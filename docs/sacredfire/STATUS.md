@@ -164,9 +164,7 @@ with the desktop apps closed.
 - Draft release v0.1 on GitHub with `dist/SacredFire-x86_64.AppImage` (841 MB) attached;
   the repository stays private until the user publishes it. Tags 0.1 to 0.5-pre3 are bbport's,
   so SacredFire releases use a `v` prefix.
-- `.github/workflows/tests.yml` runs the Python tests, shell syntax and compile checks on every
-  push; `.github/ISSUE_TEMPLATE/` has the bug report form; `CONTRIBUTING.md` states the
-  no-game-files rule and how changes are made.
+- `.github/workflows/release.yml` runs the Python tests, shell syntax and compile checks on main pushes and pull requests, and builds releases on `v*` tags; `.github/ISSUE_TEMPLATE/` has the bug report form; `CONTRIBUTING.md` states the no-game-files rule and how changes are made.
 - Game patches credited to illusion and TroyWarez (illusionyy/PS-Game-Patch) in the patch
   file, the settings table, the patch compiler, run.sh, the launcher, the README and here.
 - A first start without network no longer aborts (import names fall back to the compiled table).

@@ -1,6 +1,27 @@
-# Manual desktop builds
+# Desktop builds
 
-The public `.github/workflows/tests.yml` workflow runs source checks only. The repository provides `build.sh`, `packaging/appimage.sh`, and `packaging/windows/make_portable.py` to build the Linux AppImage and Windows portable ZIP manually. These instructions describe those scripts; the upstream maintainer's release machine and any private automation are not documented here.
+The [Build and release workflow](../.github/workflows/release.yml) runs the source checks, builds the Linux AppImage and Windows portable ZIP, and verifies both packages. The same packages can be built locally with `build.sh`, `packaging/appimage.sh`, and `packaging/windows/make_portable.py`.
+
+## Build on GitHub
+
+Open **Actions → Build and release → Run workflow**, choose `main`, and run it. The source checks run first; when they pass, Linux and Windows build jobs run. Download `linux-build` and `windows-build` from the completed workflow run's **Artifacts** section. These manual builds do not create a GitHub Release.
+
+From a shell with GitHub CLI authentication, the equivalent command is:
+
+```bash
+gh workflow run release.yml --ref main -R leomoon/OCTR-NitroFueled-PC
+```
+
+To build and publish automatically, push a new `v*` tag on a commit that contains the workflow. For example, after pushing the commit to `main`:
+
+```bash
+git tag v0.6.0
+git push origin v0.6.0
+```
+
+The tag run performs the same checks and builds, then publishes a GitHub Release with both packages and their SHA-256 files. Linux assets are named `SacredFire-<version>-x86_64.AppImage`, with a matching `.sha256` and `.build.txt`; Windows assets are named `CTR-NitroFueled-PC-portable-<version>-windows.zip`, with a matching `.sha256`. Untagged manual builds use a `git describe` version such as `v0.5-8-gabcdef0`. A `main` push or pull request runs source checks without packaging.
+
+## Build locally
 
 Run the commands from the repository root. Start from the commit you intend to package, then initialize its pinned dependencies:
 

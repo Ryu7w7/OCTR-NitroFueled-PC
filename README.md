@@ -62,9 +62,7 @@ links, no extra disk space) and then *Play*. Python is bundled; you only need a 
 key, or unzip it into a new folder and copy `user\`, `bbport.ini`, `launcher.ini` and
 `ryunet_online.key` across.
 
-**Linux and Steam Deck:** `SacredFire-x86_64.AppImage` from the same Releases page (see
-[AppImage](#appimage-steam-deck) below). Data, saves and the nickname key live in
-`~/.local/share/sacredfire`.
+**Linux and Steam Deck:** Download the AppImage from the same Releases page (see [AppImage](#appimage-steam-deck) below). The v0.5 asset is `SacredFire-x86_64.AppImage`; automated releases use `SacredFire-<version>-x86_64.AppImage`. Data, saves and the nickname key live in `~/.local/share/sacredfire`.
 
 ### Online
 
@@ -153,7 +151,7 @@ launcher's log and `user\last_run.log` say which file is missing; attach `last_r
 4. Run: `set BB_GAME_DIR=<CUSA13795-1.21>` and `C:\msys64\clang64\bin\python.exe run.py`.
    In the game, **Insert** (or L3+R3) opens the port's menu.
 
-For distributable Windows and Linux packages, follow the [manual build guide](docs/MANUAL_BUILDS.md).
+For local builds, GitHub Actions builds, and tagged releases, follow the [desktop build guide](docs/MANUAL_BUILDS.md).
 
 ### Credits
 
@@ -296,7 +294,7 @@ lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire
 Without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
 until a folder passes the game check.
 
-The [manual build guide](docs/MANUAL_BUILDS.md) has the Nix commands, version checks, Windows ZIP steps, and output checks.
+The [desktop build guide](docs/MANUAL_BUILDS.md) has the GitHub Actions workflow, Nix commands, version checks, Windows ZIP steps, and output checks.
 
 **Adding the AppImage to Steam**: the launcher's *Settings → Steam → Add to Steam* writes the
 shortcut (with `--play`, for the Steam Deck's game mode) while Steam is closed; by hand, *Add a
