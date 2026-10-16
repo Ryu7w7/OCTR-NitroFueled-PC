@@ -808,8 +808,10 @@ std::string OnlineKey() {
     if (!cached.empty()) return cached;
     const fs::path path = g_app.root / L"ryunet_online.key";
     const fs::path backup = BackupKeyPath();
-    std::string key = ReadKeyFile(path);
-    if (key.empty()) key = ReadKeyFile(backup);  // a new folder on a PC that played before
+    // The shared APPDATA key is authoritative if an older per-folder key differs. This can
+    // happen when the launcher linked a nickname before an older run.py created its local copy.
+    std::string key = ReadKeyFile(backup);
+    if (key.empty()) key = ReadKeyFile(path);  // portable folder moved to a PC without APPDATA data
     if (key.empty()) {
         unsigned char raw[32];
         if (BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};

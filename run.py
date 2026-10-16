@@ -164,7 +164,10 @@ def online_key(data):
             return ''
         return k if len(k) == 64 and all(c in '0123456789abcdef' for c in k) else ''
 
-    key = read(path) or read(backup) or secrets.token_hex(32)
+    # On Windows, the launcher also owns the shared APPDATA copy and may have created or
+    # linked it before an older run.py wrote a per-folder key. Prefer that stable identity
+    # when both exist; the folder-local key remains the fallback for portable/offline copies.
+    key = read(backup) or read(path) or secrets.token_hex(32)
     if read(path) != key:
         try:
             path.write_text(key + '\n', encoding='ascii')
