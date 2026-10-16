@@ -153,6 +153,8 @@ launcher's log and `user\last_run.log` say which file is missing; attach `last_r
 4. Run: `set BB_GAME_DIR=<CUSA13795-1.21>` and `C:\msys64\clang64\bin\python.exe run.py`.
    In the game, **Insert** (or L3+R3) opens the port's menu.
 
+For distributable Windows and Linux packages, follow the [manual build guide](docs/MANUAL_BUILDS.md).
+
 ### Credits
 
 This fork stands on the work of:
@@ -293,6 +295,8 @@ the script has the exact steps). Running it opens the launcher; `--play` starts 
 lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire-launcher`.
 Without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
 until a folder passes the game check.
+
+The [manual build guide](docs/MANUAL_BUILDS.md) has the Nix commands, version checks, Windows ZIP steps, and output checks.
 
 **Adding the AppImage to Steam**: the launcher's *Settings → Steam → Add to Steam* writes the
 shortcut (with `--play`, for the Steam Deck's game mode) while Steam is closed; by hand, *Add a

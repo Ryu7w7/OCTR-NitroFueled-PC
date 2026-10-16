@@ -102,6 +102,8 @@ build: `sacredfire.exe`, the DLLs it needs (found with `llvm-objdump`), the scri
 `bbport.ini` (windowed, 60 FPS limit), launchers with CRLF line endings, `LICENSE` and a
 `THIRD-PARTY.txt` that names the MSYS2 package and license of every DLL.
 
+The [manual build guide](../../docs/MANUAL_BUILDS.md) covers the full packaging sequence and checksum check. Run the packager in the MSYS2 CLANG64 shell:
+
 ```bash
-C:\msys64\clang64\bin\python.exe packaging/windows/make_portable.py --version v0.1.1
+python3 packaging/windows/make_portable.py
 ```
