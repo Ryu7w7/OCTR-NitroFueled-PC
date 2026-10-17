@@ -185,11 +185,6 @@ if [[ ${MANGOHUD:-0} == 1 ]]; then
         echo "MangoHud: Steam's performance overlay is on; the in-game MangoHud stays off"
         unset MANGOHUD
         export DISABLE_MANGOHUD=1
-    elif grep -qs '"VK_LAYER_MANGOHUD' /usr/share/vulkan/implicit_layer.d/*.json \
-            /etc/vulkan/implicit_layer.d/*.json \
-            "${XDG_DATA_HOME:-$HOME/.local/share}"/vulkan/implicit_layer.d/*.json; then
-        # The system's own MangoHud (and its config) is used; the bundled one is skipped.
-        export VK_LOADER_LAYERS_DISABLE=${VK_LOADER_LAYERS_DISABLE:+$VK_LOADER_LAYERS_DISABLE,}VK_LAYER_MANGOHUD_overlay_64_x86_64
     fi
 fi
 # Write tracking with userfaultfd write-protection instead of mprotect (no address-space write lock:
