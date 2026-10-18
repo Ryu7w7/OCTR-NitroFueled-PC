@@ -4,6 +4,10 @@
 
 # OCTR: CTR Nitro-Fueled PC, online
 
+ZIP mod support proposal: the Windows patch screen can list declarative ZIP packages
+containing XML, archive assets, shaders and session settings. See
+[ZIP package setup and creator guide](docs/sacredfire/18-zip-mod-packages.md).
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
 Linux, with online play on a community server.**
 

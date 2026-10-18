@@ -2022,7 +2022,22 @@ std::map<std::string, std::string> XmlAttributes(const std::string& tag) {
     return out;
 }
 
+// ZIP manifests are parsed/validated by the same bundled Python used for Play.
+// Generated metadata only exposes checkboxes; package components are prepared at launch.
+void ScanModPackages() {
+    App& a = g_app;
+    if (!a.python || a.game_running) return;
+    const fs::path script = a.root / L"scripts" / L"mod_packages.py";
+    if (!fs::is_regular_file(script)) return;
+    const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+        Quote(script.wstring()) + L" --scan " + Quote(a.root.wstring());
+    const Captured r = RunCaptured(a.python->exe, cmd, a.root, 120000);
+    if (!r.output.empty()) AddLog(r.output);
+    if (!r.started || r.code != 0) AddLog("ZIP mod scan failed; check the log before enabling packages.");
+}
+
 std::vector<PatchInfo> LoadPatches() {
+    ScanModPackages();
     std::vector<PatchInfo> list;
     std::error_code ec;
     std::vector<fs::path> files;
@@ -3281,6 +3296,16 @@ void PatchesTab() {
         ImGui::PopID();
     }
 
+    ImGui::SeparatorText(T("Mods ZIP", "ZIP mods"));
+    ImGui::TextWrapped("Copy compatible nitro-mod.json ZIP packages into mods, then press Reload. "
+                       "New packages start disabled. XML, assets, shaders and settings switch together. "
+                       "Fully close and relaunch the game after changing a ZIP mod. Mod sessions use separate saves.");
+    if (ImGui::Button(T("Abrir carpeta de mods", "Open mod folder"))) {
+        std::error_code ec;
+        fs::create_directories(a.root / L"mods", ec);
+        OpenInShell(a.root / L"mods");
+    }
+
     ImGui::SeparatorText(T("Añadir parches", "Add patches"));
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextUnformatted(T("Copia archivos .xml de parches en formato shadPS4 (como los de PS-Game-Patch o GoldHEN) en la "
@@ -3298,10 +3323,12 @@ void PatchesTab() {
         OpenInShell(a.root / L"patches");
     }
     ImGui::SameLine();
+    ImGui::BeginDisabled(a.game_running);
     if (ImGui::Button(T("Recargar", "Reload"))) {
         a.patches = LoadPatches();
         ReadPatchConfig(a.patch_enabled, a.patch_disabled);
     }
+    ImGui::EndDisabled();
 }
 
 void SavesTab() {
