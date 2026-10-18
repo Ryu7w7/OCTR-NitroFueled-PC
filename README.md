@@ -4,7 +4,7 @@
 
 # OCTR: CTR Nitro-Fueled PC, online
 
-ZIP mod support proposal: the Windows patch screen can list declarative ZIP packages
+ZIP mod support proposal: the Windows launcher has a dedicated Mods tab below Patches for declarative ZIP packages
 containing XML, archive assets, shaders and session settings. See
 [ZIP package setup and creator guide](docs/sacredfire/18-zip-mod-packages.md).
 

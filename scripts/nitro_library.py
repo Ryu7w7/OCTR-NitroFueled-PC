@@ -1,6 +1,6 @@
 """Checked ZIP library for the native launcher's patch screen. GPL-2.0-or-later."""
 from pathlib import Path
-import json,os,tempfile,zipfile
+import json,os,tempfile,zipfile,uuid
 import xml.etree.ElementTree as ET
 import nitro_format as fmt
 from nitro_components import save_json,sha,under
@@ -54,6 +54,7 @@ def scan(root,patchdir):
     for ident,item in sorted(found.items()):
         meta=ET.SubElement(xml,'Metadata',Title='Crash Team Racing Nitro-Fueled',Name='ZIP mod: '+ident,
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',
+            ModName=item['name'],ModHash=item['sha256'],
             Note=item['name']+'. ZIP package: XML, assets, shaders and settings switch together. Fully relaunch after changing mods.')
         ET.SubElement(meta,'PatchList')
     patchdir.mkdir(parents=True,exist_ok=True);target=patchdir/FILENAME
@@ -61,3 +62,33 @@ def scan(root,patchdir):
     if not target.exists() or target.read_bytes()!=payload:
         temporary=target.with_suffix('.xml.tmp');temporary.write_bytes(payload);os.replace(temporary,target)
     return result
+
+def remove(root,patchdir,ident,expected_sha256):
+    """Recoverably remove exactly the ZIP displayed by the launcher, while idle."""
+    from mod_session import launch_lock
+    fmt.slug(ident);fmt.hash_string(expected_sha256)
+    root=Path(root);patchdir=Path(patchdir)
+    with launch_lock(storage(root)):
+        catalog=scan(root,patchdir)
+        item=catalog['entries'].get(ident)
+        if item is None or item['sha256']!=expected_sha256:
+            raise ValueError('Mod ZIP changed or is unavailable; Reload before removing it')
+        source=under(root,item['zip'])
+        if not source.is_file() or source.is_symlink() or sha(source)!=expected_sha256:
+            raise ValueError('Mod ZIP changed; Reload before removing it')
+        config=root.parent/'patches.json'
+        previous=json.loads(config.read_text(encoding='utf-8')) if config.exists() else {'enabled':[],'disabled':[]}
+        if not isinstance(previous,dict) or any(not isinstance(previous.get(k,[]),list) or
+            not all(isinstance(v,str) for v in previous.get(k,[])) for k in ('enabled','disabled')):
+            raise ValueError('Invalid patch selection; ZIP was not removed')
+        prefs=dict(previous);key=PREFIX+ident
+        prefs['enabled']=[v for v in previous.get('enabled',[]) if v!=key]
+        prefs['disabled']=list(dict.fromkeys(previous.get('disabled',[])+[key]))
+        target=storage(root)/'removed'/uuid.uuid4().hex/source.name
+        target.parent.mkdir(parents=True,exist_ok=True)
+        save_json(config,prefs)
+        try:source.rename(target)
+        except OSError:
+            save_json(config,previous);raise
+        scan(root,patchdir)
+        return target

@@ -72,6 +72,56 @@ class PackageTests(unittest.TestCase):
     def test_duplicate_ids_rejected(self):
         self.package();self.package(filename='duplicate.zip')
         result=self.scan();self.assertEqual(result['entries'],{});self.assertTrue(result['messages'])
+    def test_catalog_provides_native_mod_name_and_zip_identity(self):
+        package=self.package(manifest=self.manifest()|{'name':'Readable mod name'})
+        self.scan()
+        meta=ET.parse(self.port/'patches'/library.FILENAME).getroot().find('Metadata')
+        self.assertEqual(meta.get('ModName'),'Readable mod name');self.assertEqual(meta.get('ModHash'),sha(package))
+        self.assertEqual(meta.get('Name'),'ZIP mod: sample')
+    def test_remove_keeps_zip_saves_and_unrelated_selection(self):
+        package=self.package();digest=sha(package);self.enable('sample')
+        prefs=json.loads(self.prefs.read_text());prefs['enabled'].append('other.xml/Other');prefs['custom']='keep';save_json(self.prefs,prefs)
+        save=self.port/'mod-packages/user/savedata/progress';save.parent.mkdir(parents=True);save.write_bytes(b'keep save')
+        removed=library.remove(self.mods,self.port/'patches','sample',digest)
+        self.assertFalse(package.exists());self.assertEqual(sha(removed),digest)
+        self.assertTrue(removed.is_relative_to(self.port/'mod-packages/removed'))
+        prefs=json.loads(self.prefs.read_text())
+        self.assertEqual(prefs['enabled'],['other.xml/Other']);self.assertEqual(prefs['custom'],'keep')
+        self.assertIn(library.PREFIX+'sample',prefs['disabled']);self.assertEqual(save.read_bytes(),b'keep save')
+        self.assertEqual(library.entries(self.mods),{})
+    def test_removed_zip_restores_disabled_when_copied_back(self):
+        package=self.package();self.enable('sample')
+        removed=library.remove(self.mods,self.port/'patches','sample',sha(package))
+        shutil.copy2(removed,package);self.scan()
+        self.assertIn('sample',library.entries(self.mods));self.assertEqual(self.prepare(),(self.game,str(self.ini)))
+    def test_remove_refuses_updated_zip_until_reload(self):
+        package=self.package();digest=sha(package);package.unlink()
+        self.package(manifest=self.manifest()|{'version':'1.1.0'})
+        with self.assertRaisesRegex(ValueError,'changed'):library.remove(self.mods,self.port/'patches','sample',digest)
+        self.assertTrue(package.exists())
+    def test_remove_cannot_escape_mods_folder(self):
+        package=self.package();digest=sha(package)
+        with self.assertRaises(ValueError):library.remove(self.mods,self.port/'patches','../sample',digest)
+        self.assertTrue(package.exists())
+    def test_remove_refuses_invalid_selection_without_moving_zip(self):
+        package=self.package();self.prefs.write_text('{"enabled": "wrong"}')
+        with self.assertRaisesRegex(ValueError,'Invalid patch selection'):library.remove(self.mods,self.port/'patches','sample',sha(package))
+        self.assertTrue(package.exists())
+    def test_remove_blocked_by_active_mod_session(self):
+        from mod_session import launch_lock
+        package=self.package();digest=sha(package)
+        with launch_lock(self.port/'mod-packages'):
+            with self.assertRaisesRegex(ValueError,'already running'):library.remove(self.mods,self.port/'patches','sample',digest)
+        self.assertTrue(package.exists())
+    def test_failed_remove_restores_previous_selection(self):
+        package=self.package();self.enable('sample');before=self.prefs.read_bytes()
+        original=Path.rename
+        def rename(path,target):
+            if path==package:raise PermissionError('synthetic locked file')
+            return original(path,target)
+        with patch.object(Path,'rename',rename),self.assertRaises(PermissionError):
+            library.remove(self.mods,self.port/'patches','sample',sha(package))
+        self.assertEqual(self.prefs.read_bytes(),before);self.assertTrue(package.exists())
     def test_partial_zip_is_reported(self):
         (self.mods/'copying.zip').write_bytes(b'PK incomplete')
         self.assertTrue(self.scan()['messages'])

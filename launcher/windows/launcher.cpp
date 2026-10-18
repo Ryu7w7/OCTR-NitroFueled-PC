@@ -612,6 +612,7 @@ struct Backup {
 
 struct PatchInfo {
     std::string key, name, author, note, version;
+    std::string mod_name, mod_hash;
     bool default_on = false;
     const char* ini_key = nullptr;
 };
@@ -2072,6 +2073,10 @@ std::vector<PatchInfo> LoadPatches() {
             p.author = get("Author");
             p.note = get("Note");
             p.version = get("PatchVer");
+            if (file.filename() == L"ZIP-Mod-Packages.xml") {
+                p.mod_name = get("ModName");
+                p.mod_hash = get("ModHash");
+            }
             std::string on = get("isEnabled");
             std::transform(on.begin(), on.end(), on.begin(), [](unsigned char c) { return char(std::tolower(c)); });
             p.default_on = on == "true";
@@ -3229,6 +3234,11 @@ void OnlineTab() {
     }
 }
 
+std::string PackagePatchId(const PatchInfo& patch) {
+    const std::string prefix = "ZIP-Mod-Packages.xml/ZIP mod: ";
+    return patch.key.rfind(prefix, 0) == 0 ? patch.key.substr(prefix.size()) : std::string();
+}
+
 void PatchesTab() {
     App& a = g_app;
     ImGui::PushTextWrapPos(0.0f);
@@ -3240,6 +3250,7 @@ void PatchesTab() {
         ImGui::TextColored(kYellow, "%s", T("No hay parches en la carpeta patches.", "No patches in the patches folder."));
     }
     for (const auto& p : a.patches) {
+        if (!PackagePatchId(p).empty()) continue;  // Complete ZIP packages have their own Mods page.
         ImGui::PushID(p.key.c_str());
         bool on;
         if (p.ini_key) {
@@ -3296,16 +3307,6 @@ void PatchesTab() {
         ImGui::PopID();
     }
 
-    ImGui::SeparatorText(T("Mods ZIP", "ZIP mods"));
-    ImGui::TextWrapped("Copy compatible nitro-mod.json ZIP packages into mods, then press Reload. "
-                       "New packages start disabled. XML, assets, shaders and settings switch together. "
-                       "Fully close and relaunch the game after changing a ZIP mod. Mod sessions use separate saves.");
-    if (ImGui::Button(T("Abrir carpeta de mods", "Open mod folder"))) {
-        std::error_code ec;
-        fs::create_directories(a.root / L"mods", ec);
-        OpenInShell(a.root / L"mods");
-    }
-
     ImGui::SeparatorText(T("Añadir parches", "Add patches"));
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextUnformatted(T("Copia archivos .xml de parches en formato shadPS4 (como los de PS-Game-Patch o GoldHEN) en la "
@@ -3329,6 +3330,119 @@ void PatchesTab() {
         ReadPatchConfig(a.patch_enabled, a.patch_disabled);
     }
     ImGui::EndDisabled();
+}
+
+bool ModEnableToggle(bool& on) {
+    const ImVec2 size{46.0f, 24.0f};
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+    const bool changed = ImGui::Button("##mod_enabled", size);
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    if (changed) on = !on;
+    const ImVec2 p = ImGui::GetItemRectMin();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImU32 track = ImGui::GetColorU32(on ? ImVec4(0.18f, 0.67f, 0.48f, 1.0f)
+                                           : ImVec4(0.24f, 0.34f, 0.47f, 1.0f));
+    draw->AddRectFilled(p, {p.x + size.x, p.y + size.y}, track, size.y * 0.5f);
+    draw->AddCircleFilled({p.x + (on ? size.x - 12.0f : 12.0f), p.y + 12.0f}, 9.0f,
+                          ImGui::GetColorU32(ImVec4(1, 1, 1, 1)));
+    if (ImGui::IsItemFocused()) draw->AddRect({p.x - 2, p.y - 2}, {p.x + size.x + 2, p.y + size.y + 2},
+                                             ImGui::GetColorU32(ImGuiCol_Text), 14.0f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", on ? T("Desactivar mod", "Disable mod")
+                                                                       : T("Activar mod", "Enable mod"));
+    return changed;
+}
+
+void ModsTab() {
+    App& a = g_app;
+    ImGui::TextWrapped("%s", T("Copia los ZIP compatibles en la carpeta mods y pulsa Recargar. Activa cada mod con su interruptor.",
+                               "Copy compatible ZIPs into the mods folder and press Reload. Use each switch to enable or disable a mod."));
+    ImGui::TextColored(kGrey, "%s", T("Cierra y vuelve a iniciar el juego para aplicar cambios. Las sesiones con mods usan partidas separadas.",
+                                      "Fully close and relaunch the game to apply changes. Mod sessions use separate saves."));
+    if (ImGui::Button(T("Abrir carpeta de mods", "Open mod folder"))) {
+        std::error_code ec;
+        fs::create_directories(a.root / L"mods", ec);
+        OpenInShell(a.root / L"mods");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(a.game_running || !a.python);
+    if (ImGui::Button(T("Recargar", "Reload"))) {
+        a.patches = LoadPatches();
+        ReadPatchConfig(a.patch_enabled, a.patch_disabled);
+    }
+    ImGui::EndDisabled();
+    if (a.game_running) ImGui::TextColored(kYellow, "%s", T("Cierra el juego para cambiar o quitar mods.",
+                                                                          "Close the game to change or remove mods."));
+    ImGui::Spacing();
+    size_t count = 0;
+    for (const auto& p : a.patches) if (!PackagePatchId(p).empty()) ++count;
+    if (!count) ImGui::TextColored(kGrey, "%s", T("No hay mods ZIP disponibles. Añade un ZIP y pulsa Recargar.",
+                                                                 "No ZIP mods available. Add a ZIP, then press Reload."));
+    std::string remove_id, remove_hash;
+    if (count && ImGui::BeginTable("zip_mods", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("Mod", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn(T("Estado", "Status"), ImGuiTableColumnFlags_WidthFixed, 155.0f);
+        ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        for (const auto& p : a.patches) {
+            const std::string id = PackagePatchId(p);
+            if (id.empty()) continue;
+            ImGui::PushID(p.key.c_str());
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextWrapped("%s", p.mod_name.empty() ? id.c_str() : p.mod_name.c_str());
+            ImGui::TextColored(kGrey, "%s  v%s", p.author.c_str(), p.version.c_str());
+            ImGui::TableSetColumnIndex(1);
+            bool on = std::find(a.patch_enabled.begin(), a.patch_enabled.end(), p.key) != a.patch_enabled.end();
+            ImGui::BeginDisabled(a.game_running || !a.python);
+            if (ModEnableToggle(on)) {
+                auto drop = [&](std::vector<std::string>& v) { v.erase(std::remove(v.begin(), v.end(), p.key), v.end()); };
+                drop(a.patch_enabled);
+                drop(a.patch_disabled);
+                if (on) a.patch_enabled.push_back(p.key);
+                else a.patch_disabled.push_back(p.key);
+                WritePatchConfig(a.patch_enabled, a.patch_disabled);
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(on ? T("Activado", "Enabled") : T("Desactivado", "Disabled"));
+            ImGui::TableSetColumnIndex(2);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.18f, 0.23f, 0.75f));
+            if (ImGui::Button(T("Quitar", "Remove"))) { remove_id = id; remove_hash = p.mod_hash; }
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", T("El ZIP se conserva en mod-packages/removed. Las partidas se conservan.",
+                                                                                "The ZIP is kept in mod-packages/removed. Saves are kept."));
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    // Reload only after rendering: the loop's references must remain valid.
+    if (!remove_id.empty() && a.python) {
+        const bool valid_id = std::all_of(remove_id.begin(), remove_id.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        });
+        const bool valid_hash = remove_hash.size() == 64 && std::all_of(remove_hash.begin(), remove_hash.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9');
+        });
+        if (!valid_id || !valid_hash) {
+            a.notice = T("Los datos del mod no son válidos. Pulsa Recargar.", "Mod details are invalid. Press Reload.");
+            return;
+        }
+        const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+            Quote((a.root / L"scripts" / L"mod_packages.py").wstring()) + L" --scan " + Quote(a.root.wstring()) +
+            L" --remove " + Quote(Widen(remove_id)) + L" --expected-sha " + Quote(Widen(remove_hash));
+        const Captured r = RunCaptured(a.python->exe, cmd, a.root, 120000);
+        if (!r.output.empty()) AddLog(r.output);
+        a.notice = r.started && r.code == 0 ? T("Mod quitado. El ZIP y las partidas se han conservado.",
+                                                                  "Mod removed. The ZIP and saves have been kept.")
+                                           : T("No se pudo quitar el mod. Revisa el registro y pulsa Recargar.",
+                                               "Could not remove the mod. Check the log and press Reload.");
+        a.patches = LoadPatches();
+        ReadPatchConfig(a.patch_enabled, a.patch_disabled);
+    }
 }
 
 void SavesTab() {
@@ -4900,10 +5014,15 @@ void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
         const ImVec2 pts[]={{c.x,c.y-9*s},{c.x+8*s,c.y-6*s},{c.x+7*s,c.y+3*s},{c.x,c.y+9*s},{c.x-7*s,c.y+3*s},{c.x-8*s,c.y-6*s}};
         d->AddConvexPolyFilled(pts,6,navy); const ImVec2 in[]={{c.x,c.y-7*s},{c.x+6*s,c.y-4.5f*s},{c.x+5*s,c.y+2*s},{c.x,c.y+7*s},{c.x-5*s,c.y+2*s},{c.x-6*s,c.y-4.5f*s}}; d->AddConvexPolyFilled(in,6,ink);
         line({c.x-3*s,c.y},{c.x-0.5f*s,c.y+2.5f*s},2.4f); line({c.x-0.5f*s,c.y+2.5f*s},{c.x+4*s,c.y-3*s},2.4f);
-    } else if (id == 6) { // save card
+    } else if (id == 6) { // mod packages
+        d->AddRectFilled({c.x-8*s,c.y-6*s},{c.x+3*s,c.y+6*s},navy,1.5f*s);
+        d->AddRect({c.x-8*s,c.y-6*s},{c.x+3*s,c.y+6*s},ink,1.5f*s,0,2*s);
+        d->AddRectFilled({c.x-2*s,c.y-2*s},{c.x+8*s,c.y+8*s},navy,1.5f*s);
+        d->AddRect({c.x-2*s,c.y-2*s},{c.x+8*s,c.y+8*s},ink,1.5f*s,0,2*s);
+    } else if (id == 7) { // save card
         d->AddRectFilled({c.x-7*s,c.y-9*s},{c.x+7*s,c.y+9*s},navy,1*s); d->AddRectFilled({c.x-5.5f*s,c.y-7*s},{c.x+5.5f*s,c.y+7*s},ink,0.8f*s);
         d->AddRectFilled({c.x-3.5f*s,c.y-6*s},{c.x+3.5f*s,c.y-2*s},navy); d->AddRectFilled({c.x-3.5f*s,c.y+1*s},{c.x+3.5f*s,c.y+5*s},navy,0.6f*s);
-    } else if (id == 7) { // crate
+    } else if (id == 8) { // crate
         d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
         d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
     } else { // crossed tools
@@ -4990,9 +5109,9 @@ void Frame() {
     ImGui::TextColored(ImVec4(0.76f, 0.92f, 1.0f, 0.9f), "%s", T("MENÚ PRINCIPAL", "MAIN MENU"));
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
     const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
-                           T("Teclado", "Keyboard"), T("Parches", "Patches"), T("Guardados", "Saves"), "DLC",
+                           T("Teclado", "Keyboard"), T("Parches", "Patches"), "Mods", T("Guardados", "Saves"), "DLC",
                            T("Herramientas", "Tools")};
-    for (int i=0; i<9; ++i) {
+    for (int i=0; i<static_cast<int>(sizeof(pages) / sizeof(pages[0])); ++i) {
         ImGui::SetCursorPosX(8.0f);
         if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
             a.active_page = i;
@@ -5007,8 +5126,10 @@ void Frame() {
     ImGui::EndChild();
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.015f, 0.13f, 0.32f, 0.82f));
-    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_None);
-    ImGui::SetCursorPos(ImVec2(22.0f, 17.0f));
+    // Child-window padding applies to every row, unlike a one-time cursor offset.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 17.0f));
+    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
     switch (a.active_page) {
     case 0: PlayTab(); break;
@@ -5017,8 +5138,9 @@ void Frame() {
     case 3: GamepadTab(); break;
     case 4: KeyboardTab(); break;
     case 5: PatchesTab(); break;
-    case 6: SavesTab(); break;
-    case 7: DlcTab(); break;
+    case 6: ModsTab(); break;
+    case 7: SavesTab(); break;
+    case 8: DlcTab(); break;
     default: ToolsTab(); break;
     }
     ImGui::PopStyleColor();

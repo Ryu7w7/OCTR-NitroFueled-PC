@@ -10,13 +10,22 @@ Crash-NST-Modding-Tool layout reference in its header.
 ## Player workflow
 
 1. Copy a compatible ZIP into `mods/` next to the launcher.
-2. On Patches, press Reload. A `ZIP mod: <id>` checkbox appears, initially off.
-3. Enable compatible packages together and press Play. Fully exit/relaunch after
+2. Open Mods (below Patches) and press Reload. Each ZIP appears by name, initially disabled.
+3. Enable compatible packages with their switches and press Play. Fully exit/relaunch after
    changing package selection; in-game restart retains the selected package view.
-4. Remove a ZIP and Reload to remove it. Its prepared cache cannot reactivate it.
+4. Press Remove to move a ZIP to `mod-packages/removed/`, or remove it manually and Reload.
+   Prepared caches cannot reactivate it. Saves are retained. Copying a removed ZIP back
+   restores it disabled; it can then be enabled again.
 
 Ordinary XML files in `patches/` retain their existing workflow. The generated
-`patches/ZIP-Mod-Packages.xml` contains metadata-only checkboxes. Do not edit it.
+`patches/ZIP-Mod-Packages.xml` contains internal selection metadata. Do not edit it.
+ZIP entries are hidden from Patches and rendered only in Mods. Switches, Remove and
+Reload are unavailable during a game; Open mod folder stays available. Removal
+checks the displayed ZIP hash and the session lock before moving anything, and
+preserves unrelated patch selections. The native sidebar has a dedicated package
+icon; Saves/DLC/Tools keep their own routing. The main content child uses actual
+22px horizontal and 17px vertical window padding across every tab, replacing the
+one-time cursor offset that left later rows against the left edge.
 ZIP components are composed privately at launch and checked together with all
 selected stock/custom XML patches, including the online key and unlock patch.
 
@@ -143,9 +152,9 @@ non-overlapping XML writes with the online/unlock patches, but that does not
 certify online races or rendering on current main. No real mod payloads accompany
 this PR. Native Windows rebuild, gameplay and upstream CI remain separate checks.
 
-Local source verification on Windows: all 40 new synthetic tests pass (ZIP
+Local source verification on Windows: all 48 new synthetic tests pass (ZIP
 composition/lifecycle, XML skips/overlap, shaders and variant settings). The full
-Python suite runs 151 tests: 116 pass, 32 require unavailable native components,
+Python suite runs 159 tests: 124 pass, 32 require unavailable native components,
 and the same three Linux-specific failures reproduce on the unmodified upstream
 checkout (111 tests there). These are the bash overlay test and two Linux Vulkan
 path tests. All Python scripts compile and `git diff --check` passes. `bash

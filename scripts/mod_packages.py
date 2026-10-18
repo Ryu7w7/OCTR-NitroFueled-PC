@@ -89,7 +89,15 @@ if __name__=='__main__':
     import argparse
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scan',type=Path,required=True,metavar='PORTABLE_ROOT')
+    parser.add_argument('--remove',metavar='MOD_ID')
+    parser.add_argument('--expected-sha',metavar='ZIP_SHA256')
     args=parser.parse_args()
-    result=scan(args.scan/'mods',args.scan/'patches')
-    for message in result['messages']:print(message)
-    print('ZIP packages:',len(result['entries']))
+    if bool(args.remove)!=bool(args.expected_sha):parser.error('--remove requires --expected-sha')
+    if args.remove:
+        from nitro_library import remove
+        print('Mod ZIP moved to:',remove(args.scan/'mods',args.scan/'patches',args.remove,args.expected_sha))
+    else:
+        with launch_lock(args.scan/'mod-packages'):
+            result=scan(args.scan/'mods',args.scan/'patches')
+        for message in result['messages']:print(message)
+        print('ZIP packages:',len(result['entries']))
