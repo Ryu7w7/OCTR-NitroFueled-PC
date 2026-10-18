@@ -390,6 +390,12 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
+    # ZIP packages extend the existing XML patch selection; ordinary launches are unchanged.
+    if env.get('BB_MOD_PACKAGES_SKIP') != '1':
+        sys.path.insert(0, str(PORT / 'scripts'))
+        from mod_packages import prepare as prepare_mod_packages
+        game, config = prepare_mod_packages(PORT, data, env, game, config)
+
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
@@ -466,6 +472,9 @@ def main():
             reader.join(timeout=5)
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
+                if env.get('BB_MOD_PACKAGES_SKIP') != '1':
+                    from mod_packages import finish as finish_mod_packages
+                    finish_mod_packages(code)
                 return code
             say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (restart from the menu)')
     finally:

@@ -49,3 +49,8 @@ gpu/shim/bbport_gnm_table.inc
 /ryunet_online.key
 /CUSA13795*/
 *.pkg
+
+# Local ZIP packages, checked payload cache, private mod sessions and generated UI metadata
+/mods/
+/mod-packages/
+/patches/ZIP-Mod-Packages.xml
