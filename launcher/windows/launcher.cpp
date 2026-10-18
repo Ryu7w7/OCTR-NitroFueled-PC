@@ -2679,6 +2679,15 @@ void SettingsTab() {
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
     }
+    if (temporal == "fsr3" || temporal == "dlss") {
+        GameFlag("frame_generation",
+                 T("Generación de cuadros (FSR 3, experimental)", "Frame generation (FSR 3, experimental)"),
+                 false,
+                 T("Crea cuadros extra para que el juego se vea más fluido: con el límite de FPS en 60, ves hasta "
+                   "120. Añade un poco de retraso al control. Necesita el escalado FSR 3 o DLSS.",
+                   "Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. "
+                   "Adds a little input lag. Needs FSR 3 or DLSS upscaling."));
+    }
     GameFlag("fullscreen", T("Pantalla completa", "Fullscreen"), false);
     GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
              T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));

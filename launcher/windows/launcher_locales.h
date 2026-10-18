@@ -6,6 +6,8 @@
 inline const std::map<std::string, std::map<std::string, std::string>>& GeneratedLocales() {
     static const std::map<std::string, std::map<std::string, std::string>> table = {
         {"pt_BR", {
+            {"Frame generation (FSR 3, experimental)", "Geração de quadros (FSR 3, experimental)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Cria quadros extras para o jogo parecer mais fluido: com o limite de FPS em 60, você vê até 120. Adiciona um pouco de atraso no controle. Precisa do upscaling FSR 3 ou DLSS."},
             {"Spanish (Spain)", "Espanhol (Espanha)"},
             {"German", "Alemão"},
             {"Italian", "Italiano"},
@@ -337,6 +339,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Pare o jogo e saia"},
         }},
         {"fr", {
+            {"Frame generation (FSR 3, experimental)", "Génération d'images (FSR 3, expérimental)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Crée des images supplémentaires pour un jeu plus fluide : avec la limite de FPS à 60, vous en voyez jusqu'à 120. Ajoute un peu de latence. Nécessite la mise à l'échelle FSR 3 ou DLSS."},
             {"Spanish (Spain)", "Espagnol (Espagne)"},
             {"German", "Allemand"},
             {"Italian", "Italien"},
@@ -668,6 +672,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Arrêtez le jeu et quittez"},
         }},
         {"de", {
+            {"Frame generation (FSR 3, experimental)", "Bildgenerierung (FSR 3, experimentell)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Erzeugt zusätzliche Bilder, damit das Spiel flüssiger wirkt: Mit dem FPS-Limit auf 60 siehst du bis zu 120. Erhöht die Eingabeverzögerung etwas. Benötigt FSR 3 oder DLSS als Hochskalierung."},
             {"Spanish (Spain)", "Spanisch (Spanien)"},
             {"German", "Deutsch"},
             {"Italian", "Italienisch"},
@@ -999,6 +1005,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Stoppen Sie das Spiel und beenden Sie"},
         }},
         {"it", {
+            {"Frame generation (FSR 3, experimental)", "Generazione di fotogrammi (FSR 3, sperimentale)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Crea fotogrammi extra per rendere il gioco più fluido: con il limite di FPS a 60, ne vedi fino a 120. Aggiunge un po' di ritardo ai comandi. Richiede l'upscaling FSR 3 o DLSS."},
             {"Spanish (Spain)", "Spagnolo (Spagna)"},
             {"German", "Tedesco"},
             {"Italian", "Italiano"},
@@ -1330,6 +1338,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Interrompi il gioco ed esci"},
         }},
         {"ja", {
+            {"Frame generation (FSR 3, experimental)", "フレーム生成（FSR 3、実験的）"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "追加のフレームを作り、ゲームをより滑らかに見せます。FPS制限が60なら、最大120で表示されます。入力遅延がわずかに増えます。FSR 3またはDLSSのアップスケーリングが必要です。"},
             {"Spanish (Spain)", "スペイン語（スペイン）"},
             {"German", "ドイツ語"},
             {"Italian", "イタリア語"},
@@ -1661,6 +1671,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "ゲームを停止して終了します"},
         }},
         {"zh_CN", {
+            {"Frame generation (FSR 3, experimental)", "帧生成（FSR 3，实验性）"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "生成额外的帧，让游戏看起来更流畅：FPS 限制为 60 时，最多可显示 120。会略微增加输入延迟。需要 FSR 3 或 DLSS 超分辨率。"},
             {"Spanish (Spain)", "西班牙语（西班牙）"},
             {"German", "德语"},
             {"Italian", "意大利语"},
@@ -1992,6 +2004,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "停止游戏并退出"},
         }},
         {"ru", {
+            {"Frame generation (FSR 3, experimental)", "Генерация кадров (FSR 3, экспериментально)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Создаёт дополнительные кадры, чтобы игра выглядела плавнее: при ограничении FPS 60 на экране до 120. Немного увеличивает задержку управления. Нужно масштабирование FSR 3 или DLSS."},
             {"Spanish (Spain)", "Испанский (Испания)"},
             {"German", "Немецкий"},
             {"Italian", "Итальянский"},

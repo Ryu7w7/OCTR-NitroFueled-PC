@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire: frame generation for CTR (docs/sacredfire/15-frame-generation.md).
+//
+// FSR 3 interpolates with the game's motion, and CTR's motion leaves the karts still on the
+// screen (their own motion and the wheels' turning are not decoded): blending the frame before
+// and the frame after doubles them (ghosting, worst on the wheels). The interpolated frame takes
+// the real frame's pixels instead:
+// - on the moving objects of this frame or the previous one (their masks, dilated by `radius`
+//   render pixels with a soft edge);
+// - on the background next to them that the camera's motion uncovers or hides between the two
+//   frames: FSR 3 spreads the karts' zero motion over it and smears it. A pixel is there when a
+//   kart lies along its own motion within `motion_reach` frames of it, so the band follows the
+//   speed (a few pixels when slow, dozens in a fast turn).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D current_tex;        // the real frame (display size)
+layout(binding = 1) uniform texture2D mask_tex;           // moving objects, this frame (render size)
+layout(binding = 2) uniform texture2D previous_mask_tex;  // the same of the previous frame
+layout(binding = 3, rgba8) uniform image2D generated_img; // the interpolated frame (display size)
+layout(binding = 4) uniform texture2D motion_tex;         // pixels, previous minus current (render size)
+
+layout(push_constant) uniform Params {
+    ivec2 display;
+    ivec2 render;
+    float radius;       // render pixels
+    uint flags;         // bit 0: show the area taken from the real frame (debug)
+    float motion_reach; // frames of motion
+} params;
+
+float MaskAt(ivec2 p) {
+    p = clamp(p, ivec2(0), params.render - 1);
+    return max(texelFetch(mask_tex, p, 0).r, texelFetch(previous_mask_tex, p, 0).r);
+}
+
+float Around(ivec2 center) {
+    const int r = int(ceil(params.radius));
+    float weight = 0.0;
+    for (int y = -r; y <= r; ++y) {
+        for (int x = -r; x <= r; ++x) {
+            const float falloff = clamp(1.0 - length(vec2(x, y)) / (params.radius + 1.0), 0.0, 1.0);
+            if (falloff > weight) {
+                weight = max(weight, MaskAt(center + ivec2(x, y)) * falloff);
+            }
+        }
+    }
+    return weight;
+}
+
+float AlongMotion(ivec2 center) {
+    const vec2 motion = texelFetch(motion_tex, center, 0).rg * params.motion_reach;
+    const float length_px = length(motion);
+    if (!(length_px > 1.0)) {
+        return 0.0;
+    }
+    // One sample per two pixels of motion, both ways, at most 24 each way.
+    const int steps = clamp(int(length_px * 0.5), 1, 24);
+    const vec2 origin = vec2(center) + 0.5;
+    float weight = 0.0;
+    for (int i = 1; i <= steps; ++i) {
+        const vec2 offset = motion * (float(i) / float(steps));
+        weight = max(weight, MaskAt(ivec2(origin + offset)));
+        weight = max(weight, MaskAt(ivec2(origin - offset)));
+        if (weight >= 1.0) {
+            break;
+        }
+    }
+    return weight;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, params.display))) {
+        return;
+    }
+    const ivec2 source = clamp(ivec2((vec2(pixel) + 0.5) * vec2(params.render) / vec2(params.display)),
+                               ivec2(0), params.render - 1);
+    float weight = smoothstep(0.0, 1.0, Around(source));
+    if (weight < 1.0) {
+        weight = max(weight, AlongMotion(source));
+    }
+    if (weight <= 0.0 && (params.flags & 1u) == 0u) {
+        return;
+    }
+    const vec4 generated = imageLoad(generated_img, pixel);
+    vec4 result = mix(generated, vec4(texelFetch(current_tex, pixel, 0).rgb, 1.0), weight);
+    if ((params.flags & 1u) != 0u) {
+        result.rgb = mix(result.rgb, vec3(1.0, 0.0, 1.0), weight * 0.5);
+    }
+    imageStore(generated_img, pixel, result);
+}

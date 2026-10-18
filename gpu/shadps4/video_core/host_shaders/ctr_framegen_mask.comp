@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire: frame generation for CTR (docs/sacredfire/15-frame-generation.md).
+//
+// Where the game's motion does not explain the picture. The previous frame (render size, before
+// the upscaler), fetched where this frame's motion says each pixel was, should match this frame
+// on the still world; it does not on the karts (their motion is not decoded), the turning
+// wheels and particles. Those pixels join the moving objects' mask (from the velocity target,
+// which the "Disable Motion Blur" patch leaves empty), so frame generation takes them from the
+// real frame instead of blending two frames into a double image.
+//
+// The best match in a neighbourhood absorbs the sub-pixel jitter and the small errors of the
+// world's motion, which grow with its speed (one pixel, up to three when fast). The result is
+// raw: ctr_framegen_mask_clean.comp keeps only its dense parts (a kart, not the thin lines of
+// high-contrast edges).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D current_tex;  // this frame (render size)
+layout(binding = 1) uniform texture2D previous_tex; // the previous frame
+layout(binding = 2) uniform texture2D motion_tex;   // pixels, previous minus current
+layout(binding = 3, r8) uniform readonly image2D velocity_mask_img; // from the velocity target
+layout(binding = 4, r8) uniform writeonly image2D raw_img;          // the result, before cleaning
+
+layout(push_constant) uniform Params {
+    ivec2 size;
+    float threshold; // largest channel difference still taken as the same surface
+    uint flags;      // bit 0: the previous frame is valid
+} params;
+
+float Unexplained(ivec2 pixel) {
+    if ((params.flags & 1u) == 0u) {
+        return 0.0;
+    }
+    const vec2 motion = texelFetch(motion_tex, pixel, 0).rg;
+    if (any(isnan(motion))) {
+        return 0.0;
+    }
+    const int r = clamp(int(1.0 + length(motion) * 0.04), 1, 3);
+    const ivec2 was = ivec2(floor(vec2(pixel) + 0.5 + motion));
+    // Off the previous frame: nothing to compare with (screen edges while turning).
+    if (any(lessThan(was, ivec2(r))) || any(greaterThanEqual(was, params.size - r))) {
+        return 0.0;
+    }
+    const vec3 here = texelFetch(current_tex, pixel, 0).rgb;
+    float best = 1e9;
+    for (int y = -r; y <= r; ++y) {
+        for (int x = -r; x <= r; ++x) {
+            const vec3 d = abs(here - texelFetch(previous_tex, was + ivec2(x, y), 0).rgb);
+            best = min(best, max(d.r, max(d.g, d.b)));
+        }
+    }
+    return best > params.threshold ? 1.0 : 0.0;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, params.size))) {
+        return;
+    }
+    const float velocity = imageLoad(velocity_mask_img, pixel).r;
+    imageStore(raw_img, pixel, vec4(max(velocity, Unexplained(pixel))));
+}

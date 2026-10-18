@@ -16,6 +16,9 @@
 #include "video_core/host_shaders/ctr_fsr3_inputs_d_comp.h"
 #include "video_core/host_shaders/ctr_fsr3_inputs_dv_comp.h"
 #include "video_core/host_shaders/ctr_fsr3_inputs_v_comp.h"
+#include "video_core/host_shaders/ctr_framegen_mask_clean_comp.h"
+#include "video_core/host_shaders/ctr_framegen_mask_comp.h"
+#include "video_core/renderer_vulkan/vk_ctr_framegen.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -311,12 +314,13 @@ void CtrFsr3::CreatePipelines() {
         return;
     }
     const auto device = instance.GetDevice();
-    const std::array<vk::DescriptorSetLayoutBinding, 5> bindings{{
+    const std::array<vk::DescriptorSetLayoutBinding, 6> bindings{{
         {0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
         {1, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
         {2, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
         {3, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
         {4, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
+        {5, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
     }};
     desc_layout = Check(device.createDescriptorSetLayoutUnique({
         .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
@@ -431,6 +435,11 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
     make(depth_image, &depth_view, vk::Format::eR32Sfloat, w, h, inputs);
     make(motion_image, &motion_view, vk::Format::eR16G16Sfloat, w, h, inputs);
     make(debug_image, &debug_view, vk::Format::eR8G8B8A8Unorm, w, h, inputs);
+    for (u32 i = 0; i < 2; ++i) {
+        make(mask_images[i], &mask_views[i], vk::Format::eR8Unorm, w, h, inputs);
+    }
+    make(raw_mask, &raw_mask_view, vk::Format::eR8Unorm, w, h, inputs);
+    previous_mask_valid = false;
     // The output has the frame's memory layout (RGBA or BGRA) and is sampled through views like
     // the game's (sRGB or not, swizzled).
     static constexpr std::array<vk::Format, 4> formats{
@@ -459,9 +468,11 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
 
     // The images start in General: FSR 3 reads and writes them there.
     const auto cmdbuf = scheduler.CommandBuffer();
-    std::array<vk::ImageMemoryBarrier2, 4> barriers{};
-    const std::array<vk::Image, 4> images{vk::Image(depth_image), vk::Image(motion_image),
-                                          vk::Image(debug_image), vk::Image(output_image)};
+    std::array<vk::ImageMemoryBarrier2, 7> barriers{};
+    const std::array<vk::Image, 7> images{vk::Image(depth_image),    vk::Image(motion_image),
+                                          vk::Image(debug_image),    vk::Image(output_image),
+                                          vk::Image(mask_images[0]), vk::Image(mask_images[1]),
+                                          vk::Image(raw_mask)};
     for (u32 i = 0; i < barriers.size(); ++i) {
         barriers[i] = vk::ImageMemoryBarrier2{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -487,9 +498,401 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
     return true;
 }
 
+void CtrFsr3::CameraPlanes(float& near_plane, float& far_plane, float& fov) const {
+    near_plane = 16.0f;
+    far_plane = 150000.0f;
+    fov = 1.2870f;
+    if (camera_valid) {
+        // Projection at floats 48-63 (column-major, OpenGL style): [5] = 1/tan(fov/2),
+        // [10] = A, [14] = B with near = B/(A-1), far = B/(A+1).
+        const float* p = &camera[48];
+        const float a = p[10], b = p[14];
+        if (p[5] > 0.0f && std::isfinite(a) && std::isfinite(b) && a != 1.0f && a != -1.0f) {
+            fov = 2.0f * std::atan(1.0f / p[5]);
+            near_plane = std::abs(b / (a - 1.0f));
+            far_plane = std::abs(b / (a + 1.0f));
+        }
+    }
+    if (!(near_plane > 0.0f) || !(far_plane > near_plane) || !(fov > 0.01f && fov < 3.1f)) {
+        near_plane = 16.0f;
+        far_plane = 150000.0f;
+        fov = 1.2870f;
+    }
+}
+
+void CtrFsr3::PublishFrameGen(vk::ImageView hudless_view, vk::Extent2D out, float frame_ms,
+                              bool upscaler_reset) {
+    FrameGenInputs in{};
+    in.hudless = vk::Image(output_image);
+    in.hudless_view = hudless_view;
+    in.display = out;
+    in.depth = vk::Image(depth_image);
+    in.motion = vk::Image(motion_image);
+    const u32 previous = previous_mask_valid && !upscaler_reset ? mask_index ^ 1u : mask_index;
+    in.motion_view = *motion_view;
+    in.mask = vk::Image(mask_images[mask_index]);
+    in.mask_view = *mask_views[mask_index];
+    in.previous_mask = vk::Image(mask_images[previous]);
+    in.previous_mask_view = *mask_views[previous];
+    previous_mask_valid = true;
+    in.render = {width, height};
+    in.jitter = frame_jitter;
+    in.frame_ms = frame_ms;
+    CameraPlanes(in.near_plane, in.far_plane, in.fov);
+    // The camera: the inverse of the view (floats 32-47, OpenGL style, the camera looks down -z)
+    // has the right, up and backward axes and the position in its columns.
+    Mat4 inverse{};
+    if (camera_valid && Invert(Load(&camera[32]), inverse)) {
+        for (int i = 0; i < 3; ++i) {
+            in.right[i] = float(inverse[0 * 4 + i]);
+            in.up[i] = float(inverse[1 * 4 + i]);
+            in.forward[i] = float(-inverse[2 * 4 + i]);
+            in.position[i] = float(inverse[3 * 4 + i]);
+        }
+    }
+    const auto finite = [](const std::array<float, 3>& v) {
+        return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+    };
+    if (!finite(in.right) || !finite(in.up) || !finite(in.forward) || !finite(in.position)) {
+        in.position = {};
+        in.up = {0.0f, 1.0f, 0.0f};
+        in.right = {1.0f, 0.0f, 0.0f};
+        in.forward = {0.0f, 0.0f, -1.0f};
+    }
+    std::scoped_lock lock{framegen_mutex};
+    in.reset = framegen_reset || upscaler_reset;
+    in.sequence = ++framegen_sequence;
+    framegen = in;
+    framegen_ready = true;
+    framegen_reset = false;
+    framegen_published = true;
+}
+
+void CtrFsr3::ErrorMask(VideoCore::Image& source, u32 w, u32 h) {
+    // BB_FRAMEGEN_ERROR: the largest channel difference (0..1) still taken as the same surface.
+    static const float threshold = [] {
+        const char* env = std::getenv("BB_FRAMEGEN_ERROR");
+        return env && env[0] ? std::clamp(float(std::atof(env)), 0.01f, 1.0f) : 0.12f;
+    }();
+    const auto device = instance.GetDevice();
+    const vk::Format format = Linear(source.info.pixel_format);
+    constexpr vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    if (!error_pipeline) {
+        const std::array<vk::DescriptorSetLayoutBinding, 5> bindings{{
+            {0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
+            {1, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
+            {2, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
+            {3, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
+            {4, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
+        }};
+        error_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = u32(bindings.size()),
+            .pBindings = bindings.data(),
+        }));
+        const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 16};
+        error_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*error_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push,
+        }));
+        const auto module = CompileSPV(CTR_FRAMEGEN_MASK_COMP, device);
+        error_pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = module,
+                              .pName = "main"},
+                    .layout = *error_layout,
+                }));
+        device.destroyShaderModule(module);
+
+        const std::array<vk::DescriptorSetLayoutBinding, 2> clean_bindings{{
+            {0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
+            {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
+        }};
+        clean_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = u32(clean_bindings.size()),
+            .pBindings = clean_bindings.data(),
+        }));
+        clean_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*clean_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push,
+        }));
+        const auto clean_module = CompileSPV(CTR_FRAMEGEN_MASK_CLEAN_COMP, device);
+        clean_pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = clean_module,
+                              .pName = "main"},
+                    .layout = *clean_layout,
+                }));
+        device.destroyShaderModule(clean_module);
+    }
+    if (!previous_color || previous_color_format != format || previous_color_size.width != w ||
+        previous_color_size.height != h) {
+        if (previous_color) {
+            scheduler.DeferOperation(
+                [old = std::move(previous_color), view = std::move(previous_color_view)] {});
+        }
+        previous_color = VideoCore::UniqueImage(device, instance.GetAllocator());
+        previous_color.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {w, h, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        previous_color_view = Check(device.createImageViewUnique({
+            .image = vk::Image(previous_color),
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = range,
+        }));
+        previous_color_format = format;
+        previous_color_size = {w, h};
+        previous_color_valid = false;
+    }
+    // 1. The comparison (when the previous frame continues into this one) and the velocity
+    //    target's mask into the raw mask, then its dense parts into this frame's mask.
+    {
+        const auto cmdbuf = scheduler.CommandBuffer();
+        const bool compare = previous_color_valid && !reset;
+        const vk::DescriptorImageInfo infos[5] = {
+            {{}, SourceView(source, format, vk::ImageAspectFlagBits::eColor, 3),
+             vk::ImageLayout::eShaderReadOnlyOptimal},
+            {{}, *previous_color_view, vk::ImageLayout::eShaderReadOnlyOptimal},
+            {{}, *motion_view, vk::ImageLayout::eGeneral},
+            {{}, *mask_views[mask_index], vk::ImageLayout::eGeneral},
+            {{}, *raw_mask_view, vk::ImageLayout::eGeneral},
+        };
+        std::array<vk::WriteDescriptorSet, 5> writes{};
+        for (u32 i = 0; i < writes.size(); ++i) {
+            writes[i] = {.dstBinding = i,
+                         .descriptorCount = 1,
+                         .descriptorType = i >= 3 ? vk::DescriptorType::eStorageImage
+                                                  : vk::DescriptorType::eSampledImage,
+                         .pImageInfo = &infos[i]};
+        }
+        struct {
+            s32 size[2];
+            float threshold;
+            u32 flags;
+        } params{{s32(w), s32(h)}, threshold, compare ? 1u : 0u};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *error_pipeline);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *error_layout, 0, writes);
+        cmdbuf.pushConstants(*error_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params),
+                             &params);
+        cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        const vk::MemoryBarrier2 after{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
+
+        // BB_FRAMEGEN_DENSITY: the share of set pixels within 2 that keeps a pixel (0.35).
+        static const float density = [] {
+            const char* env = std::getenv("BB_FRAMEGEN_DENSITY");
+            return env && env[0] ? std::clamp(float(std::atof(env)), 0.0f, 1.0f) : 0.35f;
+        }();
+        const vk::DescriptorImageInfo clean_infos[2] = {
+            {{}, *raw_mask_view, vk::ImageLayout::eGeneral},
+            {{}, *mask_views[mask_index], vk::ImageLayout::eGeneral},
+        };
+        const std::array<vk::WriteDescriptorSet, 2> clean_writes{{
+            {.dstBinding = 0,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eSampledImage,
+             .pImageInfo = &clean_infos[0]},
+            {.dstBinding = 1,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &clean_infos[1]},
+        }};
+        struct {
+            s32 size[2];
+            s32 radius;
+            float density;
+        } clean_params{{s32(w), s32(h)}, 2, density};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *clean_pipeline);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *clean_layout, 0,
+                                    clean_writes);
+        cmdbuf.pushConstants(*clean_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                             sizeof(clean_params), &clean_params);
+        cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
+    }
+    // 2. This frame, kept for the next.
+    runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    {
+        const auto cmdbuf = scheduler.CommandBuffer();
+        const vk::ImageMemoryBarrier2 to_dst{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .image = vk::Image(previous_color),
+            .subresourceRange = range,
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_dst});
+        const vk::ImageCopy region{
+            .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .extent = {w, h, 1},
+        };
+        cmdbuf.copyImage(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                         vk::Image(previous_color), vk::ImageLayout::eTransferDstOptimal, region);
+        const vk::ImageMemoryBarrier2 to_read{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .image = vk::Image(previous_color),
+            .subresourceRange = range,
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
+    }
+    previous_color_valid = true;
+    runtime.Transit(&source, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+}
+
+void CtrFsr3::CaptureHudless(VideoCore::Image& display) {
+    {
+        std::scoped_lock lock{framegen_mutex};
+        // Only for the frame just published and not taken yet, once.
+        if (!framegen_ready || framegen.display_hudless) {
+            return;
+        }
+    }
+    const vk::Format format = display.info.pixel_format;
+    const vk::Extent2D size{display.info.size.width, display.info.size.height};
+    if (display.info.num_samples > 1 || display.info.props.is_depth || size.width == 0 ||
+        size.height == 0) {
+        return;
+    }
+    // Viewed by the presenter in the format it views the display buffer in (sRGB or not, RGBA or
+    // BGRA): every 32-bit colour format of its class. CTR's two display buffers differ in that
+    // (one RGBA8 unorm, one sRGB): a copy of the class's own format serves both (a copy between
+    // them keeps the bytes). Remade for every frame it crashed the GPU: the new image came back
+    // with the old one's handle, and views made for the old one were used on it (code 23).
+    static constexpr std::array<vk::Format, 4> views{
+        vk::Format::eR8G8B8A8Unorm, vk::Format::eR8G8B8A8Srgb, vk::Format::eB8G8R8A8Unorm,
+        vk::Format::eB8G8R8A8Srgb};
+    const bool rgba8 = std::find(views.begin(), views.end(), format) != views.end();
+    const vk::Format copy_format = rgba8 ? vk::Format::eR8G8B8A8Unorm : format;
+    if (!hudless_copy || hudless_copy_format != copy_format || hudless_copy_size != size) {
+        if (hudless_copy) {
+            scheduler.DeferOperation([old = std::move(hudless_copy)] {});
+        }
+        ++hudless_copy_generation;
+        const vk::ImageFormatListCreateInfo list{.viewFormatCount = u32(views.size()),
+                                                 .pViewFormats = views.data()};
+        hudless_copy = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
+        hudless_copy.Create(vk::ImageCreateInfo{
+            .pNext = rgba8 ? &list : nullptr,
+            .flags = vk::ImageCreateFlagBits::eMutableFormat,
+            .imageType = vk::ImageType::e2D,
+            .format = copy_format,
+            .extent = {size.width, size.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        hudless_copy_format = copy_format;
+        hudless_copy_size = size;
+        if (!hudless_copy) {
+            return;
+        }
+        std::printf("Frame generation: HUD-less copy of the display buffer %ux%u (%s)\n",
+                    size.width, size.height, vk::to_string(copy_format).c_str());
+        std::fflush(stdout);
+    }
+    // The first draw's rendering ends here (the next draw resumes it).
+    scheduler.EndRendering();
+    runtime.Transit(&display, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    constexpr vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const vk::ImageMemoryBarrier2 to_dst{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+        .image = vk::Image(hudless_copy),
+        .subresourceRange = range,
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_dst});
+    const vk::ImageCopy region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .extent = {size.width, size.height, 1},
+    };
+    cmdbuf.copyImage(display.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                     vk::Image(hudless_copy), vk::ImageLayout::eTransferDstOptimal, region);
+    const vk::ImageMemoryBarrier2 to_general{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = vk::Image(hudless_copy),
+        .subresourceRange = range,
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_general});
+    std::scoped_lock lock{framegen_mutex};
+    if (framegen_ready && !framegen.display_hudless) {
+        framegen.display_hudless = vk::Image(hudless_copy);
+        framegen.display_hudless_id = hudless_copy_generation;
+        framegen.display_hudless_format = copy_format;
+        framegen.display_hudless_size = size;
+    }
+}
+
+bool CtrFsr3::TakeFrameGenInputs(FrameGenInputs& out) {
+    std::scoped_lock lock{framegen_mutex};
+    if (!framegen_ready) {
+        return false;
+    }
+    out = framegen;
+    framegen_ready = false;
+    return true;
+}
+
 vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_format,
                                vk::ComponentMapping mapping, vk::Extent2D out,
                                vk::ImageLayout& layout) {
+    {
+        // A frame without the upscaler (a menu, a load) breaks the interpolated sequence.
+        std::scoped_lock lock{framegen_mutex};
+        if (!framegen_published) {
+            framegen_reset = true;
+        }
+        framegen_published = false;
+    }
     const bool scene = scene_this_frame;
     scene_this_frame = false;
     camera_this_frame = false;
@@ -597,6 +1000,13 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
         std::printf("Temporal upscaling: %s\n", use_dlss ? "DLSS" : "FSR 3");
     }
 
+    const bool upscaler_reset = reset; // for frame generation (the dispatch clears it)
+    // Frame generation samples the upscaled frame the way the display pass does, without alpha.
+    const auto publish = [&] {
+        vk::ComponentMapping opaque = mapping;
+        opaque.a = vk::ComponentSwizzle::eOne;
+        PublishFrameGen(OutputView(view_format, opaque), out, frame_ms, upscaler_reset);
+    };
     runtime.Transit(&source, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
     runtime.Transit(&depth, vk::ImageLayout::eShaderReadOnlyOptimal,
@@ -616,14 +1026,17 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
     const vk::ImageView vel_src =
         SourceView(vel, Linear(vel.info.pixel_format), vk::ImageAspectFlagBits::eColor, 1);
     {
-        const vk::DescriptorImageInfo infos[5] = {
+        // This frame's moving-objects mask goes to the other image than the last frame's.
+        mask_index ^= 1u;
+        const vk::DescriptorImageInfo infos[6] = {
             {{}, depth_src, vk::ImageLayout::eShaderReadOnlyOptimal},
             {{}, vel_src, vk::ImageLayout::eShaderReadOnlyOptimal},
             {{}, *depth_view, vk::ImageLayout::eGeneral},
             {{}, *motion_view, vk::ImageLayout::eGeneral},
             {{}, *debug_view, vk::ImageLayout::eGeneral},
+            {{}, *mask_views[mask_index], vk::ImageLayout::eGeneral},
         };
-        std::array<vk::WriteDescriptorSet, 5> writes{};
+        std::array<vk::WriteDescriptorSet, 6> writes{};
         for (u32 i = 0; i < writes.size(); ++i) {
             writes[i] = {.dstBinding = i,
                          .descriptorCount = 1,
@@ -700,6 +1113,9 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
         };
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
     }
+    if (CtrFrameGen::Wanted()) {
+        ErrorMask(source, w, h);
+    }
     if (dump) {
         Dump(cmdbuf, dump_frame, source);
         runtime.Transit(&source, vk::ImageLayout::eShaderReadOnlyOptimal,
@@ -765,28 +1181,14 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
             last_skip = nullptr;
             std::printf("DLSS: upscaling again\n");
         }
+        publish();
         layout = vk::ImageLayout::eGeneral;
         return OutputView(view_format, mapping);
     }
 
     // 3. FSR 3.
-    float near_plane = 16.0f, far_plane = 150000.0f, fov = 1.2870f;
-    if (camera_valid) {
-        // Projection at floats 48-63 (column-major, OpenGL style): [5] = 1/tan(fov/2),
-        // [10] = A, [14] = B with near = B/(A-1), far = B/(A+1).
-        const float* p = &camera[48];
-        const float a = p[10], b = p[14];
-        if (p[5] > 0.0f && std::isfinite(a) && std::isfinite(b) && a != 1.0f && a != -1.0f) {
-            fov = 2.0f * std::atan(1.0f / p[5]);
-            near_plane = std::abs(b / (a - 1.0f));
-            far_plane = std::abs(b / (a + 1.0f));
-        }
-    }
-    if (!(near_plane > 0.0f) || !(far_plane > near_plane) || !(fov > 0.01f && fov < 3.1f)) {
-        near_plane = 16.0f;
-        far_plane = 150000.0f;
-        fov = 1.2870f;
-    }
+    float near_plane, far_plane, fov;
+    CameraPlanes(near_plane, far_plane, fov);
     const auto& settings = BbSettings::Get();
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
@@ -861,6 +1263,7 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
                     w, h, out.width, out.height, near_plane, far_plane, fov * 57.29578f,
                     depth.info.num_samples, vel.info.num_samples);
     }
+    publish();
     layout = vk::ImageLayout::eGeneral;
     return OutputView(view_format, mapping);
 }

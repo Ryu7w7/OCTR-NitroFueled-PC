@@ -30,7 +30,10 @@ void UpdateTextInput(SDL_Window* window);
 bool Visible();
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
+/// `generated`: an interpolated frame (frame generation); the FPS counter then also shows the
+/// game's own rate.
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            bool generated = false);
 
 /// The menu or the text dialog is open: the game's input is held neutral.
 bool CapturesInput();

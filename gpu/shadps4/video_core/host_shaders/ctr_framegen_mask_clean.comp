@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire: frame generation for CTR (docs/sacredfire/15-frame-generation.md).
+//
+// Keeps the dense parts of the raw moving-objects mask (ctr_framegen_mask.comp): a pixel stays
+// when at least `density` of the pixels within `radius` are set. A kart or a wheel is a solid
+// area and stays; the thin lines left on high-contrast edges of the world (a pixel or two of
+// motion error) go. Taken from the real frame, those lines cut the interpolated picture.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D raw_tex;              // the raw mask (render size)
+layout(binding = 1, r8) uniform writeonly image2D mask_img; // the moving objects' mask
+
+layout(push_constant) uniform Params {
+    ivec2 size;
+    int radius;
+    float density;
+} params;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, params.size))) {
+        return;
+    }
+    float set = 0.0, count = 0.0;
+    for (int y = -params.radius; y <= params.radius; ++y) {
+        for (int x = -params.radius; x <= params.radius; ++x) {
+            const ivec2 p = pixel + ivec2(x, y);
+            if (all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, params.size))) {
+                set += texelFetch(raw_tex, p, 0).r;
+                count += 1.0;
+            }
+        }
+    }
+    imageStore(mask_img, pixel, vec4(set >= params.density * count ? 1.0 : 0.0));
+}
