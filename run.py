@@ -402,6 +402,10 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
+    sys.path.insert(0, str(PORT / 'scripts'))
+    import widescreen
+    game, config = widescreen.prepare(PORT, data, env, game, config)
+
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
@@ -467,6 +471,7 @@ def main():
         first = True
         while True:
             if not first:  # the in-game menu may have changed render_res
+                widescreen.validate_restart(config)
                 apply_render_res(env, config)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
@@ -503,6 +508,7 @@ def main():
             reader.join(timeout=5)
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
+                widescreen.finish(code)
                 return code
             say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (restart from the menu)')
     finally:

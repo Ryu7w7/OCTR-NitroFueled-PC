@@ -2555,7 +2555,7 @@ void RenderResCombo() {
     for (const auto& r : kRenderRes)
         if (current == r.value) selected = &r;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-    if (ImGui::BeginCombo(T("Resolución interna", "Internal resolution"), T(selected->es, selected->en))) {
+    if (ImGui::BeginCombo(T("Resolución", "Resolution"), T(selected->es, selected->en))) {
         for (const auto& r : kRenderRes) {
             if (ImGui::Selectable(T(r.es, r.en), &r == selected)) {
                 a.game.Set("render_res", r.value);
@@ -2572,6 +2572,54 @@ void RenderResCombo() {
                  "on automatically) and the picture is output at 4K: on a 1080p screen that removes jagged "
                  "edges. 4K needs a strong GPU (an RTX 3070 runs it at about 100 FPS); 720p and 480p help low-end "
                  "PCs (the picture is output at 1080p)."));
+}
+
+void WidescreenSettings() {
+    App& a = g_app;
+    const bool enabled = a.game.Get("ultrawide", "0") == "1";
+    std::string mode = enabled ? a.game.Get("widescreen_layout") : "off";
+    if (enabled && mode.empty()) {
+        const auto size = a.game.Get("ultrawide_size", "3440x1440");
+        mode = (size == "3440x1440" || size == "2560x1080") ? "21x9" : "32x9";
+    }
+    static constexpr Choice layouts[] = {{"16:9", "16:9", "off"},
+        {"21:9", "21:9", "21x9"},
+        {"32:9", "32:9", "32x9"}};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
+    const char* preview = "16:9";
+    for (const auto& c : layouts) if (mode == c.value) preview = T(c.es, c.en);
+    if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
+        for (const auto& c : layouts) {
+            if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
+                mode = c.value;
+                a.game.Set("widescreen_layout", mode);
+                a.game.Set("ultrawide", mode == "off" ? "0" : "1");
+                if (mode != "off") {
+                    const char* output = mode == "21x9" ? "3440x1440" : "5120x1440";
+                    a.game.Set("ultrawide_size", output);
+                }
+                SaveGameIni();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (mode != "off") {
+        static constexpr Choice wide[] = {{"3440 x 1440", "3440 x 1440", "3440x1440"},
+            {"2560 x 1080", "2560 x 1080", "2560x1080"}};
+        static constexpr Choice super[] = {{"5120 x 1440", "5120 x 1440", "5120x1440"},
+            {"3840 x 1080", "3840 x 1080", "3840x1080"},
+            {"2560 x 720", "2560 x 720", "2560x720"},
+            {"7680 x 2160", "7680 x 2160", "7680x2160"}};
+        if (mode == "21x9") {
+            if (GameChoiceCombo(T("Salida ultrawide", "Widescreen output"), "ultrawide_size", wide, "3440x1440", 18.0f)) SaveGameIni();
+        } else {
+            if (GameChoiceCombo(T("Salida ultrawide", "Widescreen output"), "ultrawide_size", super, "5120x1440", 18.0f)) SaveGameIni();
+        }
+        ImGui::TextWrapped("%s", T("Incluye los ajustes de menús, fondos y HUD centrado. Hasta 1440p internos. "
+            "Prueba sin conexión; cierra el juego para cambiar de formato.",
+            "Includes corrected menus, backgrounds and centered HUD. Up to 1440p internal. "
+            "Offline test; close the game before changing layout."));
+    }
 }
 
 void SettingsTab() {
@@ -2606,13 +2654,6 @@ void SettingsTab() {
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
 
     ImGui::SeparatorText(T("Pantalla", "Display"));
-    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
-               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
-               "Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
-               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
-               "Needs a restart."));
     const std::string temporal = GameTemporal();
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
@@ -2622,6 +2663,14 @@ void SettingsTab() {
         ImGui::SameLine();
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
+    WidescreenSettings();
+    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
+             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
+               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
+               "Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
+               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+               "Needs a restart."));
     {
         // temporal=off|fsr1|fsr3|dlss (bbport.ini): one upscaler at a time.
         static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
