@@ -2,6 +2,7 @@
 #include "runtime_net_overrides.h"
 #include "runtime_net_tunnel.h"
 #include "runtime.h"
+#include "runtime_psn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,7 @@ static int g_net_initialized = 0;
 static int32_t g_net_errno = 0;
 
 int runtime_net_is_online(void) {
+    if (runtime_psn_selected()) return 1;
     const char *val = getenv("BB_ONLINE");
     return (val && strcmp(val, "1") == 0);
 }
@@ -302,6 +304,7 @@ static uint64_t now_ms(void) {
 /* The server's NAT port (UDP 3074, BB_ONLINE_NAT_PORT); 0 when the tunnel is off
  * (BB_ONLINE_TUNNEL=0, offline, or the server's address does not resolve). */
 static int tunnel_server(struct sockaddr_in *out) {
+    if (runtime_psn_selected()) return 0;
     static int state = -1;
     static struct sockaddr_in server;
     if (state < 0) {
@@ -415,10 +418,12 @@ int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) 
     sin.sin_family = in->sin_family;
     sin.sin_port = in->sin_port;
     const int game_port = ntohs(in->sin_port) == 3074;
-    const char *p_env = getenv("BB_ONLINE_PORT");
+    const int external_psn = runtime_psn_selected();
+    if (external_psn) sin.sin_addr = in->sin_addr;
+    const char *p_env = external_psn ? NULL : getenv("BB_ONLINE_PORT");
     if (p_env && atoi(p_env) > 0) {
         sin.sin_port = htons((uint16_t)atoi(p_env));
-    } else if (ntohs(sin.sin_port) == 3074 && server_is_this_machine()) {
+    } else if (!external_psn && ntohs(sin.sin_port) == 3074 && server_is_this_machine()) {
         sin.sin_port = htons(3075);
     }
 
@@ -431,7 +436,7 @@ int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) 
 
     runtime_net_trace("sceNetBind(fd=%d, port=%u)", s, ntohs(sin.sin_port));
     int ret = bind(vs->s, (struct sockaddr *)&sin, sizeof(sin));
-    if (ret != 0 && (WSAGetLastError() == WSAEADDRINUSE || WSAGetLastError() == 10048)) {
+    if (!external_psn && ret != 0 && (WSAGetLastError() == WSAEADDRINUSE || WSAGetLastError() == 10048)) {
         for (int p_retry = 1; p_retry <= 10; p_retry++) {
             sin.sin_port = htons(ntohs(sin.sin_port) + 1);
             runtime_net_trace("sceNetBind: port busy, retrying port %u", ntohs(sin.sin_port));
@@ -501,6 +506,7 @@ int32_t runtime_net_accept(int s, OrbisNetSockaddr *addr, uint32_t *addrlen) {
  * server sees that port and gives it to the peers. Same length as "3074": the request's
  * Content-Length stays right. BB_UPNP_PORT=3074 keeps the game's own. */
 static int upnp_external_port(void) {
+    if (runtime_psn_selected()) return 3074;
     static int port;
     if (port) return port;
     const char *env = getenv("BB_UPNP_PORT");

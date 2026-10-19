@@ -18,6 +18,10 @@ On top of that, this fork adds **online play** (see [Online](#online) below): pu
 private rooms, groups, friends and the Pit Stop through the RyuNET server, with your own
 nickname, Discord account linking and Discord invites.
 
+Developers can integrate an optional platform backend through the reusable
+[PSN host module](platform/psn/README.md). RyuNET remains the default; the module adds
+no Steam dependency and does not include a production backend.
+
 > **No game files are included.** You need your own dump of the game and its 1.21 update.
 > Both builds of the 1.21 update work: the one for firmware 5.05 (the reference) and the one for
 > 6.72+ (since v0.2.1).

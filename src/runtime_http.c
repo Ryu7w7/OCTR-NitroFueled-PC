@@ -1,5 +1,6 @@
 #include "runtime_http.h"
 #include "runtime_net.h"
+#include "runtime_psn.h"
 #include "runtime_net_overrides.h"
 #include "bb_sha256.h"
 #include <stdio.h>
@@ -373,7 +374,7 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
      * the installation's key for this server (BB_ONLINE_KEYHASH, from run.py): the key itself
      * never crosses the network, and a copied signature is refused. Sent only to hosts
      * redirected to the RyuNET server, never to a real one. */
-    const char *key_hash = c->is_plain_http ? getenv("BB_ONLINE_KEYHASH") : NULL;
+    const char *key_hash = c->is_plain_http && !runtime_psn_selected() ? getenv("BB_ONLINE_KEYHASH") : NULL;
     if (key_hash && strlen(key_hash) == 64 && strspn(key_hash, "0123456789abcdef") == 64 &&
         hlen < (int)sizeof(header_buf) - 200) {
         static unsigned long long counter;
