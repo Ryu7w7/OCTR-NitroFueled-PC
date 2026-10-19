@@ -25,7 +25,7 @@ jobs:
       - name: Shell syntax
         run: bash -n run.sh build.sh launcher/bb-launcher.sh launcher/install-desktop.sh packaging/appimage.sh
       - name: Launcher compiles
-        run: python3 -m py_compile launcher/sacredfire_launcher.py launcher/bbport_i18n.py launcher/bbport_vulkan.py tools/gen_import_names.py scripts/*.py
+        run: python3 -m py_compile launcher/*.py tools/gen_import_names.py tools/shader_recipe.py scripts/*.py
       - name: Patch file parses
         run: python3 -c "import xml.etree.ElementTree as ET; ET.parse('patches/CrashTeamRacing.xml'); print('ok')"
 

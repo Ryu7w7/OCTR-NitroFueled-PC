@@ -543,6 +543,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+    null_index_buffer = std::make_unique<Buffer>(instance, 0, 16, MemoryType::DeviceLocal,
+                                                 "Null Index Buffer");
+    runtime.FillBuffer(null_index_buffer.get(), 0u, 16, 0u);
 }
 
 BufferCache::~BufferCache() = default;

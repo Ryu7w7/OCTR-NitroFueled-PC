@@ -13,7 +13,9 @@
 
 #include <miniz.h>
 
+#include <chrono>
 #include <condition_variable>
+#include <thread>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -287,6 +289,25 @@ void DataBase::Clear() {
         }
     }
     LOG_WARNING(Render, "Pipeline cache cleared ({} files): it is rebuilt for this build", removed);
+}
+
+std::filesystem::path DataBase::FolderPath() const {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return {};
+    }
+    return cache_path;
+}
+
+void DataBase::Flush() {
+    while (opened) {
+        {
+            std::scoped_lock lk{submit_mutex};
+            if (num_requests == 0) {
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void DataBase::FinishPreload() {

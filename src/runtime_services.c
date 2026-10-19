@@ -552,6 +552,13 @@ static void remove_active_session(void) {
     runtime_net_trace("remove_active_session: removed '%s'", path);
 }
 
+/* The running game's title id (param.sfo TITLE_ID): friends are shown in this game (the European
+ * edition is CUSA14876, the Americas' CUSA13795). */
+static char np_title[16] = "CUSA13795";
+void runtime_np_set_title(const char *title_id) {
+    if (title_id && *title_id) snprintf(np_title, sizeof(np_title), "%s", title_id);
+}
+
 static char *generate_friends_json(void) {
     const char *csv = runtime_np_get_friends_csv();
     char buf[16384];
@@ -599,13 +606,13 @@ static char *generate_friends_json(void) {
                             "\"gameStatus\":\"In Game\","
                             "\"gameData\":\"\","
                             "\"gameTitleInfo\":{"
-                                "\"npTitleId\":\"CUSA13795_00\","
+                                "\"npTitleId\":\"%s_00\","
                                 "\"titleName\":\"Crash Team Racing Nitro-Fueled\""
                             "}"
                         "}]"
                     "}"
                     "}",
-                    token, (unsigned long long)acc_id, (unsigned long long)acc_id, token, token, token);
+                    token, (unsigned long long)acc_id, (unsigned long long)acc_id, token, token, token, np_title);
                 count++;
             }
             token = strtok(NULL, ",");

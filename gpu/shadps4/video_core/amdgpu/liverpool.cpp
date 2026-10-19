@@ -766,7 +766,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
-            while ((cblock.de_count - cblock.ce_count) >= diff) {
+            // bbport: upstream #5406: ce - de, guarded against unsigned underflow.
+            while (cblock.ce_count >= cblock.de_count && (cblock.ce_count - cblock.de_count) >= diff) {
                 YIELD_CE();
             }
             break;
@@ -781,6 +782,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                 YIELD_CE();
                 RESUME_CE(task);
             }
+            task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
             break;
         }
         default:
@@ -1754,6 +1756,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     YIELD_GFX();
                     RESUME_GFX(task);
                 }
+                task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
                 break;
             }
             case PM4ItOpcode::IncrementDeCounter: {
@@ -1761,7 +1764,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
-                while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
+                // bbport: upstream #5406: no CE task, nothing to wait for.
+                while (cblock.ce_count <= cblock.de_count && ce_task.handle && !ce_task.handle.done()) {
                     RESUME_GFX(ce_task);
                 }
                 break;
@@ -1919,6 +1923,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 YIELD_ASC(vqid);
                 RESUME_ASC(task, vqid);
             }
+            task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
             break;
         }
         case PM4ItOpcode::DmaData: {

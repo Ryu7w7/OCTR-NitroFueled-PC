@@ -9,6 +9,8 @@ pgo/
 !/art/ctr-logo.png
 !/art/ctr-menu-background.png
 !/launcher/io.github.sacredfire.Launcher.png
+# The Steam artwork the Windows package ships (SteamGridDB, like art/).
+!/packaging/windows/steamgrid/*.png
 last_run.log
 dist/
 packaging/runtime-paths.nix

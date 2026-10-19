@@ -147,6 +147,11 @@ public:
         return vk12_features.shaderInt8;
     }
 
+    /// bbport: VK_KHR_maintenance5 (vkCmdBindIndexBuffer2 with a size).
+    bool IsMaintenance5Supported() const {
+        return maintenance_5;
+    }
+
     /// Returns true if VK_KHR_maintenance8 is supported
     bool IsMaintenance8Supported() const {
         return maintenance_8;

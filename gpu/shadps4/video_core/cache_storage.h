@@ -43,6 +43,11 @@ public:
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 
+    /// SacredFire: the folder of a cache kept as files (empty for an archive).
+    [[nodiscard]] std::filesystem::path FolderPath() const;
+    /// SacredFire: waits until every queued write is on disk.
+    void Flush();
+
 private:
     std::jthread io_worker{};
     std::filesystem::path cache_path{};

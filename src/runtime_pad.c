@@ -131,6 +131,17 @@ static int claimed_by_other_port(SDL_JoystickID id, int except) {
         if (p!=except && ports[p].want[0] && !is_keyboard(ports[p].want) && is_preferred(id,ports[p].want)) return 1;
     return 0;
 }
+/* A controller that drops (Bluetooth, battery) is logged with the time since the game first read
+ * the pads and the rumble sent until then, so a log tells a dropped pad from other input trouble. */
+static uint64_t now_us(void);
+static uint64_t pad_started_us, rumble_calls, rumble_sent_count;
+static void note_disconnect(SDL_Gamepad *g, int port) {
+    const char *name=SDL_GetGamepadName(g);
+    printf("Runtime: controller port %d: %s disconnected at %.0f s (rumble: %llu requests, %llu sent)\n",
+           port,name ? name : "gamepad",pad_started_us ? (double)(now_us()-pad_started_us)/1e6 : 0.0,
+           (unsigned long long)rumble_calls,(unsigned long long)rumble_sent_count);
+    fflush(stdout);
+}
 /* Per-port stick calibration (the functions follow the axis helpers below). */
 typedef struct PadCal {
     int have_center, started, quiet_count;
@@ -145,7 +156,7 @@ static void cal_reset(PadCal *c);
 static SDL_Gamepad *port_gamepad(int p) {
     Port *port=&ports[p];
     if (!port->want[0] || is_keyboard(port->want)) { if (port->pad) { SDL_CloseGamepad(port->pad); port->pad=NULL; } return NULL; }
-    if (port->pad && !SDL_GamepadConnected(port->pad)) { SDL_CloseGamepad(port->pad); port->pad=NULL; }
+    if (port->pad && !SDL_GamepadConnected(port->pad)) { note_disconnect(port->pad,p+1); SDL_CloseGamepad(port->pad); port->pad=NULL; }
     if (port->pad) return port->pad;
     int count=0;
     SDL_JoystickID *ids=SDL_GetGamepads(&count);
@@ -320,7 +331,7 @@ static SDL_Gamepad *current_gamepad(void) {
     static int on_preferred; static uint64_t last_scan;
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
-    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+    if (gamepad && !SDL_GamepadConnected(gamepad)) { note_disconnect(gamepad,1); SDL_CloseGamepad(gamepad); gamepad=NULL; }
     const uint64_t now=now_us();
     refresh_ports(now);
     const char *want=preferred_gamepad();
@@ -802,7 +813,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (!data) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     if (handle==PAD_HANDLE) sample(data); else sample_port(data,handle-1);
-    ++reads;
+    ++reads; if (!pad_started_us) pad_started_us=now_us();
     pthread_mutex_unlock(&lock);
     return 0;
 }
@@ -826,12 +837,34 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     pthread_mutex_unlock(&lock);
     return 0;
 }
+/* Rumble: the game sets it every frame, and in a race the strength changes almost every time.
+ * Each change is a report sent to the controller; over Bluetooth that many (60+ a second) can
+ * make Xbox and 8BitDo pads drop the connection. A new strength goes out at most every
+ * RUMBLE_INTERVAL_US; stopping goes out at once, and the same strength again only renews SDL's
+ * timer (SDL sends nothing for it). BB_RUMBLE=0 turns rumble off. Called under lock. */
+#define RUMBLE_INTERVAL_US 50000u
+typedef struct { SDL_Gamepad *pad; uint16_t low, high; uint64_t at; } RumbleSent;
+static RumbleSent rumble_state[PORTS];
+static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high) {
+    static int enabled=-1;
+    if (enabled<0) { const char *v=getenv("BB_RUMBLE"); enabled=!(v && *v=='0'); }
+    ++rumble_calls;
+    if (!enabled || slot<0 || slot>=PORTS) return;
+    RumbleSent *r=&rumble_state[slot];
+    const uint64_t now=now_us();
+    const int same_pad=r->pad==g;
+    if (same_pad && low==r->low && high==r->high) { SDL_RumbleGamepad(g,low,high,1000); return; }
+    if (same_pad && (low || high) && now-r->at<RUMBLE_INTERVAL_US) return; /* a later frame sends it */
+    SDL_RumbleGamepad(g,low,high,1000);
+    r->pad=g; r->low=low; r->high=high; r->at=now;
+    ++rumble_sent_count;
+}
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!handle_open(handle)) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=handle==PAD_HANDLE ? current_gamepad() : port_gamepad(handle-1);
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    if (g) rumble(handle==PAD_HANDLE ? 0 : handle-1,g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257));
     pthread_mutex_unlock(&lock);
     return 0;
 }
@@ -850,4 +883,7 @@ static const RuntimeExport exports[]={
     {"scePadSetLightBar",pad_set_light_bar}, {"scePadResetLightBar",pad_ok_handle},
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+void runtime_pad_report(void) {
+    printf("Runtime: pad reads=%zu, gamepad=%s, rumble %llu requests, %llu sent\n",reads,
+           gamepad ? SDL_GetGamepadName(gamepad) : "none",(unsigned long long)rumble_calls,(unsigned long long)rumble_sent_count);
+}

@@ -113,7 +113,8 @@ class PresenceTests(unittest.TestCase):
                 presence.update(True, '999', activity)
                 secret = None
                 for _ in range(100):
-                    secret = presence.take_join()
+                    # take_join hands the secret out once: keep it while the invite reply arrives.
+                    secret = secret or presence.take_join()
                     if secret and any(g[0] == 'SEND_ACTIVITY_JOIN_INVITE' for g in got):
                         break
                     time.sleep(0.05)

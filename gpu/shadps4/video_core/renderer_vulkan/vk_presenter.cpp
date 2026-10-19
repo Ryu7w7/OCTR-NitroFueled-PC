@@ -125,6 +125,29 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
                          dst_rect.offset.x, dst_rect.offset.y);
 }
 
+// SacredFire: in ultrawide, videos and cutscenes are shown at 16:9 with black bars
+// (src/runtime_cinematic.c): 1 = the frame is a stretched 16:9 video, squeezed back into a
+// centred 16:9 box; 2 = a cutscene, whose middle 16:9 part is shown in that box.
+extern "C" int runtime_cinematic_mode(void);
+
+[[nodiscard]] vk::ImageBlit MakeCinematicBlit(s32 frame_width, s32 frame_height, s32 swapchain_width,
+                                              s32 swapchain_height) {
+    const int mode = runtime_cinematic_mode();
+    const s32 width_16x9 = frame_height * 16 / 9;
+    if (mode == 0 || frame_width <= width_16x9 + 8) {
+        return MakeImageBlitFit(frame_width, frame_height, swapchain_width, swapchain_height);
+    }
+    const auto dst = FitImage(width_16x9, frame_height, swapchain_width, swapchain_height);
+    vk::ImageBlit blit = MakeImageBlit(frame_width, frame_height, dst.extent.width, dst.extent.height,
+                                       dst.offset.x, dst.offset.y);
+    if (mode == 2) {
+        const s32 left = (frame_width - width_16x9) / 2;
+        blit.srcOffsets[0].x = left;
+        blit.srcOffsets[1].x = left + width_16x9;
+    }
+    return blit;
+}
+
 // bbport: screenshot capture and ImGui overlays removed; the port presents directly.
 
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
@@ -675,7 +698,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                          vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         MakeCinematicBlit(frame->width, frame->height, extent.width, extent.height),
                          vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         const bool overlay = BbOverlay::Visible();

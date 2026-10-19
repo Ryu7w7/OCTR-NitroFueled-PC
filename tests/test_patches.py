@@ -146,6 +146,20 @@ class RenderResTests(unittest.TestCase):
         self.assertEqual(writes, [(0x17aa662 - EBOOT_BASE, b'\xb8' + struct.pack('<f', 2.0)),
                                   (0x1fbb93e - EBOOT_BASE, b'\x70')])
 
+    def test_ultrawide_plan_and_writes(self):
+        plan = patches.render_plan
+        uw = {'ultrawide': '1', 'ultrawide_size': '3440x1440', 'render_res': '2160'}
+        self.assertEqual(plan(uw)['output'], (3440, 1440))
+        self.assertFalse(plan(uw)['pro'])  # the base path: the monitor's size, not render_res
+        self.assertEqual(plan({**uw, 'ultrawide': '0'})['label'], '2160p')
+        self.assertEqual(plan({'ultrawide': '1'}), None)  # no size chosen yet
+        self.assertEqual(plan({'ultrawide': '1', 'ultrawide_size': '99x99'}), None)
+        sig = bytes.fromhex(patches.OUTPUT_SIZE_SIGNATURE.replace(' ', ''))
+        elf = tiny_elf(bytes(0x100) + sig + bytes(0x100), vaddr=0x1000)
+        writes = compile_external(patches.render_patches(uw), eboot_segments(elf), elf)
+        self.assertEqual(writes, [(0x1100, b'\xb8' + struct.pack('<I', 3440)),
+                                  (0x1115, b'\xb8' + struct.pack('<I', 1440))])
+
     def test_dlss_quality_picks_the_render_size(self):
         plan = patches.render_plan
         dlss = lambda q, out='1080': {'temporal': 'dlss', 'dlss_quality': q, 'dlss_output': out,
@@ -204,6 +218,20 @@ class GamePatchTests(unittest.TestCase):
             self.assertIn(patch, keys)
         self.assertEqual(external_patches(ROOT / 'patches', title_id='CUSA99999'), [])
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.00'), [])
+
+    def test_eu_edition_patches_follow_menu_keys(self):
+        # The three game patches of the menu (60 FPS, motion blur, 1080p Pro); Camiloop's unlock
+        # patch is for the USA executable only, the online key patch has its own EU file for 1.21.
+        classic = [k for k in GAME_PATCH_KEYS if k not in ('patch_unlock_all', 'patch_online_key')]
+        found = external_patches(ROOT / 'patches', app_version='01.00', title_id='CUSA14876')
+        self.assertEqual({key.split('/')[0] for key, _, _ in found}, {'CrashTeamRacingEU.xml'})
+        self.assertEqual(len(found), len(classic))
+        found_121 = external_patches(ROOT / 'patches', app_version='01.21', title_id='CUSA14876')
+        self.assertEqual(len(found_121), len(classic) + 1)  # EU with the 1.21 update, and its online key
+        self.assertIn('CrashTeamRacingOnlineEU.xml/Online: custom Demonware key', [k for k, _, _ in found_121])
+        self.assertEqual(external_patches(ROOT / 'patches', app_version='01.10', title_id='CUSA14876'), [])
+        selected = external_selection(found, None, {'patch_60fps': '1'})
+        self.assertEqual([key for key, _, _ in selected], ['CrashTeamRacingEU.xml/60 FPS Unlock'])
 
     def test_ini_keys_select_patches(self):
         found = external_patches(ROOT / 'patches')

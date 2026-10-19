@@ -535,6 +535,7 @@ private:
         vk::Buffer handle;
         u64 offset;
         vk::IndexType type;
+        u64 size; // bbport: the bound range (maintenance5), so no index is read past it
     } index_bind{};
     /// The direct draw whose vertex/index buffers BindResources may resolve early.
     struct DrawInputs {

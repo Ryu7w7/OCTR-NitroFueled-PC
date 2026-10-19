@@ -49,6 +49,7 @@
 
 #include "discord_link.h"
 #include "nat_check.h"
+#include "port_update.h"
 #include "discord_presence.h"
 #include "launcher_locales.h"
 
@@ -56,7 +57,13 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kTitleId = "CUSA13795";
+// The Americas build (CUSA13795) and the European one (CUSA14876, SacredFire EU): the port runs both.
+constexpr const char* kTitleIds[] = {"CUSA13795", "CUSA14876"};
+bool IsCtrTitle(const std::string& title) {
+    for (const char* id : kTitleIds)
+        if (title == id) return true;
+    return false;
+}
 constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
@@ -389,7 +396,7 @@ FolderInfo Analyze(const fs::path& dir) {
     info.title = get("TITLE_ID");
     info.version = get("APP_VER");
     info.category = get("CATEGORY");
-    if (info.title != kTitleId) {
+    if (!IsCtrTitle(info.title)) {
         info.kind = Kind::OtherTitle;
     } else if (info.category == "gd") {
         info.kind = Kind::Base;
@@ -582,6 +589,16 @@ constexpr Choice kGameLanguages[] = {
     {"Francés", "French", "2"},
     {"Portugués (Brasil)", "Portuguese (Brazil)", "17"},
 };
+// The European build (CUSA14876) has English, Spain's Spanish (3), French, German (4), Italian (5)
+// and Arabic (21): the .lng texts in its archives.
+constexpr Choice kGameLanguagesEU[] = {
+    {"Inglés", "English", "1"},
+    {"Español (España)", "Spanish (Spain)", "3"},
+    {"Francés", "French", "2"},
+    {"Alemán", "German", "4"},
+    {"Italiano", "Italian", "5"},
+    {"Árabe", "Arabic", "21"},
+};
 constexpr Choice kPresentModes[] = {
     {"Mailbox (recomendado)", "Mailbox (recommended)", "Mailbox"},
     {"FIFO (VSync)", "FIFO (VSync)", "Fifo"},
@@ -613,6 +630,7 @@ struct Backup {
 struct PatchInfo {
     std::string key, name, author, note, version;
     std::string mod_name, mod_hash;
+    std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
     const char* ini_key = nullptr;
 };
@@ -691,6 +709,14 @@ struct App {
 };
 
 App g_app;
+
+/// The title ID of the chosen game (the merged folder, else the update or the base game): the
+/// saves, the shader cache and the merged folder's name follow it. CUSA13795 when none is known.
+std::wstring GameTitle() {
+    for (const FolderInfo* info : {&g_app.game_info, &g_app.update_info, &g_app.base_info})
+        if (IsCtrTitle(info->title)) return Widen(info->title);
+    return L"CUSA13795";
+}
 
 std::string EffectiveRenderRes();
 
@@ -1201,9 +1227,9 @@ void StartCheck() {
 fs::path MergeTarget(const fs::path& near_dir) {
     App& a = g_app;
     const fs::path parent = near_dir.parent_path();
-    fs::path target = parent / L"CUSA13795-1.21";
+    fs::path target = parent / (GameTitle() + L"-1.21");
     if (target == near_dir || target == a.base_dir || target == a.update_dir || target == a.game_dir) {
-        target = parent / L"CUSA13795-1.21-merged";
+        target = parent / (GameTitle() + L"-1.21-merged");
     }
     return target;
 }
@@ -1263,15 +1289,39 @@ void StartMerge(std::vector<fs::path> sources) {
     });
 }
 
-const char* DefaultGameLanguage() { return g_spanish ? "20" : "1"; }
+/// The European edition is chosen (its languages differ from the Americas build's).
+bool IsEuGame() { return GameTitle() == L"CUSA14876"; }
 
-/// The game language to start with: the saved one when the build has it, else the default (older
-/// launchers saved codes this build lacks, such as 3 for Spain's Spanish).
+/// The game language of the launcher's own language, where the chosen edition has it.
+const char* DefaultGameLanguage() {
+    const bool eu = IsEuGame();
+    if (g_active_locale == "es") return eu ? "3" : "20";
+    if (g_active_locale == "fr") return "2";
+    if (eu && g_active_locale == "de") return "4";
+    if (eu && g_active_locale == "it") return "5";
+    if (!eu && g_active_locale == "pt_BR") return "17";
+    return "1";
+}
+
+/// The game language to start with: the saved one when the chosen edition has it, else its
+/// counterpart there (Spanish: Latin American in the Americas build, Spain's in the European one),
+/// else the default.
 std::string GameLanguage() {
     const std::string saved = g_app.launcher.Get("language");
-    for (const auto& c : kGameLanguages)
-        if (saved == c.value) return saved;
-    if (saved == "3") return "20"; // Spanish: the Latin American one this build has
+    const bool eu = IsEuGame();
+    auto has = [&](const std::string& code) {
+        if (eu) {
+            for (const auto& c : kGameLanguagesEU)
+                if (code == c.value) return true;
+        } else {
+            for (const auto& c : kGameLanguages)
+                if (code == c.value) return true;
+        }
+        return false;
+    };
+    if (has(saved)) return saved;
+    if (saved == "3" && !eu) return "20";
+    if (saved == "20" && eu) return "3";
     return DefaultGameLanguage();
 }
 
@@ -1279,9 +1329,11 @@ void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
 
+bool UpdateBusy();
+
 void StartGame() {
     App& a = g_app;
-    if (!a.python || a.game_running) return;
+    if (!a.python || a.game_running || UpdateBusy()) return;
     SaveGameIni();
     SaveLauncher();
     JoinWorker();
@@ -1823,9 +1875,9 @@ fs::path SaveRoot() {
     std::error_code ec;
     for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
-        if (fs::is_directory(it->path() / L"CUSA13795", e2)) return it->path() / L"CUSA13795";
+        if (fs::is_directory(it->path() / GameTitle(), e2)) return it->path() / GameTitle();
     }
-    return base / L"1" / L"CUSA13795";
+    return base / L"1" / GameTitle();
 }
 
 fs::path BackupRoot() { return g_app.root / L"backups"; }
@@ -1989,7 +2041,18 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
     {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
+    // The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+    {"CrashTeamRacingEU.xml/60 FPS Unlock", "patch_60fps"},
+    {"CrashTeamRacingEU.xml/Disable Motion Blur", "patch_no_motion_blur"},
+    {"CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
 };
+
+/// "USA" or "EU" for a CTR title ID, "" otherwise.
+const char* RegionOf(const std::string& title) {
+    if (title == "CUSA13795") return "USA";
+    if (title == "CUSA14876") return "EU";
+    return "";
+}
 
 std::string XmlUnescape(std::string s) {
     const std::pair<const char*, const char*> entities[] = {
@@ -2050,11 +2113,16 @@ std::vector<PatchInfo> LoadPatches() {
         const std::string xml = ReadText(file);
         // Files naming other games are skipped; a file without <ID> applies to any.
         bool any_id = false, ours = false;
+        std::string file_title;
         for (size_t at = 0; (at = xml.find("<ID>", at)) != std::string::npos; at += 4) {
             const size_t close = xml.find("</ID>", at);
             if (close == std::string::npos) break;
             any_id = true;
-            if (Trim(xml.substr(at + 4, close - at - 4)) == kTitleId) ours = true;
+            const std::string id = Trim(xml.substr(at + 4, close - at - 4));
+            if (IsCtrTitle(id)) {
+                ours = true;
+                if (file_title.empty()) file_title = id;
+            }
         }
         if (any_id && !ours) continue;
         for (size_t at = 0; (at = xml.find("<Metadata", at)) != std::string::npos; ++at) {
@@ -2077,6 +2145,7 @@ std::vector<PatchInfo> LoadPatches() {
                 p.mod_name = get("ModName");
                 p.mod_hash = get("ModHash");
             }
+            p.title = file_title;
             std::string on = get("isEnabled");
             std::transform(on.begin(), on.end(), on.begin(), [](unsigned char c) { return char(std::tolower(c)); });
             p.default_on = on == "true";
@@ -2325,10 +2394,10 @@ void PlayTab() {
             ImGui::TextColored(kRed, "%s: %s", PathText(a.game_dir).c_str(), Describe(a.game_info).c_str());
         }
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(T("Necesitas tu propio dump de PS4: el juego base (CUSA13795) y la actualización 1.21 "
-                                 "(CUSA13795-patch). Si ya los tienes juntos en una carpeta, elige esa.",
-                                 "You need your own PS4 dump: the base game (CUSA13795) and the 1.21 update "
-                                 "(CUSA13795-patch). If they are already merged in one folder, choose that one."));
+        ImGui::TextUnformatted(T("Necesitas tu propio dump de PS4: el juego base (CUSA14876 en Europa, CUSA13795 en "
+                                 "América) y la actualización 1.21. Si ya los tienes juntos en una carpeta, elige esa.",
+                                 "You need your own PS4 dump: the base game (CUSA14876 in Europe, CUSA13795 in the "
+                                 "Americas) and the 1.21 update. If they are already merged in one folder, choose that one."));
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         if (ImGui::BeginTable("setup", 3, ImGuiTableFlags_SizingStretchProp)) {
@@ -2745,15 +2814,23 @@ void SettingsTab() {
     ImGui::SeparatorText(T("Consola", "Console"));
     if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
-    HelpMarker(T("Los idiomas que trae esta versión del juego (CUSA13795, América): inglés, español latinoamericano, "
-                 "francés y portugués de Brasil. Sus archivos no tienen textos de otros idiomas: el español de España, "
-                 "el alemán, el italiano y los demás vienen solo en las versiones de otras regiones. Se aplica al "
-                 "pulsar Jugar.",
-                 "The languages this build of the game has (CUSA13795, the Americas): English, Latin American "
-                 "Spanish, French and Brazilian Portuguese. Its files hold no text in other languages: Spain's "
-                 "Spanish, German, Italian and the rest come only in other regions' builds. Applied when you press "
-                 "Play."));
+    if (IsEuGame()) {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguagesEU, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión europea (CUSA14876): inglés, español de España, francés, alemán, "
+                     "italiano y árabe. La lista cambia sola según la versión del juego que elijas. Se aplica al "
+                     "pulsar Jugar.",
+                     "The languages of the European edition (CUSA14876): English, Spain's Spanish, French, German, "
+                     "Italian and Arabic. The list follows the edition of the game you choose. Applied when you "
+                     "press Play."));
+    } else {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión de América (CUSA13795): inglés, español latinoamericano, francés "
+                     "y portugués de Brasil. La lista cambia sola según la versión del juego que elijas (la europea "
+                     "trae español de España, alemán, italiano y árabe). Se aplica al pulsar Jugar.",
+                     "The languages of the Americas edition (CUSA13795): English, Latin American Spanish, French and "
+                     "Brazilian Portuguese. The list follows the edition of the game you choose (the European one has "
+                     "Spain's Spanish, German, Italian and Arabic). Applied when you press Play."));
+    }
 
     ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
     LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
@@ -3249,8 +3326,17 @@ void PatchesTab() {
     if (a.patches.empty()) {
         ImGui::TextColored(kYellow, "%s", T("No hay parches en la carpeta patches.", "No patches in the patches folder."));
     }
+    // Only the patches of the detected edition (the other's are for another executable).
+    const std::string game_title = Narrow(GameTitle());
+    ImGui::TextColored(kGreen, "%s",
+                       Format(T("Tu juego: versión %s (%s). Se muestran sus parches.",
+                                "Your game: %s edition (%s). Its patches are shown."),
+                              RegionOf(game_title), game_title).c_str());
     for (const auto& p : a.patches) {
         if (!PackagePatchId(p).empty()) continue;  // Complete ZIP packages have their own Mods page.
+        if (!p.title.empty() && p.title != game_title) continue;
+        // The online key patch follows the Online tab's switch (run.py turns it on).
+        if (p.key.find("Online: custom Demonware key") != std::string::npos) continue;
         ImGui::PushID(p.key.c_str());
         bool on;
         if (p.ini_key) {
@@ -3268,7 +3354,9 @@ void PatchesTab() {
         // render_res decides the 1080p Pro patch (Settings > Internal resolution).
         if (needs_neo) on = EffectiveRenderRes() == "1080" && neo;
         ImGui::BeginDisabled(needs_neo);
-        if (ImGui::Checkbox(p.name.c_str(), &on)) {
+        const char* region = RegionOf(p.title);
+        const std::string label = *region ? p.name + " [" + region + "]" : p.name;
+        if (ImGui::Checkbox(label.c_str(), &on)) {
             if (p.ini_key) {
                 a.game.Set(p.ini_key, on ? "1" : "0");
                 SaveGameIni();
@@ -3636,8 +3724,9 @@ DlcInfo DescribeDlc(const fs::path& path) {
     const size_t dash = content.rfind('-');
     d.label = dash == std::string::npos ? std::string() : content.substr(dash + 1);
     d.title = get("TITLE");
-    if (get("TITLE_ID") != kTitleId || get("CATEGORY") != "ac" || d.label.size() != 16) {
-        d.problem = T("no es un DLC de CTR Nitro-Fueled (CUSA13795)", "not a CTR Nitro-Fueled (CUSA13795) DLC");
+    if (!IsCtrTitle(get("TITLE_ID")) || get("CATEGORY") != "ac" || d.label.size() != 16) {
+        d.problem = T("no es un DLC de CTR Nitro-Fueled (CUSA13795 / CUSA14876)",
+                      "not a CTR Nitro-Fueled (CUSA13795 / CUSA14876) DLC");
         return d;
     }
     if (d.title.empty()) d.title = d.label;
@@ -4780,8 +4869,306 @@ void MigrateOldLauncher() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Updates (port_update.cpp): the latest published release's Windows ZIP, downloaded into
+// update\, checked (size, SHA-256), unpacked with the bundled Python and copied over the port.
+// Settings, the online key, friends, saves, backups, DLC, logs and the player's own patches are
+// never in the package and never written; replaced files go to update\rollback\ first.
+
+struct UpdateState {
+    // Dismissed: a newer release the player chose not to install now (Tools offers it again).
+    enum Stage { Idle, Checking, UpToDate, Available, Dismissed, Downloading, Unpacking, Installing, Done, Failed };
+    std::mutex mutex;
+    std::atomic<int> stage{Idle};
+    PortUpdate::Release release;  // under mutex
+    std::string error;            // under mutex
+    PortUpdate::Progress progress;
+    std::thread worker;
+    std::atomic<bool> auto_install{false};  // install as soon as the check finds a newer release
+    bool restart_sent = false;
+};
+UpdateState g_update;
+
+bool UpdateBusy() {
+    const int s = g_update.stage;
+    return s == UpdateState::Checking || s == UpdateState::Downloading || s == UpdateState::Unpacking ||
+           s == UpdateState::Installing || s == UpdateState::Done;
+}
+
+fs::path UpdateDir() { return g_app.root / L"update"; }
+
+void UpdateFail(const std::string& error) {
+    {
+        std::scoped_lock lock{g_update.mutex};
+        g_update.error = error;
+    }
+    g_update.stage = UpdateState::Failed;
+}
+
+void StartUpdateInstall();
+
+/// Asks GitHub for the latest release; with auto_install a newer one is installed at once.
+void StartUpdateCheck(bool auto_install) {
+    if (UpdateBusy()) return;
+    if (g_update.worker.joinable()) g_update.worker.join();
+    g_update.stage = UpdateState::Checking;
+    g_update.auto_install = auto_install;
+    const std::string current = g_app.version;
+    g_update.worker = std::thread([current, auto_install] {
+        std::string error;
+        const std::string url = std::string("https://api.github.com/repos/") + PortUpdate::kRepo + "/releases/latest";
+        const auto body = PortUpdate::FetchText(Widen(url), &error);
+        if (!body) {
+            UpdateFail(std::string(T("No se pudo consultar GitHub: ", "Could not ask GitHub: ")) + error);
+            return;
+        }
+        const auto release = PortUpdate::ParseRelease(*body);
+        if (!release) {
+            UpdateFail(T("GitHub no devolvió una versión para Windows.", "GitHub returned no Windows release."));
+            return;
+        }
+        {
+            std::scoped_lock lock{g_update.mutex};
+            g_update.release = *release;
+            g_update.error.clear();
+        }
+        const auto have = PortUpdate::ParseVersion(current);
+        const auto latest = PortUpdate::ParseVersion(release->tag);
+        if (!have.valid || !PortUpdate::IsNewer(have, latest)) {
+            g_update.stage = UpdateState::UpToDate;
+            return;
+        }
+        g_update.stage = UpdateState::Available;  // PollUpdate starts an automatic install
+    });
+}
+
+void StartUpdateInstall() {
+    App& a = g_app;
+    if (g_update.stage != UpdateState::Available && g_update.stage != UpdateState::Dismissed &&
+        g_update.stage != UpdateState::Failed)
+        return;
+    if (a.game_running) {
+        a.notice = T("Cierra el juego para actualizar.", "Close the game to update.");
+        return;
+    }
+    if (!a.python) {
+        UpdateFail(T("Falta Python para descomprimir la actualización.", "Python is missing to unpack the update."));
+        return;
+    }
+    PortUpdate::Release release;
+    {
+        std::scoped_lock lock{g_update.mutex};
+        release = g_update.release;
+        g_update.error.clear();
+    }
+    if (release.asset_url.empty()) return;
+    if (g_update.worker.joinable()) g_update.worker.join();
+    g_update.progress.cancel = false;
+    g_update.stage = UpdateState::Downloading;
+    const fs::path root = a.root;
+    const Python python = *a.python;
+    g_update.worker = std::thread([release, root, python] {
+        const fs::path dir = root / L"update";
+        const fs::path zip = dir / Widen(release.asset_name);
+        const fs::path staging = dir / L"staging";
+        std::error_code ec;
+        fs::remove_all(staging, ec);
+        std::string error = PortUpdate::Download(Widen(release.asset_url), zip, release.size, release.sha256,
+                                                 g_update.progress);
+        if (!error.empty()) {
+            UpdateFail(std::string(T("La descarga falló: ", "The download failed: ")) + error);
+            return;
+        }
+        g_update.stage = UpdateState::Unpacking;
+        const std::wstring cmd = Quote(python.exe) + L" " + python.args + L"-I -X utf8 -c " +
+                                 Quote(L"import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])") +
+                                 L" " + Quote(zip.wstring()) + L" " + Quote(staging.wstring());
+        const Captured r = RunCaptured(python.exe, cmd, dir, 600000);
+        const fs::path package = staging / PortUpdate::kPackageFolder;
+        const std::string unpacked_version = Trim(ReadText(package / L"bin" / L"VERSION"));
+        if (!r.started || r.code != 0 || !fs::is_regular_file(package / L"bin" / L"sacredfire.exe", ec) ||
+            !PortUpdate::ParseVersion(unpacked_version).valid) {
+            fs::remove_all(staging, ec);
+            UpdateFail(std::string(T("No se pudo descomprimir la actualización. ", "Could not unpack the update. ")) +
+                       Trim(r.output).substr(0, 300));
+            return;
+        }
+        if (g_app.game_running) {
+            UpdateFail(T("Cierra el juego para actualizar.", "Close the game to update."));
+            return;
+        }
+        g_update.stage = UpdateState::Installing;
+        error = PortUpdate::Install(package, root, dir / L"rollback");
+        fs::remove_all(staging, ec);
+        if (!error.empty()) {
+            UpdateFail(std::string(T("No se pudo instalar (todo quedó como estaba): ",
+                                     "Could not install (everything was put back): ")) + error);
+            return;
+        }
+        fs::remove(zip, ec);
+        g_update.stage = UpdateState::Done;
+    });
+}
+
+/// Every frame: an automatic update starts once the check found one; a finished install
+/// restarts the launcher in its new version.
+void PollUpdate() {
+    App& a = g_app;
+    if (g_update.auto_install && g_update.stage != UpdateState::Checking) {
+        g_update.auto_install = false;
+        if (g_update.stage == UpdateState::Available && !a.game_running) StartUpdateInstall();
+    }
+    if (g_update.stage == UpdateState::Done && !g_update.restart_sent) {
+        g_update.restart_sent = true;
+        SaveLauncher();
+        wchar_t self[MAX_PATH * 4]{};
+        GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
+        fs::path exe = self;
+        // The packaged launcher's name, if the running one is an older name next to it.
+        std::error_code ec;
+        const fs::path packaged = a.root / (std::wstring(kLauncherName) + L".exe");
+        if (fs::is_regular_file(packaged, ec)) exe = packaged;
+        std::wstring cmd = Quote(exe.wstring()) + L" --updated";
+        STARTUPINFOW si{sizeof si};
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, a.root.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            PostQuitMessage(0);
+        } else {
+            a.notice = T("Actualizado. Cierra y vuelve a abrir el launcher.", "Updated. Close and open the launcher again.");
+        }
+    }
+}
+
+/// At start: the previous update's leftovers (the old launcher in rollback\ may still be running
+/// for a moment, so this retries in the background).
+void CleanupUpdate() {
+    const fs::path dir = UpdateDir();
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return;
+    std::thread([dir] {
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            std::error_code e;
+            fs::remove_all(dir / L"rollback", e);
+            fs::remove_all(dir / L"staging", e);
+            if (!fs::exists(dir / L"rollback", e) && !fs::exists(dir / L"staging", e)) break;
+            Sleep(500);
+        }
+        std::error_code e;
+        fs::remove(dir, e);  // only when empty (a download in progress keeps it)
+    }).detach();
+}
+
+/// The update line under the header: a newer version, the progress, or what went wrong.
+void UpdateBanner() {
+    const int stage = g_update.stage;
+    if (stage == UpdateState::Idle || stage == UpdateState::Checking || stage == UpdateState::UpToDate ||
+        stage == UpdateState::Dismissed)
+        return;
+    PortUpdate::Release release;
+    std::string error;
+    {
+        std::scoped_lock lock{g_update.mutex};
+        release = g_update.release;
+        error = g_update.error;
+    }
+    if (stage == UpdateState::Available) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Hay una versión nueva: %s (tienes %s).", "A new version is out: %s (you have %s)."),
+                                                release.tag, g_app.version).c_str());
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.game_running);
+        if (ImGui::SmallButton(T("Actualizar ahora", "Update now"))) StartUpdateInstall();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Novedades", "What's new"))) OpenInShell(Widen(release.page_url));
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Ahora no", "Not now"))) g_update.stage = UpdateState::Dismissed;
+    } else if (stage == UpdateState::Downloading) {
+        const double total = double(std::max<std::uint64_t>(1, g_update.progress.total));
+        const float fraction = float(double(g_update.progress.done) / total);
+        ImGui::TextColored(kGrey, "%s", Format(T("Descargando %s...", "Downloading %s..."), release.tag).c_str());
+        ImGui::SameLine();
+        char text[64];
+        std::snprintf(text, sizeof text, "%.0f / %.0f MB", double(g_update.progress.done) / 1e6, total / 1e6);
+        ImGui::ProgressBar(fraction, ImVec2(ImGui::GetFontSize() * 14.0f, 0.0f), text);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Cancelar", "Cancel"))) g_update.progress.cancel = true;
+    } else if (stage == UpdateState::Unpacking || stage == UpdateState::Installing) {
+        ImGui::TextColored(kGrey, "%s", stage == UpdateState::Unpacking ? T("Descomprimiendo la actualización...", "Unpacking the update...")
+                                                                       : T("Instalando la actualización...", "Installing the update..."));
+    } else if (stage == UpdateState::Done) {
+        ImGui::TextColored(kGreen, "%s", T("Actualizado: reiniciando el launcher...", "Updated: restarting the launcher..."));
+    } else if (stage == UpdateState::Failed) {
+        ImGui::TextColored(kYellow, "%s", error.c_str());
+        ImGui::SameLine();
+        if (!release.asset_url.empty() && ImGui::SmallButton(T("Reintentar", "Retry"))) StartUpdateInstall();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("OK")) g_update.stage = UpdateState::Idle;
+    }
+}
+
+void UpdateSection() {
+    App& a = g_app;
+    ImGui::SeparatorText(T("Actualizaciones", "Updates"));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kGrey, "%s",
+                       T("Descarga la última versión publicada en GitHub y la instala encima. Tus ajustes, amigos, apodo, "
+                         "parches propios, partidas, copias, DLC y registros se mantienen: la actualización solo cambia "
+                         "los archivos del port. Si algo falla, todo vuelve a como estaba.",
+                         "Downloads the latest release published on GitHub and installs it over this one. Your settings, "
+                         "friends, nickname, own patches, saves, backups, DLC and logs are kept: the update only changes "
+                         "the port's files. If anything fails, everything is put back."));
+    ImGui::PopTextWrapPos();
+    ImGui::Text("%s %s", T("Versión instalada:", "Installed version:"), a.version.c_str());
+    const int stage = g_update.stage;
+    ImGui::BeginDisabled(UpdateBusy());
+    if (ImGui::Button(T("Comprobar actualizaciones", "Check for updates"))) StartUpdateCheck(false);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (stage == UpdateState::Available || stage == UpdateState::Dismissed) {
+        PortUpdate::Release release;
+        {
+            std::scoped_lock lock{g_update.mutex};
+            release = g_update.release;
+        }
+        ImGui::TextColored(kGreen, "%s", Format(T("Versión nueva: %s", "New version: %s"), release.tag).c_str());
+        ImGui::TextUnformatted(T("¿Quieres actualizar ahora?", "Do you want to update now?"));
+        ImGui::BeginDisabled(a.game_running);
+        if (ImGui::Button(T("Actualizar ahora", "Update now"))) StartUpdateInstall();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (stage == UpdateState::Available && ImGui::Button(T("Ahora no", "Not now")))
+            g_update.stage = UpdateState::Dismissed;
+        ImGui::SameLine();
+        if (ImGui::Button(T("Novedades", "What's new"))) OpenInShell(Widen(release.page_url));
+        if (a.game_running)
+            ImGui::TextColored(kGrey, "%s", T("Cierra el juego para actualizar.", "Close the game to update."));
+    } else if (stage == UpdateState::Checking) {
+        ImGui::TextColored(kGrey, "%s", T("Consultando GitHub...", "Asking GitHub..."));
+    } else if (stage == UpdateState::UpToDate) {
+        std::string tag;
+        {
+            std::scoped_lock lock{g_update.mutex};
+            tag = g_update.release.tag;
+        }
+        ImGui::TextColored(kGreen, "%s", Format(T("Estás al día (última versión: %s).", "You are up to date (latest: %s)."), tag).c_str());
+    } else if (stage != UpdateState::Idle) {
+        ImGui::TextColored(kGrey, "%s", T("Mira el aviso de arriba.", "See the notice at the top."));
+    }
+    LauncherFlag("update_check", T("Buscar actualizaciones al abrir el launcher", "Check for updates when the launcher opens"), true,
+                 T("Una consulta pequeña a GitHub al abrir. No descarga nada sin tu permiso, salvo que actives la opción de abajo.",
+                   "A small request to GitHub at start. Nothing is downloaded without your say, unless the option below is on."));
+    LauncherFlag("update_auto", T("Instalar las actualizaciones automáticamente", "Install updates automatically"), false,
+                 T("Al abrir el launcher, si hay una versión nueva se descarga e instala sola y el launcher se reinicia. "
+                   "Nunca mientras juegas. Si abres el juego directo (acceso directo o Steam), no se actualiza.",
+                   "When the launcher opens and a new version is out, it is downloaded and installed and the launcher "
+                   "restarts. Never while you play. Starting straight into the game (shortcut, Steam) does not update."));
+}
+
 void ToolsTab() {
     App& a = g_app;
+    UpdateSection();
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
     if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenInShell(a.root / L"last_run.log");
     ImGui::SameLine();
@@ -4865,7 +5252,7 @@ void ToolsTab() {
 
 void ClearShaderCache() {
     std::error_code ec;
-    const fs::path cache = g_app.root / L"user" / L"cache" / L"CUSA13795";
+    const fs::path cache = g_app.root / L"user" / L"cache" / GameTitle();
     const auto removed = fs::remove_all(cache, ec);
     g_app.notice = ec ? std::string(T("No se pudo borrar la caché: ", "Could not clear the cache: ")) + ec.message()
                       : std::string(T("Caché borrada (", "Cache cleared (")) + std::to_string(removed) +
@@ -5075,6 +5462,7 @@ bool MenuEntry(int id, const char* label, bool selected, float width) {
 void Frame() {
     App& a = g_app;
     PollJobs();
+    PollUpdate();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -5100,6 +5488,7 @@ void Frame() {
         ImGui::SameLine();
         if (ImGui::SmallButton("OK")) a.notice.clear();
     }
+    UpdateBanner();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
     ImGui::BeginChild("menu_body", ImVec2(0, 0), ImGuiChildFlags_None);
@@ -5213,15 +5602,17 @@ void LoadState() {
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
     // First start of a portable package: a merged folder next to the launcher is picked up.
     if (a.game_dir.empty()) {
-        for (const wchar_t* name : {L"CUSA13795-1.21", L"CUSA13795"}) {
+        for (const wchar_t* name : {L"CUSA14876-1.21", L"CUSA13795-1.21", L"CUSA14876", L"CUSA13795"}) {
             if (Analyze(a.root / name).kind == Kind::Complete) {
                 a.game_dir = a.root / name;
                 break;
             }
         }
-        if (a.base_dir.empty() && Analyze(a.root / L"CUSA13795").kind == Kind::Base) a.base_dir = a.root / L"CUSA13795";
-        if (a.update_dir.empty() && Analyze(a.root / L"CUSA13795-patch").kind == Kind::Update)
-            a.update_dir = a.root / L"CUSA13795-patch";
+        for (const wchar_t* title : {L"CUSA14876", L"CUSA13795"}) {
+            const std::wstring base = title, update = base + L"-patch";
+            if (a.base_dir.empty() && Analyze(a.root / base).kind == Kind::Base) a.base_dir = a.root / base;
+            if (a.update_dir.empty() && Analyze(a.root / update).kind == Kind::Update) a.update_dir = a.root / update;
+        }
     }
     a.base_info = Analyze(a.base_dir);
     a.update_info = Analyze(a.update_dir);
@@ -5401,9 +5792,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
-    bool direct_launch = false;
+    bool direct_launch = false, updated = false;
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"--direct") == 0) {
@@ -5416,6 +5808,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     LoadState();
     MigrateOldLauncher();
+    if (!direct_launch) {
+        CleanupUpdate();
+        if (updated) {
+            g_app.notice = Format(T("Actualizado a %s. Tus ajustes, amigos, parches y partidas se mantienen.",
+                                    "Updated to %s. Your settings, friends, patches and saves are kept."),
+                                  g_app.version);
+        } else if (g_app.launcher.Flag("update_check", true)) {
+            StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
+        }
+    }
 
     if (direct_launch) {
         if (g_app.worker.joinable()) g_app.worker.join();
@@ -5578,6 +5980,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     DiscordPresence::Shutdown();
+    if (g_update.worker.joinable()) {  // a download stops; an install in progress finishes
+        g_update.progress.cancel = true;
+        g_update.worker.join();
+    }
     // Background work finishes on its own; a running game keeps running.
     if (g_app.worker.joinable()) {
         if (g_app.job == Job::Play) g_app.worker.detach();

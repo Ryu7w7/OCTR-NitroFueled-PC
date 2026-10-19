@@ -126,6 +126,13 @@ public:
         submit_cv.wait(lk, [this] { return num_submits == 0; });
     }
 
+    /// bbport: IsGpuIdle with the submission counters read under their lock: what the GPU idle
+    /// interrupt's handler and sceGnmSubmitDone decide the submission lock on.
+    bool IsGpuIdleNow() {
+        std::scoped_lock lk{submit_mutex};
+        return IsGpuIdle();
+    }
+
     /// bbport: also the draw recording thread and the fences it deferred are done (see
     /// work_retired). sceGnmSubmitDone does not block the guest when this is true.
     bool IsGpuIdle() const {

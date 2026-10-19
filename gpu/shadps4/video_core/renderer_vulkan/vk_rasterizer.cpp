@@ -2485,9 +2485,14 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
 }
 
 void Rasterizer::EmitIndexBuffer() {
-    scheduler.Record([handle = index_bind.handle, offset = index_bind.offset,
-                      type = index_bind.type](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindIndexBuffer(handle, offset, type);
+    scheduler.Record([handle = index_bind.handle, offset = index_bind.offset, type = index_bind.type,
+                      size = index_bind.size,
+                      sized = instance.IsMaintenance5Supported()](vk::CommandBuffer cmdbuf) {
+        if (sized) {
+            cmdbuf.bindIndexBuffer2KHR(handle, offset, size, type);
+        } else {
+            cmdbuf.bindIndexBuffer(handle, offset, type);
+        }
     });
 }
 
@@ -2499,15 +2504,31 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     const bool is_index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
-    const VAddr index_address =
-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
+    const VAddr base_address = regs.index_base_address.Address<VAddr>();
+    const VAddr index_address = base_address + u64(index_offset) * index_size;
 
-    // Bind index buffer.
-    const u32 index_buffer_size = regs.num_indices * index_size;
+    // bbport (upstream #5358, #5327): only the mapped part of the index range is bound. A
+    // garbage base or count (a command buffer the guest reused, issue #2) read unmapped guest
+    // memory; with no base or nothing mapped, 16 zero bytes are bound instead (index 0).
+    const u64 requested_size = u64(regs.num_indices) * index_size;
+    const u64 mapped_size =
+        base_address != 0 && requested_size != 0 ? memory->ClampRangeSize(index_address, requested_size) : 0;
+    const u32 index_buffer_size =
+        static_cast<u32>(std::min<u64>(Common::AlignDown(mapped_size, index_size), 0xFFFFFFFFu & ~3u));
+    if (index_buffer_size == 0) {
+        static std::atomic<u32> noted{0};
+        if (requested_size != 0 && noted.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_ERROR(Render, "Unmapped index buffer at {:#x} ({} indices): zero indices bound",
+                      index_address, regs.num_indices);
+        }
+        const auto* null_buffer = buffer_cache.GetNullIndexBuffer();
+        index_bind = {null_buffer->Handle(), 0, index_type, null_buffer->SizeBytes()};
+        return;
+    }
     const auto [buffer, offset] =
         buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
-    index_bind = {buffer->Handle(), offset, index_type};
+    index_bind = {buffer->Handle(), offset, index_type, index_buffer_size};
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
@@ -3259,6 +3280,34 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        // bbport (after upstream #5137): undefined field values (CTR's title screen uses
+        // anisotropy 7; a garbage S# from a reused command buffer has more) are clamped to the
+        // nearest defined one, and a custom border colour with no border colour table becomes
+        // transparent black, so no Vulkan sampler is made from values the hardware lacks.
+        if (!ssharp.Valid() || (ssharp.border_color_type.Value() == AmdGpu::BorderColor::Custom &&
+                                Regs().ta_bc_base.Address() == 0)) {
+            static std::atomic<u32> clamped{0};
+            if (clamped.fetch_add(1, std::memory_order_relaxed) < 4) {
+                LOG_WARNING(Render, "S# with undefined fields (aniso {}, filter mode {}, mip filter {}, border {}): clamped",
+                            static_cast<u32>(ssharp.max_aniso.Value()),
+                            static_cast<u32>(ssharp.filter_mode.Value()),
+                            static_cast<u32>(ssharp.mip_filter.Value()),
+                            static_cast<u32>(ssharp.border_color_type.Value()));
+            }
+            if (ssharp.max_aniso.Value() > AmdGpu::AnisoRatio::Sixteen) {
+                ssharp.max_aniso.Assign(AmdGpu::AnisoRatio::Sixteen);
+            }
+            if (ssharp.filter_mode.Value() > AmdGpu::FilterMode::Max) {
+                ssharp.filter_mode.Assign(AmdGpu::FilterMode{});
+            }
+            if (ssharp.mip_filter.Value() > AmdGpu::MipFilter::Linear) {
+                ssharp.mip_filter.Assign(AmdGpu::MipFilter::Linear);
+            }
+            if (ssharp.border_color_type.Value() == AmdGpu::BorderColor::Custom &&
+                Regs().ta_bc_base.Address() == 0) {
+                ssharp.border_color_type.Assign(AmdGpu::BorderColor{});
+            }
+        }
         ForceAnisotropy(ssharp, sampler.is_depth);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);

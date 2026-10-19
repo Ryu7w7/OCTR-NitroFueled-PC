@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -21,6 +25,10 @@
 
 namespace Serialization {
 struct Archive;
+}
+
+namespace Shader::Gcn {
+struct FetchShaderData;
 }
 
 namespace Shader {
@@ -210,6 +218,17 @@ struct Info : InfoPersistent {
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
         T data;
+        if (replay) [[unlikely]] {
+            data = {};
+            for (const auto& sharp : replay->sharps) {
+                if (sharp.ptr_index == ptr_index && sharp.dword_offset == dword_offset) {
+                    std::memcpy(&data, sharp.dwords.data(), std::min(sizeof(T), sizeof(sharp.dwords)));
+                    return data;
+                }
+            }
+            replay->missed = true;
+            return data;
+        }
         const auto ud = UserData();
         const u32* base = ud.data();
         if (ptr_index != IR::NumScalarRegs) {
@@ -237,7 +256,29 @@ struct Info : InfoPersistent {
         bnd.user_data += ud_mask.NumRegs();
     }
 
+    /// SacredFire: the shader prebuild (vk_shader_prebuild.cpp) translates draws recorded in an
+    /// earlier session, away from the game: their resource table copy and parsed fetch shader
+    /// come from the recording instead of guest memory (fetch_shader.cpp reads `fetch`).
+    /// A descriptor read through a pointer in the user data (the fetch shader's vertex buffers).
+    struct ReplaySharp {
+        u32 ptr_index;
+        u32 dword_offset;
+        std::array<u32, 4> dwords;
+    };
+    struct Replay {
+        const std::vector<u32>* flat;
+        const std::optional<Gcn::FetchShaderData>* fetch;
+        std::span<const ReplaySharp> sharps;
+        mutable bool missed = false; ///< something not in the recording was read
+    };
+    static inline thread_local const Replay* replay = nullptr;
+
     void RefreshFlatBuf() {
+        if (replay) [[unlikely]] {
+            flattened_ud_buf = *replay->flat;
+            flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());

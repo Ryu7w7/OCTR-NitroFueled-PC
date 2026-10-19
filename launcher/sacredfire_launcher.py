@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from bbport_i18n import language, set_language, tr
+from launcher_i18n import UI_LANGUAGES, menu_language, set_language, tr
 
 import gi
 
@@ -60,22 +60,31 @@ TITLE = "SacredFire"
 GAME = "Crash Team Racing: Nitro-Fueled"
 
 # Choices: (label, value); the first is the default.
-UI_LANGUAGES = [("System", ""), ("English", "en"), ("Русский", "ru"), ("Português (Brasil)", "pt_BR")]
-# The languages CUSA13795 (the Americas build) has, as PS4 system language codes.
+# The languages each edition has (the .lng texts in its archives), as PS4 system language codes:
+# the Americas build (CUSA13795) and the European one (CUSA14876). The list follows the chosen game.
 LANGUAGES = [("English", "1"), ("Spanish (Latin America)", "20"), ("French", "2"),
              ("Portuguese (Brazil)", "17")]
+LANGUAGES_EU = [("English", "1"), ("Spanish (Spain)", "3"), ("French", "2"), ("German", "4"),
+                ("Italian", "5"), ("Arabic", "21")]
+REGIONS = {"CUSA13795": "USA", "CUSA14876": "EU"}
+
+
+def languages_for(title):
+    return LANGUAGES_EU if title == "CUSA14876" else LANGUAGES
+
+
+def language_for(title, saved):
+    """The saved game language where the edition has it, else its counterpart (Spanish), else English."""
+    codes = [code for _label, code in languages_for(title)]
+    if saved in codes:
+        return saved
+    if saved == "3" and "20" in codes:
+        return "20"
+    if saved == "20" and "3" in codes:
+        return "3"
+    return "1"
 PRESENT_MODES = [("Mailbox", "Mailbox"), ("FIFO (VSync)", "Fifo"),
                  ("FIFO Relaxed", "FifoRelaxed"), ("Immediate", "Immediate")]
-# Game patches (patches/CrashTeamRacing.xml, scripts/patches.py; community patches by illusion and
-# TroyWarez from https://github.com/illusionyy/PS-Game-Patch): bbport.ini key,
-# label, note. The in-game menu edits the same keys.
-PATCHES = [
-    ("patch_60fps", "60 FPS unlock", "By illusion. 60 in menus, 40-45 in races on a Steam Deck"),
-    ("patch_no_motion_blur", "Disable motion blur", "By illusion"),
-    ("patch_pro_1080p", "1080p in PS4 Pro mode", "By TroyWarez; only with PS4 Pro mode below"),
-    ("patch_unlock_all", "Unlock Everything",
-     "By Camiloop. Unlocks what the game grants when its unlock conditions are met; back up your saves first"),
-]
 # The game's FPS limit (bbport.ini fps_limit; the in-game menu offers the same values). Above 30
 # it needs the 60 FPS patch.
 FPS_LIMITS = [("No limit", "0"), ("30", "30"), ("60", "60"), ("72 (half of 144 Hz)", "72"),
@@ -89,6 +98,26 @@ RENDER_RESOLUTIONS = [("Game default (the PS4 Pro switches decide)", ""),
                       ("1440p (2560 x 1440, PS4 Pro)", "1440"),
                       ("1620p (2880 x 1620)", "1620"),
                       ("4K (3840 x 2160)", "2160")]
+# bbport.ini temporal: one upscaler at a time (the game reads it). DLSS is Windows-only (its
+# NVIDIA library is a Windows DLL); there "dlss" falls back to FSR 3, so it is not offered here.
+UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
+# Settings the game reads from bbport.ini itself (gpu/shim/bbport_settings.cpp), with the
+# game's defaults: the launcher shows and writes them, the in-game menu changes the same keys.
+GAME_FLAGS = {"async_pipelines": "0", "msaa": "0", "borderless": "0"}
+VOLUME_DEFAULT = 100
+# Patches with a bbport.ini key of their own (shared with the in-game menu); other patches are
+# switched in patches.json (scripts/patches.py GAME_PATCH_KEYS).
+INI_PATCHES = {"CrashTeamRacing.xml/60 FPS Unlock": "patch_60fps",
+               "CrashTeamRacing.xml/Disable Motion Blur": "patch_no_motion_blur",
+               "CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p",
+               "CrashTeamRacingUnlockAll.xml/Unlock Everything": "patch_unlock_all",
+               # The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+               "CrashTeamRacingEU.xml/60 FPS Unlock": "patch_60fps",
+               "CrashTeamRacingEU.xml/Disable Motion Blur": "patch_no_motion_blur",
+               "CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p"}
+# Set by the online switch, not by hand (patches.py turns it on for online play).
+HIDDEN_PATCHES = {"CrashTeamRacingOnline.xml/Online: custom Demonware key",
+                  "CrashTeamRacingOnlineEU.xml/Online: custom Demonware key"}
 
 DEFAULTS = {
     "ui_language": "",
@@ -114,6 +143,11 @@ DEFAULTS = {
     "discord_rpc": True,
     "discord_accept_requests": True,
     "discord_app_id": "",
+    # The monitor for the game ("": the primary; else its number, BB_DISPLAY), and the launcher
+    # window while the game runs: hidden, and closed when the game ends normally.
+    "display": "",
+    "hide_on_play": False,
+    "close_on_play": False,
 }
 DISCORD_APP_ID = "1560408801704943708"
 
@@ -173,7 +207,7 @@ PAD_LABELS = {
     "dpleft": "D-pad left", "dpright": "D-pad right", "guide": "Guide / PS", "misc1": "Capture / Misc",
 }
 MAX_KEYS = 4  # bindings per input, as in the Windows launcher
-INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key, _, _ in PATCHES}}
+INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key in INI_PATCHES.values()}}
 # RyuNET online (run.py setup_online reads the same bbport.ini keys). The nickname is the
 # player's identity on the server: the first installation to use one keeps it.
 ONLINE_SERVER = "octr.ryu7w7.xyz"
@@ -247,9 +281,11 @@ def game_environment(s):
     if s["user_dir"]:
         env["BB_USER_DIR"] = s["user_dir"]
     env["BB_LANGUAGE"] = s["language"]
-    env["BB_MENU_LANGUAGE"] = language()
+    env["BB_MENU_LANGUAGE"] = menu_language()
     env["BB_FULLSCREEN"] = "1" if s["fullscreen"] else "0"
     env["BB_PRESENT_MODE"] = s["present_mode"]
+    if s.get("display"):
+        env["BB_DISPLAY"] = s["display"]  # the monitor's number (gpu/shim/window.cpp)
     if s.get("gamepad"):
         env["BB_GAMEPAD"] = s["gamepad"]
     env["BB_NEO"] = "1" if s.get("neo") else "0"
@@ -280,6 +316,282 @@ def connected_gamepads():
     except (OSError, subprocess.SubprocessError):
         return []
     return [tuple(line.split("\t", 1)) for line in run.stdout.splitlines() if "\t" in line]
+
+
+def connected_displays():
+    """(number, label) of the monitors (bb-gpu-capabilities --displays: name, size, primary),
+    numbered from 1 as BB_DISPLAY takes them; [] if unknown."""
+    tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    try:
+        run = subprocess.run([str(tool), "--displays"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in run.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) < 2:
+            continue
+        number = str(len(found) + 1)
+        label = f"{number}: {parts[0]} ({parts[1]})"
+        if len(parts) > 2 and parts[2] == "1":
+            label += " - " + tr("primary")
+        found.append((number, label))
+    return found
+
+
+# --- patches: every eboot patch for CUSA13795 01.21 in the bundled patches/ and the player's
+# own folder (the data folder's patches/; the package's is read-only), as run.sh passes them to
+# scripts/patches.py.
+
+def user_patches_dir():
+    return DATA_DIR / "patches"
+
+
+def patch_file_title(path):
+    """The CTR edition a patch file names in <TitleID> (CUSA13795 / CUSA14876), "" for any game."""
+    import xml.etree.ElementTree as ET
+    try:
+        ids = [e.text.strip() for e in ET.parse(path).getroot().iter("ID") if e.text]
+    except (OSError, ET.ParseError):
+        return ""
+    return next((i for i in ids if i in REGIONS), "")
+
+
+def patch_list(title=None, version=None):
+    """[(key, name, author, version, note, default_on, file, file title)] of the patches the game
+    can use: those for its title and version (as run.sh applies them), the defaults when unknown."""
+    import patches as patch_files
+    found = patch_files.all_external_patches([PORT_DIR / "patches", user_patches_dir()],
+                                             version or patch_files.APP_VERSION, title or patch_files.TITLE_ID)
+    listed = []
+    for key, path, meta in found:
+        if key in HIDDEN_PATCHES:
+            continue
+        file_title = patch_file_title(path)
+        if title and file_title and file_title != title:
+            continue
+        listed.append((key, meta.get("Name", ""), meta.get("Author", ""), meta.get("PatchVer", ""), meta.get("Note", ""),
+                       meta.get("isEnabled", "false").lower() == "true", path, file_title))
+    return listed
+
+
+def patch_config_path():
+    return Path(os.environ.get("BB_PATCHES_CONFIG", DATA_DIR / "patches.json"))
+
+
+def read_patch_config():
+    """patches.json's "enabled" and "disabled" lists."""
+    try:
+        data = json.loads(patch_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return [str(x) for x in data.get("enabled", [])], [str(x) for x in data.get("disabled", [])]
+
+
+def write_patch_config(enabled, disabled):
+    path = patch_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"enabled": enabled, "disabled": disabled}, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+
+
+# --- saves: <user>/savedata/<user id>/CUSA13795/<slot> holds the game's files and <slot>.sce_sys
+# its param.bin (title, subtitle, detail: OrbisSaveDataParam) and icon0.png, as
+# src/runtime_savedata.c keeps them. Backups are copies in the data folder's backups/saves-<date>.
+
+SAVE_PARAM_SIZE = 1328  # char title[128], subtitle[128], detail[1024]; u32; i32; i64 mtime; 32 bytes
+
+
+# The editions the port runs: the Americas (CUSA13795) and Europe (CUSA14876). Saves, the shader
+# cache and DLC follow the chosen game's title ID (set_game_title); the Americas one by default.
+GAME_TITLES = ("CUSA13795", "CUSA14876")
+GAME_TITLE = ["CUSA13795"]
+GAME_VERSION = [""]  # its APP_VER (the EU base game is 01.00), "" until a game is chosen
+
+
+def set_game_title(game_dir):
+    """The title ID of the game folder (param.sfo), when it is one of GAME_TITLES."""
+    try:
+        info = game_check.sfo_info(Path(game_dir).expanduser())
+    except Exception:  # an unreadable param.sfo keeps the last one
+        return GAME_TITLE[0]
+    if info.get("TITLE_ID", "") in GAME_TITLES:
+        GAME_TITLE[0] = info["TITLE_ID"]
+        GAME_VERSION[0] = info.get("APP_VER", "")
+    return GAME_TITLE[0]
+
+
+def save_root(user_dir):
+    title = GAME_TITLE[0]
+    base = Path(user_dir) / "savedata"
+    try:
+        for entry in sorted(base.iterdir()):
+            if (entry / title).is_dir():
+                return entry / title
+    except OSError:
+        pass
+    return base / "1" / title
+
+
+def backup_root():
+    return DATA_DIR / "backups"
+
+
+def is_meta_name(name):
+    return name.endswith((".sce_sys", ".memory"))
+
+
+def folder_bytes(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def format_size(size):
+    return f"{size / (1 << 20):.1f} MB" if size >= 1 << 20 else f"{size / 1024:.0f} KB"
+
+
+def list_saves(user_dir):
+    """[(slot, description, bytes, modified)] of the game's save slots."""
+    root = save_root(user_dir)
+    slots = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return slots
+    for entry in entries:
+        if not entry.is_dir() or is_meta_name(entry.name):
+            continue
+        text = []
+        try:
+            raw = (root / f"{entry.name}.sce_sys" / "param.bin").read_bytes()
+            if len(raw) >= SAVE_PARAM_SIZE:
+                for start, size in ((0, 128), (128, 128), (256, 1024)):
+                    value = raw[start:start + size].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+                    if value:
+                        text.append(value)
+        except OSError:
+            pass
+        newest = entry.stat().st_mtime
+        for folder, _dirs, files in os.walk(entry):
+            for name in files:
+                try:
+                    newest = max(newest, (Path(folder) / name).stat().st_mtime)
+                except OSError:
+                    pass
+        slots.append((entry.name, " - ".join(text) or "-", folder_bytes(entry),
+                      time.strftime("%Y-%m-%d %H:%M", time.localtime(newest))))
+    return slots
+
+
+def list_backups():
+    """[(path, bytes)] of the backups, newest first."""
+    try:
+        found = [p for p in backup_root().iterdir() if p.is_dir() and p.name.startswith("saves-")]
+    except OSError:
+        return []
+    return [(p, folder_bytes(p)) for p in sorted(found, key=lambda p: p.name, reverse=True)]
+
+
+def has_saves(user_dir):
+    root = save_root(user_dir)
+    try:
+        return root.is_dir() and any(root.iterdir())
+    except OSError:
+        return False
+
+
+def backup_saves(user_dir, label=""):
+    """A copy of all saves in backups/saves-<date>[-label]; None when there is nothing to copy."""
+    import shutil
+    if not has_saves(user_dir):
+        return None
+    target = backup_root() / ("saves-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{label}" if label else ""))
+    shutil.copytree(save_root(user_dir), target, dirs_exist_ok=True)
+    return target
+
+
+def restore_backup(user_dir, backup):
+    """The saves become the backup's; the current ones are backed up first."""
+    import shutil
+    backup_saves(user_dir, "auto")
+    root = save_root(user_dir)
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.copytree(backup, root)
+
+
+def read_sfo(path):
+    """param.sfo's text and number entries as a dict."""
+    import struct
+    data = Path(path).read_bytes()
+    if data[:4] != b"\0PSF":
+        raise ValueError("not a param.sfo")
+    key_table, data_table, count = struct.unpack_from("<III", data, 8)
+    values = {}
+    for i in range(count):
+        key_offset, fmt, length, _max_length, offset = struct.unpack_from("<HHIII", data, 20 + i * 16)
+        key = data[key_table + key_offset:].split(b"\0", 1)[0].decode("utf-8", "replace")
+        raw = data[data_table + offset:data_table + offset + length]
+        if fmt == 0x0404:
+            values[key] = str(struct.unpack("<I", raw[:4])[0]) if len(raw) >= 4 else ""
+        else:
+            values[key] = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+    return values
+
+
+def import_saves(user_dir, source):
+    """A save folder from elsewhere: this launcher's backup or another PC's CUSA13795 folder (copied
+    as it is), or a decrypted PS4 save (Apollo Save Tool, Save Wizard: its files plus
+    sce_sys/param.sfo), converted to the runtime's layout. The saves are backed up first.
+    Returns an error text, or "" when done."""
+    import shutil
+    import struct
+    source = Path(source)
+    root = save_root(user_dir)
+    sfo = source / "sce_sys" / "param.sfo"
+    if sfo.is_file():
+        try:
+            values = read_sfo(sfo)
+        except (OSError, ValueError, struct.error) as error:
+            return str(error)
+        slot = values.get("SAVEDATA_DIRECTORY", "")
+        if not slot or len(slot) >= 32 or any(c in slot for c in "\\/:"):
+            return tr("param.sfo does not name the save slot (SAVEDATA_DIRECTORY).")
+        backup_saves(user_dir, "before-import")
+        target, meta = root / slot, root / f"{slot}.sce_sys"
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
+        meta.mkdir(parents=True, exist_ok=True)
+        for entry in source.iterdir():
+            if entry.name == "sce_sys":
+                continue
+            if entry.is_dir():
+                shutil.copytree(entry, target / entry.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, target / entry.name)
+        param = bytearray(SAVE_PARAM_SIZE)
+        for start, size, key in ((0, 128, "MAINTITLE"), (128, 128, "SUBTITLE"), (256, 1024, "DETAIL")):
+            value = values.get(key, "").encode("utf-8")[:size - 1]
+            param[start:start + len(value)] = value
+        struct.pack_into("<q", param, 1288, int(time.time()))
+        (meta / "param.bin").write_bytes(bytes(param))
+        icon = source / "sce_sys" / "icon0.png"
+        if icon.is_file():
+            shutil.copy2(icon, meta / "icon0.png")
+        return ""
+    ours = any(not is_meta_name(p.name) and p.is_dir() and (source / f"{p.name}.sce_sys").is_dir()
+               for p in source.iterdir()) if source.is_dir() else False
+    if not ours:
+        return tr("This folder is not recognized: choose a backup, the CUSA13795 saves folder from another PC or a "
+                  "decrypted PS4 save (with sce_sys/param.sfo).")
+    backup_saves(user_dir, "before-import")
+    shutil.copytree(source, root, dirs_exist_ok=True)
+    return ""
 
 
 def discord_activity_for(ini, started, party):
@@ -498,6 +810,10 @@ class LauncherWindow(Adw.ApplicationWindow):
                                         "preferences-system-symbolic")
         self.stack.add_titled_with_icon(self.build_controls_page(), "controls", tr("Controls"),
                                         "input-gaming-symbolic")
+        self.stack.add_titled_with_icon(self.build_patches_page(), "patches", tr("Patches"),
+                                        "applications-engineering-symbolic")
+        self.stack.add_titled_with_icon(self.build_saves_page(), "saves", tr("Saves"),
+                                        "document-save-symbolic")
         self.stack.add_titled_with_icon(self.build_dlc_page(), "dlc", tr("DLC"),
                                         "package-x-generic-symbolic")
         self.stack.add_titled_with_icon(self.build_log_page(), "log", tr("Log"),
@@ -519,7 +835,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         game = Adw.PreferencesGroup(title=tr("Game"),
                                     description=tr("The dumped game with its 1.21 update merged over the base (eboot.bin, sce_module, ...)"))
-        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA13795)"))
+        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA13795 or CUSA14876)"))
         self.game_status = Gtk.Image(valign=Gtk.Align.CENTER)
         self.game_row.add_suffix(self.game_status)
         self.game_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the folder with eboot.bin"), self.on_choose_game))
@@ -530,19 +846,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.user_row.add_suffix(flat_button("folder-symbolic", tr("Open in the file manager"),
                                              lambda _b: open_folder(self, self.user_dir())))
         game.add(self.user_row)
-        self.language_row = combo_row(tr("Game language"), None, LANGUAGES, self.settings["language"])
+        self.language_title = GAME_TITLE[0]
+        self.language_row = combo_row(tr("Game language"), tr("The languages of your edition of the game"),
+                                      languages_for(self.language_title),
+                                      language_for(self.language_title, self.settings["language"]))
         game.add(self.language_row)
         page.add(game)
-
-        patches = Adw.PreferencesGroup(title=tr("Game patches"),
-                                       description=tr("From patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), applied at start; "
-                                                      "also in the in-game menu"))
-        self.patch_rows = {}
-        for key, label, note in PATCHES:
-            row = Adw.SwitchRow(title=tr(label), subtitle=tr(note), active=self.ini.get(key) == "1")
-            patches.add(row)
-            self.patch_rows[key] = row
-        page.add(patches)
 
         online = Adw.PreferencesGroup(title=tr("Online (RyuNET)"),
                                       description=tr("Online races, private rooms and the Pit Stop. Your nickname is yours on the server: "
@@ -613,9 +922,33 @@ class LauncherWindow(Adw.ApplicationWindow):
         console.add(self.neo_row)
         page.add(console)
 
+        performance = Adw.PreferencesGroup(
+            title=tr("Performance"),
+            description=tr("Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings."))
+        self.fps_limit_row = combo_row(tr("FPS limit"), tr("Above 30 it needs the 60 FPS unlock patch; also in the in-game menu"),
+                                       FPS_LIMITS, self.ini.get("fps_limit", "60"))
+        performance.add(self.fps_limit_row)
+        self.async_row = Adw.SwitchRow(
+            title=tr("Compile shaders in the background (experimental)"),
+            subtitle=tr("Fewer hitches when an effect is first seen; an effect may show up a frame late."),
+            active=self.ini.get("async_pipelines") == "1")
+        performance.add(self.async_row)
+        page.add(performance)
+
         screen = Adw.PreferencesGroup(title=tr("Display"))
         self.fullscreen_row = Adw.SwitchRow(title=tr("Fullscreen"), active=self.settings["fullscreen"])
         screen.add(self.fullscreen_row)
+        self.borderless_row = Adw.SwitchRow(title=tr("Borderless window"),
+                                            subtitle=tr("Removes window borders in windowed mode."),
+                                            active=self.ini.get("borderless") == "1")
+        screen.add(self.borderless_row)
+        displays = connected_displays()
+        display_choices = [(tr("Primary"), "")] + displays
+        if self.settings.get("display") and self.settings["display"] not in [n for n, _ in displays]:
+            display_choices.append((tr("Monitor {} (not connected)").format(self.settings["display"]), self.settings["display"]))
+        self.display_row = combo_row(tr("Monitor"), tr("The screen the game window and fullscreen go to"),
+                                     display_choices, self.settings.get("display", ""))
+        screen.add(self.display_row)
         self.present_row = combo_row(tr("Presentation"), None, PRESENT_MODES, self.settings["present_mode"])
         screen.add(self.present_row)
         self.render_res_row = combo_row(tr("Internal resolution"), tr("Also in the in-game menu"),
@@ -626,14 +959,58 @@ class LauncherWindow(Adw.ApplicationWindow):
                "PCs and the Steam Deck."))
         self.render_res_row.connect("notify::selected", lambda *_: self.update_render_res())
         screen.add(self.render_res_row)
+        self.msaa_row = Adw.SwitchRow(
+            title=tr("Game MSAA (2x)"),
+            subtitle=tr("The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and in light "
+                        "shafts. At high internal resolutions or with FSR it is barely missed. Needs a restart."),
+            active=self.ini.get("msaa") == "1")
+        screen.add(self.msaa_row)
+        temporal = self.ini.get("temporal", "")
+        if temporal not in [v for _l, v in UPSCALERS]:
+            # Older settings: fsr1=1 / fsr3=1; "dlss" (a Windows setting) runs FSR 3 here.
+            temporal = "fsr3" if temporal == "dlss" or self.ini.get("fsr3") == "1" else \
+                "fsr1" if self.ini.get("fsr1") == "1" else "off"
+        self.upscaler_row = combo_row(
+            tr("Upscaling"),
+            tr("FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. FSR 3 rebuilds detail "
+               "over several frames from the game's depth and motion, and smooths edges even at the same resolution. "
+               "Experimental: switch to FSR 1 if you see trails or shimmering."),
+            UPSCALERS, temporal)
+        self.upscaler_row.connect("notify::selected", lambda *_: self.update_upscaler())
+        screen.add(self.upscaler_row)
+        sharpness = Gtk.Adjustment(lower=0.0, upper=1.0, step_increment=0.05, page_increment=0.1)
+        try:
+            sharpness.set_value(float(self.ini.get("fsr3_sharpness", "0.30")))
+        except ValueError:
+            sharpness.set_value(0.30)
+        self.sharpness_row = Adw.SpinRow(title=tr("FSR 3 sharpness"), adjustment=sharpness, digits=2)
+        screen.add(self.sharpness_row)
         self.fps_row = Adw.SwitchRow(title=tr("FPS counter in the corner"), active=self.ini.get("show_fps") == "1")
         screen.add(self.fps_row)
-        self.fps_limit_row = combo_row(tr("FPS limit"), tr("Above 30 it needs the 60 FPS unlock patch; also in the in-game menu"),
-                                       FPS_LIMITS, self.ini.get("fps_limit", "60"))
-        screen.add(self.fps_limit_row)
         page.add(screen)
 
+        sound = Adw.PreferencesGroup(title=tr("Sound"))
+        volume_row = Adw.ActionRow(
+            title=tr("Game volume"),
+            subtitle=tr("100% is the level the game was mixed at. Above it, the loudest peaks are rounded off instead of "
+                        "distorting. While you play it can also be changed in the in-game menu (Insert or L3+R3)."))
+        try:
+            volume = max(0, min(200, int(self.ini.get("volume", VOLUME_DEFAULT))))
+        except ValueError:
+            volume = VOLUME_DEFAULT
+        self.volume_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 200, 5)
+        self.volume_scale.set_value(volume)
+        self.volume_scale.set_size_request(220, -1)
+        self.volume_scale.set_valign(Gtk.Align.CENTER)
+        self.volume_scale.set_draw_value(True)
+        self.volume_scale.set_format_value_func(lambda _scale, value: f"{int(value)}%")
+        self.volume_scale.add_mark(100, Gtk.PositionType.BOTTOM, None)
+        volume_row.add_suffix(self.volume_scale)
+        sound.add(volume_row)
+        page.add(sound)
+
         self.update_render_res()
+        self.update_upscaler()
 
         dev = Adw.PreferencesGroup(title=tr("Developer"))
         self.mangohud_row = Adw.SwitchRow(title="MangoHud", active=self.settings["mangohud"])
@@ -650,10 +1027,23 @@ class LauncherWindow(Adw.ApplicationWindow):
         dev.add(self.validation_row)
         self.env_row = Adw.EntryRow(title=tr("Extra environment (VAR=value ...)"), text=self.settings["extra_env"])
         dev.add(self.env_row)
+        page.add(dev)
+
+        window = Adw.PreferencesGroup(title=tr("Window and Launcher"))
         self.ui_language_row = combo_row(tr("Launcher language"), tr("Applies after restarting the launcher"),
                                          UI_LANGUAGES, self.settings["ui_language"])
-        dev.add(self.ui_language_row)
-        page.add(dev)
+        window.add(self.ui_language_row)
+        self.hide_on_play_row = Adw.SwitchRow(
+            title=tr("Hide launcher window while playing"),
+            subtitle=tr("Hides the launcher window completely while playing and restores it automatically when exiting."),
+            active=self.settings.get("hide_on_play", False))
+        window.add(self.hide_on_play_row)
+        self.close_on_play_row = Adw.SwitchRow(
+            title=tr("Close launcher after playing"),
+            subtitle=tr("Closes the launcher once you exit the game (it stays open if the game crashed, with its log)."),
+            active=self.settings.get("close_on_play", False))
+        window.add(self.close_on_play_row)
+        page.add(window)
 
         steam = Adw.PreferencesGroup(title=tr("Steam"))
         exe, _start, _options = steam_shortcuts.launcher_command()
@@ -674,9 +1064,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.neo_row.set_sensitive(not chosen)
         self.neo_row.set_subtitle(tr("Set by the internal resolution (Display)") if chosen else
                                   tr("Neo mode, 7 CPUs, 5568 MiB direct memory: the game's Pro rendering path"))
-        pro_patch = self.patch_rows.get("patch_pro_1080p")
-        if pro_patch:
-            pro_patch.set_sensitive(not chosen)
+        self.fill_patches()  # the 1080p Pro patch follows the internal resolution
+
+    def update_upscaler(self):
+        self.sharpness_row.set_visible(combo_value(self.upscaler_row) == "fsr3")
 
     def game_dir(self):
         return Path(self.settings["game_dir"]).expanduser()
@@ -692,6 +1083,16 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def update_game_status(self):
         path = self.game_dir()
+        title = set_game_title(path)
+        if hasattr(self, "language_row") and title != self.language_title:
+            # Another edition: its own languages (Spanish follows: Latin American / Spain's).
+            current = combo_value(self.language_row)
+            self.language_title = title
+            choices = languages_for(title)
+            self.language_row.set_model(Gtk.StringList.new([tr(label) for label, _code in choices]))
+            self.language_row.values = [code for _label, code in choices]
+            self.language_row.set_selected(self.language_row.values.index(language_for(title, current)))
+            self.fill_patches()
         ok = bool(self.settings["game_dir"]) and (path / "eboot.bin").is_file()
         self.game_row.set_subtitle(str(path) if self.settings["game_dir"] else tr("not chosen"))
         problem = game_check.problem(path) if ok else None
@@ -706,7 +1107,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             problem = ("other_title", profile["title"], profile["version"])
             self.game_row.set_subtitle(f"{path}\n{tooltip}")
         else:
-            tooltip = f"{GAME} CUSA13795, 1.21"
+            info = game_check.sfo_info(path)
+            tooltip = f"{GAME} {info.get('TITLE_ID', '')}, {info.get('APP_VER', '').lstrip('0')}"
         self.game_status.set_from_icon_name("object-select-symbolic" if ok and not problem else "dialog-warning-symbolic")
         self.game_status.set_tooltip_text(tooltip)
         self.launch_button.set_sensitive((ok and not problem) or self.process is not None)
@@ -761,11 +1163,19 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["ui_language"] = combo_value(self.ui_language_row)
         s["discord_rpc"] = self.discord_rpc_row.get_active()
         s["discord_accept_requests"] = self.discord_accept_row.get_active()
+        s["display"] = combo_value(self.display_row)
+        s["hide_on_play"] = self.hide_on_play_row.get_active()
+        s["close_on_play"] = self.close_on_play_row.get_active()
         save_settings(s)
         self.ini, self.ini_lines = load_ini()
-        for key, row in self.patch_rows.items():
-            self.ini[key] = "1" if row.get_active() else "0"
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
+        self.ini["async_pipelines"] = "1" if self.async_row.get_active() else "0"
+        self.ini["msaa"] = "1" if self.msaa_row.get_active() else "0"
+        self.ini["borderless"] = "1" if self.borderless_row.get_active() else "0"
+        self.ini["temporal"] = combo_value(self.upscaler_row)
+        self.ini["fsr1"] = self.ini["fsr3"] = None  # older keys: temporal decides
+        self.ini["fsr3_sharpness"] = f"{self.sharpness_row.get_value():.2f}"
+        self.ini["volume"] = str(int(self.volume_scale.get_value()))
         self.ini["fps_limit"] = combo_value(self.fps_limit_row)
         self.ini["render_res"] = combo_value(self.render_res_row) or None  # "": the Pro switches decide
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
@@ -780,9 +1190,19 @@ class LauncherWindow(Adw.ApplicationWindow):
     def reload_game_settings(self):
         """bbport.ini as the in-game menu left it: the switches show what the game will use."""
         self.ini, self.ini_lines = load_ini()
-        for key, row in self.patch_rows.items():
-            row.set_active(self.ini.get(key) == "1")
+        self.fill_patches()
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
+        self.async_row.set_active(self.ini.get("async_pipelines") == "1")
+        self.msaa_row.set_active(self.ini.get("msaa") == "1")
+        self.borderless_row.set_active(self.ini.get("borderless") == "1")
+        temporal = self.ini.get("temporal", "off")
+        if temporal in self.upscaler_row.values:
+            self.upscaler_row.set_selected(self.upscaler_row.values.index(temporal))
+        try:
+            self.volume_scale.set_value(max(0, min(200, int(self.ini.get("volume", VOLUME_DEFAULT)))))
+        except ValueError:
+            pass
+        self.show_keyboard_player()
         limit = self.ini.get("fps_limit", "60")
         values = self.fps_limit_row.values
         self.fps_limit_row.set_selected(values.index(limit) if limit in values else values.index("60"))
@@ -819,6 +1239,17 @@ class LauncherWindow(Adw.ApplicationWindow):
             choices.append((tr("{} (not connected)").format(self.settings["gamepad_name"] or self.settings["gamepad"]), self.settings["gamepad"]))
         self.gamepad_row = combo_row(tr("Controller"), None, choices, self.settings["gamepad"])
         controls.add(self.gamepad_row)
+        # bbport.ini port.N=keyboard (N 2..4): that split-screen player plays on the keyboard and
+        # player 1 on the controller alone (src/runtime_pad.c). Player 1: the keyboard drives it too.
+        self.keyboard_player_row = combo_row(
+            tr("Keyboard"),
+            tr("For two players in split screen, one on the keyboard and one on a controller, choose Player 2: the "
+               "controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on the "
+               "keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."),
+            [(tr("Player 1 (with the controller)"), "1")] + [(tr("Player {}").format(n), str(n)) for n in (2, 3, 4)],
+            self.keyboard_player())
+        self.keyboard_player_row.connect("notify::selected", lambda *_: self.on_keyboard_player())
+        controls.add(self.keyboard_player_row)
         page.add(controls)
 
         # Bindings: "Change" waits for a key or button in a small window (bb-gpu-capabilities
@@ -861,6 +1292,27 @@ class LauncherWindow(Adw.ApplicationWindow):
                 group.add(preset)
             page.add(group)
         return page
+
+    def keyboard_player(self):
+        """The split-screen player the keyboard plays ("1": with player 1's controller)."""
+        for n in (2, 3, 4):
+            if self.ini.get(f"port.{n}", "").strip().lower() == "keyboard":
+                return str(n)
+        return "1"
+
+    def on_keyboard_player(self):
+        chosen = combo_value(self.keyboard_player_row)
+        if chosen == self.keyboard_player():
+            return
+        changes = {f"port.{n}": None for n in (2, 3, 4) if self.ini.get(f"port.{n}", "").strip().lower() == "keyboard"}
+        if chosen != "1":
+            changes[f"port.{chosen}"] = "keyboard"
+        self.set_ini(changes)
+
+    def show_keyboard_player(self):
+        current = self.keyboard_player()
+        if combo_value(self.keyboard_player_row) != current:
+            self.keyboard_player_row.set_selected(self.keyboard_player_row.values.index(current))
 
     def binding_text(self, kind, value):
         names = [n.strip() for n in value.split(",") if n.strip()]
@@ -920,6 +1372,279 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.set_binding(kind, name, ",".join(current[-MAX_KEYS:]))
         process.communicate_utf8_async(None, None, done)
 
+    # --- patches page ------------------------------------------------------------------------
+
+    def build_patches_page(self):
+        page = Adw.PreferencesPage()
+        intro = Adw.PreferencesGroup(
+            title=tr("Game patches"),
+            description=tr("Applied when the game starts (or with the in-game menu's \"Apply and restart\"). Add your own: "
+                           "copy patch .xml files in shadPS4 format (like PS-Game-Patch's or GoldHEN's) into the patches "
+                           "folder and press Reload. Only those for CUSA13795 version 01.21 are listed."))
+        actions = Adw.ActionRow(title=tr("Your patches folder"), subtitle=str(user_patches_dir()))
+        add = Gtk.Button(label=tr("Add .xml…"), valign=Gtk.Align.CENTER)
+        add.add_css_class("suggested-action")
+        add.connect("clicked", self.on_add_patches)
+        actions.add_suffix(add)
+        actions.add_suffix(flat_button("folder-symbolic", tr("Open the patches folder"),
+                                       lambda _b: open_folder(self, user_patches_dir())))
+        actions.add_suffix(flat_button("view-refresh-symbolic", tr("Reload"), lambda _b: self.fill_patches()))
+        intro.add(actions)
+        unlock = Adw.ActionRow(title=tr("To have the game unlocked: turn on Unlock Everything (below) or import a 100% "
+                                        "save in the Saves page."))
+        unlock.add_css_class("dim-label")
+        intro.add(unlock)
+        page.add(intro)
+        self.patches_page = page
+        self.patches_group = None
+        self.fill_patches()
+        return page
+
+    def fill_patches(self):
+        if not hasattr(self, "patches_page"):
+            return
+        if self.patches_group is not None:
+            self.patches_page.remove(self.patches_group)
+        title = GAME_TITLE[0]
+        self.patches_group = Adw.PreferencesGroup(
+            title=tr("Patches found"),
+            description=tr("Your game: {} edition ({}). Its patches are shown.").format(REGIONS.get(title, ""), title))
+        try:
+            found = patch_list(title, GAME_VERSION[0])
+        except Exception as error:  # a broken file must not take the page down
+            found = []
+            self.patches_group.add(Adw.ActionRow(title=GLib.markup_escape_text(str(error))))
+        if not found:
+            self.patches_group.add(Adw.ActionRow(title=tr("No patches in the patches folder.")))
+        enabled, disabled = read_patch_config()
+        render_res_chosen = bool(combo_value(self.render_res_row)) if hasattr(self, "render_res_row") else False
+        bundled = (PORT_DIR / "patches").resolve()
+        for key, name, author, version, note, default_on, path, file_title in found:
+            ini_key = INI_PATCHES.get(key)
+            if ini_key:
+                on = self.ini.get(ini_key) == "1"
+            else:
+                on = key in enabled or (default_on and key not in disabled)
+            details = []
+            if author:
+                details.append(tr("by {}").format(author) + (f"  v{version}" if version else ""))
+            if ini_key == "patch_unlock_all":
+                details.append(tr("Unlocks what the game grants when its unlock conditions are met, with the same switch "
+                                  "the trade-show demos (E3/PAX) used. The author advises backing up your save first "
+                                  "(Saves page)."))
+            if ini_key == "patch_pro_1080p":
+                details.append(tr("Only with PS4 Pro mode, and only when the internal resolution is the game default "
+                                  "(Settings > Internal resolution decides otherwise)."))
+            if note:
+                details.append(note)
+            details.append(key)
+            region = REGIONS.get(file_title, "")
+            label = f"{name or key} [{region}]" if region else (name or key)
+            row = Adw.SwitchRow(title=GLib.markup_escape_text(label),
+                                subtitle=GLib.markup_escape_text("\n".join(details)), active=on)
+            if ini_key == "patch_pro_1080p" and render_res_chosen:
+                row.set_sensitive(False)
+            row.connect("notify::active", lambda r, *_a, k=key, i=ini_key, d=default_on: self.on_patch_toggled(k, i, d, r.get_active()))
+            if path.parent.resolve() != bundled:
+                row.add_suffix(flat_button("user-trash-symbolic", tr("Remove"),
+                                           lambda _b, p=path: self.confirm_remove_patch(p)))
+            self.patches_group.add(row)
+        self.patches_page.add(self.patches_group)
+
+    def on_patch_toggled(self, key, ini_key, default_on, on):
+        if ini_key:
+            self.set_ini({ini_key: "1" if on else "0"})
+            return
+        enabled, disabled = read_patch_config()
+        enabled = [k for k in enabled if k != key]
+        disabled = [k for k in disabled if k != key]
+        if on and not default_on:
+            enabled.append(key)
+        elif on:
+            pass  # on by its file
+        elif default_on:
+            disabled.append(key)
+        write_patch_config(enabled, disabled)
+
+    def on_add_patches(self, _button):
+        dialog = Gtk.FileDialog(title=tr("Patch files (.xml)"), modal=True)
+        xml = Gtk.FileFilter(name=tr("shadPS4 patches (*.xml)"))
+        xml.add_pattern("*.xml")
+        xml.add_pattern("*.XML")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(xml)
+        dialog.set_filters(filters)
+
+        def done(dialog, result):
+            try:
+                files = dialog.open_multiple_finish(result)
+            except GLib.Error:
+                return
+            import patches as patch_files
+            folder = user_patches_dir()
+            added, problems = 0, []
+            for i in range(files.get_n_items()):
+                source = Path(files.get_item(i).get_path())
+                try:
+                    folder.mkdir(parents=True, exist_ok=True)
+                    target = folder / (source.stem + ".xml")
+                    target.write_bytes(source.read_bytes())
+                    if not any(p.name == target.name for _k, p, _m in patch_files.external_patches(folder)):
+                        target.unlink()
+                        problems.append(tr("{}: no patch for CUSA13795 01.21").format(source.name))
+                        continue
+                    added += 1
+                except OSError as error:
+                    problems.append(f"{source.name}: {error}")
+            self.toasts.add_toast(Adw.Toast(title=tr("Patch files added: {}").format(added) +
+                                            (". " + "; ".join(problems) if problems else ""), timeout=8))
+            self.fill_patches()
+        dialog.open_multiple(self, None, done)
+
+    def confirm_remove_patch(self, path):
+        def remove():
+            try:
+                path.unlink()
+            except OSError as error:
+                self.toasts.add_toast(Adw.Toast(title=str(error)))
+            self.fill_patches()
+        self.confirm(tr("Remove {} from your patches folder?").format(path.name),
+                     tr("Every patch in that file goes away."), tr("Remove"), remove)
+
+    # --- saves page --------------------------------------------------------------------------
+
+    def build_saves_page(self):
+        page = Adw.PreferencesPage()
+        self.saves_page = page
+        self.saves_groups = []
+        self.fill_saves()
+        return page
+
+    def fill_saves(self):
+        for group in self.saves_groups:
+            self.saves_page.remove(group)
+        self.saves_groups = []
+        locked = self.process is not None
+        user = self.user_dir()
+        saves = Adw.PreferencesGroup(
+            title=tr("Saves"),
+            description=(tr("Close the game to back up, import or restore saves.") + "\n" if locked else "") +
+            str(save_root(user)))
+        slots = list_saves(user)
+        if not slots:
+            saves.add(Adw.ActionRow(title=tr("No saves yet.")))
+        for slot, text, size, modified in slots:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(text),
+                                subtitle=GLib.markup_escape_text(f"{slot}  ·  {format_size(size)}  ·  {modified}"))
+            saves.add(row)
+        actions = Adw.ActionRow(title=tr("Back up, export or import"),
+                                subtitle=tr("Import takes a backup made by this launcher, the CUSA13795 saves folder from "
+                                            "another PC, or a decrypted PS4 save (Apollo Save Tool, Save Wizard: a folder "
+                                            "with sce_sys/param.sfo). Your saves are backed up before importing."))
+        backup = Gtk.Button(label=tr("Back up now"), valign=Gtk.Align.CENTER)
+        backup.set_sensitive(bool(slots) and not locked)
+        backup.connect("clicked", lambda _b: self.on_backup_saves())
+        actions.add_suffix(backup)
+        export = Gtk.Button(label=tr("Export…"), valign=Gtk.Align.CENTER)
+        export.set_sensitive(bool(slots) and not locked)
+        export.connect("clicked", lambda _b: self.on_export_saves())
+        actions.add_suffix(export)
+        imported = Gtk.Button(label=tr("Import…"), valign=Gtk.Align.CENTER)
+        imported.set_sensitive(not locked)
+        imported.connect("clicked", lambda _b: self.on_import_saves())
+        actions.add_suffix(imported)
+        actions.add_suffix(flat_button("folder-symbolic", tr("Open folder"), lambda _b: open_folder(self, save_root(user))))
+        saves.add(actions)
+
+        backups = Adw.PreferencesGroup(title=tr("Backups"), description=str(backup_root()))
+        found = list_backups()
+        if not found:
+            backups.add(Adw.ActionRow(title=tr("No backups yet.")))
+        for path, size in found:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(path.name), subtitle=format_size(size))
+            restore = Gtk.Button(label=tr("Restore"), valign=Gtk.Align.CENTER)
+            restore.set_sensitive(not locked)
+            restore.connect("clicked", lambda _b, p=path: self.confirm_restore(p))
+            row.add_suffix(restore)
+            row.add_suffix(flat_button("user-trash-symbolic", tr("Delete"), lambda _b, p=path: self.confirm_delete_backup(p)))
+            backups.add(row)
+        folder = Adw.ActionRow(title=tr("Open backups folder"))
+        folder.add_suffix(flat_button("folder-symbolic", tr("Open backups folder"), lambda _b: open_folder(self, backup_root())))
+        backups.add(folder)
+        refresh = Adw.ActionRow(title=tr("Refresh"))
+        refresh.add_suffix(flat_button("view-refresh-symbolic", tr("Refresh"), lambda _b: self.fill_saves()))
+        backups.add(refresh)
+        for group in (saves, backups):
+            self.saves_page.add(group)
+            self.saves_groups.append(group)
+
+    def saves_notice(self, text):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(text), timeout=8))
+        self.fill_saves()
+
+    def on_backup_saves(self):
+        try:
+            made = backup_saves(self.user_dir())
+        except OSError as error:
+            self.saves_notice(str(error))
+            return
+        self.saves_notice(tr("Backup created: {}").format(made.name) if made else tr("No saves yet."))
+
+    def on_export_saves(self):
+        dialog = Gtk.FileDialog(title=tr("Export saves"), modal=True)
+
+        def done(dialog, result):
+            try:
+                chosen = dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            import shutil
+            target = Path(chosen.get_path()) / ("CTR-saves-" + time.strftime("%Y%m%d-%H%M%S"))
+            try:
+                shutil.copytree(save_root(self.user_dir()), target)
+            except OSError as error:
+                self.saves_notice(str(error))
+                return
+            self.saves_notice(tr("Saves exported to {}").format(target))
+        dialog.select_folder(self, None, done)
+
+    def on_import_saves(self):
+        dialog = Gtk.FileDialog(title=tr("Import save"), modal=True)
+
+        def done(dialog, result):
+            try:
+                chosen = dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            try:
+                error = import_saves(self.user_dir(), chosen.get_path())
+            except OSError as failure:
+                error = str(failure)
+            self.saves_notice(error or tr("Save imported. The previous one was backed up."))
+        dialog.select_folder(self, None, done)
+
+    def confirm_restore(self, path):
+        def restore():
+            try:
+                restore_backup(self.user_dir(), path)
+            except OSError as error:
+                self.saves_notice(str(error))
+                return
+            self.saves_notice(tr("Backup restored. Your previous saves were backed up first."))
+        self.confirm(tr("Restore {}?").format(path.name),
+                     tr("Your current saves are replaced by this backup (they are backed up first)."), tr("Restore"), restore)
+
+    def confirm_delete_backup(self, path):
+        def delete():
+            import shutil
+            try:
+                shutil.rmtree(path)
+            except OSError as error:
+                self.saves_notice(str(error))
+                return
+            self.fill_saves()
+        self.confirm(tr("Delete {}?").format(path.name), tr("This backup is deleted for good."), tr("Delete"), delete)
+
     # --- DLC page ----------------------------------------------------------------------------
 
     def dlc_dir(self):
@@ -960,7 +1685,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         if self.dlc_dir().is_dir():
             for path in sorted(self.dlc_dir().iterdir()):
                 if content_profile.is_candidate(path):
-                    items.append((path, *content_profile.describe_addon(path, "CUSA13795")))
+                    items.append((path, *content_profile.describe_addon(path, GAME_TITLE[0])))
         if not items:
             self.dlc_group.add(Adw.ActionRow(title=tr("No DLC in the dlc folder")))
         for path, label, title, problem in sorted(items, key=lambda i: i[2].lower()):
@@ -1006,7 +1731,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.dlc_dir().mkdir(parents=True, exist_ok=True)
             for i in range(files.get_n_items()):
                 source = Path(files.get_item(i).get_path())
-                _label, _title, problem = content_profile.describe_addon(source, "CUSA13795")
+                _label, _title, problem = content_profile.describe_addon(source, GAME_TITLE[0])
                 if problem:
                     problems.append(f"{source.name}: {problem}")
                     continue
@@ -1458,6 +2183,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.process.wait_async(None, self.on_exit)
         self.update_launch_button()
         self.stack.set_visible_child_name("log")
+        self.fill_saves()  # locked while the game runs
+        if self.settings.get("hide_on_play"):
+            self.set_visible(False)  # the application keeps running: the window is still its own
 
     def read_line(self):
         self.stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_line)
@@ -1503,7 +2231,14 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.reload_game_settings()
         self.update_launch_button()
         self.update_game_status()
+        self.fill_saves()
         self.append_log(tr("\n— the game exited (code {}) —\n").format(status))
+        if self.settings.get("close_on_play") and status == 0:
+            self.close()
+            return
+        if not self.get_visible():
+            self.set_visible(True)
+        self.present()
 
     def on_close(self, _window):
         self.store()

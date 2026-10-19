@@ -35,15 +35,17 @@ the in-game menu, and the game's DLC from your own packages (optional). Internal
 480p to native 4K, with AMD FSR 1 or temporal upscaling (AMD FSR 3.1, or NVIDIA DLSS on RTX
 cards; experimental). Tested on
 Windows 11 24H2 with an NVIDIA RTX 3070 and an Intel i5-9500: 110-130 FPS uncapped in races with
-the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). Shaders seen for the first
-time cause short stalls; they are cached and load at start from the next session on, or compile
-in the background with the experimental switch.
+the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). From v0.5.3 the first
+start prepares the game's shaders for your GPU from your own dump (a few seconds, once:
+[shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
+compile them; the few the recipe lacks are compiled when first seen and cached.
 
 | Release | What it brought |
 |---|---|
+| [v0.5.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.3) | The European edition (CUSA14876, with or without its 1.21 update), online with the USA one; ultrawide screens; the first start prepares the game's shaders for your GPU (far fewer stalls in the first races); one more cause of the code 23 GPU hang removed (a stale GPU idle signal; code 23 itself is not fixed and can still happen); shadPS4 crash fixes; Bluetooth controllers no longer drop from rumble; the launcher checks for updates and installs them keeping your files; the Linux launcher gets the Windows options (volume, player per controller, window settings, more languages, patches) |
 | [v0.5.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.2) | Two causes of the code 23 GPU hang mitigated (garbage buffer descriptors, a minimised window) and more detail in crash logs; Linux launcher close to the Windows one: controls, DLC, friends, internal resolution, Discord account link, status and invites (also from Steam), AppImage icon, Steam shortcut that survives updates |
 | [v0.5.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.1) (pre-release) | Fix for the code 3 crash at start; the game no longer stops when VRAM runs short; GPU hangs (code 23) report their cause in the log; a server tunnel for players who cannot reach each other directly; redesigned launcher, now named *Crash™ Team Racing Nitro-Fueled*, in nine languages, with the NAT type on its Play page; Linux launcher: FPS limit, Unlock Everything, in-game settings kept |
-| [v0.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5) | Your own online nickname, linked to your Discord account and recoverable on any PC; Discord invites that join a private room directly; Discord presence; game volume (0-200%); keyboard as a split-screen player; optional "Unlock Everything" patch; Pit Stop items from the server or from your save; players on the same network can join each other; fixes for error codes 3 and 23; first Linux AppImage of this fork |
+| [v0.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5) | Your own online nickname, linked to your Discord account and recoverable on any PC; Discord invites that join a private room directly; Discord presence; game volume (0-200%); keyboard as a split-screen player; optional "Unlock Everything" patch; Pit Stop items from the server or from your save; players on the same network can join each other; fixes for error code 3 and for some causes of code 23; first Linux AppImage of this fork |
 | [v0.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.4) | Private matches and groups; the in-game friends list |
 | [v0.3 online](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.3) | First online build: matchmaking, lobbies and the Pit Stop on the RyuNET server; Online section in the launcher (server and nickname); hostnames for the server; bundled Python 3.14 |
 
@@ -135,7 +137,8 @@ content is in the game). Spanish and English.
 ### Which game dumps work
 
 The launcher needs the game as **folders of decrypted files** from **CUSA13795** (the USA
-edition): the base game (v01.00) and the 1.21 update. The folder names do not matter. When you
+edition) or, from v0.5.3, **CUSA14876** (the European edition): the base game (v01.00) and the
+1.21 update. The launcher tells which edition you chose and shows its patches and languages. The folder names do not matter. When you
 choose a folder, the launcher says in green or red what it found.
 
 | Your dump | What it looks like | Works? |
@@ -144,7 +147,8 @@ choose a folder, the launcher says in green or red what it found.
 | Extracted with **PS4 PKG Tool** | `Image0\` (eboot.bin, sce_module, the game data) and `Sc0\` (param.sfo and the rest of sce_sys) | Yes, from v0.3: choose the folder that holds `Image0` and `Sc0` and press *Prepare the game*. With v0.2.1, first copy **everything** in `Image0` to that folder and everything in `Sc0` to a new `sce_sys` folder in it |
 | Any other tool | Works if the files end up in one of the two layouts above | Yes |
 | A `.pkg` file that was not extracted | | No: extract it first. Only the DLC tab takes `.pkg` files |
-| Another region or edition (EU CUSA14876, JP…) | | No: each one has a different executable |
+| The European edition (CUSA14876) | | Yes, from v0.5.3, also online with the USA edition |
+| Another region or edition (JP…) | | No: each one has a different executable |
 | Encrypted files (straight from a disc or an official package) | `eboot.bin could not be read as a decrypted PS4 executable` | No: dump the game again |
 
 Both builds of the 1.21 update work (for firmware 5.05 and for 6.72+). If something fails, the

@@ -83,8 +83,25 @@ static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
 
+// bbport: the GPU thread finds the GPU idle and then raises this interrupt, with no lock held in
+// between. If it is preempted there, the guest can submit the next frame and set the submission
+// lock in sceGnmSubmitDone before the interrupt arrives: clearing the lock then (an idle that
+// belonged to the frame before) let the guest build the frame after next into the command buffer
+// still being decoded (issue #2: garbage V# and S# from it, then a lost device). So the lock goes
+// only while the GPU is still idle; the next idle interrupt clears it otherwise.
+static std::atomic<u64> stale_idle_signals{0};
+
 static void ResetSubmissionLock(Platform::InterruptId irq) {
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock != 0 && liverpool && !liverpool->IsGpuIdleNow()) {
+        const u64 n = stale_idle_signals.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 5 || n % 1000 == 0) {
+            std::printf("GPU idle signal for earlier work ignored: the guest's submission lock stays "
+                        "until the work it submitted since is done (%llu so far)\n",
+                        static_cast<unsigned long long>(n));
+        }
+        return;
+    }
     submission_lock = 0;
     cv_lock.notify_all();
 }
@@ -2536,8 +2553,12 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
         liverpool->SubmitDone(u64(frames_submitted));
     } else {
         WaitGpuIdle();
-        if (!liverpool->IsGpuIdle()) {
-            submission_lock = true;
+        {
+            // bbport: under the interrupt handler's lock (ResetSubmissionLock re-checks idle).
+            std::scoped_lock idle_lock{m_wait_idle};
+            if (!liverpool->IsGpuIdleNow()) {
+                submission_lock = true;
+            }
         }
         ++frames_submitted;
         liverpool->SubmitDone();

@@ -56,6 +56,9 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+// SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
+std::atomic<bool> ultrawide_prompt{false};
+bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
@@ -499,6 +502,25 @@ void Menu() {
     // SacredFire: the scene resolution (render_res) replaces the 1080p Pro patch's checkbox; a
     // DLSS quality mode sets it instead (scripts/patches.py render_plan).
     const bool dlss_sized = s.temporal == BbSettings::TemporalDlss && s.dlss_quality > 0;
+    // SacredFire: ultrawide (the monitor's own size instead of 16:9); it replaces render_res.
+    const bool ultrawide = s.ultrawide == 1;
+    if (BbSettings::UltrawideAvailable() || ultrawide) {
+        bool on = ultrawide;
+        char label[96];
+        std::snprintf(label, sizeof label, "%s (%dx%d)", BbSettings::MenuText("Ultrawide", "Ультраширокий"),
+                      s.display_w.load(), s.display_h.load());
+        if (ImGui::Checkbox(label, &on)) {
+            BbSettings::SetUltrawide(on);
+            dirty = true;
+            std::printf("Menu: ultrawide = %d (applies after the restart)\n", int(on));
+        }
+        Checkbox(BbSettings::MenuText("Ask about ultrawide at every start", "Спрашивать при каждом запуске"),
+                 s.ultrawide_ask);
+        Hint(BbSettings::MenuText(
+            "Draws the game at the monitor's size instead of 16:9 with black bars. Replaces the "
+            "internal resolution. Applies after restarting the game.",
+            "Игра рисуется в размере монитора вместо 16:9. Применяется после перезапуска игры."));
+    }
     {
         static const char* labels[] = {"854 x 480", "1280 x 720", "1920 x 1080",
                                        "2560 x 1440 (PS4 Pro)", "2880 x 1620", "3840 x 2160 (4K)"};
@@ -507,7 +529,7 @@ void Menu() {
             dlss_sized    ? BbSettings::MenuText("(DLSS quality decides)", "(решает качество DLSS)")
             : current >= 0 ? labels[current]
                            : BbSettings::MenuText("(game patches decide)", "(решают патчи)");
-        ImGui::BeginDisabled(dlss_sized);
+        ImGui::BeginDisabled(dlss_sized || ultrawide);
         if (ImGui::BeginCombo(BbSettings::MenuText("Internal resolution", "Внутреннее разрешение"),
                               preview)) {
             for (int r = 0; r < BbSettings::RenderResCount; ++r) {
@@ -952,6 +974,47 @@ void TextPrompt() {
     ImGui::End();
 }
 
+// SacredFire: "Ultrawide?" with Yes / No and "Ask me every time". A choice that differs from the
+// one the game started with restarts it (the size is patched into the executable at start).
+void UltrawidePrompt() {
+    auto& s = BbSettings::Get();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.95f);
+    ImGui::SetNextWindowFocus();
+    ImGui::Begin("##ultrawide", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Text("Ultrawide %dx%d?", s.display_w.load(), s.display_h.load());
+    ImGui::Separator();
+    ImGui::TextUnformatted("Yes: the game fills the whole monitor (gameplay is drawn wider).");
+    ImGui::TextUnformatted("No: 16:9 with black bars, as on the PS4.");
+    ImGui::Spacing();
+    int choice = -1;
+    if (ImGui::Button("Yes, ultrawide")) choice = 1;
+    ImGui::SetItemDefaultFocus();
+    ImGui::SameLine();
+    if (ImGui::Button("No, 16:9")) choice = 0;
+    ImGui::Spacing();
+    bool ask = s.ultrawide_ask;
+    if (ImGui::Checkbox("Ask me every time the game starts", &ask)) {
+        s.ultrawide_ask = ask;
+    }
+    ImGui::TextDisabled("Cross / Enter: choose   Insert or L3+R3: settings menu later");
+    ImGui::End();
+    if (choice >= 0) {
+        BbSettings::SetUltrawide(choice == 1);
+        BbSettings::Save();
+        ultrawide_prompt = false;
+        std::printf("Ultrawide: %s (ask every time: %d)\n", choice ? "on" : "off", int(s.ultrawide_ask));
+        if (BbSettings::RenderSizeNeedsRestart()) {
+            runtime_restart();
+        }
+    }
+}
+
 } // namespace
 
 void SetTextPrompt(bool active, const std::string& prompt, const std::string& text) {
@@ -1044,13 +1107,13 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
-    const bool is_open = menu_open;
+    const bool is_open = menu_open || ultrawide_prompt;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
         if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
+            (event.key.key == SDLK_INSERT || (menu_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
@@ -1129,7 +1192,16 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || AnnouncementActive());
+    if (initialized && !ultrawide_prompt_checked) {
+        // Once, at the first presented frame: the first start, or every start with ultrawide_ask.
+        ultrawide_prompt_checked = true;
+        const auto& s = BbSettings::Get();
+        if (BbSettings::UltrawideAvailable() && (s.ultrawide < 0 || s.ultrawide_ask)) {
+            ultrawide_prompt = true;
+        }
+    }
+    return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+                           AnnouncementActive());
 }
 
 bool MenuOpen() {
@@ -1142,7 +1214,7 @@ bool TakePadRescan() {
 
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active;
+    return menu_open || prompt_active || ultrawide_prompt;
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -1181,6 +1253,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         TextPrompt();
     }
     AnnouncementBanner();
+    if (ultrawide_prompt && !menu_open) {
+        UltrawidePrompt();
+    }
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

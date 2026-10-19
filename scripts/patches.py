@@ -36,6 +36,15 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
                  'patch_unlock_all':'CrashTeamRacingUnlockAll.xml/Unlock Everything',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
+# The bundled files of other editions: their patches are selected under the USA files' keys.
+BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
+               'CrashTeamRacingOnlineEU.xml':'CrashTeamRacingOnline.xml'}
+
+
+def selection_key(key):
+    """key as the menu and patches.json name it (an edition's bundled file as the USA one)."""
+    name,sep,patch=key.partition('/')
+    return BUNDLED_FILES[name]+'/'+patch if sep and name in BUNDLED_FILES else key
 
 
 # bbport.ini render_res: the scene size the game renders in PS4 Pro mode (run.py turns the Pro
@@ -47,6 +56,13 @@ RENDER_SCALE_SIGNATURE='41 8b 44 24 48 41 89 86 48 05 00 00'  # mov 0x48(%r12),%
 GPU_HEAP_SIGNATURE='c7 45 c8 00 00 00 3c e9'                  # movl $0x3c000000,-0x38(%rbp); jmp
 RENDER_SCALES={'480':480/1080,'720':720/1080,'1620':1.5,'2160':2.0}
 # Below 1080p the picture stays 1920x1080: the Pro path's doubling of the output size is removed.
+# Ultrawide (bbport.ini ultrawide=1, ultrawide_size=WxH): the display setup's two loads of the
+# output size from the game's settings (mov 0x10(%r12),%eax and mov 0x14(%r12),%eax, 5 bytes each)
+# become `mov $W,%eax` and `mov $H,%eax`; the base PS4 path then draws the scene at that size and
+# the camera follows its aspect. Found in the EU 1.00 executable (0x12e6bc1).
+OUTPUT_SIZE_SIGNATURE=('41 8b 44 24 10 85 c0 7f 05 41 8b 44 24 08 41 89 86 40 05 00 00 '
+                       '41 8b 44 24 14 85 c0 7f 05 41 8b 44 24 0c 41 89 86 44 05 00 00 '
+                       '41 8b 44 24 18 41 89 86 88 04 00 00')
 OUTPUT_DOUBLE_SIGNATURE='01 c9 41 89 8e 40 05 00 00 45 8b 86 44 05 00 00 45 01 c0'
 
 
@@ -61,12 +77,25 @@ def render_res(settings):
 DLSS_QUALITIES={'dlaa':1.0,'quality':2/3,'balanced':0.58,'performance':0.5,'ultra_performance':1/3}
 
 
+def ultrawide_size(settings):
+    """(width, height) when ultrawide is on (bbport.ini ultrawide=1 with ultrawide_size=WxH), else None."""
+    s=settings or {}
+    if s.get('ultrawide')!='1': return None
+    w,sep,h=s.get('ultrawide_size','').partition('x')
+    if not (sep and w.isdigit() and h.isdigit()): return None
+    w,h=int(w),int(h)
+    return (w,h) if 640<=w<=16384 and 360<=h<=8640 else None
+
+
 def render_plan(settings):
     """How the game renders, from bbport.ini: a dict with `label`, `scale` (the render scale
     relative to 1920x1080 patched at 0x17aa662, None for the game's own), `pro` (the PS4 Pro path,
     BB_NEO=1), `single` (the Pro path's output doubling removed: a 1080p picture) and `heap` (the
     larger GPU heap, needed above a 1.5 scale), or None when nothing is set."""
     s=settings or {}
+    if size:=ultrawide_size(s):
+        return dict(label=f'ultrawide {size[0]}x{size[1]}',scale=None,pro=False,single=False,heap=False,
+                    output=size)
     quality=s.get('dlss_quality')
     if s.get('temporal')=='dlss' and quality in DLSS_QUALITIES:
         out=2160 if s.get('dlss_output')=='2160' else 1080
@@ -90,6 +119,12 @@ def render_patches(settings):
     if plan is None:
         return []
     lines=[]
+    if plan.get('output'):
+        w,h=plan['output']
+        lines.append(dict(Type='bytes',Address='0x016e6bc1',Value='b8'+struct.pack('<I',w).hex(),
+                          Signature=OUTPUT_SIZE_SIGNATURE,SignatureOffset='0x0'))
+        lines.append(dict(Type='bytes',Address='0x016e6bd6',Value='b8'+struct.pack('<I',h).hex(),
+                          Signature=OUTPUT_SIZE_SIGNATURE,SignatureOffset='0x15'))
     if plan['scale'] is not None:
         value='b8'+struct.pack('<f',plan['scale']).hex()
         lines.append(dict(Type='bytes',Address='0x017aa662',Value=value,
@@ -172,6 +207,134 @@ def load_segments(elf):
     return found
 
 
+def reflected_fields(image,rel,field):
+    """The fields of the Alchemy class that has `field` (bytes, a field name), as (name -> u16
+    offset, metadata slots), or None. The class's field registration gets its field names (lea
+    rsi), per-field metadata slots (lea rdx) and u16 offsets (lea rcx)."""
+    def text(a):
+        end=image.find(b'\0',a)
+        return image[a:end] if 0<=a<len(image) and end>a else b''
+    name=image.find(b'\0'+field+b'\0')
+    if name<0: return None
+    name+=1
+    slots=[t for t,v in rel.items() if v==name]
+    if not slots: return None
+    start=slots[0]
+    while text(rel.get(start-8,-1)).startswith(b'_'): start-=8
+    fields=[]
+    while text(rel.get(start+8*len(fields),-1)).startswith(b'_'): fields.append(text(rel[start+8*len(fields)]).decode())
+    def lea_target(at,opcode):
+        for back in range(at,at+0x30):
+            if image[back:back+3]==opcode:
+                return back+7+struct.unpack_from('<i',image,back+3)[0]
+    i=image.find(b'\x48\x8d\x35')
+    while i!=-1 and i<len(image)-7:
+        if i+7+struct.unpack_from('<i',image,i+3)[0]==start:
+            storage,offsets=lea_target(i,b'\x48\x8d\x15'),lea_target(i,b'\x48\x8d\x0d')
+            if storage is None or offsets is None: return None
+            offs=struct.unpack_from(f'<{len(fields)}H',image,offsets)
+            return dict(zip(fields,offs)),[rel.get(storage+8*k,0) for k in range(len(fields))]
+        i=image.find(b'\x48\x8d\x35',i+1)
+    return None
+
+
+def boot_image(out):
+    """(image, relocations) of the prepared image out/boot.bin: the loaded image and its absolute
+    relocations (target -> value)."""
+    data=Path(out,'boot.bin').read_bytes()
+    _magic,size,_entry,nl,nr,nn,_=struct.unpack_from('<8sQQQQQQ',data,0)
+    pos=56+nl*24+nn*128
+    rel={}
+    for i in range(nr):
+        target,kind,value,_=struct.unpack_from('<QQqq',data,pos+i*32)
+        if kind==0: rel[target]=value
+    return data[pos+nr*32:pos+nr*32+size],rel
+
+
+def registered_vtable(image,rel,name):
+    """Image offset of an Alchemy class's vtable from its registration in the prepared image, or
+    None: the code that loads the class name (lea r8,[rip+name]) loads, a little before, tables of
+    code pointers (lea reg,[rip+table]); the last one before the name is the class's vtable (an
+    earlier one, when there are two, belongs to its meta object)."""
+    text=image.find(b'\0'+name.encode()+b'\0')
+    if text<0 or not rel: return None
+    text+=1
+    code_end=min(rel)  # the relocated pointers live in data, after the code
+    i=image.find(b'\x4c\x8d\x05')
+    while i!=-1 and i<len(image)-7:
+        if i+7+struct.unpack_from('<i',image,i+3)[0]==text:
+            found=None
+            for back in range(max(i-0x120,0),i):
+                if image[back]==0x48 and image[back+1]==0x8d and (image[back+2]&0xc7)==0x05:
+                    t=back+7+struct.unpack_from('<i',image,back+3)[0]
+                    if all(0<rel.get(t+8*k,-1)<code_end for k in range(3)): found=t
+            if found is not None: return found
+        i=image.find(b'\x4c\x8d\x05',i+1)
+    return None
+
+
+# The instruction that turns the render camera's field of view into degrees each frame: load the
+# camera setup's radians (+0xd0), vmulss xmm0,[rip+57.29578], keep the aspect, store to the render
+# camera's +0x3c. Found in the EU 1.21 executable (0xaf7278); src/runtime_frontend.c points it at a
+# factor of its own.
+FRONTEND_FOV_SIGNATURE=bytes.fromhex('c4c17a1085d0000000c5fa5905')
+FRONTEND_FOV_AFTER=bytes.fromhex('c5fa1195f0feffffc5fa11433c')
+
+
+FRONTEND_POSITION_LOAD=bytes.fromhex('c4c178109db0010000')  # vmovups xmm3,[r13+0x1b0]
+FRONTEND_POSITION_STORE=bytes.fromhex('c5f8119ba0000000')   # vmovups [rbx+0xa0],xmm3
+
+
+def frontend_state(out):
+    """(instruction, CPreRenderUpdatePass vtable, slot) image offsets for the field of view of the
+    title and customization screens in ultrawide (src/runtime_frontend.c), or None. The slot is a
+    float in the unused tail of the image's last page."""
+    image,rel=boot_image(out)
+    sites=[]
+    i=image.find(FRONTEND_FOV_SIGNATURE)
+    while i!=-1:
+        if image[i+len(FRONTEND_FOV_SIGNATURE)+4:i+len(FRONTEND_FOV_SIGNATURE)+4+len(FRONTEND_FOV_AFTER)]==FRONTEND_FOV_AFTER:
+            sites.append(i+9)
+        i=image.find(FRONTEND_FOV_SIGNATURE,i+1)
+    if len(sites)!=1: return None
+    fields=reflected_fields(image,rel,b'_cameraAspectRatioMultiplier')
+    if not fields or fields[0].get('_cameraName')!=0x138 or fields[0].get('_renderCamera')!=0x168: return None
+    vtable=registered_vtable(image,rel,'CPreRenderUpdatePass')
+    slot=(len(image)+15)&~15
+    if vtable is None or slot+4>(len(image)+0xfff)&~0xfff: return None
+    # The same function stores the camera's world matrix; its last row (the position) is stored by
+    # vmovups [rbx+0xa0],xmm3 after loading it from the camera setup (vmovups xmm3,[r13+0x1b0]).
+    # The runtime lowers the camera there on the title screen (the logo then clears "Press X").
+    near=image[sites[0]:sites[0]+0x100]
+    load=near.find(FRONTEND_POSITION_LOAD)
+    store=near.find(FRONTEND_POSITION_STORE,load) if load>=0 else -1
+    position=sites[0]+store if store>=0 and store-load<0x30 else None
+    return (sites[0],vtable,slot)+((position,) if position is not None else ())
+
+
+def cutscene_state(out):
+    """(instance slot, active field, designer field, flyby field or None) of CCutsceneManager in
+    the prepared image (out/boot.bin: the loaded image and its relocations), or None. The static
+    _Instance follows the last metadata slot. flyby: CCutsceneData's _isFlybyIntro (a bool), set
+    for the camera fly-over before a race, which stays ultrawide. Used for 16:9 cutscenes in
+    ultrawide."""
+    data=Path(out,'boot.bin').read_bytes()
+    _magic,size,_entry,nl,nr,nn,_=struct.unpack_from('<8sQQQQQQ',data,0)
+    pos=56+nl*24+nn*128
+    rel={}
+    for i in range(nr):
+        target,kind,value,_=struct.unpack_from('<QQqq',data,pos+i*32)
+        if kind==0: rel[target]=value
+    image=data[pos+nr*32:pos+nr*32+size]
+    manager=reflected_fields(image,rel,b'_activeCutsceneData')
+    if not manager: return None
+    by_name,meta=manager
+    if '_activeDesignerCutscene' not in by_name: return None
+    cutscene=reflected_fields(image,rel,b'_isFlybyIntro')
+    flyby=cutscene[0].get('_isFlybyIntro') if cutscene else None
+    return max(meta)+8,by_name['_activeCutsceneData'],by_name['_activeDesignerCutscene'],flyby
+
+
 def signature_regex(text):
     tokens=text.split()
     if not tokens: raise ValueError('empty signature')
@@ -229,6 +392,21 @@ def external_patches(directory, app_version=APP_VERSION, title_id=TITLE_ID):
     return found
 
 
+def all_external_patches(directories, app_version=APP_VERSION, title_id=TITLE_ID):
+    """external_patches of several folders (the bundled patches/, then the player's own: the Linux
+    package's is read-only). A later folder's file replaces the patches of a file of the same name."""
+    by_file,seen={},set()
+    for directory in directories:
+        folder=Path(directory).resolve()
+        if folder in seen: continue  # the same folder named twice (a checkout's data folder)
+        seen.add(folder)
+        for key,path,meta in external_patches(directory,app_version,title_id):
+            if path.name in by_file and by_file[path.name][0]!=path.parent:
+                by_file[path.name]=(path.parent,[])
+            by_file.setdefault(path.name,(path.parent,[]))[1].append((key,path,meta))
+    return [patch for name in sorted(by_file) for patch in by_file[name][1]]
+
+
 def external_selection(found, config, ini=None):
     """Selected patches: patches.json {"enabled": [...], "disabled": [...]} overrides each file's
     isEnabled; bbport.ini patch_* keys (GAME_PATCH_KEYS, the in-game menu) add to it."""
@@ -246,7 +424,8 @@ def external_selection(found, config, ini=None):
     # 1080p Pro patch is never needed (on the base path its flipped branch would take the Pro one).
     if render_plan(ini): enabled.discard(pro_1080p); disabled.add(pro_1080p)
     return [(key,path,meta) for key,path,meta in found
-            if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
+            if selection_key(key) in enabled
+            or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
 def compile_external(selected, segments, elf=None):
@@ -286,17 +465,37 @@ def write_blob(out, writes):
 def main():
     root=Path(__file__).resolve().parent.parent
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--patches-dir',type=Path,default=root/'patches',help='patch XML files (shadPS4 format)')
+    p.add_argument('--patches-dir',type=Path,action='append',
+                   help='patch XML files (shadPS4 format); repeatable, a later folder\'s file replaces one of the same name '
+                        '(default: patches/ in the checkout)')
     p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled patches')
     p.add_argument('--app-version',default=APP_VERSION)
     p.add_argument('--title-id',default=TITLE_ID,help='the game (patch files naming other ids are skipped)')
     p.add_argument('--out',type=Path,default=root/'out')
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
+    p.add_argument('--print-cutscene',action='store_true',
+                   help='print "INSTANCE ACTIVE DESIGNER [FLYBY]" of the cutscene manager (ultrawide 16:9 cutscenes), or nothing')
+    p.add_argument('--print-frontend',action='store_true',
+                   help='print "INSTRUCTION VTABLE SLOT" for the ultrawide title/customization field of view, or nothing')
+    p.add_argument('--print-plan',action='store_true',
+                   help='print "PRO HEAP LABEL" of the render plan (run.sh), or nothing, and exit')
     a=p.parse_args()
+    if a.print_cutscene:
+        found=cutscene_state(a.out)
+        if found: print(f'{found[0]:#x} {found[1]:#x} {found[2]:#x}'+(f' {found[3]:#x}' if found[3] is not None else ''))
+        return
+    if a.print_frontend:
+        found=frontend_state(a.out)
+        if found: print(' '.join(f'{v:#x}' for v in found))
+        return
+    if a.print_plan:
+        plan=render_plan(read_settings(a.settings))
+        if plan: print(int(plan['pro']),int(plan['heap']),plan['label'])
+        return
     elf=(a.out/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
-    found=external_patches(a.patches_dir,a.app_version,a.title_id)
+    found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
                             +theme_patches(settings),

@@ -111,6 +111,17 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         for (int r = 0; r < RenderResCount; ++r) {
             if (i == RenderResHeights[r]) v.render_res = r;
         }
+    } else if (key == "ultrawide") {
+        v.ultrawide = i != 0 ? 1 : 0;
+    } else if (key == "ultrawide_ask") {
+        v.ultrawide_ask = i != 0;
+    } else if (key == "ultrawide_size") {
+        int w = 0, h = 0;
+        if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 16384 &&
+            h <= 8640) {
+            v.ultrawide_w = w;
+            v.ultrawide_h = h;
+        }
     } else if (key == "model_lod") {
         v.model_lod = std::clamp(i, -2, 2);
     } else if (key == "live_resolution") {
@@ -236,6 +247,9 @@ void Load() {
     }
     v.startup_model_lod = v.model_lod;
     v.startup_render_res = v.render_res;
+    v.startup_ultrawide = v.ultrawide == 1 && v.ultrawide_w > 0;
+    v.startup_ultrawide_w = v.ultrawide_w;
+    v.startup_ultrawide_h = v.ultrawide_h;
     v.startup_temporal = v.temporal;
     v.startup_dlss_quality = v.dlss_quality;
     v.startup_dlss_output = v.dlss_output;
@@ -249,9 +263,32 @@ bool RenderSizeNeedsRestart() {
     const auto key = [](int temporal, int quality, int output, int render_res) {
         return temporal == TemporalDlss && quality > 0 ? 100 + quality * 2 + output : render_res;
     };
+    const bool ultrawide = v.ultrawide == 1 && v.ultrawide_w > 0;
+    if (ultrawide != v.startup_ultrawide ||
+        (ultrawide && (v.ultrawide_w != v.startup_ultrawide_w || v.ultrawide_h != v.startup_ultrawide_h))) {
+        return true;
+    }
+    if (ultrawide) {
+        return false; // the monitor's size decides, not render_res
+    }
     return key(v.temporal, v.dlss_quality, v.dlss_output, v.render_res) !=
            key(v.startup_temporal, v.startup_dlss_quality, v.startup_dlss_output,
                v.startup_render_res);
+}
+
+bool UltrawideAvailable() {
+    const auto& v = Get();
+    // Wider than 16:9 by more than rounding (2560x1080, 3440x1440, 5120x1440, ...).
+    return v.display_w > 0 && v.display_h > 0 && v.display_w * 9 > v.display_h * 16 + v.display_h / 2;
+}
+
+void SetUltrawide(bool on) {
+    auto& v = Get();
+    v.ultrawide = on ? 1 : 0;
+    if (on && v.display_w > 0 && v.display_h > 0) {
+        v.ultrawide_w = v.display_w.load();
+        v.ultrawide_h = v.display_h.load();
+    }
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
@@ -336,6 +373,11 @@ void Save() {
     }
     put("model_lod", std::to_string(v.model_lod.load()));
     if (v.render_res >= 0) put("render_res", std::to_string(RenderResHeights[v.render_res]));
+    if (v.ultrawide >= 0) put("ultrawide", flag(v.ultrawide == 1));
+    put("ultrawide_ask", flag(v.ultrawide_ask));
+    if (v.ultrawide_w > 0) {
+        put("ultrawide_size", std::to_string(v.ultrawide_w.load()) + "x" + std::to_string(v.ultrawide_h.load()));
+    }
     put("temporal", TemporalNames[std::clamp(v.temporal.load(), 0, TemporalCount - 1)]);
     put("dlss_quality", DlssQualityNames[std::clamp(v.dlss_quality.load(), 0, DlssQualityCount - 1)]);
     put("dlss_output", std::to_string(DlssOutputHeights[v.dlss_output ? 1 : 0]));

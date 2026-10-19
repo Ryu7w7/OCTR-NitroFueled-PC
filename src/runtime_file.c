@@ -53,7 +53,19 @@ _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
 /* commit: a save file opened for writing is written to a temporary copy (temp), which replaces
  * the file (commit) in one rename when closed: a crash or a kill mid-save leaves the old file. */
-typedef struct { int used, host, dirty, save_logged; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
+/* The game's full-screen videos (Bink .bk2 files in archives): the logos and intro at start, the credits and
+ * the endings. */
+static int fullscreen_video(const char *guest) {
+    static const char *const names[] = {"openinglogo.bk2", "octane_intro_logo_atvi.bk2", "ctr_game_intro.bk2",
+                                        "octanecredits.bk2", "oxide_outro_first.bk2", "oxide_outro_second.bk2"};
+    const char *name = strrchr(guest, '/');
+    name = name ? name + 1 : guest;
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); ++i)
+        if (!strcasecmp(name, names[i])) return 1;
+    return 0;
+}
+
+typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -430,6 +442,10 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     }
     files[fd]=(File){.used=1,.host=host,.dir=dir,.commit=commit,.temp=temp};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
+    /* A full-screen Bink video (ultrawide: shown at 16:9 while one is open, runtime_cinematic.c).
+     * The menus' videos (track previews, hints, CTR TV, the tutorial) play inside the ultrawide
+     * menu and are left alone. */
+    if (fullscreen_video(guest)) { files[fd].video=1; runtime_cinematic_video(1); }
     ++opens;
     pthread_mutex_unlock(&lock);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
@@ -455,6 +471,7 @@ static int64_t do_close(int fd) {
     File closed=*f;
     *f=(File){0};
     pthread_mutex_unlock(&lock);
+    if (closed.video) runtime_cinematic_video(-1);
     free_listing(closed.dir);
     int result=0;
     if (closed.temp) result=commit_file(&closed);

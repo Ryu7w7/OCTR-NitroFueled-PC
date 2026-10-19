@@ -43,6 +43,10 @@ SDL_DisplayID ChooseDisplay() {
         }
     }
     const SDL_DisplayID display = chosen ? chosen : primary;
+    if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(display)) {
+        BbSettings::Get().display_w = mode->w; // the ultrawide choice (bbport_overlay.cpp)
+        BbSettings::Get().display_h = mode->h;
+    }
     for (int i = 0; i < count; ++i) {
         const char* name = SDL_GetDisplayName(ids[i]);
         const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(ids[i]);

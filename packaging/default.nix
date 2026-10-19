@@ -9,7 +9,7 @@
 let
   lib = pkgs.lib;
   root = ./..;
-  assetDirs = [ "scripts" "patches" "launcher" ];
+  assetDirs = [ "scripts" "patches" "launcher" "shaders" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
@@ -124,6 +124,8 @@ pkgs.stdenv.mkDerivation {
     cp run.sh run.py $d/   # run.py: scripts/online_config.py reuses its online setup
     cp out/VERSION $d/VERSION   # the build's source revision (build.sh); run.sh and the launcher show it
     cp -r scripts patches launcher $d/
+    # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
+    if [ -d shaders ]; then cp -r shaders $d/; fi
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
     install -Dm755 tools/gen_import_names.py $d/tools/gen_import_names.py
     install -m755 out/sacredfire $d/bin/sacredfire

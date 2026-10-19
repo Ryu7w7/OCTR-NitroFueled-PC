@@ -34,6 +34,7 @@ typedef struct ThreadAttr {
     uint32_t magic;
     int detached, policy, prio, inherit;
     uint64_t stack, guard, affinity;
+    void *stack_addr; /* lowest address of the stack's used part (scePthreadAttrGetstack) */
     struct ThreadAttr *next;
 } ThreadAttr;
 typedef struct GuestThread {
@@ -184,6 +185,18 @@ static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *next=a->next;
     *a=t->attr; a->magic=ATTR_MAGIC; a->next=next;
     a->detached=t->detached;
+#ifndef _WIN32
+    /* A running thread's stack: the top a->stack bytes of its host stack (the margin is below). */
+    pthread_attr_t host;
+    if (!pthread_getattr_np(t->host,&host)) {
+        void *base; size_t size;
+        if (!pthread_attr_getstack(&host,&base,&size)) {
+            if (a->stack==0 || a->stack>size) a->stack=size;
+            a->stack_addr=(char *)base+size-a->stack;
+        }
+        pthread_attr_destroy(&host);
+    }
+#endif
     return 0;
 }
 static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {

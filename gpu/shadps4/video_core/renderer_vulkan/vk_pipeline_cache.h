@@ -166,6 +166,9 @@ public:
     }
 
 private:
+    /// SacredFire: prepares the shipped shader recipe for this GPU (vk_pipeline_serialization.cpp).
+    void PrebuildFromRecipe();
+
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);
     bool RefreshComputeKey();
@@ -193,6 +196,7 @@ private:
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;
+    u64 recipe_id = 0; ///< SacredFire: the shader recipe of this session (0: none)
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     /// bbport: exclusive for program/permutation insertions, shared for worker lookups.
     std::shared_mutex programs_mutex;

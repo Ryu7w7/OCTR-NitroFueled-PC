@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The European edition (CUSA14876) 1.21: the online patch of CrashTeamRacingOnline.xml (the
+     RyuNET server's RSA-2048 key in place of Demonware's, the same value). The key sits 0x40
+     earlier than in the USA build, next to "DW-RSAENC"; it is found by signature (the DER header
+     and the start of Demonware's own modulus), the address given is this build's. The in-game
+     switch selects it as the same patch (patches.py BUNDLED_FILES). -->
+<Patch>
+    <TitleID>
+        <ID>CUSA14876</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Online: custom Demonware key"
+              Note="Replaces official Demonware RSA-2048 public key with server custom key for auth response signature verification"
+              Author="RyuNET / SacredFire"
+              PatchVer="1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x1fecf61" Value="F8C16F376D12D286BCD3023E7B0657B5049122C1814D33121064736F963BB2B52BA096763D5E846ECB38020D6B711EC631E7541410D490609E633EA7BDD80F571384F059EE75096E459308423F0DD40C7392F1F95528C791FC89D6D8EA4D38962938AC09187F79E05995958B178628E4DA8A6A521F8435426ABD692E56214AFD0F8AE5BD5B6DA64E7B597F57162000AFDCB7CA52C2D57222734A79FEAC6554A8600607FA4E1B33F31F523D1C40F5642D4171988E65C12BA1979B15FAF70CE2B6B6741442B673CF872EF2A9E51FD3E9E6EB5E161B27095BB6806B3DEE4EA5D214879CA9C097814688633B1E2830E5F1A80C4FFA5BEDD387DC724922816EC13C51"
+                  Signature="30 82 01 0a 02 82 01 01 00 c0 a2 0b 1f 6c b8 1b 12" SignatureOffset="0x9"/>
+        </PatchList>
+    </Metadata>
+</Patch>

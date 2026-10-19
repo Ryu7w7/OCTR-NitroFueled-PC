@@ -223,3 +223,23 @@ right before the clobber in run 4); the evening runs did 250 to 300 compiles at 
 port's cache is cleared each time (`user/cache/CUSA13795` is written and removed as expected), so
 the difference is RADV's own on-disk cache (`~/.cache/mesa_shader_cache`), cold in the morning,
 warm now. Run 4 points `MESA_SHADER_CACHE_DIR` at an empty directory to bring the long stalls back.
+
+## 2026-10-17: a stale GPU idle interrupt released the submission lock
+
+v0.5.2 logs from many players (NVIDIA, code 23) showed `Issue #2 guard` lines (late fences into
+a command buffer the game had already rebuilt), then V# and S# with garbage fields, then a lost
+device. The game was a frame further ahead than the submission lock allows.
+
+The hole: the GPU thread decides "idle" under `submit_mutex`, releases it, and only then raises
+the GpuIdle interrupt, whose handler (`ResetSubmissionLock`) cleared `submission_lock`
+unconditionally; `sceGnmSubmitDone` set the lock without the handler's mutex. If the GPU thread
+was preempted between the decision and the interrupt, the guest could submit the next frame and
+set the lock in `sceGnmSubmitDone`, and the late interrupt (an idle of the frame before) cleared
+it. The guest then built the frame after next into the command buffer still being decoded; the
+resource tables it keeps inside that buffer were read as garbage.
+
+Fix (gnmdriver.cpp): the lock is set under `m_wait_idle`, and the handler clears it only if
+`Liverpool::IsGpuIdleNow()` (the counters read under `submit_mutex`) still holds; otherwise the
+next idle interrupt clears it. A log line counts the ignored interrupts ("GPU idle signal for
+earlier work ignored"): 3 in the first two minutes of a test run (during the intro videos, where
+the GPU goes idle often).

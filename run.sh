@@ -65,7 +65,11 @@ if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
-echo "Game profile: $BB_GAME_PROFILE"
+# The edition's title ID and version (the EU edition has its own patches); the USA 1.21 update when
+# param.sfo cannot be read, as run.py.
+read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
+title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
+echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
@@ -81,32 +85,50 @@ fi
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 "$PYTHON" tools/gen_import_names.py --out "$out"
 "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+# The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
+# own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
+# BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+recipe=${BB_SHADER_RECIPE:-shaders/recipe.zip}
+if [[ ${BB_SHADER_RECIPE:-} != 0 && -f $recipe ]]; then
+    "$PYTHON" scripts/gcn_shaders.py "$game" --out "$out"
+    BB_SHADER_RECIPE=$(realpath "$recipe")
+    BB_GCN_SHADERS=$(realpath "$out")/gcn_shaders.bin
+    export BB_SHADER_RECIPE BB_GCN_SHADERS
+else
+    unset BB_SHADER_RECIPE BB_GCN_SHADERS
+fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
-# keys) or patches.json; BB_PATCHES_DIR adds a folder of further shadPS4-format XML files.
+# keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
+# in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
-    --app-version 01.21 --title-id CUSA13795 --out "$out" --settings "$BB_CONFIG"
+"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
+    --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
+    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$BB_CONFIG"
 patch_args=(--patches "$out/patches.bin")
-# bbport.ini render_res (the launcher's and the in-game menu's internal resolution, as run.py
-# does on Windows): above 1080p the game's PS4 Pro path, at 4K the larger GPU heap. patches.py has
-# already patched the scene size; unset keeps BB_NEO as the launcher's PS4 Pro switch set it.
-render_plan=$("$PYTHON" - "$BB_CONFIG" <<'EOF'
-import sys
-from pathlib import Path
-sys.path.insert(0, 'scripts')
-from patches import read_settings, render_plan
-plan = render_plan(read_settings(Path(sys.argv[1])))
-if plan:
-    print(int(plan['pro']), int(plan['heap']), plan['label'])
-EOF
-) || render_plan=
-if [[ -n $render_plan ]]; then
-    read -r plan_pro plan_heap plan_label <<< "$render_plan"
+# bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
+# above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
+read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$BB_CONFIG") || true
+if [[ -n ${plan_pro:-} ]]; then
     export BB_NEO=$plan_pro
     if [[ $plan_heap == 1 && ${BB_DMEM_MB:-0} -lt 7168 ]]; then export BB_DMEM_MB=7168; fi
-    echo "Internal resolution: $plan_label ($([[ $plan_pro == 1 ]] && echo 'PS4 Pro' || echo 'base PS4') rendering path)"
+    echo "Internal resolution: $plan_label"
+fi
+# Ultrawide: videos and cutscenes at 16:9 with black bars (src/runtime_cinematic.c) unless
+# bbport.ini has ultrawide_cinematics=0.
+unset BB_CINEMATIC_16X9 BB_CUTSCENE
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$BB_CONFIG" 2>/dev/null; then
+    export BB_CINEMATIC_16X9=1
+    BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
+    export BB_CUTSCENE
+fi
+# Ultrawide: the title and customization screens with a 16:9 field of view, so their backdrop
+# fills the width (src/runtime_frontend.c), unless bbport.ini has ultrawide_frontend=0.
+unset BB_FRONTEND_FOV
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$BB_CONFIG" 2>/dev/null; then
+    BB_FRONTEND_FOV=$("$PYTHON" scripts/patches.py --print-frontend --out "$out" || true)
+    export BB_FRONTEND_FOV
 fi
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
 # picks its Pro rendering path. Off by default: the Steam Deck is closer to a base PS4.
@@ -118,7 +140,7 @@ echo "PS4 Pro mode: ${BB_NEO} (BB_NEO=1 turns it on)"
 # deletes it first; the fur breakage that once forced a clear per launch is fixed
 # (docs/sacredfire/06-fur.md: geometry specialization and preload fetch shader).
 if [[ ${BB_CLEAR_SHADER_CACHE:-0} == 1 ]]; then
-    rm -rf "${BB_USER_DIR:-$data/user}/cache/CUSA13795"
+    rm -rf "${BB_USER_DIR:-$data/user}/cache/$title_id"
     echo "Shader cache: cleared for this launch (BB_CLEAR_SHADER_CACHE=1)"
 fi
 # With the 60 FPS patch the game's own limiter paces frames; a 60 Hz virtual vblank would

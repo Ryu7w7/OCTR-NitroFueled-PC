@@ -273,7 +273,10 @@ def prepare(game, out):
                   status='Prepared only; execution and Vulkan are tested separately.')
     (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(f"{report['sfo'].get('TITLE')} | entry={header[4]:#x} | image={size:,} bytes")
-    if game_profile and game_profile.get('variant'):
+    if game_profile and game_profile.get('variant') == 'experimental':
+        print(f"Experimental edition: {game_profile['title']} {game_profile['version']} (untested; "
+              'patches from patches/CrashTeamRacingEU.xml and render patches by signature)')
+    elif game_profile and game_profile.get('variant'):
         sdk = next((f.split('=', 1)[1] for f in str(report['sfo'].get('PUBTOOLINFO', '')).split(',')
                     if f.startswith('sdk_ver=')), '?')
         print(f"Update build: {game_profile['version']} for firmware {game_profile['variant']} (param.sfo sdk_ver={sdk})"

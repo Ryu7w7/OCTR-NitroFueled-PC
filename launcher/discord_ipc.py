@@ -154,11 +154,15 @@ class _Connection:
                         return op, json.loads(body.decode("utf-8", "replace")) if body else {}
                     except ValueError:
                         return op, {}
+            # The socket is polled at least once: with a timeout of 0 (the main loop's _pump),
+            # events Discord sent while the launcher was idle (an accepted invite, a join request,
+            # a ping) used to stay unread until the next command.
             left = deadline - time.monotonic()
-            if left <= 0:
-                return None, None
-            if not self._fill(left):
+            before = len(self.buffer)
+            if not self._fill(max(left, 0)):
                 raise EOFError
+            if left <= 0 and len(self.buffer) == before:
+                return None, None
 
 
 class Presence:

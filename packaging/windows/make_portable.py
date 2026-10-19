@@ -211,6 +211,10 @@ def main():
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     for patch in (ROOT / 'patches').glob('*.xml'):
         shutil.copy2(patch, folder / 'patches')
+    # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
+    if (ROOT / 'shaders' / 'recipe.zip').is_file():
+        (folder / 'shaders').mkdir()
+        shutil.copy2(ROOT / 'shaders' / 'recipe.zip', folder / 'shaders')
     steamgrid_dir = PORTABLE.parent / 'steamgrid'
     if steamgrid_dir.is_dir():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)

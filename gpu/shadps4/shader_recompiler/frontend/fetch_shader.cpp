@@ -53,6 +53,9 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     if (!info.has_fetch_shader) {
         return std::nullopt;
     }
+    if (Info::replay) [[unlikely]] {
+        return *Info::replay->fetch; // SacredFire: the shader prebuild's recorded parse
+    }
 
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
 

@@ -37,6 +37,8 @@ inline constexpr Effect Effects[] = {
     {"effect_game_aa", "Game's own anti-aliasing", "Собственное сглаживание игры", true},
     {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
     {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
+    {"ultrawide_cinematics", "Ultrawide: videos and cutscenes at 16:9", "Ультраширокий: видео и ролики в 16:9", true},
+    {"ultrawide_frontend", "Ultrawide: title and customization screens fill the width", "Ультраширокий: титульный экран и настройка карта на всю ширину", true},
     {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
     {"debug_camera", "Free camera (Cross + L3)", "Свободная камера (Cross + L3)", false},
     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
@@ -132,6 +134,14 @@ struct Values {
     std::atomic<bool> game_patches[GamePatchCount]{}; ///< SacredFire: see GamePatches
     std::atomic<int> model_lod{0}; ///< -2 highest .. 2 lowest, 0 the game's
     std::atomic<int> render_res{-1}; ///< index into RenderResHeights, -1 when not set
+    /// Ultrawide (bbport.ini ultrawide, ultrawide_size, ultrawide_ask): the game draws at the
+    /// monitor's own size instead of 16:9 (scripts/patches.py render_plan; at start). -1: never
+    /// asked (the first start asks), 0 off, 1 on. ultrawide_ask: ask again at every start.
+    std::atomic<int> ultrawide{-1};
+    std::atomic<bool> ultrawide_ask{false};
+    std::atomic<int> ultrawide_w{0}, ultrawide_h{0};
+    /// The desktop size of the game's monitor (window.cpp), for the ultrawide choice.
+    std::atomic<int> display_w{0}, display_h{0};
     /// SacredFire: the upscaler (Temporal: off, FSR 1, FSR 3, DLSS).
     std::atomic<int> temporal{TemporalFsr1};
     std::atomic<int> dlss_quality{0}; ///< index into DlssQualityNames (at start)
@@ -158,6 +168,8 @@ struct Values {
     bool startup_game_patches[GamePatchCount]{};
     int startup_model_lod = 0;
     int startup_render_res = -1;
+    bool startup_ultrawide = false;
+    int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
@@ -166,6 +178,10 @@ struct Values {
 /// SacredFire: whether the render size the settings ask for differs from the one the game
 /// started with (render_res, or a DLSS quality mode and output): a restart applies it.
 bool RenderSizeNeedsRestart();
+/// Whether the game's monitor is wider than 16:9 (ultrawide can be offered).
+bool UltrawideAvailable();
+/// Turns ultrawide on (at the monitor's size) or off; a restart applies it.
+void SetUltrawide(bool on);
 
 Values& Get();
 std::mutex& PortsMutex();

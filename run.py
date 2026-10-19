@@ -119,6 +119,15 @@ def ini_value(path, key):
 # (scripts/patches.py render_plan, docs/sacredfire/13-resolution.md): above 1080 and below it the
 # PS4 Pro path; the larger GPU heap of native 4K also takes more than the Pro's 5568 MiB of direct
 # memory.
+def render_plan_of(config):
+    sys.path.insert(0, str(PORT / 'scripts'))
+    try:
+        from patches import read_settings, render_plan
+    finally:
+        sys.path.pop(0)
+    return render_plan(read_settings(Path(config)))
+
+
 def apply_render_res(env, config):
     sys.path.insert(0, str(PORT / 'scripts'))
     try:
@@ -386,6 +395,9 @@ def main():
     if check.returncode:
         fail(check.stdout.strip() or 'Game check failed.', 2)
     env['BB_GAME_PROFILE'] = check.stdout.strip() or 'ctr'
+    # The game's own title ID and version (the EU edition, CUSA14876 1.00, has its own patches).
+    info = run_python('scripts/game_check.py', '--info', game, capture=True).split()
+    title_id, app_version = (info + [TITLE_ID, APP_VERSION][len(info):])[:2]
     say(f'Game profile: {env["BB_GAME_PROFILE"]}')
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
@@ -412,12 +424,24 @@ def main():
         # DLC (optional): the player's add-on packages in dlc\ (BB_DLC_DIR), reported installed.
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
                    '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
+        # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the
+        # game's own shaders, so new tracks and racers do not stop the game to compile them.
+        # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+        recipe_setting = env.get('BB_SHADER_RECIPE', '')
+        recipe = Path(recipe_setting) if recipe_setting not in ('', '0') else PORT / 'shaders' / 'recipe.zip'
+        if recipe_setting != '0' and recipe.is_file():
+            run_python('scripts/gcn_shaders.py', game, '--out', out)
+            env['BB_SHADER_RECIPE'] = str(recipe)
+            env['BB_GCN_SHADERS'] = str(out / 'gcn_shaders.bin')
+        else:
+            env.pop('BB_SHADER_RECIPE', None)
+            env.pop('BB_GCN_SHADERS', None)
         env.setdefault('BB_NEO', '0')
         apply_render_res(env, config)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
         if env.get('BB_CLEAR_SHADER_CACHE', '0') == '1':
-            shutil.rmtree(user_dir / 'cache' / TITLE_ID, ignore_errors=True)
+            shutil.rmtree(user_dir / 'cache' / title_id, ignore_errors=True)
             say('Shader cache: cleared for this launch (BB_CLEAR_SHADER_CACHE=1)')
         env.setdefault('BB_PREUPLOAD', '1')
         # The PC memory model (dma-buf guest memory) is Linux only: the 0.3 model on Windows.
@@ -453,8 +477,21 @@ def main():
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
-                       '--app-version', APP_VERSION, '--title-id', TITLE_ID, '--out', out,
+                       '--app-version', app_version, '--title-id', title_id, '--out', out,
                        '--settings', config)
+            # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
+            for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
+                env.pop(key, None)
+            plan = render_plan_of(config)
+            if plan and plan.get('output') and not ini_has(config, 'ultrawide_cinematics=0'):
+                env['BB_CINEMATIC_16X9'] = '1'
+                env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out,
+                                                capture=True).strip()
+            # Ultrawide: the title and customization screens fill the width (src/runtime_frontend.c).
+            env.pop('BB_FRONTEND_FOV', None)
+            if plan and plan.get('output') and not ini_has(config, 'ultrawide_frontend=0'):
+                env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
+                                                    capture=True).strip()
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
             elif ini_has(config, 'patch_60fps=1'):

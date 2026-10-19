@@ -254,7 +254,7 @@ if (WIN32)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
     add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
-        ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp
+        ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp ../launcher/windows/port_update.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
@@ -263,6 +263,13 @@ if (WIN32)
     target_link_options(ctr-launcher PRIVATE -static -municode -s)
     target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi windowscodecs ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
     set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
+    # The updater: versions, the release answer, protected files and a rolled-back install.
+    add_executable(port-update-test EXCLUDE_FROM_ALL ../tests/test_port_update.cpp ../launcher/windows/port_update.cpp)
+    target_compile_options(port-update-test PRIVATE -UNDEBUG -Wall -Wextra)
+    target_include_directories(port-update-test PRIVATE ../launcher/windows)
+    target_compile_definitions(port-update-test PRIVATE UNICODE _UNICODE)
+    target_link_options(port-update-test PRIVATE -static)
+    target_link_libraries(port-update-test PRIVATE winhttp bcrypt)
     # Discord presence and invites against a fake Discord pipe; never touches the real one.
     add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp
         ../launcher/windows/discord_presence.cpp)
