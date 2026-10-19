@@ -40,6 +40,9 @@ bool TakePadRescan();
 /// and whether it is pressing something, for the Controllers tab (bbgpu_pad_status).
 void SetPadStatus(int port, const std::string& name, bool pressing);
 
+/// Opens the settings menu (any thread): the game Options menu's Graphics tab.
+void OpenMenu();
+
 /// The settings menu is open: the window shows the system cursor over it.
 bool MenuOpen();
 
