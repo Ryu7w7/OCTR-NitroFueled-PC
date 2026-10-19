@@ -2,10 +2,11 @@
 
 Updated 2026-10-09.
 
-2026-10-19: an opt-in [shared PSN host module](psn-host-backend.md) is available for
-external platform backends. The existing RyuNET path remains the default. Windows
-build and contract tests are covered; production-backend and in-game validation
-are separate and have not been performed for this integration.
+2026-10-20: the opt-in [PSN host module](psn-host-backend.md) now includes an
+optional authenticated local bridge backend for provider notifications and
+accepted invitations. The existing RyuNET path remains the default. Windows
+build and offline HTTP/guest-contract tests are covered; live provider and
+in-game validation remain separate and have not been performed for this integration.
 
 ## Milestones
 

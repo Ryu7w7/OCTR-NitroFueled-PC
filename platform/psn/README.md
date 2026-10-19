@@ -1,10 +1,9 @@
 # PSN host module
 
-A shared PS4 platform-service adapter for native ports descended from bbport.
-It builds independently of OCTR, its renderer, any game dump and any platform SDK.
-OCTR is its first integration. Other ports can use these same sources and tests;
-they only need to connect startup, import resolution, SystemService and their
-launcher/network policy. No second implementation of the PSN adapter is required.
+A PS4 platform-service adapter that builds independently of OCTR, its renderer,
+any game dump and any platform SDK. OCTR connects startup, import resolution,
+SystemService and its launcher/network policy. The native backend ABI keeps
+platform implementations separate from those host responsibilities.
 
 The game's existing PS4 imports remain the interface. `include/psn_backend.h` is
 a versioned **host binding**, not an official Sony API header or a new social
@@ -31,9 +30,10 @@ Invalid paths, ABI versions, missing functions or initialization failures stop
 activation; they never fall back to RyuNET. Selection is fixed for the process.
 Only load libraries you trust: this is an in-process extension, not a sandbox.
 
-No production backend or Steam SDK is included. The test module is a fixture,
-not an online service or a usable Steam integration. A backend may internally
-use IPC with a separately supervised service; no IPC format is imposed here.
+The optional [bridge backend](backends/README.md) is a concrete implementation
+for an independently supervised provider. It uses authenticated loopback HTTP
+and does not load Steam or link provider code. The dynamically loaded test
+module remains a fixture, separate from this implementation.
 
 OCTR keeps publisher routing separately configurable. In external mode it skips
 RyuNET nickname claims, synthetic identity/friend lists, Discord join secrets and
@@ -62,11 +62,14 @@ This does not claim compatibility with every historical SDK variant.
 Unsupported NP operations return an explicit error in external mode. In particular,
 the older extended-push callback signature, notification callback variants, NP
 NotifyPlusFeature, manager SetTimeout,
-dedicated multipart builders, pool statistics and WebAPI utility parsing are not
-implemented. Score, TUS/TSS, Matching2 and signaling are outside this profile.
-The built-in implementation retains its existing behavior. The module is a
-reviewable integration foundation, not a complete PSN implementation or verified
-end-to-end online replacement.
+dedicated multipart builders and pool statistics are not implemented. OCTR's
+existing local WebAPI NpId parsing utility remains available. Score, TUS/TSS,
+Matching2 and signaling are outside this profile.
+The built-in implementation retains its existing behavior. The bridge backend
+implements a narrower subset than the host profile: authorization-code requests
+and invitation dialog UI fail explicitly; overlay-accepted invitations are
+delivered through SystemService. Neither the module nor the backend claims a
+complete PSN implementation or verified end-to-end online replacement.
 
 ## Ownership and events
 
@@ -106,3 +109,5 @@ Tests use synthetic data and a dynamically loaded fixture: no game, Steam, PSN,
 publisher server, GPU or network connection is started. See the
 [implementation note](../../docs/sacredfire/psn-host-backend.md) for evidence and
 the distinction between automated checks and outstanding runtime validation.
+Enabling `PSN_BRIDGE_BACKEND` also tests the real adapter against a private
+loopback HTTP fixture, including guest callbacks and accepted-invitation bytes.

@@ -94,7 +94,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(env['BB_THEME'], 'winter')
         self.assertNotIn('BB_ONLINE_TUNNEL', env)
 
-    def test_shell_export_clears_inherited_identity_and_preserves_config(self):
+    def test_shell_export_clears_identity_without_serializing_backend_capability(self):
         output = self.data / 'environment'
         result = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'online_config.py'),
                                  '--config', str(self.config), '--data', str(self.data), '--env-file', str(output)],
@@ -104,7 +104,15 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(entries['BB_ONLINE_KEYHASH'], '')
         self.assertEqual(entries['BB_ONLINE_ACCOUNT_ID'], '')
         self.assertEqual(entries['BB_ONLINE_TUNNEL'], '0')
-        self.assertEqual(entries['BB_PSN_BACKEND_CONFIG'], 'opaque=one two')
+        for key in ('BB_PSN_BACKEND', 'BB_PSN_BACKEND_CONFIG'):
+            self.assertNotIn(key, entries)
+        self.assertNotIn(b'opaque=one two', output.read_bytes())
+        # run.sh exports these updates over its existing inherited environment.
+        child_env = {**os.environ, **self.env, **entries}
+        result = subprocess.run([sys.executable, '-c',
+                                 'import os; assert os.environ["BB_PSN_BACKEND_CONFIG"] == "opaque=one two"'],
+                                env=child_env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_shell_setup_error_does_not_continue_with_partial_settings(self):
         (self.data / 'host_overrides.json').mkdir()

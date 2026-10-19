@@ -14,8 +14,10 @@ from run import external_psn_backend, setup_online
 EXPORT_KEYS = (
     "BB_USER_NAME", "BB_ONLINE", "BB_NET_TRACE", "BB_ONLINE_SERVER", "BB_ONLINE_NAME",
     "BB_ONLINE_ACCOUNT_ID", "BB_ONLINE_PORT", "BB_ONLINE_FRIENDS", "BB_ONLINE_KEY", "BB_ONLINE_KEYHASH", "BB_ONLINE_INVENTORY",
-    "BB_THEME", "BB_PSN_BACKEND", "BB_PSN_BACKEND_CONFIG", "BB_ONLINE_TUNNEL",
+    "BB_THEME", "BB_ONLINE_TUNNEL",
 )
+# Backend selection/configuration are already inherited by the shell and child.
+# In particular, an ephemeral relay capability must never enter the env-file.
 
 
 def main():

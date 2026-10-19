@@ -327,6 +327,9 @@ uintptr_t psn_host_resolve(const char *name) {
     /* Local trophy storage/UI remains the host's responsibility in every mode. */
     if (name && !strncmp(name, "sceNpTrophy", 11))
         return 0;
+    /* The existing host's local JSON-to-NpId utility has no backend state. */
+    if (name && !strcmp(name, "sceNpWebApiUtilityParseNpId"))
+        return 0;
     uintptr_t fn = psn_host_identity_resolve(name);
     if (fn)
         return fn;
