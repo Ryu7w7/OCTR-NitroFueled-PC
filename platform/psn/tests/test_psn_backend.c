@@ -120,7 +120,8 @@ static void release_fixture(void *library) {
 
 static void check_invitation_queue(void) {
     unsigned char actual[184], expected[180] = {0};
-    const int32_t kind = 0x10000002, user = 3;
+    const int32_t kind = 0x10000002;
+    const int32_t user = strcmp(test_case, "good-arbitrary-user") == 0 ? 70001 : 3;
     const uint32_t flag = 0xa1b2c3d4u;
     const uint64_t account = UINT64_C(0xfedcba9876543210);
     CHECK(psn_host_system_count() == 1);
@@ -187,6 +188,13 @@ int main(int argc, char **argv) {
         psn_host_stop();
         return failures ? 1 : 0;
     }
+    if (strcmp(test_case, "unconfigured-users") == 0) {
+        set_environment("BB_PSN_BACKEND", path);
+        CHECK(psn_host_start() == PSN_INVALID_ARGUMENT);
+        CHECK(psn_host_pump() == PSN_INVALID_ARGUMENT);
+        psn_host_stop();
+        return failures ? 1 : 0;
+    }
     if (strcmp(test_case, "relative") == 0)
         path = "psn_backend_fixture.dll";
     char missing[32768];
@@ -194,6 +202,19 @@ int main(int argc, char **argv) {
         snprintf(missing, sizeof(missing), "%s.missing", path);
         path = missing;
     }
+    int32_t users[] = {1, 3, 0, 70001};
+    CHECK(psn_host_set_local_users(NULL, 1) == PSN_INVALID_ARGUMENT);
+    CHECK(psn_host_set_local_users(users, 0) == PSN_INVALID_ARGUMENT);
+    CHECK(psn_host_set_local_users(users, 5) == PSN_INVALID_ARGUMENT);
+    int32_t duplicate[] = {1, 1}, invalid[] = {-1};
+    CHECK(psn_host_set_local_users(duplicate, 2) == PSN_INVALID_ARGUMENT);
+    CHECK(psn_host_set_local_users(invalid, 1) == PSN_INVALID_ARGUMENT);
+    CHECK(psn_host_set_local_users(users, 4) == 0);
+    users[3] = 7; /* The host owns a copy, not this caller's array. */
+    int32_t copied[PSN_MAX_LOCAL_USERS];
+    CHECK(psn_host_local_users(copied) == 4 && copied[3] == 70001);
+    CHECK(psn_host_has_local_user(0) && psn_host_has_local_user(70001));
+    CHECK(!psn_host_has_local_user(2) && !psn_host_has_local_user(-1));
     set_environment("BB_PSN_BACKEND", path);
     CHECK(psn_host_selected() == 1);
     const int init_failure =
@@ -201,6 +222,8 @@ int main(int argc, char **argv) {
         strncmp(test_case, "bad-", 4) == 0 || strcmp(test_case, "missing-function") == 0 ||
         strcmp(test_case, "query-null") == 0 || strncmp(test_case, "open-", 5) == 0;
     int32_t result = psn_host_start();
+    CHECK(psn_host_set_local_users(users, 4) == PSN_BACKEND_BUSY);
+    CHECK(psn_host_set_local_users(copied, 4) == 0);
     if (init_failure) {
         int32_t expected = strcmp(test_case, "open-error") == 0     ? PSN_BACKEND_BUSY
                            : strcmp(test_case, "open-partial") == 0 ? PSN_BACKEND_ABORTED
@@ -229,7 +252,7 @@ int main(int argc, char **argv) {
     CHECK(fixture_stats()->opens == 1 && fixture_stats()->configuration_matches == 1);
     CHECK(psn_host_start() == 0 && fixture_stats()->opens == 1);
     check_resolver();
-    if (strcmp(test_case, "good") == 0) {
+    if (strcmp(test_case, "good") == 0 || strcmp(test_case, "good-arbitrary-user") == 0) {
         check_invitation_queue();
         CHECK(fixture_stats()->identity_calls == 2);
     } else {

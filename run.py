@@ -295,7 +295,6 @@ def setup_online(env, config, data):
         for key in ('BB_ONLINE_NAME', 'BB_ONLINE_ACCOUNT_ID', 'BB_ONLINE_FRIENDS',
                     'BB_ONLINE_KEY', 'BB_ONLINE_KEYHASH'):
             env[key] = ''
-        env['BB_ONLINE_TUNNEL'] = '0'
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
     if online == '1' and not external and not nick_ok(name):

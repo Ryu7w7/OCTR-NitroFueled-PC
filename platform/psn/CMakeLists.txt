@@ -31,7 +31,10 @@ if(PSN_HOST_TESTS)
         target_link_libraries(psn-${part}-test PRIVATE Threads::Threads)
         set_target_properties(psn-${part}-test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
         add_test(NAME psn-${part} COMMAND psn-${part}-test)
-        set_tests_properties(psn-${part} PROPERTIES TIMEOUT 20)
+        add_test(NAME psn-${part}-arbitrary-user COMMAND psn-${part}-test 70001)
+        add_test(NAME psn-${part}-zero-user COMMAND psn-${part}-test 0)
+        set_tests_properties(psn-${part} psn-${part}-arbitrary-user psn-${part}-zero-user
+            PROPERTIES TIMEOUT 20)
     endforeach()
     add_library(psn-backend-fixture MODULE tests/psn_backend_fixture.c)
     set_target_properties(psn-backend-fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -42,8 +45,8 @@ if(PSN_HOST_TESTS)
     target_compile_options(psn-backend-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_link_libraries(psn-backend-test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     set_target_properties(psn-backend-test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-    foreach(case default empty relative missing bad-abi bad-size bad-capabilities missing-function
-            query-null open-error open-null open-partial good overflow invalid-event invalid-invite
+    foreach(case default empty unconfigured-users relative missing bad-abi bad-size bad-capabilities missing-function
+            query-null open-error open-null open-partial good good-arbitrary-user overflow invalid-event invalid-invite
             invalid-user invalid-state invalid-push oversized-push event-error state-error push-error)
         add_test(NAME psn-backend-${case} COMMAND psn-backend-test $<TARGET_FILE:psn-backend-fixture> ${case})
         set_tests_properties(psn-backend-${case} PROPERTIES TIMEOUT 10)

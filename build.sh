@@ -8,6 +8,18 @@ psn_contract_tests() {
     cmake --build out/psn-tests
     ctest --test-dir out/psn-tests --output-on-failure
 }
+net_policy_tests() {
+    local compiler=$1
+    local libraries=()
+    case $(uname -s) in MINGW*|MSYS*) libraries=(-lws2_32);; esac
+    "$compiler" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_policy.c \
+        src/runtime_net_overrides.c src/runtime_net_tunnel.c "${libraries[@]}" -o out/net-policy-test
+    for backend in unset empty selected; do
+        for preserve in unset 0 1; do
+            for tunnel in 0 1; do out/net-policy-test "$backend" "$preserve" "$tunnel"; done
+        done
+    done
+}
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links sacredfire.exe as well; no PGO (GCC-only flags), LTO off by default.
 case $(uname -s) in
@@ -38,7 +50,10 @@ MINGW*|MSYS*)
     version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
     printf '%s-windows\n' "$version" > out/VERSION
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
-    if [[ ${1:-} == --test ]]; then psn_contract_tests clang; fi
+    if [[ ${1:-} == --test ]]; then
+        psn_contract_tests clang
+        net_policy_tests clang
+    fi
     exit 0
     ;;
 esac
@@ -129,6 +144,7 @@ echo "Version: $version (out/VERSION)"
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
     psn_contract_tests "$CC"
+    net_policy_tests "$CC"
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test

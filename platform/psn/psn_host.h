@@ -28,6 +28,13 @@ static inline uintptr_t psn_host_lookup(const PsnHostExport *table, size_t count
 /* Internal host adapter. Backend lock serializes native calls, never guest callbacks.
  * Module registry locks may nest the backend lock; the core releases its lock before
  * delivering events to either module. Resolver functions are only used in external mode. */
+/* Local user IDs belong to the integrating host, not the platform provider. Copy a
+ * process-lifetime set before start(); IDs are opaque nonnegative values, not slot
+ * numbers. Local login state is still reported by identity(), never inferred here. */
+#define PSN_MAX_LOCAL_USERS 4u
+int32_t psn_host_set_local_users(const int32_t *users, uint32_t count);
+uint32_t psn_host_local_users(int32_t users[PSN_MAX_LOCAL_USERS]);
+int psn_host_has_local_user(int32_t user);
 int psn_host_selected(void);
 int psn_host_start(void);
 void psn_host_stop(void);

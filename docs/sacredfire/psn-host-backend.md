@@ -1,4 +1,4 @@
-# Optional PSN backend and local notification relay
+# PSN compatibility through optional backends
 
 The existing OCTR implementation mixes platform identity and PSN service replies
 with RyuNET-specific configuration. A different platform cannot safely replace
@@ -12,6 +12,20 @@ dump. The same module can be integrated by other bbport descendants. OCTR's shim
 only resolves NIDs to symbols and connects startup and SystemService. Launcher
 and socket policy remain host-specific.
 
+The direction is a common compatibility boundary for bbport descendants, not a
+required multiplayer service. Host adapters implement the game's existing PS4
+imports; independently selected backends supply platform services. The native
+`PsnBackendV1` binding defines ownership and capabilities without passing guest
+pointers, host sockets or game-specific packets. It is not an official Sony
+interface or a replacement game protocol.
+
+This allows hosts to share ABI conversion and lifecycle fixes while keeping their
+existing online implementation. orbiSteamworks and ctrnf-p2p provide one optional
+integration; other providers can implement the same binding. Publisher services
+and peer transport are separate decisions. A future shadPS4 adapter may consume
+the same provider services, but this change neither modifies shadPS4 nor claims
+cross-host gameplay compatibility.
+
 ## Compatibility decision
 
 Selection is explicit and fixed before guest startup. Without `BB_PSN_BACKEND`,
@@ -20,6 +34,13 @@ network tunnel run as before. A selected backend must satisfy the versioned
 social profile; loading or initialization failure does not select RyuNET instead.
 Unsupported external operations fail explicitly instead of borrowing synthetic
 responses from another identity namespace. Local trophy services stay with OCTR.
+
+The host supplies its local user IDs explicitly; OCTR retains IDs 1 through 4.
+Selecting a PSN backend does not select a transport, enable online mode or turn
+off the RyuNET tunnel. `BB_ONLINE` and `BB_ONLINE_TUNNEL` retain their separate
+roles. The independent opt-in `BB_NET_PRESERVE_ENDPOINTS=1` keeps guest bind
+addresses and ports intact, disabling port overrides, retries and UPnP-body
+rewriting for integrations which require stable endpoints. It is off by default.
 
 An invitation accepted in the platform UI enters the SystemService queue. The
 game then performs its original session WebAPI requests. A WebAPI invitation
@@ -46,8 +67,9 @@ The relay's independent event worker avoids blocking friends/invitations behind
 a slow session request. A replay cursor acknowledges copied events and prevents
 a repeated HTTP response from duplicating an accepted invitation. Queue loss,
 account replacement or malformed messages fail the selected session. Identity
-is mapped only to local user 1, and unsupported authorization-code and invitation
-UI operations remain explicit failures. See the [backend contract and build
+is mapped to an explicitly configured local user (1 by default); unsupported
+authorization-code and invitation UI operations remain explicit failures.
+See the [backend contract and build
 instructions](../../platform/psn/backends/README.md).
 
 ## Evidence and ownership
@@ -79,26 +101,15 @@ unregistration, and invitation-dialog outcomes. Launcher tests verify that an
 explicit external selection bypasses RyuNET admission and rejects Discord join
 mutations while the default path retains its existing behavior.
 
-Windows validation used the existing MSYS2 CLANG64 toolchain, including the full
-`bash build.sh --test` build of the runtime and native launcher. The module's 25
-CTest cases and the 12 focused Python launcher tests passed.
+The network-policy harness exercises real loopback binds with backend selection
+unset, empty and enabled, independently varying endpoint preservation and tunnel
+selection. Identity, WebAPI and event tests also use nonsequential and zero-valued
+host user IDs. The optional adapter's HTTP fixture exercises actual module loading,
+request cancellation, slow replies, subscription fanout, guest callbacks, invitation
+layout/replay and malformed, overflow and account-change failures.
 
-The full Python discovery run executed 151 tests: 109 passed, 38 skipped and four
-failed in this Windows environment. Two require symlink creation privilege; one
-requires Linux Bash through WSL; one assumes Linux Vulkan driver paths. The
-affected existing tests and their implementation files were not changed. They
-are not recorded as passing. A Linux build/test run remains required before
-merging upstream; no Linux/macOS runtime or in-game acceptance is claimed here.
-
-No game or platform client was launched for these checks, and no installed
-binaries, profiles, saves or databases were replaced.
-
-The 2026-10-20 pass repeated the full Windows build and its 25 existing module
-tests, the 12 focused launcher tests, and Python discovery with the same four
-environment-dependent failures. The optional backend adds an HTTP fixture using
-the real module and real guest callback adapter: nine scenarios cover transport,
-request ownership/cancellation, a six-second response, filter fanout, callback
-unregistration, exact sender identity, accepted-invitation replay, malformed
-messages, stream overflow and account change. The combined standalone CTest run
-passes 26 tests. The fixture runs only on local loopback and uses synthetic data;
-it does not run the game or any platform client.
+Use `bash build.sh --test` for the build and native tests, and
+`python3 -m unittest discover -s tests` for launcher/tool tests. The optional
+backend has its own documented CMake build. These checks use synthetic data and
+establish software contracts, not live friends refresh, invitation delivery or
+successful joining. Linux/macOS and in-game acceptance must be assessed separately.

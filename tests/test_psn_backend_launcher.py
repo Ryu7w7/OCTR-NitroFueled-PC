@@ -48,7 +48,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), before)
         self.assertEqual(self.env['BB_PSN_BACKEND_CONFIG'], 'opaque=one two')
         self.assertEqual(self.env['BB_ONLINE_SERVER'], '127.0.0.1')
-        self.assertEqual(self.env['BB_ONLINE_TUNNEL'], '0')
+        self.assertEqual(self.env['BB_ONLINE_TUNNEL'], '1')
         for name in ('NAME', 'ACCOUNT_ID', 'FRIENDS', 'KEY', 'KEYHASH'):
             self.assertEqual(self.env['BB_ONLINE_' + name], '')
         routing = json.loads((self.data / 'host_overrides.json').read_text())
@@ -65,6 +65,21 @@ class SetupTests(unittest.TestCase):
         before = existing.read_bytes()
         self.setup_external()
         self.assertEqual(existing.read_bytes(), before)
+
+    def test_external_backend_does_not_select_transport_or_enable_online(self):
+        self.env.update(BB_ONLINE='0', BB_ONLINE_TUNNEL='1',
+                        BB_ONLINE_PORT='42000', BB_NET_PRESERVE_ENDPOINTS='0')
+        self.setup_external()
+        self.assertEqual(self.env['BB_ONLINE'], '0')
+        self.assertEqual(self.env['BB_ONLINE_TUNNEL'], '1')
+        self.assertEqual(self.env['BB_ONLINE_PORT'], '42000')
+        self.assertEqual(self.env['BB_NET_PRESERVE_ENDPOINTS'], '0')
+        self.assertFalse((self.data / 'host_overrides.json').exists())
+        self.env.pop('BB_ONLINE_TUNNEL')
+        self.env.pop('BB_NET_PRESERVE_ENDPOINTS')
+        self.setup_external()
+        self.assertNotIn('BB_ONLINE_TUNNEL', self.env)
+        self.assertNotIn('BB_NET_PRESERVE_ENDPOINTS', self.env)
 
     def test_invalid_explicit_backend_fails_without_legacy_fallback(self):
         for value in ('backend.dll', str(self.data / 'missing.dll'), str(self.data)):
@@ -103,12 +118,13 @@ class SetupTests(unittest.TestCase):
         entries = dict(record.decode('utf-8').split('=', 1) for record in output.read_bytes().split(b'\0') if record)
         self.assertEqual(entries['BB_ONLINE_KEYHASH'], '')
         self.assertEqual(entries['BB_ONLINE_ACCOUNT_ID'], '')
-        self.assertEqual(entries['BB_ONLINE_TUNNEL'], '0')
+        self.assertNotIn('BB_ONLINE_TUNNEL', entries)
         for key in ('BB_PSN_BACKEND', 'BB_PSN_BACKEND_CONFIG'):
             self.assertNotIn(key, entries)
         self.assertNotIn(b'opaque=one two', output.read_bytes())
         # run.sh exports these updates over its existing inherited environment.
         child_env = {**os.environ, **self.env, **entries}
+        self.assertEqual(child_env['BB_ONLINE_TUNNEL'], '1')
         result = subprocess.run([sys.executable, '-c',
                                  'import os; assert os.environ["BB_PSN_BACKEND_CONFIG"] == "opaque=one two"'],
                                 env=child_env, capture_output=True, text=True)

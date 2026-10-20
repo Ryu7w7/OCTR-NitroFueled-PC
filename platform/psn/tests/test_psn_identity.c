@@ -6,6 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static int32_t test_user = 1;
+uint32_t psn_host_local_users(int32_t users[PSN_MAX_LOCAL_USERS]) {
+    users[0] = test_user;
+    return 1;
+}
+int psn_host_has_local_user(int32_t user) { return user == test_user; }
+
 static pthread_mutex_t backend_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int backend_locked, auth_pending, auth_canceled, auth_released, dialog_pending;
 static int dialog_canceled, dialog_released, web_dispatches, auth_failure;
@@ -22,7 +29,7 @@ static char seen_title[13];
 static int32_t identity(void *ctx, int32_t user, PsnIdentity *out) {
     (void)ctx;
     assert(backend_locked);
-    if (user != 1)
+    if (user != test_user)
         return (int32_t)0x80550007;
     *out = (PsnIdentity){0};
     out->account_id = 0x123456789;
@@ -33,7 +40,7 @@ static int32_t identity(void *ctx, int32_t user, PsnIdentity *out) {
 static int32_t policy(void *ctx, int32_t user, uint64_t features, PsnPolicy *out) {
     (void)ctx;
     assert(backend_locked);
-    assert(user == 1);
+    assert(user == test_user);
     checked_features = features;
     if (policy_failure)
         return policy_failure;
@@ -61,7 +68,7 @@ static int32_t restriction(void *ctx, const PsnContentRestriction *r) {
 static int32_t auth_start(void *ctx, const PsnAuthRequest *input, uint64_t *handle) {
     (void)ctx;
     assert(backend_locked);
-    assert(input->user_id == 1);
+    assert(input->user_id == test_user);
     assert(input->client_id != guest_client);
     assert(!strcmp(input->client_id, "client"));
     assert(!strcmp(input->scope, "openid"));
@@ -102,7 +109,7 @@ static void auth_release(void *ctx, uint64_t handle) {
 static int32_t invite_start(void *ctx, const PsnInvitationRequest *input, uint64_t *handle) {
     (void)ctx;
     assert(backend_locked);
-    assert(input->user_id == 1);
+    assert(input->user_id == test_user);
     if (input->mode == 1) {
         assert(!strcmp(input->session_id, "opaque-session"));
         assert(!strcmp(input->message, "Join"));
@@ -196,7 +203,7 @@ typedef struct {
 } Auth;
 static void test_auth(void) {
     Async async = {sizeof(async), 0, 0, 0};
-    Auth param = {sizeof(param), 1, 0, "client", "secret", "openid"};
+    Auth param = {sizeof(param), test_user, 0, "client", "secret", "openid"};
     guest_client = param.client;
     int32_t request = CALLPTR("sceNpAuthCreateAsyncRequest", &async);
     assert(request > 0);
@@ -240,7 +247,7 @@ static void test_auth(void) {
         int32_t user;
         uint32_t padding;
         const char *client, *scope;
-    } code_param = {32, 1, 0, "client", "openid"};
+    } code_param = {32, test_user, 0, "client", "openid"};
     char code[136];
     int32_t issuer = 0;
     auth_pending = 1;
@@ -258,7 +265,7 @@ static void test_auth(void) {
 }
 static void test_repeated_auth_get(void) {
     Async async = {sizeof(async), 0, 0, 0};
-    Auth param = {sizeof(param), 1, 0, "client", "secret", "openid"};
+    Auth param = {sizeof(param), test_user, 0, "client", "secret", "openid"};
     guest_client = param.client;
     unsigned char first[4104], second[4104];
     memset(first, 0xa5, sizeof(first));
@@ -318,7 +325,7 @@ static int state_calls, modern_calls;
 static int legacy_transitions;
 static PSN_GUEST_ABI void legacy_transition_callback(int32_t user, int32_t state, const void *npid,
                                                      void *argument) {
-    assert(user == 1 && argument == &legacy_transitions);
+    assert(user == test_user && argument == &legacy_transitions);
     if (state == 2)
         assert(npid && !memcmp(npid, "abcdefghijklmnop", 16));
     else
@@ -327,14 +334,14 @@ static PSN_GUEST_ABI void legacy_transition_callback(int32_t user, int32_t state
 }
 static PSN_GUEST_ABI void state_callback(int32_t user, int32_t state, const void *npid,
                                          void *argument) {
-    assert(!backend_locked && user == 1 && state == 2 && argument == &state_calls);
+    assert(!backend_locked && user == test_user && state == 2 && argument == &state_calls);
     assert(!memcmp(npid, "abcdefghijklmnop", 16));
     ++state_calls;
     assert(CALL0("sceNpUnregisterStateCallback") == 0);
     assert(CALL0("sceNpCheckCallback") == 0); /* reentrant pump never redelivers this callback */
 }
 static PSN_GUEST_ABI void modern_callback(int32_t user, int32_t state, void *argument) {
-    assert(!backend_locked && user == 1 && (state == 1 || state == 2));
+    assert(!backend_locked && user == test_user && (state == 1 || state == 2));
     assert(argument == &modern_calls);
     ++modern_calls;
 }
@@ -347,7 +354,7 @@ static void test_callbacks(void) {
     assert(state_calls == 1 && modern_calls == 1 && web_dispatches == 2);
     PsnEvent event = {0};
     event.kind = 1;
-    event.user_id = 1;
+    event.user_id = test_user;
     event.data.identity.state = 1;
     psn_host_identity_event(&event);
     assert(modern_calls == 1);
@@ -432,19 +439,23 @@ static void test_concurrent_unregister(void) {
 static void test_policy_and_identity(void) {
     unsigned char online[22];
     memset(online, 0xaa, sizeof(online));
-    assert(((UserOutFn)resolve("sceNpGetOnlineId"))(1, online + 1) == 0);
+    assert(((UserOutFn)resolve("sceNpGetOnlineId"))(test_user, online + 1) == 0);
     assert(online[0] == 0xaa && online[21] == 0xaa && online[17] == 0);
     assert(!memcmp(online + 1, "abcdefghijklmnop", 16));
     uint64_t account = 0;
-    assert(((UserOutFn)resolve("sceNpGetAccountIdA"))(1, &account) == 0 && account == 0x123456789);
+    assert(((UserOutFn)resolve("sceNpGetAccountIdA"))(test_user, &account) == 0 && account == 0x123456789);
     assert(((UserOutFn)resolve("sceNpGetAccountIdA"))(2, &account) == (int32_t)0x80550007);
+    typedef int32_t(PSN_GUEST_ABI *AccountUserFn)(uint64_t, int32_t *);
+    int32_t local_user = -1;
+    assert(((AccountUserFn)resolve("sceNpGetUserIdByAccountId"))(account, &local_user) == 0);
+    assert(local_user == test_user);
     int32_t state = 99;
     identity_state = 0;
-    assert(((UserOutFn)resolve("sceNpGetState"))(1, &state) == PSN_BACKEND_UNAVAILABLE &&
+    assert(((UserOutFn)resolve("sceNpGetState"))(test_user, &state) == PSN_BACKEND_UNAVAILABLE &&
            state == 99);
     PsnEvent event = {0};
     event.kind = 1;
-    event.user_id = 1;
+    event.user_id = test_user;
     assert(psn_host_identity_event(&event) == PSN_INVALID_ARGUMENT);
     identity_state = 2;
     Async async = {sizeof(async), 0, 0, 0};
@@ -455,7 +466,7 @@ static void test_policy_and_identity(void) {
         uint32_t pad;
         uint64_t features;
         uint8_t reserved[32];
-    } plus = {56, 1, 0, 3, {0}};
+    } plus = {56, test_user, 0, 3, {0}};
     uint8_t result[35];
     memset(result, 0xaa, sizeof(result));
     typedef int32_t(PSN_GUEST_ABI * PlusFn)(int32_t, const void *, void *);
@@ -468,7 +479,7 @@ static void test_policy_and_identity(void) {
     typedef int32_t(PSN_GUEST_ABI * ParentalFn)(int32_t, int32_t, int8_t *, void *);
     int8_t age = 0;
     uint8_t restrictions[5] = {7, 7, 7, 7, 7};
-    assert(((ParentalFn)resolve("sceNpGetParentalControlInfoA"))(request, 1, &age,
+    assert(((ParentalFn)resolve("sceNpGetParentalControlInfoA"))(request, test_user, &age,
                                                                  restrictions + 1) == 0);
     assert(age == 13 && restrictions[0] == 7 && restrictions[4] == 7);
     assert(restrictions[1] == 0 && restrictions[2] == 1 && restrictions[3] == 0);
@@ -522,12 +533,12 @@ static PSN_GUEST_ABI void presence_keep_callback(const Online *online, void *arg
     ++presence_keep_calls;
 }
 static PSN_GUEST_ABI void plus_callback(int32_t user, int32_t event, void *argument) {
-    assert(!backend_locked && user == 1 && event == 7 && argument == &plus_calls);
+    assert(!backend_locked && user == test_user && event == 7 && argument == &plus_calls);
     ++plus_calls;
     assert(CALL0("sceNpUnregisterPlusEventCallback") == 0);
 }
 static PSN_GUEST_ABI void reachability_callback(int32_t user, int32_t state, void *argument) {
-    assert(!backend_locked && user == 1 && argument == &reachability_calls);
+    assert(!backend_locked && user == test_user && argument == &reachability_calls);
     assert(reachability_calls < 3);
     reachability_values[reachability_calls++] = state;
 }
@@ -547,24 +558,24 @@ static void test_presence_plus_reachability(void) {
     assert(CALL0("sceNpCheckCallback") == 0);
     assert(!presence_legacy_calls && !presence_a_calls && !presence_keep_calls && !plus_calls &&
            !reachability_calls);
-    PsnEvent event = {.kind = 4, .user_id = 1};
+    PsnEvent event = {.kind = 4, .user_id = test_user};
     strcpy(event.data.online_id, "Friend");
     assert(psn_host_identity_event(&event) == 0);
     assert(psn_host_identity_event(&event) == 0);
     memset(event.data.online_id, 'x', sizeof(event.data.online_id));
     assert(psn_host_identity_event(&event) == PSN_INVALID_ARGUMENT);
-    event = (PsnEvent){.kind = 5, .user_id = 1};
+    event = (PsnEvent){.kind = 5, .user_id = test_user};
     event.data.plus_event = 7;
     assert(psn_host_identity_event(&event) == 0);
     assert(psn_host_identity_event(&event) == 0);
-    event = (PsnEvent){.kind = 6, .user_id = 1};
+    event = (PsnEvent){.kind = 6, .user_id = test_user};
     for (int32_t state = 0; state <= 2; ++state) {
         event.data.reachability = state;
         assert(psn_host_identity_event(&event) == 0);
     }
     event.data.reachability = 3;
     assert(psn_host_identity_event(&event) == PSN_INVALID_ARGUMENT);
-    event = (PsnEvent){.kind = 1, .user_id = 1};
+    event = (PsnEvent){.kind = 1, .user_id = test_user};
     event.data.identity.state = 2;
     assert(psn_host_identity_event(&event) ==
            0); /* State events cannot call another callback family. */
@@ -579,7 +590,7 @@ static void test_presence_plus_reachability(void) {
     assert(CALL0("sceNpUnregisterNpReachabilityStateCallback") == 0);
 
     /* Legacy replacement must invalidate the queued delivery to the old generation. */
-    event = (PsnEvent){.kind = 4, .user_id = 1};
+    event = (PsnEvent){.kind = 4, .user_id = test_user};
     strcpy(event.data.online_id, "Friend");
     register_presence_legacy(presence_legacy_callback, &presence_legacy_calls);
     assert(psn_host_identity_event(&event) == 0);
@@ -668,7 +679,7 @@ static void test_dialog(void) {
     param.base_size = 48;
     param.size = sizeof(param);
     param.mode = 1;
-    param.user = 1;
+    param.user = test_user;
     param.arg = &param;
     param.data = &data;
     assert(CALLPTR("sceInvitationDialogOpenA", &param) == 0);
@@ -704,7 +715,9 @@ static void test_dialog(void) {
     assert(CALL0("sceInvitationDialogGetStatus") == 0);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1)
+        test_user = (int32_t)strtol(argv[1], NULL, 10);
     test_auth();
     test_repeated_auth_get();
     test_callbacks();

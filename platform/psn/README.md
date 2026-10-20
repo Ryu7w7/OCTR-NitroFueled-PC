@@ -1,8 +1,8 @@
 # PSN host module
 
-A PS4 platform-service adapter that builds independently of OCTR, its renderer,
-any game dump and any platform SDK. OCTR connects startup, import resolution,
-SystemService and its launcher/network policy. The native backend ABI keeps
+A PS4 platform-service adapter that builds independently of its host, renderer,
+any game dump and any platform SDK. The host connects startup, import resolution,
+SystemService and its own launcher/network policy. The native backend ABI keeps
 platform implementations separate from those host responsibilities.
 
 The game's existing PS4 imports remain the interface. `include/psn_backend.h` is
@@ -13,7 +13,7 @@ invitation-dialog state. The publisher server and peer transport stay separate.
 
 ## Default behavior and selection
 
-With `BB_PSN_BACKEND` unset or empty, OCTR uses its existing RyuNET/Discord path.
+With `BB_PSN_BACKEND` unset or empty, the host uses its existing service path.
 The module does not initialize a platform SDK or change that path's responses.
 An external backend is opt-in:
 
@@ -27,7 +27,7 @@ configuration string is opaque to the host. Export `psn_backend_query` with the
 native C calling convention and return a `PsnBackendV1` table for version 1.
 All capability bits in `PSN_PROFILE_SOCIAL_V1` and all table functions are required.
 Invalid paths, ABI versions, missing functions or initialization failures stop
-activation; they never fall back to RyuNET. Selection is fixed for the process.
+activation; they never fall back to the host's built-in backend. Selection is fixed for the process.
 Only load libraries you trust: this is an in-process extension, not a sandbox.
 
 The optional [bridge backend](backends/README.md) is a concrete implementation
@@ -35,13 +35,13 @@ for an independently supervised provider. It uses authenticated loopback HTTP
 and does not load Steam or link provider code. The dynamically loaded test
 module remains a fixture, separate from this implementation.
 
-OCTR keeps publisher routing separately configurable. In external mode it skips
-RyuNET nickname claims, synthetic identity/friend lists, Discord join secrets and
-invite-file writes. Discord display presence remains available. The runtime uses
-direct sockets without RyuNET tunnel, port retries/remapping or UPnP-body rewriting.
-An explicitly configured publisher route is retained; no RyuNET default route is
-created if none was selected. Local users, trophies, saves and rendering remain
-owned by the host.
+Backend selection owns identity and social services only. It must not implicitly
+choose publisher routing, enable online mode, select a tunnel or change socket
+address/port policy. Each host configures those separately and prevents its
+legacy identity or invitation path from mixing with the selected backend.
+Local users, trophies, saves and rendering remain owned by the host. See the
+[host integration note](../../docs/sacredfire/psn-host-backend.md) for its defaults
+and transport options.
 
 ## Implemented contracts
 
@@ -62,7 +62,7 @@ This does not claim compatibility with every historical SDK variant.
 Unsupported NP operations return an explicit error in external mode. In particular,
 the older extended-push callback signature, notification callback variants, NP
 NotifyPlusFeature, manager SetTimeout,
-dedicated multipart builders and pool statistics are not implemented. OCTR's
+dedicated multipart builders and pool statistics are not implemented. The host's
 existing local WebAPI NpId parsing utility remains available. Score, TUS/TSS,
 Matching2 and signaling are outside this profile.
 The built-in implementation retains its existing behavior. The bridge backend
@@ -89,11 +89,20 @@ complete PSN implementation or verified end-to-end online replacement.
 - Queue overflow or malformed events produce an error instead of silent loss.
   There is no artificial session/menu-idle deadline. Request timeouts remain bounded.
 
+Before `psn_host_start()`, call `psn_host_set_local_users(ids, count)` with the
+host's possible local user IDs (one to four). The module copies this snapshot;
+IDs are opaque nonnegative values, including zero, rather than a presumed
+`1..4` range. Changing the snapshot after startup is rejected. Identity lookup,
+legacy online-ID/account-ID lookup, callback seeding and accepted invitations
+use this set. The backend reports sign-in state; the snapshot does not log users
+in or replace the host's UserService. `src/runtime_psn.c` supplies its host's
+existing controller-slot IDs; another host supplies its own IDs.
+
 Call `psn_host_start()` before resolving guest imports. Pass resolved symbol names
 to `psn_host_resolve()` before the host's normal services table; zero means leave
 the import to the host. Connect SystemService count/receive to the module only in
 selected mode. Stop guest threads before explicit `psn_host_stop()`; process exit
-also runs cleanup. `src/runtime_psn.c` shows OCTR's small integration shim.
+also runs cleanup. `src/runtime_psn.c` shows the small integration shim.
 
 ## Build and test without a game
 

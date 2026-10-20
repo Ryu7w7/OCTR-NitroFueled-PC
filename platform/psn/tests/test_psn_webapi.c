@@ -71,6 +71,13 @@ typedef int32_t(PSN_GUEST_ABI *CreateExtended)(int32_t, int32_t, const char *, u
                                                const ExtFilter *, uint64_t);
 typedef int32_t(PSN_GUEST_ABI *Register)(int32_t, int32_t, void *, void *);
 
+static int32_t test_user = 1;
+uint32_t psn_host_local_users(int32_t users[PSN_MAX_LOCAL_USERS]) {
+    users[0] = test_user;
+    return 1;
+}
+int psn_host_has_local_user(int32_t user) { return user == test_user; }
+
 static pthread_mutex_t backend_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int started, pending, canceled, released, subscriptions, unsubscriptions;
 static unsigned char reply[] = {1, 0, 3, 4};
@@ -100,12 +107,12 @@ void psn_host_unlock(void) { pthread_mutex_unlock(&backend_lock); }
 static int32_t backend_identity(void *instance, int32_t user, PsnIdentity *identity) {
     assert(instance == &backend);
     memset(identity, 0, sizeof(*identity));
-    identity->state = user == 1 ? 2 : 1;
+    identity->state = user == test_user ? 2 : 1;
     strcpy(identity->online_id, "Tester");
     return 0;
 }
 static int32_t backend_start(void *instance, const PsnWebRequest *request, uint64_t *id) {
-    assert(instance == &backend && request->user_id == 1);
+    assert(instance == &backend && request->user_id == test_user);
     assert(request->body.data != guest_body); /* A native module never receives guest memory. */
     assert(request->body.size <= sizeof(saved_body));
     strcpy(saved_path, request->path);
@@ -148,7 +155,7 @@ static void backend_release(void *instance, uint64_t id) {
     memset(reply, 0xee, sizeof(reply));
 }
 static int32_t backend_subscribe(void *instance, uint64_t cookie, const PsnPushFilter *filter) {
-    assert(instance == &backend && cookie && filter->user_id == 1);
+    assert(instance == &backend && cookie && filter->user_id == test_user);
     unsigned index = (unsigned)atomic_fetch_add(&subscriptions, 1);
     assert(index < 64);
     Subscription *sub = &subs[index];
@@ -189,7 +196,7 @@ static int32_t new_library(void) {
     return id;
 }
 static int32_t new_context(int32_t library) {
-    int32_t id = FN("sceNpWebApiCreateContextA", Two)(library, 1);
+    int32_t id = FN("sceNpWebApiCreateContextA", Two)(library, test_user);
     assert(id > 0);
     return id;
 }
@@ -564,7 +571,9 @@ static void test_concurrent_unregister(void) {
     assert(atomic_load(&unregister_done));
     assert(!FN("sceNpWebApiTerminate", One)(lib));
 }
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1)
+        test_user = (int32_t)strtol(argv[1], NULL, 10);
     backend = (PsnBackendV1){.size = sizeof(backend),
                              .abi_version = PSN_BACKEND_ABI_V1,
                              .identity = backend_identity,
@@ -574,6 +583,15 @@ int main(void) {
                              .web_release = backend_release,
                              .subscribe = backend_subscribe,
                              .unsubscribe = backend_unsubscribe};
+    /* Legacy online-ID lookup must retain arbitrary local IDs, including zero. */
+    int32_t lib = new_library();
+    OnlineId online = {0};
+    strcpy(online.name, "Tester");
+    typedef int32_t(PSN_GUEST_ABI *LegacyContext)(int32_t, const OnlineId *);
+    int32_t context = FN("sceNpWebApiCreateContext", LegacyContext)(lib, &online);
+    assert(context > 0);
+    assert(!FN("sceNpWebApiDeleteContext", One)(context));
+    assert(!FN("sceNpWebApiTerminate", One)(lib));
     test_requests();
     test_abort_and_delete();
     test_extended_push();

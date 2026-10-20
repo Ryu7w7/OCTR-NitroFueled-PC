@@ -88,7 +88,7 @@ static void online_to_guest(GuestOnlineId *out, const char *name) {
     memcpy(out->data, name, bounded_length(name, 16));
 }
 static int32_t get_identity(int32_t user, PsnIdentity *identity) {
-    if (user < 1 || user > 4)
+    if (!psn_host_has_local_user(user))
         return NP_USER_NOT_FOUND;
     void *instance;
     const PsnBackendV1 *backend = psn_host_lock(&instance);
@@ -110,7 +110,10 @@ static int32_t user_from_online(const GuestOnlineId *online) {
     memcpy(&copied, online, sizeof(copied));
     if (copied.term)
         return PSN_INVALID_ARGUMENT;
-    for (int32_t user = 1; user <= 4; ++user) {
+    int32_t users[PSN_MAX_LOCAL_USERS];
+    uint32_t count = psn_host_local_users(users);
+    for (uint32_t i = 0; i < count; ++i) {
+        int32_t user = users[i];
         PsnIdentity id = {0};
         if (!signed_identity(user, &id)) {
             GuestOnlineId candidate;
@@ -162,7 +165,10 @@ static PSN_GUEST_ABI int32_t np_account(int32_t user, uint64_t *out) {
 static PSN_GUEST_ABI int32_t np_user(uint64_t account, int32_t *out) {
     if (!out || !account)
         return PSN_INVALID_ARGUMENT;
-    for (int32_t user = 1; user <= 4; ++user) {
+    int32_t users[PSN_MAX_LOCAL_USERS];
+    uint32_t count = psn_host_local_users(users);
+    for (uint32_t i = 0; i < count; ++i) {
+        int32_t user = users[i];
         PsnIdentity identity = {0};
         if (!signed_identity(user, &identity) && identity.account_id == account) {
             *out = user;
@@ -369,7 +375,7 @@ static int32_t auth_start(int32_t id, const GuestAuth *param, void *output, int3
     int32_t user = variant ? copied.identity.user : user_from_online(copied.identity.online);
     if (user < 0)
         return user;
-    if (user < 1 || user > 4)
+    if (!psn_host_has_local_user(user))
         return AUTH_INVALID_ARGUMENT;
     char client[129] = {0}, secret[257] = {0}, scope[4097] = {0};
     if (!copy_string(client, sizeof(client), copied.client) ||
@@ -520,7 +526,7 @@ static PSN_GUEST_ABI int32_t set_restriction(const GuestContentRestriction *para
 
 static int32_t policy_request(int32_t id, int32_t user, int kind, uint64_t features, void *out,
                               int8_t *age) {
-    if (user < 1 || user > 4)
+    if (!psn_host_has_local_user(user))
         return PSN_INVALID_ARGUMENT;
     pthread_mutex_lock(&identity_mutex);
     Request *request = request_find(id, 0);
@@ -660,7 +666,7 @@ static int32_t queue_event_locked(const PsnEvent *value, int only_slot) {
     return 0;
 }
 int32_t psn_host_identity_event(const PsnEvent *event) {
-    if (!event || event->user_id < 1 || event->user_id > 4)
+    if (!event || !psn_host_has_local_user(event->user_id))
         return PSN_INVALID_ARGUMENT;
     switch (event->kind) {
     case 1:
@@ -707,7 +713,10 @@ static int32_t register_state(void *function, void *argument, int kind) {
         cb->kind = kind;
         cb->generation = ++callback_generation;
         rc = 0;
-        for (int32_t user = 1; kind <= CALLBACK_STATE_A && user <= 4; ++user) {
+        int32_t users[PSN_MAX_LOCAL_USERS];
+        uint32_t count = psn_host_local_users(users);
+        for (uint32_t i = 0; kind <= CALLBACK_STATE_A && i < count; ++i) {
+            int32_t user = users[i];
             PsnIdentity identity = {0};
             if (!get_identity(user, &identity)) {
                 PsnEvent event = {.kind = 1, .user_id = user};
@@ -955,8 +964,8 @@ static int32_t dialog_open(const GuestDialogParam *param, int account_ids) {
     if (!param)
         return DIALOG_ERROR(13);
     GuestDialogParam copied = *param;
-    if (copied.size != sizeof(copied) || copied.base_size != 48 || copied.user < 1 ||
-        copied.user > 4 || (copied.mode != 1 && copied.mode != 2))
+    if (copied.size != sizeof(copied) || copied.base_size != 48 ||
+        !psn_host_has_local_user(copied.user) || (copied.mode != 1 && copied.mode != 2))
         return DIALOG_ERROR(10);
     char message[513] = {0}, session[46] = {0};
     PsnInvitationUser users[16] = {{0}};

@@ -104,7 +104,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    for mode in ('good', 'overflow', 'account-change', 'lost-cursor', 'malformed', 'bad-info', 'bad-token', 'redirect', 'nonloopback'):
+    for mode in ('good', 'arbitrary-user', 'zero-user', 'overflow', 'account-change', 'lost-cursor', 'malformed', 'bad-info', 'bad-token', 'redirect', 'nonloopback'):
         server = Server(('127.0.0.1', 0), Handler)
         server.mode, server.events, server.replayed, server.failure = mode, [], False, ''
         server.lock = threading.Lock()

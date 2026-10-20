@@ -148,6 +148,7 @@ struct Event {
 };
 struct Instance {
     std::string url, token;
+    int32_t local_user_id = 1;
     std::atomic<bool> stopping{false};
     std::mutex mutex;
     std::condition_variable wake;
@@ -258,10 +259,10 @@ void peer(const Json &j, uint64_t &account, char (&name)[17], bool unknown = fal
     copy(name, text(j.at("onlineId"), 16, unknown));
     require(account || !name[0]);
 }
-std::shared_ptr<Event> event(const Json &j, const PsnIdentity &identity) {
+std::shared_ptr<Event> event(const Json &j, const PsnIdentity &identity, int32_t local_user_id) {
     require(j.is_object() && integer(j.at("version")) == 1);
     auto e = std::make_shared<Event>();
-    e->value.user_id = 1;
+    e->value.user_id = local_user_id;
     auto kind = text(j.at("kind"), 32, false);
     if (kind == "identity") {
         e->value.kind = 1;
@@ -284,7 +285,7 @@ std::shared_ptr<Event> event(const Json &j, const PsnIdentity &identity) {
         copy(v.session_id, text(j.at("sessionId"), 45, false));
         copy(v.invitation_id, text(j.at("invitationId"), 60, false));
         v.flag = 1;
-        v.accepting_user_id = 1;
+        v.accepting_user_id = local_user_id;
         v.referring_account_id = from;
         copy(v.accepting_online_id, to_name);
         copy(v.referring_online_id, from_name);
@@ -338,7 +339,7 @@ void poll_events(Instance &i) {
         if (sequence <= cursor)
             continue; // A retried response never replays a delivered invitation.
         require(sequence == cursor + 1);
-        auto e = event(entry.at("event"), i.identity);
+        auto e = event(entry.at("event"), i.identity, i.local_user_id);
         if (e->value.kind == 1) {
             auto id = e->value.data.identity;
             require(id.state == 2 && id.account_id == i.identity.account_id);
@@ -468,8 +469,12 @@ int32_t open(const char *configuration, void **out) {
     *out = nullptr;
     return guarded([&]() -> int32_t {
         auto j = Json::parse(input(configuration, 4096, false));
-        require(j.is_object() && j.size() == 2);
+        require(j.is_object() && (j.size() == 2 || (j.size() == 3 && j.contains("local_user_id"))));
         auto i = std::make_unique<Instance>();
+        if (j.contains("local_user_id")) {
+            i->local_user_id = integer(j.at("local_user_id"));
+            require(i->local_user_id >= 0);
+        }
         i->url = text(j.at("url"), 64, false);
         i->token = text(j.at("token"), 64, false);
         require(i->token.size() == 64 &&
@@ -539,7 +544,7 @@ void close(void *opaque) {
     delete i;
 }
 int32_t identity(void *opaque, int32_t user, PsnIdentity *out) {
-    if (!opaque || !out || user != 1)
+    if (!opaque || !out || user != static_cast<Instance *>(opaque)->local_user_id)
         return PSN_INVALID_ARGUMENT;
     auto &i = *static_cast<Instance *>(opaque);
     std::lock_guard lock(i.mutex);
@@ -593,7 +598,7 @@ int32_t submit(Instance &i, std::shared_ptr<Job> job, uint64_t *out) {
     return 0;
 }
 int32_t auth_start(void *opaque, const PsnAuthRequest *r, uint64_t *out) {
-    if (!opaque || !r || !out || r->user_id != 1)
+    if (!opaque || !r || !out || r->user_id != static_cast<Instance *>(opaque)->local_user_id)
         return PSN_INVALID_ARGUMENT;
     if (r->kind != 1)
         return PSN_BACKEND_UNSUPPORTED;
@@ -624,8 +629,8 @@ int32_t auth_poll(void *opaque, uint64_t id, PsnAuthResult *out) {
     return 0;
 }
 int32_t web_start(void *opaque, const PsnWebRequest *r, uint64_t *out) {
-    if (!opaque || !r || !out || r->user_id != 1 || r->method > 4 ||
-        r->header_count > PSN_MAX_HEADERS || (r->header_count && !r->headers))
+    if (!opaque || !r || !out || r->user_id != static_cast<Instance *>(opaque)->local_user_id ||
+        r->method > 4 || r->header_count > PSN_MAX_HEADERS || (r->header_count && !r->headers))
         return PSN_INVALID_ARGUMENT;
     if (r->body.size > body_limit)
         return PSN_BACKEND_UNSUPPORTED;
@@ -712,8 +717,9 @@ void release(void *opaque, uint64_t id) {
     std::erase(i.pending, id);
 }
 int32_t subscribe(void *opaque, uint64_t cookie, const PsnPushFilter *f) {
-    if (!opaque || !f || !cookie || f->user_id != 1 || f->kind < 1 || f->kind > 3 ||
-        f->ext_key_count > PSN_MAX_EXT_DATA || (f->ext_key_count && !f->ext_keys))
+    if (!opaque || !f || !cookie || f->user_id != static_cast<Instance *>(opaque)->local_user_id ||
+        f->kind < 1 || f->kind > 3 || f->ext_key_count > PSN_MAX_EXT_DATA ||
+        (f->ext_key_count && !f->ext_keys))
         return PSN_INVALID_ARGUMENT;
     return guarded([&]() -> int32_t {
         Subscription s{f->kind, f->service_label, f->service != nullptr,

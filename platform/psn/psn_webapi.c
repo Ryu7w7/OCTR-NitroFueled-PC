@@ -332,7 +332,7 @@ static PSN_GUEST_ABI int32_t web_initialize(int32_t http, uint64_t pool_size) {
     return id;
 }
 static PSN_GUEST_ABI int32_t web_create_context_a(int32_t library, int32_t user) {
-    if (user < 1 || user > 4)
+    if (!psn_host_has_local_user(user))
         return WEB_INVALID;
     pthread_mutex_lock(&web_lock);
     if (!find_library(library)) {
@@ -368,20 +368,21 @@ static PSN_GUEST_ABI int32_t web_create_context_a(int32_t library, int32_t user)
 static PSN_GUEST_ABI int32_t web_create_context(int32_t library, const GuestOnlineId *online) {
     if (!online || strnlen(online->name, 17) > 16)
         return WEB_INVALID;
-    int32_t user = 0;
+    int32_t user = -1, users[PSN_MAX_LOCAL_USERS];
+    uint32_t count = psn_host_local_users(users);
     void *instance;
     const PsnBackendV1 *backend = psn_host_lock(&instance);
     if (backend)
-        for (int32_t i = 1; i <= 4; i++) {
+        for (uint32_t i = 0; i < count; i++) {
             PsnIdentity identity = {0};
-            if (!backend->identity(instance, i, &identity) && identity.state == 2 &&
+            if (!backend->identity(instance, users[i], &identity) && identity.state == 2 &&
                 !strncmp(identity.online_id, online->name, 17)) {
-                user = i;
+                user = users[i];
                 break;
             }
         }
     psn_host_unlock();
-    return user ? web_create_context_a(library, user) : WEB_ERROR(16);
+    return user >= 0 ? web_create_context_a(library, user) : WEB_ERROR(16);
 }
 static PSN_GUEST_ABI int32_t web_delete_context(int32_t id) {
     pthread_mutex_lock(&web_lock);

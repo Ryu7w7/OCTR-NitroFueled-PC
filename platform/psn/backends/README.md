@@ -1,14 +1,15 @@
 # Local bridge backend
 
 `psn-bridge-backend` connects the optional PSN host module to a separately
-supervised platform provider. The provider translates Steam events into PSN
+supervised platform provider. The provider maps its platform events into PSN
 notification types and payloads. This adapter transports requests and copied
 notifications, while the host owns guest memory, filters, callbacks and
 SystemService events. No Steam library, game packet parser or provider source is
-linked into OCTR.
+linked into the host.
 
-The backend is opt-in. The normal OCTR build and RyuNET/Discord path remain the
-default. A supervisor such as ctrnf-p2p starts the selected host with:
+The backend is opt-in. The normal host build and built-in service path remain the
+default. A supervisor such as [ctrnf-p2p](https://github.com/pierluigizagaria/ctrnf-p2p)
+starts the selected host with:
 
 ```text
 BB_PSN_BACKEND=<absolute path to psn-bridge-backend.dll or .so>
@@ -64,8 +65,13 @@ case-insensitive header names are unsupported because the relay's header object
 cannot preserve them. HTTP error status and transport failure remain distinct.
 
 The handshake requires identity, ID-token, WebAPI, push and accepted-invitation
-capabilities, version 1 and a signed-in identity. One local PS4 user (1) maps to
-that account. The session cannot switch accounts. The fixed local adult policy
+capabilities, version 1 and a signed-in identity. One local PS4 user maps to that
+account. The optional `local_user_id` configuration field selects its opaque
+nonnegative ID (default `1`). The integrating host must
+include that ID in its local-user snapshot; this selection does not change the
+platform account or relay protocol. Identity, requests, subscriptions and accepted
+invitation events preserve the selected local ID. The session cannot switch accounts.
+The fixed local adult policy
 (age 99, Plus-authorized, unrestricted) preserves the port's local policy; it is
 not a claim about a PSN subscription or Steam parental enforcement. Title and
 content-policy inputs are validated locally. Sony application secrets are never
@@ -102,5 +108,6 @@ The HTTP fixture exercises the real module, exact account IDs, binary requests,
 six-second replies, active cancellation, subscription fanout, guest callback
 dispatch and self-unregister, accepted-invitation layout and cursor replay,
 malformed/account-change/overflow failures, credentials, redirects and endpoint
-validation. These are offline contract checks. They do not establish Steam
+validation, and explicit local-user mapping with IDs `70001` and `0`. These are
+offline contract checks. They do not establish Steam
 delivery, successful in-game joining or friend-page refresh in a live game.

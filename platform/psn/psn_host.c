@@ -27,6 +27,50 @@ static int32_t failure;
 #define INVITE_CAPACITY 32
 static PsnSessionInvitation invitations[INVITE_CAPACITY];
 static unsigned invitation_head, invitation_count;
+static int32_t local_users[PSN_MAX_LOCAL_USERS];
+static uint32_t local_user_count;
+
+int32_t psn_host_set_local_users(const int32_t *users, uint32_t count) {
+    if (!users || !count || count > PSN_MAX_LOCAL_USERS)
+        return PSN_INVALID_ARGUMENT;
+    int32_t copied[PSN_MAX_LOCAL_USERS];
+    memcpy(copied, users, count * sizeof(*users));
+    for (uint32_t i = 0; i < count; ++i) {
+        if (copied[i] < 0)
+            return PSN_INVALID_ARGUMENT;
+        for (uint32_t j = 0; j < i; ++j)
+            if (copied[i] == copied[j])
+                return PSN_INVALID_ARGUMENT;
+    }
+    pthread_mutex_lock(&backend_mutex);
+    int32_t result = 0;
+    if (initialized && (count != local_user_count ||
+                        memcmp(local_users, copied, count * sizeof(*users))))
+        result = PSN_BACKEND_BUSY;
+    if (!result) {
+        memcpy(local_users, copied, count * sizeof(*users));
+        local_user_count = count;
+    }
+    pthread_mutex_unlock(&backend_mutex);
+    return result;
+}
+uint32_t psn_host_local_users(int32_t users[PSN_MAX_LOCAL_USERS]) {
+    if (!users)
+        return 0;
+    pthread_mutex_lock(&backend_mutex);
+    uint32_t count = local_user_count;
+    memcpy(users, local_users, count * sizeof(*users));
+    pthread_mutex_unlock(&backend_mutex);
+    return count;
+}
+int psn_host_has_local_user(int32_t user) {
+    int32_t users[PSN_MAX_LOCAL_USERS];
+    uint32_t count = psn_host_local_users(users);
+    for (uint32_t i = 0; i < count; ++i)
+        if (users[i] == user)
+            return 1;
+    return 0;
+}
 
 int psn_host_selected(void) {
     /* Selection is immutable from the first runtime entry, before NP initialization. */
@@ -69,6 +113,12 @@ int psn_host_start(void) {
         return result;
     }
     initialized = 1;
+    if (!local_user_count) {
+        failure = PSN_INVALID_ARGUMENT;
+        fputs("PSN backend: the host has not configured its local user IDs.\n", stderr);
+        pthread_mutex_unlock(&backend_mutex);
+        return failure;
+    }
     const char *path = getenv("BB_PSN_BACKEND");
     PsnBackendEntry query = NULL;
 #ifdef _WIN32
@@ -204,7 +254,7 @@ static int32_t queue_invitation(const PsnSessionInvitation *invite) {
         !memchr(invite->invitation_id, 0, sizeof(invite->invitation_id)) ||
         !memchr(invite->accepting_online_id, 0, sizeof(invite->accepting_online_id)) ||
         !memchr(invite->referring_online_id, 0, sizeof(invite->referring_online_id)) ||
-        invite->accepting_user_id < 1 || invite->accepting_user_id > 4)
+        !psn_host_has_local_user(invite->accepting_user_id))
         return PSN_INVALID_ARGUMENT;
     pthread_mutex_lock(&system_mutex);
     int32_t result = PSN_BACKEND_BUSY;

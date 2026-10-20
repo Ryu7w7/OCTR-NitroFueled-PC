@@ -144,7 +144,7 @@ static void make_invitation(PsnEvent *event, unsigned index) {
     invite->session_id[0] = (char)('A' + index % 26);
     memset(invite->invitation_id, 'I', 60);
     invite->flag = 0xa1b2c3d4u;
-    invite->accepting_user_id = 3;
+    invite->accepting_user_id = is_case("good-arbitrary-user") ? 70001 : 3;
     memset(invite->accepting_online_id, 'A', 16);
     memset(invite->referring_online_id, 'R', 16);
     invite->referring_account_id = UINT64_C(0xfedcba9876543210);

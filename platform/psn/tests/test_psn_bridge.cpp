@@ -14,6 +14,12 @@ using namespace std::chrono_literals;
 using Json = nlohmann::json;
 constexpr uint64_t owner = UINT64_C(76561198000000001), sender = UINT64_C(76561198000000002);
 static unsigned callbacks;
+static int32_t local_user = 1;
+static unsigned state_callbacks;
+static void PSN_GUEST_ABI state_callback(int32_t user, int32_t state, void *) {
+    assert(user == local_user && state == 2);
+    ++state_callbacks;
+}
 static std::thread::id main_thread;
 struct DataType {
     char value[65];
@@ -85,7 +91,7 @@ static void trigger(const char *path, bool allow_session_failure = false) {
     void *instance;
     auto b = psn_host_lock(&instance);
     PsnWebRequest r{};
-    r.user_id = 1;
+    r.user_id = local_user;
     r.method = 1;
     r.api_group = "test";
     r.path = path;
@@ -122,7 +128,13 @@ int main(int argc, char **argv) {
     main_thread = std::this_thread::get_id();
     std::string mode = argv[4];
     environment("BB_PSN_BACKEND", argv[1]);
-    environment("BB_PSN_BACKEND_CONFIG", Json{{"url", argv[2]}, {"token", argv[3]}}.dump());
+    const bool success_mode = mode == "good" || mode == "arbitrary-user" || mode == "zero-user";
+    local_user = mode == "arbitrary-user" ? 70001 : mode == "zero-user" ? 0 : 1;
+    Json config{{"url", argv[2]}, {"token", argv[3]}};
+    if (mode == "arbitrary-user" || mode == "zero-user")
+        config["local_user_id"] = local_user;
+    environment("BB_PSN_BACKEND_CONFIG", config.dump());
+    assert(!psn_host_set_local_users(&local_user, 1));
     auto started = psn_host_start();
     if (started)
         std::fprintf(stderr, "backend startup status: 0x%08x\n", static_cast<unsigned>(started));
@@ -131,14 +143,19 @@ int main(int argc, char **argv) {
         return 0;
     }
     assert(!started);
+    using StateRegister = int32_t(PSN_GUEST_ABI *)(void *, void *);
+    auto state_handle = fn<StateRegister>("sceNpRegisterStateCallbackA")(
+        reinterpret_cast<void *>(state_callback), nullptr);
+    assert(state_handle > 0 && !fn<Pump>("sceNpCheckCallback")() && state_callbacks == 1);
+    assert(!fn<One>("sceNpUnregisterStateCallbackA")(state_handle));
     void *instance;
     auto b = psn_host_lock(&instance);
     PsnIdentity identity{};
-    assert(!b->identity(instance, 1, &identity) && identity.account_id == owner &&
+    assert(!b->identity(instance, local_user, &identity) && identity.account_id == owner &&
            identity.state == 2);
     assert(b->identity(instance, 2, &identity) == PSN_INVALID_ARGUMENT);
     PsnAuthRequest auth{};
-    auth.user_id = 1;
+    auth.user_id = local_user;
     auth.kind = 2;
     auth.client_id = "client";
     auth.scope = "scope";
@@ -174,7 +191,7 @@ int main(int argc, char **argv) {
     b = psn_host_lock(&instance);
     PsnHeader duplicate[] = {{"X-Test", "one"}, {"x-test", "two"}};
     PsnWebRequest invalid{};
-    invalid.user_id = 1;
+    invalid.user_id = local_user;
     invalid.api_group = "test";
     invalid.path = "/binary";
     invalid.headers = duplicate;
@@ -186,7 +203,7 @@ int main(int argc, char **argv) {
     PsnInvitationRequest invite{};
     assert(b->invitation_start(instance, &invite, &request) == PSN_BACKEND_UNSUPPORTED);
     PsnWebRequest slow{};
-    slow.user_id = 1;
+    slow.user_id = local_user;
     slow.api_group = "test";
     slow.path = "/slow";
     assert(!b->web_start(instance, &slow, &request));
@@ -202,7 +219,7 @@ int main(int argc, char **argv) {
     assert(std::chrono::steady_clock::now() - cancel_start < 2500ms);
     auto lib = fn<Initialize>("sceNpWebApiInitialize")(0, 1024 * 1024);
     assert(lib > 0);
-    auto context = fn<Two>("sceNpWebApiCreateContextA")(lib, 1);
+    auto context = fn<Two>("sceNpWebApiCreateContextA")(lib, local_user);
     assert(context > 0);
     auto handle = fn<One>("sceNpWebApiCreateHandle")(lib);
     assert(handle > 0);
@@ -218,15 +235,15 @@ int main(int argc, char **argv) {
     if (mode == "overflow") {
         b = psn_host_lock(&instance);
         PsnPushFilter many{};
-        many.user_id = 1;
+        many.user_id = local_user;
         many.kind = 1;
         many.data_type = "np:service:presence:onlineStatus";
         for (uint64_t n = 10000; n < 10256; ++n)
             assert(!b->subscribe(instance, n, &many));
         psn_host_unlock();
     }
-    trigger(mode == "good" ? "/trigger" : ("/" + mode).c_str(), mode != "good");
-    if (mode != "good") {
+    trigger(success_mode ? "/trigger" : ("/" + mode).c_str(), !success_mode);
+    if (!success_mode) {
         bool failed = false;
         for (unsigned n = 0; n < 1000; ++n) {
             if (fn<Pump>("sceNpCheckCallback")() < 0) {
@@ -257,6 +274,9 @@ int main(int argc, char **argv) {
     uint64_t account = 0;
     memcpy(&kind, e, 4);
     memcpy(&account, e + 4 + 168, 8);
+    int32_t accepting_user = -1;
+    memcpy(&accepting_user, e + 4 + 140, sizeof(accepting_user));
+    assert(accepting_user == local_user);
     assert(kind == 0x10000002 && account == sender &&
            !strcmp(reinterpret_cast<char *>(e + 4), "76561198099999999"));
     assert(!strcmp(reinterpret_cast<char *>(e + 4 + 48), "76561198099999999-76561198000000002-1"));
