@@ -268,6 +268,11 @@ def season_theme(host, port):
     return theme if theme in ('default', 'halloween', 'golden') else None
 
 
+def external_psn_backend(env=None):
+    """An explicit backend owns platform identity and social services for this launch."""
+    return bool((os.environ if env is None else env).get('BB_PSN_BACKEND'))
+
+
 def setup_online(env, config, data):
     ini_values = {}
     try:
@@ -278,22 +283,38 @@ def setup_online(env, config, data):
     except OSError:
         pass
 
+    external = external_psn_backend(env)
+    if external:
+        backend = Path(env['BB_PSN_BACKEND'])
+        if not backend.is_absolute():
+            fail('BB_PSN_BACKEND must be an absolute library path.')
+        if not backend.is_file() or not os.access(backend, os.R_OK):
+            fail('BB_PSN_BACKEND must name a readable library file.')
+        # Empty values also clear inherited settings when online_config exports them to run.sh.
+        # A backend must never accidentally inherit RyuNET credentials or synthetic identities.
+        for key in ('BB_ONLINE_NAME', 'BB_ONLINE_ACCOUNT_ID', 'BB_ONLINE_FRIENDS',
+                    'BB_ONLINE_KEY', 'BB_ONLINE_KEYHASH'):
+            env[key] = ''
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
-    if online == '1' and not nick_ok(name):
+    if online == '1' and not external and not nick_ok(name):
         fail('Online play needs your own nickname: 3 to 16 letters, digits, _ or -, and not a default '
              'name like RyuPC. Set it in the launcher (Online tab) or as online_name= in bbport.ini.\n'
              'El juego online necesita tu propio apodo: de 3 a 16 letras, números, _ o -, y no un nombre '
              'por defecto como RyuPC. Ponlo en el launcher (pestaña Online) o como online_name= en bbport.ini.')
-    env['BB_USER_NAME'] = name or OFFLINE_NAME
+    if not external:
+        env['BB_USER_NAME'] = name or OFFLINE_NAME
 
     if online != '1':
         return
 
     env['BB_ONLINE'] = '1'
     env['BB_NET_TRACE'] = '1'
-    server = env.get('BB_ONLINE_SERVER', ini_values.get('online_server', 'octr.ryu7w7.xyz'))
+    server = env.get('BB_ONLINE_SERVER', ini_values.get('online_server', '' if external else 'octr.ryu7w7.xyz'))
     if not server or server.strip() == '':
+        if external:
+            say('External PSN backend selected; publisher routing left unchanged')
+            return
         server = 'octr.ryu7w7.xyz'
     host = server
     auth_port = env.get('BB_ONLINE_HTTP_PORT', ini_values.get('online_http_port', '8080'))
@@ -304,12 +325,13 @@ def setup_online(env, config, data):
             auth_port = p
 
     env['BB_ONLINE_SERVER'] = host
-    env['BB_ONLINE_NAME'] = name
-    key = online_key(data)
-    env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
-    if key:
-        env['BB_ONLINE_KEYHASH'] = key_hash(server_key(key, host))
-        claim_nick(host, auth_port, name, env['BB_ONLINE_KEYHASH'])
+    if not external:
+        env['BB_ONLINE_NAME'] = name
+        key = online_key(data)
+        env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
+        if key:
+            env['BB_ONLINE_KEYHASH'] = key_hash(server_key(key, host))
+            claim_nick(host, auth_port, name, env['BB_ONLINE_KEYHASH'])
     # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
     # instead of the ones bought on the server, which are tied to the nickname.
     if env.get('BB_ONLINE_INVENTORY', ini_values.get('online_inventory', 'server')).strip().lower() == 'save':
@@ -317,13 +339,13 @@ def setup_online(env, config, data):
     else:
         env.pop('BB_ONLINE_INVENTORY', None)
     account_id = env.get('BB_ONLINE_ACCOUNT_ID', ini_values.get('online_account_id', ''))
-    if account_id:
+    if account_id and not external:
         env['BB_ONLINE_ACCOUNT_ID'] = account_id
     online_port = env.get('BB_ONLINE_PORT', ini_values.get('online_port', ''))
     if online_port:
         env['BB_ONLINE_PORT'] = online_port
     friends = env.get('BB_ONLINE_FRIENDS', ini_values.get('online_friends', ''))
-    if friends:
+    if friends and not external:
         env['BB_ONLINE_FRIENDS'] = friends
 
     overrides_file = data / 'host_overrides.json'
@@ -355,6 +377,9 @@ def setup_online(env, config, data):
         "friends.dev.demonware.net": f"http://{host}:{auth_port}",
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
+    if external:
+        say(f'External PSN backend selected; publisher server {host}:{auth_port}')
+        return
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
     # Every player loads the theme the server announces (bbport.ini theme= only applies offline).
     if not env.get('BB_THEME'):

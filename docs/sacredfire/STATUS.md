@@ -2,6 +2,13 @@
 
 Updated 2026-10-09.
 
+2026-10-20: the opt-in [PSN compatibility module](psn-host-backend.md) provides a
+reusable backend binding for identity, authentication, WebAPI and notifications.
+The host supplies local user IDs and independently selects its network policy.
+RyuNET remains the default; an authenticated loopback adapter is an optional
+example. Windows build and offline contract tests are covered; live provider
+and in-game validation have not been performed for this integration.
+
 ## Milestones
 
 | milestone | state |

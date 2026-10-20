@@ -6,6 +6,7 @@
  * Every entry here is an explicit contract; unknown functions still stop. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_psn.h"
 #include "gpu/bbgpu.h"
 #include "ctr_trophies.h"
 #include <stdio.h>
@@ -234,10 +235,17 @@ static void invite_session_joined(const char *path) {
 static ABI int32_t system_status(unsigned char *status) {
     if (!status) return SYSTEM_PARAMETER;
     memset(status,0,12); /* event_num=0, no overlay, foreground, normal CPU mode */
+    if (runtime_psn_selected()) {
+        int32_t count=runtime_psn_system_count();
+        if (count<0) return count;
+        memcpy(status,&count,sizeof(count));
+        return 0;
+    }
     if (invite_due()) *(int32_t *)status=1;
     return 0;
 }
 static ABI int32_t system_event(void *event) {
+    if (runtime_psn_selected()) return runtime_psn_system_receive(event);
     if (!event) return SYSTEM_PARAMETER;
     const time_t now=time(NULL);
     pthread_mutex_lock(&s_invite_lock);
