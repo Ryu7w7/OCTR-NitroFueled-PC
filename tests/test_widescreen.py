@@ -39,6 +39,33 @@ def entry(archive, patch, index):
 
 
 class WidescreenTests(unittest.TestCase):
+    def test_alternate_usa_executable_does_not_disable_layout(self):
+        for mode in widescreen.OUTPUTS:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                game = root / 'game'
+                game.mkdir()
+                (game / 'eboot.bin').write_bytes(b'alternate USA 1.21 executable')
+                ini = root / 'bbport.ini'
+                ini.write_text(f'widescreen_layout={mode}\nrender_res=1620\nonline=1\n')
+                base = {'/app0/archives/update2.pak': root / 'playlist.bbpatch'}
+                made = {'/app0/archives/update2.pak': root / 'combined.bbpatch'}
+                original_sha = widescreen.sha
+
+                def checked_sha(path):
+                    self.assertNotEqual(Path(path).name, 'eboot.bin')
+                    return original_sha(path)
+
+                with patch.object(widescreen, 'sha', side_effect=checked_sha), \
+                     patch.object(widescreen, 'archive_patches', return_value=made) as assets:
+                    plan = widescreen.prepare(game, root / 'out', ini, {}, 'CUSA13795', '01.21', base)
+                self.assertIsNotNone(plan)
+                self.assertEqual(plan['archive_patches'], made)
+                self.assertEqual(assets.call_args.args[4], base)
+                lines = list(ET.parse(plan['patches_dir'] / 'Widescreen.xml').iter('Line'))
+                self.assertEqual(len(lines), 16)
+                self.assertTrue(all(line.get('Signature') for line in lines))
+
     def test_marker_hook_fits_every_variant_without_overlapping_writes(self):
         for mode in widescreen.OUTPUTS:
             folder = widescreen.DATA / ('ultrawide-' + mode)
