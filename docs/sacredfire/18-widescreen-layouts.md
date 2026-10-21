@@ -54,18 +54,18 @@ GPL-2.0), in `scripts/widescreen_data/eu`:
 The launch says why (`Widescreen: ...`) and goes on at 16:9 when:
 
 - the game's title or update is not USA or EU 1.21;
-- the EU executable image does not match the edition the layout was ported to;
 - an asset is not the expected one (a mod changed it), or the data does not validate.
 
 Online mode does not change the selected layout. The online playlist archive patch is
 composed with the layout patches, so both remain active.
 
-USA 1.21 executable builds are not restricted to a single whole-file checksum. A v0.6
+USA and EU 1.21 executable builds are not restricted to a single executable checksum. A v0.6
 user with a different build was falling back to 16:9 despite selecting 21:9; removing
 that checksum gate was confirmed to restore the layout on that user's machine.
 The title/update checks, archive content checks and executable patch signatures remain
-in place. The EU executable check is unchanged. This does not certify every alternate
-executable build.
+in place. The USA whole-file check and EU loaded-image check are both removed from
+layout selection. The alternate EU path is source-tested but has not had a new live
+test. This does not certify every alternate executable build.
 
 ## Startup and online interface corrections
 
