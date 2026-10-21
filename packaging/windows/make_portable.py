@@ -221,7 +221,7 @@ def main():
     shutil.rmtree(folder, ignore_errors=True)
     if folder.exists():
         sys.exit(f'{folder} could not be removed (is it open?)')
-    for sub in ('bin', 'scripts', 'tools', 'patches', 'out'):
+    for sub in ('bin', 'scripts', 'tools', 'patches', 'out', 'mods'):
         (folder / sub).mkdir(parents=True)
     shutil.copy2(exe, folder / 'bin')
     shutil.copy2(caps, folder / 'bin')
@@ -247,6 +247,10 @@ def main():
     python = bundle_python(folder, a.dist / 'pycache')
     bundle_iced_x86(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
+    (folder / 'docs').mkdir(exist_ok=True)
+    for document in ('mod-packaging.html', 'mod-support.txt'):
+        shutil.copy2(ROOT / 'docs' / document, folder / 'docs' / document)
+    shutil.copytree(ROOT / 'docs' / 'native-handbook', folder / 'docs' / 'native-handbook')
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
     shutil.copytree(ROOT / 'scripts' / 'widescreen_data',

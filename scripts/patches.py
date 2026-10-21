@@ -452,7 +452,7 @@ def external_selection(found, config, ini=None):
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
-def compile_external(selected, segments, elf=None):
+def compile_external(selected, segments, elf=None, strict=False):
     """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
     eboot.elf bytes) is needed for lines with a Signature."""
     writes,claims=[],[]
@@ -471,6 +471,7 @@ def compile_external(selected, segments, elf=None):
                     raise ValueError(f'address {line.get("Address")} is outside the eboot')
                 ours.append((offset,data))
         except ValueError as error:
+            if strict:raise ValueError(f'Cannot apply enabled mod patch {key}: {error}') from error
             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
             continue
         # Two patches writing the same bytes: the later one's bytes win, and neither works as
@@ -478,6 +479,7 @@ def compile_external(selected, segments, elf=None):
         for offset,data in ours:
             for start,end,other in claims:
                 if other!=key and offset<end and start<offset+len(data):
+                    if strict:raise ValueError(f'Conflicting executable patches: {key} / {other}')
                     print(f'Patches: {key} and {other} both write {offset+EBOOT_BASE:#010x}: the later one wins',file=sys.stderr)
                     break
         claims+=[(offset,offset+len(data),key) for offset,data in ours]
@@ -497,6 +499,7 @@ def write_blob(out, writes):
 def main():
     root=Path(__file__).resolve().parent.parent
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--strict-overlap',action='store_true',help='reject skipped/overlapping writes in mod sessions')
     p.add_argument('--patches-dir',type=Path,action='append',
                    help='patch XML files (shadPS4 format); repeatable, a later folder\'s file replaces one of the same name '
                         '(default: patches/ in the checkout)')
@@ -531,7 +534,7 @@ def main():
     settings=read_settings(a.settings)
     writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
                             +theme_patches(settings)+end_race_patches(),
-                            segments,elf)
+                            segments,elf,strict=a.strict_overlap)
     write_blob(a.out,writes)
     print(f'Patches: {len(writes)} writes from {len(found)} available patches')
 

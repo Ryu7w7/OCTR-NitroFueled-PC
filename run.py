@@ -522,6 +522,11 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
+    import mod_packages
+    try:
+        game, config = mod_packages.prepare(PORT, data, env, game, config,log=say)
+    except (ValueError, RuntimeError, OSError) as error:
+        fail('Mod launch blocked: ' + str(error) + '\nChoose compatible settings or disable the indicated mod in Mods.')
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
@@ -581,6 +586,8 @@ def main():
                     env[key] = value
             layout_saved.clear()
             layout = widescreen.prepare(game, out, config, env, title_id, app_version, base_patches)
+            if mod_packages.ACTIVE and widescreen.selection(widescreen.read_ini(config)) and not layout:
+                raise ValueError('The selected mods cannot use this widescreen layout; see the Widescreen message above.')
             if layout:
                 layout_saved.update({key: env.get(key) for key in layout['env']})
                 env.update(layout['env'])
@@ -592,6 +599,9 @@ def main():
             return (layout['config'], layout['patches_dir']) if layout else (config, None)
 
         settings, layout_patches = apply_layout()
+        if mod_packages.ACTIVE:
+            mod_packages.preflight(Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
+                                   [layout_patches] if layout_patches else [], title_id, app_version)
         apply_render_res(env, settings)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
@@ -631,8 +641,12 @@ def main():
             if not first:  # the in-game menu may have changed render_res
                 settings, layout_patches = apply_layout()
                 apply_render_res(env, settings)
+                if mod_packages.ACTIVE:
+                    mod_packages.preflight(Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
+                                           [layout_patches] if layout_patches else [], title_id, app_version)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
+                       *(['--strict-overlap'] if mod_packages.ACTIVE else []),
                        *(['--patches-dir', layout_patches] if layout_patches else []),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
@@ -671,6 +685,7 @@ def main():
                     say('--- This GPU or its driver does not support Vulkan 1.3, which the game needs. '
                         'Update the graphics driver; if it is already the latest, the GPU is too old for '
                         'Windows (on Linux, the Mesa driver supports Vulkan 1.3 on many older GPUs).')
+                mod_packages.finish(code)
                 return code
             say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (restart from the menu)')
     finally:

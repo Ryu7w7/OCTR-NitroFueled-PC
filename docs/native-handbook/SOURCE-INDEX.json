@@ -1,0 +1,401 @@
+{
+  "snapshot": "2026-10-19",
+  "note": "Source paths relative to matching project distribution. Source files are not bundled.",
+  "files": [
+    {
+      "path": "mod-research/build_jade.py",
+      "bytes": 12437,
+      "sha256": "b8935216b81868ccd1f91b385a950b3f7b4e4383dafa7e3b35c1c2e9b87ed29e"
+    },
+    {
+      "path": "mod-research/build_smoke_probe.py",
+      "bytes": 9218,
+      "sha256": "e395d67f9f43a2ab58f2caa22bc5bc6b1882451b1befccbaf5becf44ab649558"
+    },
+    {
+      "path": "mod-research/build_smoke_v8.py",
+      "bytes": 5394,
+      "sha256": "1699c490b3ba326abec250099f92132355da92aeba480cc103f4d6fc706cb100"
+    },
+    {
+      "path": "mod-research/build_twinsanity_skin.py",
+      "bytes": 6151,
+      "sha256": "05c1bca1067df96fa1cbe63cd6e0e0f3e2770b058bee6d212f9f8c8b42f43a5d"
+    },
+    {
+      "path": "mod-research/finish_twinsanity_v3.py",
+      "bytes": 3481,
+      "sha256": "b0da8dcff23f18051513910da2bcd57e163a1797880fd26b695a14df1a043b14"
+    },
+    {
+      "path": "mod-research/add_smoke_portraits.py",
+      "bytes": 4032,
+      "sha256": "c64db4a8aa2670b39f3f9246b9250f45e2cc3c894d6658d0bd81e29851fb1a4c"
+    },
+    {
+      "path": "mod-research/prepare_smoke_voice.py",
+      "bytes": 2140,
+      "sha256": "e13cda6091d291720afa9a31162611885f335dbbf7d5a98fcd7e74eaecb4d73e"
+    },
+    {
+      "path": "mod-research/validate_jade.py",
+      "bytes": 3327,
+      "sha256": "294c28d0d6366968fcedce696cd93fa5f1724994c60ca26bb393bd28c55df693"
+    },
+    {
+      "path": "mod-research/validate_smoke_probe.py",
+      "bytes": 3466,
+      "sha256": "40898d781f89651193a76df92280ba2c1661b18015b8d3e4892061aee24603a7"
+    },
+    {
+      "path": "mod-research/validate_twinsanity.py",
+      "bytes": 3179,
+      "sha256": "e9e535c83ce84fe9586eb4774f29dd59b3879dda74e3a9f321b1d176a273eb2b"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_pak.py",
+      "bytes": 11383,
+      "sha256": "cc970f2caa479722418aea9535458ac36586a5abddf4c27ccc624eea7100a30b"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_igz.py",
+      "bytes": 5872,
+      "sha256": "398779a037bfa4f7b51a0e0db6dc1e93c4c0e1e7b3837f968b094ccf2ab63c0e"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_igz_edit.py",
+      "bytes": 3378,
+      "sha256": "de44d3dd5d402af7d3651915bdb94cfbf4d574d889363fb4d4663ea73bfad9b7"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_model_import.py",
+      "bytes": 4847,
+      "sha256": "761d804b53c0b16f084047680a88cab58bbd91677c3ab6812be3ace1df710130"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_model_import_tawna.py",
+      "bytes": 4931,
+      "sha256": "4e432ec56b057860555afb478110ce61153cd1927d20f637ca9073d7276bc1be"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_static_mesh_import.py",
+      "bytes": 6550,
+      "sha256": "9a4ca3ce8698740c637d05ea45d60bdf302111a91b7ba353c877212ceda02df8"
+    },
+    {
+      "path": "OCTRNFSOURCE/tools/ctr_texture_import.py",
+      "bytes": 4112,
+      "sha256": "322a13d48f9a9791e698205962246472ea4b8a2059cd2f126da850eafa2bb48c"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroDiagnostics.cs",
+      "bytes": 12454,
+      "sha256": "cc66178c2f1369a5144c3fd94da5a9a06f856f9e4151ce59eb1b1d6a57a0416d"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroNeonTest.cs",
+      "bytes": 20789,
+      "sha256": "0ffee8febd05b518cbd8981b8f54a23f3ac7adffe75449056e0f1df4a22d55a3"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroRetroCollision.cs",
+      "bytes": 6841,
+      "sha256": "11e7608722dba1f379541bbd9c6cfe4bff6cfb031ff713b411f62b77d8a2b76d"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroRetroScene.cs",
+      "bytes": 8363,
+      "sha256": "334f74c8013d00707829726310cd08dcbcb075576a51002eae2757d04bcbaf70"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroImportedMesh.cs",
+      "bytes": 5987,
+      "sha256": "686bcfe1573e0124e5c50d7d4812edd6c54829f626f3b914651a31cf281100f6"
+    },
+    {
+      "path": "CTR-Track-Editor/src/Nitro/NitroImportedCollision.cs",
+      "bytes": 7457,
+      "sha256": "43948048ccab9dae3d5379f6ab304a7a2355ef49c07b03a29aa3b7d65190cc8b"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/extract_ctr_disc.py",
+      "bytes": 5033,
+      "sha256": "b1c5ee2417cf7b9651e2efba1b4c2b54c786a72fd0ac8ab7767bc413b82a4d84"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/audit_ctr_level.py",
+      "bytes": 5301,
+      "sha256": "b2a24265a28e422469aee41f2cb1d1c0b86977c8bba2fe9aa9e988e3e743f69d"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/audit_native_sky.py",
+      "bytes": 2423,
+      "sha256": "c869a4e1fcc42f9153ca9a92fbc7fd171debf0f89db87fdad7886ff03d63d186"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/patch_neon_gameplay_v4.py",
+      "bytes": 15192,
+      "sha256": "9f37b438ed20cefcff1f6dc114ce85d6ecbfe58317852035cd2c36827e175879"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/package_neon_no_sunshafts.py",
+      "bytes": 1895,
+      "sha256": "a31ad2a6de93f036987f83b2aa67c7cba4c71579fee975289028cb5aec88a31d"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/probe_neon_route_sky.py",
+      "bytes": 7762,
+      "sha256": "2eb9e398cc6f10cf23f6916acd732e3258437ccf2f3a11e1cbcce13a7e22708e"
+    },
+    {
+      "path": "CTR-Track-Editor/launch-neon-driving-test.py",
+      "bytes": 4777,
+      "sha256": "c9b19cf211ec328f2dac295bd30dc48da6d2580aace0c4840eb23129fd35fa3e"
+    },
+    {
+      "path": "CTR-Track-Editor/CREATOR-WORKBENCH.md",
+      "bytes": 5624,
+      "sha256": "3db30631a13cc1c31ab7d922050f125e15340eb81983d58480d3a73c19e02978"
+    },
+    {
+      "path": "CTR-Track-Editor/ROAD-WORKBENCH.md",
+      "bytes": 5088,
+      "sha256": "34a6f7d2c02038ddf4f62fa30ae8b7b01c79b7f3c1f7c99574624e63672378ea"
+    },
+    {
+      "path": "CTR-Track-Editor/ROAD-SCENE-WORKBENCH.md",
+      "bytes": 5446,
+      "sha256": "566629797201fc5735164126ed29f40dd3cbf519395f5ffebe236b08ec115f2b"
+    },
+    {
+      "path": "CTR-Track-Editor/NITRO-DEVELOPMENT.md",
+      "bytes": 14120,
+      "sha256": "3486e2e6aa1d1e560a2df835cac81d23fbb67445afcb49b570ee42a88c225a6d"
+    },
+    {
+      "path": "mod-research/models/add_kart_reference.py",
+      "bytes": 1581,
+      "sha256": "5eb898e69975a3908c8239dbaa64b3ea7f9f59ff5bf2b93928845a6cf63b057d"
+    },
+    {
+      "path": "mod-research/models/build_comparison.py",
+      "bytes": 10706,
+      "sha256": "995bdbfc38314865258b3b95c989f4d0ba41de346c2acc2544c60dc597b60c83"
+    },
+    {
+      "path": "mod-research/models/check_hat.py",
+      "bytes": 2396,
+      "sha256": "9e66f4a0f5afd554fc4083b5d4ea7db6f61717862fa0a382db0b4af22a23f82f"
+    },
+    {
+      "path": "mod-research/models/check_rig.py",
+      "bytes": 2141,
+      "sha256": "da27156be14041ee83af92a93200fad3b4b4d17976c04280707e85af20d498eb"
+    },
+    {
+      "path": "mod-research/models/decode_driving_pose.py",
+      "bytes": 3448,
+      "sha256": "17fbc7eb64e3280ead2eef75bdf985aad5ea9c143be2aede3412e91b372519bb"
+    },
+    {
+      "path": "mod-research/models/decode_tawna_pose.py",
+      "bytes": 3509,
+      "sha256": "4a226fcdda0e1d16a0f9facf6b3374a8a82388cc94669b7c059581236f696835"
+    },
+    {
+      "path": "mod-research/models/encode_smoke_texture.py",
+      "bytes": 2095,
+      "sha256": "026429a1bee3cb7f047a8ea60c04c74eaf31f3be4348f19920576764b8f0690a"
+    },
+    {
+      "path": "mod-research/models/export_smoke_game_bind.py",
+      "bytes": 3587,
+      "sha256": "0749c61e84647ea01a6d0263bf7d15566d883cd9b09f9d0860a843ec9772eca2"
+    },
+    {
+      "path": "mod-research/models/export_smoke_large_game_bind.py",
+      "bytes": 3662,
+      "sha256": "e57422d14871d383290fe7e5a9c315d476934c0051c3f7eb307a206131235d01"
+    },
+    {
+      "path": "mod-research/models/fit_kart_contacts.py",
+      "bytes": 2708,
+      "sha256": "de179674862c6f2487adc19605301bb0989f5c0b6eff7a791fd79d6df2fa8815"
+    },
+    {
+      "path": "mod-research/models/fit_smoke_rig.py",
+      "bytes": 6235,
+      "sha256": "aced8f4eb55a6954111853cb783ee0cd26a488edeeb8cbf7392892a5c94cb517"
+    },
+    {
+      "path": "mod-research/models/inspect_contacts.py",
+      "bytes": 1562,
+      "sha256": "9763938895af7541229e801448b885375b308cbe534ab5ca0a3c79e946c717cd"
+    },
+    {
+      "path": "mod-research/models/inspect_kart_clips.py",
+      "bytes": 2311,
+      "sha256": "8e591c249f00271368aaac7d91e52707048624d44ec350586a9c5ca34b7a0084"
+    },
+    {
+      "path": "mod-research/models/inspect_model_layout.py",
+      "bytes": 609,
+      "sha256": "5832089c0ddfec9d10657179c9f8f8e86afad46b2e1cf1c1eb849a7bd72d490a"
+    },
+    {
+      "path": "mod-research/models/inspect_twinsanity.py",
+      "bytes": 2413,
+      "sha256": "b96bc8896f734a9d3efbcc38e12dd8969885f43ea542f7336fd0eaa767589fbc"
+    },
+    {
+      "path": "mod-research/models/jade/build_animation_bank.py",
+      "bytes": 4758,
+      "sha256": "2b68cfe5406b038282db41a5867e936865eeda1dc215a33072b41087ef7bee43"
+    },
+    {
+      "path": "mod-research/models/jade/check_animations.py",
+      "bytes": 3444,
+      "sha256": "1c9133d05a3115114362944a2c8e54b8a73d71ce14814e55d34efc2484202e4e"
+    },
+    {
+      "path": "mod-research/models/jade/encode_portraits.py",
+      "bytes": 2566,
+      "sha256": "883aa6994dc0422861e276bc05aff8f383b1eaee51dbbf97469103ece2e81581"
+    },
+    {
+      "path": "mod-research/models/jade/encode_texture.py",
+      "bytes": 2089,
+      "sha256": "7331470b980bef2c96eaa0aaa8a4ab7eb6ecc94034c747f343c94566360f8c42"
+    },
+    {
+      "path": "mod-research/models/jade/fit_export.py",
+      "bytes": 11810,
+      "sha256": "4a30a2acb364b29257262ab7600e91f97f7d7f8cbd1647229a46dcb29c862e23"
+    },
+    {
+      "path": "mod-research/models/jade/import_preview.py",
+      "bytes": 1741,
+      "sha256": "30f9686c8a7e66422621ba1f70be443ca0a98728cd30d96764a960361ffe77f7"
+    },
+    {
+      "path": "mod-research/models/jade/inspect_source.py",
+      "bytes": 749,
+      "sha256": "15881023af5e81065b927ba71e839b17955e28f0293fb4bc5bcf696d79ba750c"
+    },
+    {
+      "path": "mod-research/models/jade/normalize_uv.py",
+      "bytes": 1877,
+      "sha256": "8fd0e8361edc6ee75d00d7d678f39420bbf784e70f9fbe900a076cd2baf01b79"
+    },
+    {
+      "path": "mod-research/models/jade/prepare_atlas.py",
+      "bytes": 1010,
+      "sha256": "5d9941cc01c0af87a34ab34e18161509643fb59f6aa4fc9b5e99f4de307a31ee"
+    },
+    {
+      "path": "mod-research/models/jade/preview_retarget.py",
+      "bytes": 775,
+      "sha256": "467c26268c259f04a18ca40a9aa566ed5a44e2804af607bf7d0ef11ce24b9a49"
+    },
+    {
+      "path": "mod-research/models/jade/render_side_review.py",
+      "bytes": 675,
+      "sha256": "95ecfc1d976b60fd52474c9c0f487b5e40882477f3f360952d511969782bd777"
+    },
+    {
+      "path": "mod-research/models/jade/retarget_motion.py",
+      "bytes": 3217,
+      "sha256": "06bc58b6c9d0e449ab41c2aa683944ca4dcb91da1dd12b4de33344cb12b0ffeb"
+    },
+    {
+      "path": "mod-research/models/kart-reference/apply_kart_fit.py",
+      "bytes": 2852,
+      "sha256": "3b009d6ea18226e3c62681f72a36f00529b967de3fd9d62c1b6fa173af46b6dc"
+    },
+    {
+      "path": "mod-research/models/live_preview.py",
+      "bytes": 1731,
+      "sha256": "06979a30660a9d27370d51129a8c06dce5883ce411999d590995b09f8e6292c2"
+    },
+    {
+      "path": "mod-research/models/preview_driving_pose.py",
+      "bytes": 3709,
+      "sha256": "154eba45e6529618a7c52c3b79a51edfdda52f132ba5b6a5e9ede5a39c9b8f8f"
+    },
+    {
+      "path": "mod-research/models/rebuild_smoke_preview.py",
+      "bytes": 11378,
+      "sha256": "449bf1d8bef77fa7d5cac52fbab835f01e40998f65883da13c5f9963d6970690"
+    },
+    {
+      "path": "mod-research/models/render_contact_details.py",
+      "bytes": 676,
+      "sha256": "19c5e5b6c6aa6d451327a74c1851b3ade2c3d3a250f481e7153c1884ce0fa2b7"
+    },
+    {
+      "path": "mod-research/models/render_size_review.py",
+      "bytes": 550,
+      "sha256": "bff0b907ce6af74e2f28bdb4732ce7738c96fe66acd5ed7cfa5bb5b84811d6fb"
+    },
+    {
+      "path": "mod-research/models/resize_smoke_proportions.py",
+      "bytes": 2775,
+      "sha256": "c1dc761afbfbf215c1dda773fa20e01e55b7321cfe19afe910a7c662c7eeecb6"
+    },
+    {
+      "path": "mod-research/models/smooth_smoke.py",
+      "bytes": 1634,
+      "sha256": "a5bafc969bfa66de37bc991a8610b23b46ebbdb7674b8cebeaa116928c17ca97"
+    },
+    {
+      "path": "mod-research/models/tawna-reference/build_reference.py",
+      "bytes": 2981,
+      "sha256": "b3d335fc8615ebca94024f3a543ef60d502dd442d4ab011a74e96ba6e482f81e"
+    },
+    {
+      "path": "mod-research/models/twinsanity/check_animations.py",
+      "bytes": 3438,
+      "sha256": "1efc1989f5930f631900eeb0364ef8c973b8bf6688106b73ae50bf187ab5aac1"
+    },
+    {
+      "path": "mod-research/models/twinsanity/encode_portraits.py",
+      "bytes": 2596,
+      "sha256": "2bf5b8d5c7b2f39a1a5ea07609bfce542c3bbf3d77c73c258364067b32aacde4"
+    },
+    {
+      "path": "mod-research/models/twinsanity/encode_texture.py",
+      "bytes": 2095,
+      "sha256": "45a06aa5ea5e2102d117c5292b1dc3c60f562c17cfa47204ca895abf3466fee0"
+    },
+    {
+      "path": "mod-research/models/twinsanity/fit_export.py",
+      "bytes": 10515,
+      "sha256": "a425c4f98546c3792557b8d883c04d844fbc621cb283e5794b57caf4a5c171c1"
+    },
+    {
+      "path": "mod-research/models/twinsanity/prepare_atlas.py",
+      "bytes": 1365,
+      "sha256": "be0885950a57f57f46bcd55de6847a4e4d54816520bcc3a5d535d7ee536e3b28"
+    },
+    {
+      "path": "mod-research/models/twinsanity/render_portrait.py",
+      "bytes": 1053,
+      "sha256": "adda24203e9db1fc3838c2bc06ac1bf602587a1c0d431e75cb2545669a7ff485"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/blender_neon_workspace.py",
+      "bytes": 5642,
+      "sha256": "b8f21604f55307744fdac9273c7a5d276530dd4e34fefe964064875571f2d977"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/blender_ctr_collision.py",
+      "bytes": 3957,
+      "sha256": "6c620ea056da7323206e82b6ba737b8137a1f92abab538e24564187500afb97d"
+    },
+    {
+      "path": "CTR-Track-Editor/tools/blender_neon_start_remaster.py",
+      "bytes": 7027,
+      "sha256": "0dcdb87110471e8ca9f89fce8c87c343970becf4bb251b47b76b9a230b4d2397"
+    }
+  ]
+}

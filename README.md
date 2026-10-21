@@ -308,10 +308,20 @@ not include: with your own key (the same shadPS4 uses; paste it, or import it fr
 5568 MiB of direct memory) and takes its Pro rendering path; with the 1080p patch it renders
 at 1920×1080. Off by default: the Steam Deck is closer to a base PS4.
 
-**Mods:** loose-file mod folders (with the game's folders inside) are overlaid on the game
-folder at start, with enable switches and load order in `mods.json`
-(`scripts/mods.py`, [docs/MODS.md](docs/MODS.md), written for bbport). Further shadPS4-format
-patch files go into `patches/` or `BB_PATCHES_DIR`, selected through `patches.json`.
+**Mods (Windows):** the Mods page lists built-in patches first, followed by installed
+add-ons. Add `.pak`, `.zip`, `.xml` files or an unpacked folder to `mods/` beside the
+launcher, using Add files / Add folder or copying them there and pressing Reload.
+Manifest packages can combine assets and executable patches under one switch;
+creator descriptions appear when the card's chevron is expanded. Legacy `patches/`
+is still read. See the [creator and packaging guide](docs/mod-packaging.html) and
+[implementation notes](docs/mod-support.txt), also available from the Mods page.
+No actual mod payloads are bundled with this feature. Online compatibility is a
+package declaration, not a server approval or whitelist service.
+
+The existing loose-folder CLI loader and `mods.json` remain available for older
+workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The unified
+Mods UI/import flow is Windows-only in this revision; AppImage `run.sh` integration
+is not included.
 
 ## AppImage (Steam Deck)
 
