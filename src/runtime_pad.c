@@ -416,6 +416,23 @@ static SDL_Gamepad *current_gamepad(void) {
                 printf("Runtime: a bound controller was not found in %d rescans: treated as disconnected (the in-game menu's Rescan controllers tries again)\n",PAD_RESCAN_ATTEMPTS);
         }
         if (pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i) if (!claimed_by_other_port(ids[i],0)) pick=i;
+        /* If player 1's chosen pad is absent, use the first available split-screen pad for
+         * player 1. Otherwise its input can silently create a different user's save. */
+        int port_fallback=0;
+        if (pick<0 && !gamepad && ids && ports[0].want[0]) {
+            for (int p=1;p<PORTS && pick<0;++p) {
+                if (!ports[p].want[0] || is_keyboard(ports[p].want)) continue;
+                for (int i=0;i<count;++i) if (is_preferred(ids[i],ports[p].want) &&
+                    !claimed_by_other_port(ids[i],p)) { pick=i; break; }
+            }
+            if (pick>=0) {
+                for (int p=1;p<PORTS;++p) if (ports[p].pad && SDL_GetGamepadID(ports[p].pad)==ids[pick]) {
+                    SDL_CloseGamepad(ports[p].pad);
+                    ports[p].pad=NULL;
+                }
+                port_fallback=1;
+            }
+        }
         if (pick>=0 && (!gamepad || SDL_GetGamepadID(gamepad)!=ids[pick])) {
             if (gamepad) SDL_CloseGamepad(gamepad);
             gamepad=SDL_OpenGamepad(ids[pick]);
@@ -428,6 +445,7 @@ static SDL_Gamepad *current_gamepad(void) {
             }
         }
         SDL_free(ids);
+        if (port_fallback && gamepad) update_port_presence();
     }
     /* SacredFire: the controller touched last is the active one. Every other connected gamepad is
      * kept open and polled ten times a second; one that produces input while the active one is idle

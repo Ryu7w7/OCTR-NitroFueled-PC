@@ -191,6 +191,43 @@ int main(void) {
         SDL_CloseGamepad(gamepad); gamepad=NULL;
         assert(SDL_DetachVirtualJoystick(first) && SDL_DetachVirtualJoystick(second));
     }
+    /* Any lone split-screen pad takes player 1's place until its selected pad connects. */
+    for (int player=2;player<=4;++player) {
+        FILE *f=fopen(config,"w"); assert(f);
+        fprintf(f,"port.1=first controller\nport.%d=second controller\n",player); fclose(f);
+        config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
+        desc.name="second controller";
+        SDL_JoystickID second=SDL_AttachVirtualJoystick(&desc); assert(second);
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==second);
+        assert(!ports[player-1].pad && !ports[player-1].present);
+        desc.name="first controller";
+        SDL_JoystickID first=SDL_AttachVirtualJoystick(&desc); assert(first);
+        usleep(1100000);
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==first);
+        update_port_presence();
+        assert(ports[player-1].pad && SDL_GetGamepadID(ports[player-1].pad)==second && ports[player-1].present);
+        assert(SDL_DetachVirtualJoystick(first));
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==second);
+        assert(!ports[player-1].pad && !ports[player-1].present);
+        SDL_CloseGamepad(gamepad); gamepad=NULL;
+        assert(SDL_DetachVirtualJoystick(second));
+    }
+    {
+        FILE *f=fopen(config,"w"); assert(f);
+        fputs("port.1=first controller\nport.2=second controller\n"
+              "port.3=third controller\nport.4=fourth controller\n",f); fclose(f);
+        config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
+        const char *names[]={"second controller","third controller","fourth controller"};
+        SDL_JoystickID ids[3];
+        for (int i=0;i<3;++i) { desc.name=names[i]; ids[i]=SDL_AttachVirtualJoystick(&desc); assert(ids[i]); }
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==ids[0]);
+        assert(!ports[1].present && ports[2].present && ports[3].present);
+        assert(ports[2].pad && SDL_GetGamepadID(ports[2].pad)==ids[1]);
+        assert(ports[3].pad && SDL_GetGamepadID(ports[3].pad)==ids[2]);
+        for (int p=1;p<PORTS;++p) if (ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
+        SDL_CloseGamepad(gamepad); gamepad=NULL;
+        for (int i=0;i<3;++i) assert(SDL_DetachVirtualJoystick(ids[i]));
+    }
     SDL_Quit();
     unlink(path);
     unlink(config);
