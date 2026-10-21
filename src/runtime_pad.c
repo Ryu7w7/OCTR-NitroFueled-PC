@@ -73,6 +73,8 @@ _Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout"
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized, opened, sdl_ready;
 static SDL_Gamepad *gamepad;
+static SDL_Gamepad *other_gamepads[8];
+static int other_count;
 /* SacredFire: ports 2..4 for split screen: the gamepad named in bbport.ini (port.N=), opened while
  * connected; the game sees user N logged in while the port has its gamepad. Port 1 is `gamepad`. */
 #define PORTS 4
@@ -82,6 +84,8 @@ static Port ports[PORTS]; /* ports[0].want overrides BB_GAMEPAD for port 1 */
  * its gamepad alone (one person on the keyboard, another on a gamepad). */
 static int is_keyboard(const char *want) { return !SDL_strcasecmp(want,"keyboard"); }
 static int keyboard_port(void) { for (int p=1;p<PORTS;++p) if (is_keyboard(ports[p].want)) return p; return 0; }
+static int is_preferred(SDL_JoystickID id, const char *want);
+static int claimed_by_other_port(SDL_JoystickID id, int except);
 static unsigned pad_rescan_attempts; /* misses in a row looking for a bound controller (current_gamepad) */
 static struct timespec config_mtime; static uint64_t config_checked;
 static void load_ports(void) {
@@ -102,7 +106,18 @@ static void load_ports(void) {
         if (strcmp(fresh[p],ports[p].want)) {
             pad_rescan_attempts=0; /* a new binding is looked for afresh */
             snprintf(ports[p].want,sizeof ports[p].want,"%.63s",fresh[p]);
+            if (!p && gamepad) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
             if (p && ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
+            if (p && gamepad && fresh[p][0] && !is_keyboard(fresh[p]) &&
+                is_preferred(SDL_GetGamepadID(gamepad),fresh[p])) {
+                int count=0, another=0;
+                SDL_JoystickID *ids=SDL_GetGamepads(&count);
+                for (int i=0;ids && i<count;++i)
+                    if (ids[i]!=SDL_GetGamepadID(gamepad) && is_preferred(ids[i],fresh[p]) &&
+                        !claimed_by_other_port(ids[i],p)) another=1;
+                SDL_free(ids);
+                if (!another) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+            }
             if (p) printf("Runtime: controller port %d -> %s\n",p+1,fresh[p][0] ? fresh[p] : "(none)");
         }
     }
@@ -129,7 +144,6 @@ static void refresh_ports(uint64_t now) {
  * name, so port.2=<GUID> matches every one of them, and port 1 would be left with none. A port still
  * without its pad reserves every match from port 1 and from the ports after it (port 2 before 3
  * before 4), so two ports bound to the same GUID take one pad each instead of yielding to each other. */
-static int is_preferred(SDL_JoystickID id, const char *want);
 static int claimed_by_other_port(SDL_JoystickID id, int except) {
     for (int p=1;p<PORTS;++p) {
         if (p==except || !ports[p].want[0] || is_keyboard(ports[p].want)) continue;
@@ -378,6 +392,10 @@ static SDL_Gamepad *current_gamepad(void) {
             last_reinit=now;
             SDL_free(ids); ids=NULL;
             if (gamepad) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+            for (int p=1;p<PORTS;++p) if (ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
+            for (int i=0;i<other_count;++i) if (other_gamepads[i]) {
+                SDL_CloseGamepad(other_gamepads[i]); other_gamepads[i]=NULL;
+            }
             SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
             if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) { sdl_ready=-1; return NULL; }
             ids=SDL_GetGamepads(&count);
@@ -417,28 +435,34 @@ static SDL_Gamepad *current_gamepad(void) {
     static uint64_t last_switch_scan;
     if (now-last_switch_scan>100000) {
         last_switch_scan=now;
-        static SDL_Gamepad *others[8]; static int other_count;
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        for (int i=0;i<other_count;++i) if (others[i] && !SDL_GamepadConnected(others[i])) { others[i]=NULL; }
+        for (int i=0;i<other_count;++i) {
+            SDL_Gamepad *other=other_gamepads[i];
+            if (other && (!SDL_GamepadConnected(other) || claimed_by_other_port(SDL_GetGamepadID(other),0))) {
+                SDL_CloseGamepad(other);
+                other_gamepads[i]=NULL;
+            }
+        }
         for (int i=0; ids && i<count; ++i) {
             if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
             if (claimed_by_other_port(ids[i],0)) continue;
             int known=0;
-            for (int j=0;j<other_count;++j) if (others[j] && SDL_GetGamepadID(others[j])==ids[i]) known=1;
+            for (int j=0;j<other_count;++j) if (other_gamepads[j] && SDL_GetGamepadID(other_gamepads[j])==ids[i]) known=1;
             if (!known) {
                 int slot=-1;
-                for (int j=0;j<other_count;++j) if (!others[j]) { slot=j; break; }
+                for (int j=0;j<other_count;++j) if (!other_gamepads[j]) { slot=j; break; }
                 if (slot<0 && other_count<8) slot=other_count++;
-                if (slot>=0) others[slot]=SDL_OpenGamepad(ids[i]);
+                if (slot>=0) other_gamepads[slot]=SDL_OpenGamepad(ids[i]);
             }
         }
         SDL_free(ids);
         if (gamepad && !gamepad_active(gamepad)) {
             for (int j=0;j<other_count;++j) {
-                if (!others[j] || !gamepad_active(others[j])) continue;
+                if (!other_gamepads[j] || !gamepad_active(other_gamepads[j]) ||
+                    claimed_by_other_port(SDL_GetGamepadID(other_gamepads[j]),0)) continue;
                 SDL_Gamepad *previous=gamepad;
-                gamepad=others[j]; others[j]=previous; on_preferred=1;
+                gamepad=other_gamepads[j]; other_gamepads[j]=previous; on_preferred=1;
                 printf("Runtime: gamepad switched to %s (it was used)\n",SDL_GetGamepadName(gamepad));
                 break;
             }

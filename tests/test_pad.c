@@ -103,20 +103,24 @@ int main(void) {
     {
         desc.ntouchpads=0;
         desc.touchpads=NULL;
-        SDL_JoystickID same[3];
-        for (int i=0;i<3;++i) { same[i]=SDL_AttachVirtualJoystick(&desc); assert(same[i]!=0); }
+        SDL_JoystickID same[4];
+        for (int i=0;i<4;++i) { same[i]=SDL_AttachVirtualJoystick(&desc); assert(same[i]!=0); }
         char guid[33];
         SDL_GUIDToString(SDL_GetGamepadGUIDForID(same[0]),guid,sizeof guid);
-        for (int i=1;i<3;++i) {
+        for (int i=1;i<4;++i) {
             char other[33];
             SDL_GUIDToString(SDL_GetGamepadGUIDForID(same[i]),other,sizeof other);
             assert(!strcmp(guid,other));
         }
-        for (int bound=2;bound<=3;++bound) {
+        /* Bind port 2 after player 1 has already claimed that controller. */
+        assert(current_gamepad());
+        const SDL_JoystickID first_player_pad=SDL_GetGamepadID(gamepad);
+        for (int bound=2;bound<=4;++bound) {
             FILE *f=fopen(config,"w");
             assert(f);
             fprintf(f,"port.2=%s\n",guid);
-            if (bound==3) fprintf(f,"port.3=%s\n",guid);
+            if (bound>=3) fprintf(f,"port.3=%s\n",guid);
+            if (bound==4) fprintf(f,"port.4=%s\n",guid);
             fclose(f);
             config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
             for (int round=0;round<3;++round) {
@@ -126,16 +130,66 @@ int main(void) {
             assert(gamepad && ports[1].pad);
             const SDL_JoystickID p1=SDL_GetGamepadID(gamepad), p2=SDL_GetGamepadID(ports[1].pad);
             assert(p1!=p2);
+            if (bound==2) {
+                assert(p1==first_player_pad);
+                SDL_Joystick *second=SDL_OpenJoystick(p2);
+                assert(second && SDL_SetJoystickVirtualButton(second,SDL_GAMEPAD_BUTTON_SOUTH,true));
+                SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+                usleep(120000);
+                assert(SDL_GetGamepadID(current_gamepad())==p1); /* player 2 cannot steal player 1 */
+                assert(port_gamepad(1) && SDL_GetGamepadButton(port_gamepad(1),SDL_GAMEPAD_BUTTON_SOUTH));
+                assert(SDL_SetJoystickVirtualButton(second,SDL_GAMEPAD_BUTTON_SOUTH,false));
+                SDL_CloseJoystick(second);
+            }
             if (bound==3) {
                 assert(ports[2].pad);
                 const SDL_JoystickID p3=SDL_GetGamepadID(ports[2].pad);
                 assert(p3!=p1 && p3!=p2);
             }
+            if (bound==4) {
+                assert(ports[2].pad && ports[3].pad);
+                const SDL_JoystickID p3=SDL_GetGamepadID(ports[2].pad), p4=SDL_GetGamepadID(ports[3].pad);
+                assert(p3!=p1 && p3!=p2 && p4!=p1 && p4!=p2 && p4!=p3);
+                for (int p=2;p<4;++p) {
+                    SDL_Joystick *other=SDL_OpenJoystick(SDL_GetGamepadID(ports[p].pad));
+                    assert(other && SDL_SetJoystickVirtualButton(other,SDL_GAMEPAD_BUTTON_SOUTH,true));
+                    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+                    usleep(120000);
+                    assert(SDL_GetGamepadID(current_gamepad())==p1);
+                    assert(SDL_SetJoystickVirtualButton(other,SDL_GAMEPAD_BUTTON_SOUTH,false));
+                    SDL_CloseJoystick(other);
+                }
+            }
         }
+        const SDL_JoystickID p1_before=SDL_GetGamepadID(gamepad);
+        const SDL_JoystickID p2_before=SDL_GetGamepadID(ports[1].pad);
+        assert(SDL_DetachVirtualJoystick(p2_before));
+        assert(!port_gamepad(1));
+        assert(SDL_GetGamepadID(current_gamepad())==p1_before);
+        for (int i=0;i<4;++i) if (same[i]==p2_before) same[i]=SDL_AttachVirtualJoystick(&desc);
+        assert(port_gamepad(1) && SDL_GetGamepadID(ports[1].pad)!=p1_before);
         for (int p=1;p<PORTS;++p) if (ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
         if (gamepad) SDL_CloseGamepad(gamepad);
         gamepad=NULL;
-        for (int i=0;i<3;++i) assert(SDL_DetachVirtualJoystick(same[i]));
+        for (int i=0;i<4;++i) assert(SDL_DetachVirtualJoystick(same[i]));
+    }
+    /* Assign player 2 the controller player 1 is holding; player 1 moves to the other pad. */
+    {
+        FILE *f=fopen(config,"w"); assert(f); fclose(f);
+        config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
+        desc.name="first controller";
+        SDL_JoystickID first=SDL_AttachVirtualJoystick(&desc); assert(first);
+        desc.name="second controller";
+        SDL_JoystickID second=SDL_AttachVirtualJoystick(&desc); assert(second);
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==first);
+        f=fopen(config,"w"); assert(f); fputs("port.2=first controller\n",f); fclose(f);
+        config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
+        current_gamepad();
+        assert(port_gamepad(1) && SDL_GetGamepadID(ports[1].pad)==first);
+        assert(current_gamepad() && SDL_GetGamepadID(gamepad)==second);
+        SDL_CloseGamepad(ports[1].pad); ports[1].pad=NULL;
+        SDL_CloseGamepad(gamepad); gamepad=NULL;
+        assert(SDL_DetachVirtualJoystick(first) && SDL_DetachVirtualJoystick(second));
     }
     SDL_Quit();
     unlink(path);
@@ -161,5 +215,5 @@ int main(void) {
         assert(clone.have_center && clone.center[0]==16380 && clone.base[0]==16380);
         assert(stick_axis(&clone,0,16380)==128 && stick_axis(&clone,0,32760)==255 && stick_axis(&clone,0,0)==0);
     }
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, split screen with identical pads, stick calibration");
+    puts("PASS: pad ABI, touch, controls, four-player ownership and hotplug, stick calibration");
 }
