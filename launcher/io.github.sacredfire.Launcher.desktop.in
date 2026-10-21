@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=SacredFire
+Comment=Runs your copy of Crash Team Racing: Nitro-Fueled (PS4) natively on Linux
+Exec=@LAUNCHER@
+Icon=@ICON@
+Categories=Game;

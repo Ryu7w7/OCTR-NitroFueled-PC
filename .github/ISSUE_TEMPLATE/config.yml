@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Before filing
+    url: https://github.com/T3CHNOLOG1C/SacredFire/blob/main/README.md
+    about: The README lists requirements, known limitations and the variables that produce useful logs.
+  - name: Game files
+    url: https://github.com/T3CHNOLOG1C/SacredFire/blob/main/CONTRIBUTING.md
+    about: No game files, saves or dumps in issues or pull requests. Questions about obtaining the game are not answered here.

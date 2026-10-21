@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: FSR reactive mask from the scene color before and after the game's blended
+// (transparent: particles, fire, glass, effects) draws. Where they changed the color, the
+// upscaler relies less on history, so moving effects do not smear or ghost.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D opaque;
+layout(binding = 1, rgba16f) uniform readonly image2D scene;
+layout(binding = 2) uniform writeonly image2D reactive;
+
+layout(push_constant) uniform Params {
+    float scale;
+    float max_value;
+    float threshold;
+};
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(scene)))) {
+        return;
+    }
+    const vec3 before = max(imageLoad(opaque, pixel).rgb, vec3(0.0));
+    const vec3 after = max(imageLoad(scene, pixel).rgb, vec3(0.0));
+    const vec3 diff = abs(after - before);
+    // Relative change, so dim and bright effects count alike (HDR input).
+    const float peak = max(max(max(after.r, after.g), after.b), max(max(before.r, before.g), before.b));
+    const float change = max(max(diff.r, diff.g), diff.b) / max(peak, 1e-3);
+    // As AMD's reactive mask generator: faint changes (thin mist) keep the history.
+    const float value = change * scale;
+    imageStore(reactive, pixel, vec4(value < threshold ? 0.0 : min(value, max_value)));
+}

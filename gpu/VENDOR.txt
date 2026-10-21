@@ -1,0 +1,15 @@
+Vendored from https://github.com/shadps4-emu/shadPS4 commit b4e7ae776071ceb1dd35004577a8719481e1d258 (GPL-2.0-or-later).
+Directories: src/video_core, src/shader_recompiler, src/common, src/core/libraries/{gnmdriver,videoout}, externals/gcn, externals/sirit, externals/half.
+Also: src/core/libraries/kernel/{orbis_error,posix_error,time,process,equeue}.h, equeue.cpp, src/core/libraries/error_codes.h, src/core/platform.h, src/core/libraries/system/{userservice,systemservice}.h.
+Also: src/core/libraries/avplayer (without the handle streamer), src/core/libraries/videodec/video_utils.{h,cpp}.
+Local changes are marked with "bbport:" comments.
+Backported from upstream after b4e7ae7 (2026-10-02), recompiler correctness fixes only:
+  233562929 V_INTERP_MOV_F32 P10/P20 selectors (#5087), d96278e1e compute shader floating-point
+  mode (#5126), e518a6515 S_SUBB_U32 SCC wrap (#5031), 282e5c792 S_ADDC_U32 SCC carry-out (#5030),
+  fb6367d29 32-bit literals in the high dword of 64-bit floats (#5114), 94e217781 V_BFM_B32 (#5185),
+  d1cb90dbb ADDC (#5200), dd43d1cac V_CVT_PK_U8_F32 (#5194), ef08b1e1f V_ALIGNBIT/ALIGNBYTE (#5186).
+Backported on 2026-10-17, crash and stability fixes (adapted to this tree, marked "bbport (upstream #N)"):
+  e6c79a5f CE/DE counter waits (#5406), 12c5978f nested indirect buffer frames freed (#5258),
+  23c41333 + e9f2c54c unmapped or null index buffers (#5358, #5327; here a 16-byte zero buffer and
+  bindIndexBuffer2 with the mapped size), 1a0f5be8 undefined S# fields (#5137; here clamped rather
+  than replaced), 43e4c470 submit waits on all stages (#5231, the scheduler part).

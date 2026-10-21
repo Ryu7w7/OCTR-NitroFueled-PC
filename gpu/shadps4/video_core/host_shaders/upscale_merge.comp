@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: writes the upscaler's color back into the game's scene color, keeping the game's alpha
+// (post-processing reads data from it). Debug modes: 1 shows the reactive mask in red,
+// 2 the motion vectors given to the upscaler (red/green: |x|/|y|, 8 render pixels = full;
+// blue: the pixel has an object motion vector from its vertices, not camera motion).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D upscaled;
+layout(binding = 1, rgba16f) uniform image2D scene;
+layout(binding = 2, r8) uniform readonly image2D reactive;
+layout(binding = 3) uniform texture2D motion;  // render size, pixels
+layout(binding = 4) uniform texture2D objects; // render size, b = object vector written
+
+layout(push_constant) uniform Params {
+    uint mode;
+};
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(scene)))) {
+        return;
+    }
+    const vec4 original = imageLoad(scene, pixel);
+    vec3 color = imageLoad(upscaled, pixel).rgb;
+    if (mode == 1) {
+        const float mask = imageLoad(reactive, min(pixel * imageSize(reactive) / imageSize(scene), imageSize(reactive) - 1)).r;
+        color = mix(color * 0.25, vec3(4.0, 0.0, 0.0), mask);
+    } else if (mode == 2) {
+        const ivec2 size = textureSize(motion, 0);
+        const ivec2 source = min(pixel * size / imageSize(scene), size - 1);
+        const vec2 mv = texelFetch(motion, source, 0).rg;
+        const ivec2 object_size = textureSize(objects, 0);
+        const bool object = object_size == size && texelFetch(objects, source, 0).b > 0.99;
+        const float luma = dot(min(color, vec3(1.0)), vec3(0.3, 0.6, 0.1));
+        color = vec3(luma * 0.3) + vec3(clamp(abs(mv) / 8.0, 0.0, 1.0), object ? 0.6 : 0.0);
+    }
+    imageStore(scene, pixel, vec4(color, original.a));
+}

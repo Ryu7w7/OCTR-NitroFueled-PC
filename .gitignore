@@ -1,0 +1,54 @@
+out/
+__pycache__/
+user/
+*.mp4
+bbport.ini
+pgo/
+*.png
+!/art/ctr-hero.png
+!/art/ctr-logo.png
+!/art/ctr-menu-background.png
+!/launcher/io.github.sacredfire.Launcher.png
+# The Steam artwork the Windows package ships (SteamGridDB, like art/).
+!/packaging/windows/steamgrid/*.png
+last_run.log
+dist/
+packaging/runtime-paths.nix
+vkd3d-proton.cache
+perf.data
+# Local leftovers: patch backups, generated SPIR-V, analysis outputs, test saves and routes
+*.orig
+/*.spv
+/1060/
+/docs/savedata_route/
+/docs/route*.txt
+/docs/route_run.log
+mods.json
+patches.json
+# Local: game logs, messages and archives from users, internal plans
+/logs/
+/message*.txt
+/*.zip
+/docs/ISSUE_ACTION_PLAN_*.md
+
+# SacredFire: game files and generated output, never committed
+orig/
+out/
+user/
+pgo/
+logs/
+bbport.ini
+# Generated from the game's executable by tools/re/gen_gnm_table.py; never committed
+gpu/shim/bbport_gnm_table.inc
+# Alternate builds set aside (out.arch, out.nix: see packaging/appimage.sh)
+/out.*/
+*.kate-swp
+# Windows launcher: the player's DLC packages, save backups and launcher settings; game folders
+/dlc/
+/backups/
+/launcher.ini
+# The installation's secret that owns its online nicknames (run.py / launcher): never shared
+/ryunet_online.key
+/widescreen/
+/CUSA13795*/
+*.pkg

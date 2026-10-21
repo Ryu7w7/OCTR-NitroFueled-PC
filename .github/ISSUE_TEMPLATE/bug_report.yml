@@ -1,0 +1,67 @@
+name: Bug report
+description: The game crashes, freezes, renders wrong or does not start
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Never attach game files** (eboot.bin, sce_module, saves, dumps or anything
+        from the game folder); issues containing them are closed. Logs and screenshots are what we need.
+  - type: input
+    id: version
+    attributes:
+      label: SacredFire version
+      description: Release name, AppImage file name, or `git rev-parse --short HEAD` for a checkout.
+      placeholder: v0.1 / SacredFire-x86_64.AppImage (title bar shows the version) / 4c5f8cf
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How do you run it?
+      options:
+        - AppImage (launcher)
+        - AppImage --play (Steam / game mode)
+        - From source, launcher
+        - From source, run.sh
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Machine
+      description: Distribution, GPU and driver (Mesa/RADV version or NVIDIA driver), CPU, RAM.
+      placeholder: Steam Deck LCD, SteamOS 3.7, Mesa 25.x RADV
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, what happened instead. Where in the game (menu, hub, which track, split screen).
+    validations:
+      required: true
+  - type: textarea
+    id: game-check
+    attributes:
+      label: Game check
+      description: The launcher's Game row or the first lines of run.sh's output ("Game profile:" and any "Unsupported game files" message). The dump must be CUSA13795 with update 1.21 merged in.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        The launcher's Log tab (or the log file from "Save the log to a file"), or run.sh's output. For
+        rendering or performance issues run with `BB_FRAME_STATS=1` and include the `Frame stats:` lines;
+        for crashes include everything from `STOP` or `Guest fault` to the end. Paste as text or attach a .log/.txt file.
+      render: text
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings
+      description: Game patches, PS4 Pro mode, controller(s), anything set in bbport.ini or as extra environment.
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+      description: Drag images here. For rendering issues a screenshot of the same spot on a PS4 or in shadPS4 helps.

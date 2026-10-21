@@ -1,0 +1,6 @@
+#include <winuser.h>
+// UTF-8 paths, long paths and DPI awareness (sacredfire.manifest). The file's icon is the
+// project's emblem (icons/ctr.ico); the game window shows the game's own icon (sce_sys/icon0.png),
+// set at run time.
+1 ICON "icons/ctr.ico"
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "sacredfire.manifest"

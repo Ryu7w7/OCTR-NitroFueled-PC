@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Crash Team Racing Nitro-Fueled (CUSA13795) 1.21 patches, from
+     https://github.com/illusionyy/PS-Game-Patch (patches/xml/CrashTeamRacingUS-Orbis.xml),
+     authors illusion and TroyWarez. Selected in the in-game menu (bbport.ini patch_* keys),
+     compiled by scripts/patches.py into out/patches.bin at start.
+     SacredFire change: the Resolution Patch address is 0x017a9db4, not the published 0x017a9db3.
+     The instruction there is a two-byte jne (0F 85) on the "is PS4 Pro" flag; 0x84 belongs on
+     its second byte (jne to je). Written on the first byte it becomes "test al, [rbp+0x88f]"
+     and the game faults at boot (docs/sacredfire/08-patches.md).
+     SacredFire addition: each line carries a Signature of the code around it (relative jumps
+     and RIP offsets masked), so patches.py also finds it in the 1.21 build for firmware 6.72+,
+     whose code sits at other addresses. The addresses are the firmware 5.05 build's. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="60 FPS Unlock"
+              Note="Version 2.0 now removes double buffer vsync."
+              Author="illusion"
+              PatchVer="2.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x017a9d90" Value="41899688040000"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x5"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Disable Motion Blur"
+              Author="illusion"
+              PatchVer="1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00ef0f52" Value="9090909090"
+                  Signature="41 80 bc 24 50 01 00 00 00 75 10 49 8b b4 24 68 01 00 00 4c 89 e7 e8 ?? ?? ?? ?? c4 c1 7a 10 86 c0 03 00 00" SignatureOffset="0x16"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Resolution Patch (1080p for PS4 Pro)"
+              Author="TroyWarez"
+              PatchVer="1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x017a9db4" Value="84"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x29"/>
+        </PatchList>
+    </Metadata>
+</Patch>

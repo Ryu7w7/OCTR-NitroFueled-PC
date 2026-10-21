@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Native-resolution TAA: unjitter, motion reprojection, depth rejection and neighborhood
+// clipping. History contains scene RGB and depth in alpha; HUD never enters the history.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D color_tex;
+layout(binding = 1) uniform sampler2D depth_tex;
+layout(binding = 2) uniform sampler2D motion_tex;
+layout(binding = 3) uniform sampler2D history_tex;
+layout(binding = 4, rgba16f) uniform writeonly image2D result_img;
+layout(binding = 5, rgba32f) uniform writeonly image2D next_history;
+layout(binding = 6, rgba16f) uniform writeonly image2D diagnostic_img;
+layout(push_constant) uniform Params {
+    vec2 jitter;
+    uint reset_history;
+    uint pad; // bits 0-7: diagnostic output (BB_TAA_DIAGNOSTICS); 8-12: A/B switches
+    vec4 proj;
+    vec4 prev_proj;
+    vec4 previous_z;
+};
+
+vec4 fetchLinear(sampler2D tex, vec2 position) {
+    ivec2 p = ivec2(floor(position));
+    vec2 f = fract(position);
+    ivec2 bound = textureSize(tex, 0) - 1;
+    return mix(mix(texelFetch(tex, clamp(p, ivec2(0), bound), 0),
+                   texelFetch(tex, clamp(p + ivec2(1,0), ivec2(0), bound), 0), f.x),
+               mix(texelFetch(tex, clamp(p + ivec2(0,1), ivec2(0), bound), 0),
+                   texelFetch(tex, clamp(p + ivec2(1,1), ivec2(0), bound), 0), f.x), f.y);
+}
+
+// Compare depths in the SAME camera, with tolerance proportional to view distance.
+// Raw device depth is nonlinear; a constant epsilon merges unrelated distant surfaces.
+float expectedPreviousDepth(float depth, vec2 source, ivec2 size) {
+    if (depth >= 1.0) return 1.0;
+    vec2 uv = (source + 0.5 - jitter) / vec2(size);
+    vec2 ndc = uv * 2.0 - 1.0; // +y down the screen, proj carries the sign (camera_motion.comp)
+    float z = proj.w / min(depth - proj.z, -1e-8);
+    float prev_z = dot(previous_z, vec4(ndc * z / proj.xy, z, 1.0));
+    if (prev_z <= 0.0) return -1.0;
+    return prev_proj.z + prev_proj.w / prev_z;
+}
+
+// Depth must be unjittered too. A nearest sample on a sloping surface moves in depth
+// as Halton changes, even with a stationary camera. Use the smaller one-sided slope
+// to avoid extrapolating across a silhouette or a foreground/background discontinuity.
+float depthSlope(float depth, ivec2 source, ivec2 axis, ivec2 size) {
+    float left = depth - texelFetch(depth_tex, clamp(source - axis, ivec2(0), size-1), 0).r;
+    float right = texelFetch(depth_tex, clamp(source + axis, ivec2(0), size-1), 0).r - depth;
+    float slope = abs(left) < abs(right) ? left : right;
+    return abs(slope) <= max(2e-7, abs(proj.z-depth)*0.1) ? slope : 0.0;
+}
+
+// Blending and neighbourhood statistics in a tonemapped space: a few very bright HDR pixels
+// (highlights, sparks, sun on water) otherwise dominate the averages and flicker.
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 tonemap(vec3 c) { c = max(c, vec3(0.0)); return c / (1.0 + luma(c)); }
+vec3 untonemap(vec3 c) { return c / max(1.0 - luma(c), 1e-4); }
+vec3 toYCoCg(vec3 c) {
+    return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)),
+                dot(c, vec3(-0.25, 0.5, -0.25)));
+}
+vec3 fromYCoCg(vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
+
+// Moves `history` towards `center` until it is inside the box (clamping per channel instead
+// shifts its hue and changes with every jitter phase).
+vec3 clipToBox(vec3 history, vec3 center, vec3 lo, vec3 hi) {
+    vec3 extent = max(0.5 * (hi - lo), vec3(1e-5));
+    vec3 offset = history - 0.5 * (hi + lo);
+    vec3 units = abs(offset / extent);
+    float m = max(units.x, max(units.y, units.z));
+    return m > 1.0 ? 0.5 * (hi + lo) + offset / m : history;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(result_img);
+    if (any(greaterThanEqual(p, size))) return;
+    const uint diag = pad & 0xffu, variant = pad >> 8;
+    vec2 current_pos = vec2(p) + jitter;
+    ivec2 color_source = clamp(ivec2(floor(current_pos + 0.5)), ivec2(0), size - 1);
+    ivec2 source = color_source;
+    // Neighbourhood of the current pixel: the RGB min/max box (history clamp), and for the
+    // optional techniques below its tonemapped YCoCg box, moments and a jitter-aware 3x3
+    // reconstruction (a Blackman-Harris fit, as in UE4).
+    vec3 rgb_lo = vec3(1e9), rgb_hi = vec3(-1e9);
+    vec3 filtered = vec3(0.0), moment1 = vec3(0.0), moment2 = vec3(0.0);
+    vec3 lo = vec3(1e9), hi = vec3(-1e9);
+    float filter_weight = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            ivec2 q = clamp(color_source + ivec2(x,y), ivec2(0), size - 1);
+            vec3 c = texelFetch(color_tex, q, 0).rgb;
+            if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+            rgb_lo = min(rgb_lo, c);
+            rgb_hi = max(rgb_hi, c);
+            vec2 d = vec2(color_source + ivec2(x,y)) - current_pos;
+            float w = exp(-2.29 * dot(d, d));
+            vec3 t = tonemap(c);
+            filtered += t * w;
+            filter_weight += w;
+            vec3 s = toYCoCg(t);
+            moment1 += s;
+            moment2 += s * s;
+            lo = min(lo, s);
+            hi = max(hi, s);
+        }
+    vec3 current = (variant & 8u) != 0u ? untonemap(filtered / filter_weight)
+                                         : fetchLinear(color_tex, current_pos).rgb;
+    rgb_lo = min(rgb_lo, current);
+    rgb_hi = max(rgb_hi, current);
+    lo = min(lo, toYCoCg(tonemap(current)));
+    hi = max(hi, toYCoCg(tonemap(current)));
+    float depth = texelFetch(depth_tex, source, 0).r;
+    // Dilate foreground depth/motion, as temporal upscalers do. Thin geometry can
+    // alternate with background under jitter; a 3x3 nearest surface remains trackable.
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            ivec2 candidate = clamp(color_source+ivec2(x,y),ivec2(0),size-1);
+            float candidate_depth = texelFetch(depth_tex,candidate,0).r;
+            if (candidate_depth < depth) {
+                depth = candidate_depth;
+                source = candidate;
+            }
+        }
+    if (depth < 1.0) {
+        vec2 slope = vec2(depthSlope(depth,source,ivec2(1,0),size),
+                          depthSlope(depth,source,ivec2(0,1),size));
+        depth = clamp(depth + dot(current_pos-vec2(source),slope),0.0,1.0-1e-7);
+    }
+    vec3 result = current;
+    float history_weight = 0.0;
+    vec3 diagnostic_history = current;
+    vec3 diagnostic_sample = current;
+    vec3 diagnostic_direct = current;
+    float diagnostic_displacement = 0.0;
+    // Do not sample undefined history on reset, including the first dispatch after resizing.
+    if (reset_history == 0) {
+        vec2 motion = texelFetch(motion_tex, source, 0).rg;
+        vec2 previous_pos = vec2(p) + motion;
+        if (diag != 0) {
+            diagnostic_direct = texelFetch(history_tex,p,0).rgb;
+            diagnostic_displacement = length(previous_pos-vec2(p));
+        }
+        if (!any(isnan(motion)) && !any(isinf(motion)) &&
+            all(greaterThanEqual(previous_pos, vec2(0))) &&
+            all(lessThanEqual(previous_pos, vec2(size - 1)))) {
+            float expected_depth = expectedPreviousDepth(depth, current_pos, size);
+            // Validate each bilinear tap separately: interpolating foreground/background
+            // depth invents a surface and causes history rejection along thin edges.
+            // Separate the integer pixel from the subpixel motion before interpolation.
+            // Adding tiny motion to a large coordinate first loses fractional precision.
+            vec2 integer_motion = floor(motion);
+            ivec2 base = p + ivec2(integer_motion);
+            vec2 fraction = motion - integer_motion;
+            vec3 history_rgb = vec3(0.0);
+            float coverage = 0.0;
+            float threshold = max(2e-7, abs(prev_proj.z - expected_depth) * 0.02);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x) {
+                    vec4 tap = texelFetch(history_tex,
+                        clamp(base + ivec2(x,y), ivec2(0), size - 1), 0);
+                    float w = (x == 0 ? 1.0 - fraction.x : fraction.x) *
+                              (y == 0 ? 1.0 - fraction.y : fraction.y);
+                    bool same_surface = depth >= 1.0 ? tap.a >= 1.0 :
+                        tap.a < 1.0 && abs(tap.a - expected_depth) <= threshold;
+                    // When nothing moves, history in front of the current surface stays:
+                    // a thin surface (railing, window bars) that this jitter phase missed
+                    // otherwise blinks with the jitter sequence (static-camera flicker p99.9
+                    // -45%, 2026-10-03). An object that moved away is bounded by the colour clip
+                    // below, as in TAA without depth rejection. Variant bit 16: the old rule.
+                    if (!same_surface && (variant & 16u) == 0u && length(motion) < 1.0 &&
+                        tap.a < expected_depth && expected_depth < 1.0)
+                        same_surface = true;
+                    if (same_surface && !any(isnan(tap)) && !any(isinf(tap))) {
+                        history_rgb += tap.rgb * w;
+                        coverage += w;
+                    }
+                }
+            // Conservatively discard newly revealed surfaces. RGB clipping handles animated
+            // objects lacking object vectors, transparent effects and lighting changes.
+            if (expected_depth >= 0.0 && coverage > 0.01) {
+                diagnostic_sample = history_rgb / coverage;
+                float moving = clamp(length(motion) / 8.0, 0.0, 1.0);
+                vec3 clipped;
+                if ((variant & 2u) != 0u) {
+                    // Clip towards the box centre in tonemapped YCoCg (no hue shift), within
+                    // mean +- gamma * sigma with variance clipping (Salvi).
+                    vec3 box_lo = lo, box_hi = hi;
+                    if ((variant & 4u) != 0u) {
+                        vec3 mean = moment1 / 9.0;
+                        vec3 sigma = sqrt(max(moment2 / 9.0 - mean * mean, vec3(0.0)));
+                        float gamma = mix(1.25, 0.9, moving);
+                        box_lo = max(lo, mean - gamma * sigma);
+                        box_hi = min(hi, mean + gamma * sigma);
+                    }
+                    clipped = untonemap(fromYCoCg(clipToBox(toYCoCg(tonemap(diagnostic_sample)),
+                                                            vec3(0.0), box_lo, box_hi)));
+                } else {
+                    clipped = clamp(diagnostic_sample, rgb_lo, rgb_hi);
+                }
+                diagnostic_history = clipped;
+                // Reliable history suppresses subpixel shimmer even on distant geometry.
+                float weight = mix(0.98, 0.85, moving) * coverage;
+                history_weight = weight;
+                // Tonemapped blending: a few very bright HDR samples otherwise dominate.
+                result = (variant & 1u) != 0u
+                             ? untonemap(mix(tonemap(current), tonemap(clipped), weight))
+                             : mix(current, clipped, weight);
+            }
+        }
+    }
+    // Optional diagnostic alpha; normal output remains opaque.
+    vec3 output_color = diag == 2 ? current : diag == 3 ? diagnostic_history : result;
+    imageStore(result_img, p, vec4(output_color, diag != 0 ? history_weight : 1.0));
+    imageStore(next_history, p, vec4(result, depth));
+    if (diag != 0) imageStore(diagnostic_img,p,
+        vec4(diag == 2 ? diagnostic_direct : diagnostic_history,
+             diag == 2 ? diagnostic_displacement : history_weight));
+}
