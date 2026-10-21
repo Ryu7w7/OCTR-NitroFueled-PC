@@ -76,7 +76,7 @@ enum {
 /* The next notice to show, 0 when none. */
 int runtime_friends_take_event(char name[RF_NAME]);
 
-/* The next message from the server's administrators (admin panel), 0 when none. The server's
+/* The next message from the server's administrators, 0 when none. The server's
  * announcement goes to the game's announcement banner instead (ryunet_announce.txt). */
 #define RF_MESSAGE 256
 int runtime_friends_take_message(char text[RF_MESSAGE]);

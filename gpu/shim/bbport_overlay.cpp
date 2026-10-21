@@ -411,7 +411,7 @@ void PollFriends() {
         privacy_sent = true;
         runtime_friends_set_hidden(s.friends_hide_me);
     }
-    // The administrators' messages (the server's admin panel): always shown, whatever the
+    // The server administrators' messages: always shown, whatever the
     // friends options say.
     char message[RF_MESSAGE];
     while (runtime_friends_take_message(message)) {
@@ -495,7 +495,7 @@ void CommunityDiscordLine(const char* why) {
     if (ImGui::SmallButton(BbSettings::MenuText("Copy link", "Копировать"))) SDL_SetClipboardText(kCommunityDiscord);
 }
 
-// Friends tab > Report a player: to the server's administrators (admin panel).
+// Friends tab > Report a player: to the server's administrators.
 void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
     static int reason = 0;
     static char comment[RF_REPORT_COMMENT] = "";
