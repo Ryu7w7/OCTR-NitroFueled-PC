@@ -27,6 +27,14 @@ int main() {
         const std::uint8_t other[9] = {21, 2, 0, 1, 2, 3, 4, 5, 6};
         assert(!ParseServerReply(other, sizeof(other), ip, port));
     }
+    // RyuNET: the NAT test reply, 21, 2, 0, client 203.0.113.7:3074, server 198.51.100.1:3074.
+    {
+        const std::uint8_t reply[15] = {21, 2, 0, 203, 0, 113, 7, 0x02, 0x0C, 198, 51, 100, 1, 0x02, 0x0C};
+        assert(IsServerTestReply(reply, sizeof(reply)));
+        assert(!IsServerTestReply(reply, 9));
+        const std::uint8_t address[15] = {31, 2, 0, 203, 0, 113, 7, 0x02, 0x0C};
+        assert(!IsServerTestReply(address, sizeof(address)));
+    }
     // STUN: a Binding request, and a success response with XOR-MAPPED-ADDRESS 198.51.100.20:40000.
     {
         const std::uint8_t tx[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};

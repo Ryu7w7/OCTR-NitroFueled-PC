@@ -34,14 +34,19 @@ def valid_server(server):
     return bool(server) and len(server) <= 64 and set(server) <= allowed
 
 
-def request(data_dir, server, path, form=None, timeout=3.0):
+def request(data_dir, server, path, form=None, timeout=3.0, register=False):
     """The answer's JSON object, or None when the server could not be reached or answered
-    something else. form: a dict, sent as application/x-www-form-urlencoded (a POST)."""
+    something else. form: a dict, sent as application/x-www-form-urlencoded (a POST). The request
+    is signed with this installation's key (run.proof_header); register also sends the key's hash,
+    which a Discord link takes for a new installation."""
     host, port = split_server(server)
     headers = {"User-Agent": "SacredFire launcher"}
     key = run.online_key(Path(data_dir))
     if key:
-        headers["X-RyuNET-Key"] = run.server_key(key, host)
+        khash = run.key_hash(run.server_key(key, host))
+        headers["X-RyuNET-Proof"] = run.proof_header(khash, "POST" if form is not None else "GET", path)
+        if register:
+            headers["X-RyuNET-Key-Hash"] = khash
     body = None
     if form is not None:
         body = urllib.parse.urlencode(form).encode("utf-8")
@@ -92,7 +97,7 @@ def discord_link(data_dir, server, nick, code, redirect_uri):
     """Trades a Discord authorization code for a link of nick (or, with no nick, recovers the
     account's nickname). {"status": linked|recovered|own_nick|no_nick|other_nick|taken|..., ...}"""
     return request(data_dir, server, "/ryunet/discord/link",
-                   {"nick": nick, "code": code, "redirect_uri": redirect_uri}, timeout=25)
+                   {"nick": nick, "code": code, "redirect_uri": redirect_uri}, timeout=25, register=True)
 
 
 def discord_unlink(data_dir, server, nick):

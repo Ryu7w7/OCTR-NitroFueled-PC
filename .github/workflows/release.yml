@@ -19,6 +19,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      # scripts/isa_rewrite.py scans the linked image with iced-x86 (docs/sacredfire/15-isa-rewrite.md).
+      - name: Python packages
+        run: pip install iced-x86
       # Tests needing the executable run separately with `bash build.sh --test`.
       - name: Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v

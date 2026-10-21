@@ -43,6 +43,10 @@ int32_t runtime_http_set_epoll(void *handle, int32_t req, void *user_data);
 int32_t runtime_http_unset_epoll(void *handle, int32_t req);
 int32_t runtime_http_wait_request(void *handle, void *events, int32_t max_events, int64_t timeout_usec);
 
+/* The port's own signed requests to the RyuNET server (runtime_friends.c). */
+int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size);
+int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size);
+
 #ifdef __cplusplus
 }
 #endif

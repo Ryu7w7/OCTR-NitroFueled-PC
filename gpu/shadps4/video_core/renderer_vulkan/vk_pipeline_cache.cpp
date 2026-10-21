@@ -25,6 +25,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/bb_hud_scale.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
@@ -1050,6 +1051,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
+    } else if (const auto hud = BbHud::ForModule(info.pgm_hash, perm_idx, spv)) {
+        module = CompileSPV(*hud, instance.GetDevice()); // the cache keeps the shader as it is
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }

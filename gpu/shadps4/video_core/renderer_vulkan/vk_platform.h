@@ -21,6 +21,14 @@ namespace Vulkan {
 
 constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
 
+// bbport: exit code of a GPU, driver or Vulkan loader below TargetVulkanApiVersion. Not a crash:
+// the launchers explain it in words instead of reporting code 23.
+constexpr int UnsupportedVulkanExitCode = 24;
+
+// bbport: logs what lacks Vulkan 1.3 (the loader or a device) and its version, then exits with
+// UnsupportedVulkanExitCode.
+[[noreturn]] void StopUnsupportedVulkan(std::string_view what, u32 version);
+
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,

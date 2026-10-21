@@ -13,6 +13,8 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -255,6 +257,21 @@ std::vector<const char*> GetInstanceLayers(bool enable_validation, bool enable_c
     return layers;
 }
 
+void StopUnsupportedVulkan(std::string_view what, u32 version) {
+    const std::string have = version ? fmt::format("only Vulkan {}.{}", VK_VERSION_MAJOR(version),
+                                                   VK_VERSION_MINOR(version))
+                                     : std::string("no Vulkan");
+    LOG_CRITICAL(Render_Vulkan, "Vulkan {}.{} is required, but {} has {}",
+                 VK_VERSION_MAJOR(TargetVulkanApiVersion), VK_VERSION_MINOR(TargetVulkanApiVersion),
+                 what, have);
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "STOP: this GPU or its driver does not support Vulkan 1.3, which the game needs "
+                 "(%.*s: %s)\n",
+                 int(what.size()), what.data(), have.c_str());
+    std::_Exit(UnsupportedVulkanExitCode);
+}
+
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,
                                   bool enable_crash_diagnostic) {
     LOG_INFO(Render_Vulkan, "Creating vulkan instance");
@@ -281,10 +298,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
             : vk::ResultValue(vk::Result::eSuccess, VK_API_VERSION_1_0);
     ASSERT_MSG(available_version_result == vk::Result::eSuccess,
                "Failed to query Vulkan API version: {}", vk::to_string(available_version_result));
-    ASSERT_MSG(available_version >= TargetVulkanApiVersion,
-               "Vulkan {}.{} is required, but only {}.{} is supported by instance!",
-               VK_VERSION_MAJOR(TargetVulkanApiVersion), VK_VERSION_MINOR(TargetVulkanApiVersion),
-               VK_VERSION_MAJOR(available_version), VK_VERSION_MINOR(available_version));
+    if (available_version < TargetVulkanApiVersion) {
+        StopUnsupportedVulkan("the Vulkan loader (vulkan-1)", available_version);
+    }
 
     const auto layers = GetInstanceLayers(enable_validation, enable_crash_diagnostic);
     auto extensions = GetLayerExtensions(GetInstanceExtensions(window_type, true), layers);

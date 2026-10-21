@@ -21,6 +21,7 @@
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <tlhelp32.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <cctype>
@@ -138,8 +139,38 @@ std::string FormatBytes(std::uintmax_t bytes) {
 
 const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
+// The game found no Vulkan 1.3 (GPU, driver or loader): UnsupportedVulkanExitCode in vk_platform.h.
+constexpr DWORD kUnsupportedGpuCode = 24;
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
+// The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
+// cards, colours and heading font; its icon-font glyphs are left out (this launcher has none).
+const ImVec4 kText{0.92f, 0.93f, 0.96f, 1.0f};
+const ImVec4 kBlue{0.30f, 0.64f, 1.0f, 1.0f};
+const ImVec4 kCard{0.118f, 0.133f, 0.188f, 1.0f};
+const ImVec4 kFrame{0.149f, 0.169f, 0.231f, 1.0f};
+const ImVec4 kBorder{0.173f, 0.192f, 0.259f, 1.0f};
+#define ICON_INFO ""
+#define ICON_CHECK ""
+#define ICON_FOLDER ""
+#define ICON_UNDO ""
+#define ICON_STAR ""
+ImFont* g_font_heading = nullptr;
+ImU32 Col(const ImVec4& c, float alpha = 1.0f) { return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, c.w * alpha)); }
+/// A rounded panel that grows with its content.
+void BeginCard(const char* id) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+    ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f * g_ui_scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * g_ui_scale, 12.0f * g_ui_scale));
+    ImGui::BeginChild(id, ImVec2(0, 0),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders);
+}
+void EndCard() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
 
 // ---------------------------------------------------------------------------------------------
 // Language: Spanish or English, chosen in the launcher (default: Windows' language).
@@ -653,7 +684,6 @@ struct App {
     Ini game;      // bbport.ini
     char online_server_buf[128] = "octr.ryu7w7.xyz";
     char online_name_buf[32] = "";
-    char online_friends_buf[512] = "";
 
     // Game folders.
     fs::path game_dir, base_dir, update_dir;
@@ -747,13 +777,10 @@ void SyncOnlineBuffers() {
         a.game.Set("online_server", srv);
     }
     std::string nick = a.game.Get("online_name", a.game.Get("user_name"));
-    std::string friends = a.game.Get("online_friends", "");
     std::strncpy(a.online_server_buf, srv.c_str(), sizeof(a.online_server_buf) - 1);
     a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
     std::strncpy(a.online_name_buf, nick.c_str(), sizeof(a.online_name_buf) - 1);
     a.online_name_buf[sizeof(a.online_name_buf) - 1] = '\0';
-    std::strncpy(a.online_friends_buf, friends.c_str(), sizeof(a.online_friends_buf) - 1);
-    a.online_friends_buf[sizeof(a.online_friends_buf) - 1] = '\0';
 }
 
 std::string CurrentNick() { return Trim(g_app.game.Get("online_name", g_app.game.Get("user_name"))); }
@@ -861,6 +888,9 @@ struct NickCheck {
         bool linked = false;          // the nickname is linked to a Discord account
         bool link_available = false;  // the server can link Discord accounts
         std::string discord;          // the linked account's name (only for our own nickname)
+        std::string banned;           // the ban's reason when this player or address is banned
+        std::string ban_kind;         // "player" or "ip"
+        long long ban_until = 0;      // unix time; 0: permanent
     };
     std::mutex mutex;
     std::map<std::string, Result> results;  // "server|nick" -> answer
@@ -887,42 +917,74 @@ void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& po
 
 /// What one server sees of the installation's key: HMAC-SHA256(key, host), as run.py sends it.
 /// Every server gets a different value, so none can reuse it on another to take a nickname.
-std::string ServerKey(const std::string& host) {
-    const std::string key = OnlineKey();
-    if (key.size() != 64) return {};
-    unsigned char raw[32];
-    for (int i = 0; i < 32; ++i) raw[i] = static_cast<unsigned char>(std::stoi(key.substr(i * 2, 2), nullptr, 16));
-    const std::string msg = Lower(Trim(host));
-    unsigned char mac[32];
+/// SHA-256 of msg (HMAC-SHA256 with key when there is one), in lower-case hex; "" on failure.
+std::string Sha256Hex(const std::string& msg, const std::string& key = {}) {
+    unsigned char out[32];
     bool ok = false;
     BCRYPT_ALG_HANDLE alg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0) {
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                    key.empty() ? 0 : BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0) {
         BCRYPT_HASH_HANDLE hash = nullptr;
-        if (BCryptCreateHash(alg, &hash, nullptr, 0, raw, sizeof raw, 0) == 0) {
+        // No secret at all for a plain hash: a non-null pointer, even with length 0, makes
+        // BCryptCreateHash fail (STATUS_INVALID_PARAMETER), and every request went unsigned.
+        PUCHAR secret = key.empty() ? nullptr : reinterpret_cast<PUCHAR>(const_cast<char*>(key.data()));
+        if (BCryptCreateHash(alg, &hash, nullptr, 0, secret, ULONG(key.size()), 0) == 0) {
             ok = BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(msg.data())), ULONG(msg.size()), 0) == 0 &&
-                 BCryptFinishHash(hash, mac, sizeof mac, 0) == 0;
+                 BCryptFinishHash(hash, out, sizeof out, 0) == 0;
             BCryptDestroyHash(hash);
         }
         BCryptCloseAlgorithmProvider(alg, 0);
     }
     if (!ok) return {};
     static const char kHex[] = "0123456789abcdef";
-    std::string out;
-    for (const unsigned char b : mac) {
-        out += kHex[b >> 4];
-        out += kHex[b & 15];
+    std::string hex;
+    for (const unsigned char b : out) {
+        hex += kHex[b >> 4];
+        hex += kHex[b & 15];
     }
-    return out;
+    return hex;
 }
 
-/// A request to the RyuNET server's HTTP port, with this installation's key for that server.
+std::string ServerKey(const std::string& host) {
+    const std::string key = OnlineKey();
+    if (key.size() != 64) return {};
+    std::string raw(32, '\0');
+    for (int i = 0; i < 32; ++i) raw[size_t(i)] = static_cast<char>(std::stoi(key.substr(i * 2, 2), nullptr, 16));
+    return Sha256Hex(Lower(Trim(host)), raw);
+}
+
+/// What the server stores of the server key (its keyHash): the key requests are signed with.
+std::string ServerKeyHash(const std::string& host) {
+    const std::string key = ServerKey(host);
+    return key.empty() ? std::string() : Sha256Hex(key);
+}
+
+/// X-RyuNET-Proof for one request (the server's nick_proof.go, run.py proof_header): the key
+/// never crosses the network, and the signature is good once, for a few minutes.
+std::string ProofHeader(const std::string& key_hash, const char* method, const std::string& target) {
+    unsigned char raw[16];
+    if (key_hash.empty() || BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};
+    static const char kHex[] = "0123456789abcdef";
+    std::string nonce;
+    for (const unsigned char b : raw) {
+        nonce += kHex[b >> 4];
+        nonce += kHex[b & 15];
+    }
+    const std::string ts = std::to_string(static_cast<long long>(std::time(nullptr)));
+    const std::string mac = Sha256Hex(ts + "\n" + nonce + "\n" + method + "\n" + target, key_hash);
+    return mac.empty() ? std::string() : "1." + ts + "." + nonce + "." + mac;
+}
+
+/// A request to the RyuNET server's HTTP port, signed with this installation's key for that
+/// server; register also sends the key's hash (a Discord link takes it for a new installation).
 /// The body, or "" when the server could not be reached. Called from background threads.
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
-                        const std::string& form = {}, int timeout_ms = 3000) {
+                        const std::string& form = {}, int timeout_ms = 3000, bool register_key = false) {
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
-    const std::string key = ServerKey(host);
+    const std::string key_hash = ServerKeyHash(host);
+    const std::string proof = ProofHeader(key_hash, Narrow(method).c_str(), Narrow(path));
     std::string body;
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -933,7 +995,8 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
                                               WINHTTP_DEFAULT_ACCEPT_TYPES, 0)
                          : nullptr;
     std::wstring headers;
-    if (!key.empty()) headers += L"X-RyuNET-Key: " + Widen(key) + L"\r\n";
+    if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\n";
+    if (register_key && !key_hash.empty()) headers += L"X-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
     if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
     if (req && WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
                                   headers.empty() ? 0 : DWORD(-1),
@@ -977,6 +1040,9 @@ bool JsonNumber(const std::string& body, const char* key, int& value) {
     return true;
 }
 
+// Defined with the Discord join secrets below.
+std::string JsonText(const std::string& body, const char* key);
+
 /// A true/false field of a small flat JSON answer.
 bool JsonBool(const std::string& body, const char* key) {
     return body.find(std::string("\"") + key + "\":true") != std::string::npos;
@@ -991,6 +1057,10 @@ NickCheck::Result AskNickStatus(const std::string& server, const std::string& ni
     r.linked = JsonBool(body, "linked");
     r.link_available = JsonBool(body, "discord_link");
     r.discord = JsonField(body, "discord");
+    r.banned = JsonText(body, "banned");
+    r.ban_kind = JsonField(body, "ban_kind");
+    if (const auto at = body.find("\"ban_until\":"); at != std::string::npos)
+        r.ban_until = std::strtoll(body.c_str() + at + 12, nullptr, 10);
     return r;
 }
 
@@ -1047,9 +1117,41 @@ NickCheck::Result NickInfo() {
     return it == g_nick_check.results.end() ? NickCheck::Result{} : it->second;
 }
 
+constexpr const wchar_t* kCommunityDiscord = L"https://discord.gg/PAT5SJzdXw";
+
+/// The community's Discord (bugs, questions, ban appeals): a line and a button.
+void CommunityDiscordLine(const char* why) {
+    ImGui::TextColored(kGrey, "%s", why);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Abrir Discord", "Open Discord"))) OpenInShell(kCommunityDiscord);
+}
+
+/// This player's ban, as the server's nickname check tells it (nothing when not banned).
+bool BanNotice() {
+    const NickCheck::Result info = NickInfo();
+    if (info.banned.empty()) return false;
+    ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+    ImGui::TextWrapped("%s", info.ban_kind == "ip" ? T("Tu conexión (IP) está baneada del online.", "Your connection (IP) is banned from online play.") : T("Tu cuenta está baneada del online.", "Your account is banned from online play."));
+    ImGui::TextWrapped(T("Motivo: %s", "Reason: %s"), info.banned.c_str());
+    if (info.ban_until > 0) {
+        char when[32];
+        const std::time_t t = std::time_t(info.ban_until);
+        std::tm local{};
+        localtime_s(&local, &t);
+        std::strftime(when, sizeof when, "%Y-%m-%d %H:%M", &local);
+        ImGui::TextWrapped(T("Hasta: %s", "Until: %s"), when);
+    } else {
+        ImGui::TextWrapped("%s", T("Duración: permanente", "Duration: permanent"));
+    }
+    ImGui::PopStyleColor();
+    CommunityDiscordLine(T("Si crees que es un error, apela en nuestro Discord.", "If you think it is a mistake, appeal on our Discord."));
+    return true;
+}
+
 /// One line under a nickname field: what the server says about it.
 void NickAvailabilityLine() {
     const std::string s = NickAvailability();
+    if (BanNotice()) return;
     if (s == "?") {
         ImGui::TextColored(kGrey, "%s", T("Comprobando el apodo en el servidor...", "Checking the nickname with the server..."));
     } else if (s == "free") {
@@ -1159,6 +1261,11 @@ std::string NatLabel(const std::string& server, ImVec4& color) {
     }
     color = kGrey;
     if (running) return std::string("NAT: ") + T("comprobando...", "checking...");
+    if (r.replies_blocked || r.error == "server") {
+        color = kRed;
+        return r.replies_blocked ? T("NAT: online bloqueado (¿firewall?)", "NAT: online blocked (firewall?)")
+                                 : T("NAT: el servidor no responde", "NAT: no answer from the server");
+    }
     switch (r.type) {
     case NatCheck::Type::Open: color = kGreen; return T("NAT: tipo 1 (abierto)", "NAT: type 1 (open)");
     case NatCheck::Type::Moderate: color = kGreen; return T("NAT: tipo 2 (moderado)", "NAT: type 2 (moderate)");
@@ -1347,6 +1454,7 @@ void StartGame() {
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
+    SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
     SetEnv(L"BB_DLC", a.launcher.Flag("dlc", true) ? "1" : "0");
     SetEnv(L"BB_DLC_DISABLED", a.launcher.Get("dlc_disabled"));
@@ -2041,6 +2149,7 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
     {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
     // The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+    {"CrashTeamRacingUnlockAllEU.xml/Unlock Everything", "patch_unlock_all"},
     {"CrashTeamRacingEU.xml/60 FPS Unlock", "patch_60fps"},
     {"CrashTeamRacingEU.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
@@ -2323,17 +2432,8 @@ void PlayTab() {
                 std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
                 if (srv.empty()) srv = "octr.ryu7w7.xyz";
                 const std::string nick = CurrentNick().empty() ? std::string("-") : CurrentNick();
-                const std::string friends = a.game.Get("online_friends", "");
-                if (!friends.empty()) {
-                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s  |  %s: %s",
-                                       T("Servidor", "Server"), srv.c_str(),
-                                       T("Apodo", "Nick"), nick.c_str(),
-                                       T("Amigos", "Friends"), friends.c_str());
-                } else {
-                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
-                                       T("Servidor", "Server"), srv.c_str(),
-                                       T("Apodo", "Nick"), nick.c_str());
-                }
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
+                                   T("Servidor", "Server"), srv.c_str(), T("Apodo", "Nick"), nick.c_str());
                 {
                     ImVec4 nat_color;
                     const std::string nat = NatLabel(Trim(srv), nat_color);
@@ -2347,6 +2447,7 @@ void PlayTab() {
                                                   "Whether other players can connect to you directly. Details in the Online "
                                                   "tab. Your IP is not shown."));
                 }
+                if (!NickInfo().banned.empty()) ImGui::TextColored(kRed, "%s", T("Baneado del online: mira la pestaña Online.", "Banned from online play: see the Online tab."));
                 if (const char* problem = NickProblem(CurrentNick()))
                     ImGui::TextColored(kYellow, "%s %s", problem, T("Se te pedirá al pulsar Jugar.", "You will be asked when you press Play."));
             } else {
@@ -2471,6 +2572,16 @@ void PlayTab() {
                                             "The game is running. The first start compiles shaders and takes a while."));
     } else if (a.show_exit) {
         if (a.exit_code == 0 || a.stopped) ImGui::TextColored(kGrey, "%s", T("El juego se cerró.", "The game was closed."));
+        else if (a.exit_code == kUnsupportedGpuCode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", T("Tu tarjeta gráfica o su driver no soporta Vulkan 1.3, que el juego necesita. Actualiza el "
+                                       "driver de la GPU; si ya es el último, la tarjeta es demasiado antigua para Windows (en "
+                                       "Linux, el driver Mesa da Vulkan 1.3 a muchas GPU antiguas).",
+                                       "Your graphics card or its driver doesn't support Vulkan 1.3, which the game needs. Update "
+                                       "the GPU driver; if it is already the latest, the card is too old for Windows (on Linux, "
+                                       "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
+            ImGui::PopStyleColor();
+        }
         else ImGui::TextColored(kRed, T("El juego se cerró con un error (código %lu). Mira el registro abajo o en last_run.log.",
                                         "The game ended with an error (code %lu). See the log below or last_run.log."),
                                 (unsigned long)a.exit_code);
@@ -2574,6 +2685,53 @@ void RenderResCombo() {
                  "PCs (the picture is output at 1080p)."));
 }
 
+// The corrected 21:9 and 32:9 layouts (scripts/widescreen.py, by tcosi): menus, backgrounds and a
+// centered HUD. bbport.ini widescreen_layout / widescreen_output; the in-game ultrawide (the
+// monitor's size without those corrections) is turned off while one is on.
+void WidescreenSettings() {
+    App& a = g_app;
+    std::string mode = a.game.Get("widescreen_layout", "off");
+    static constexpr Choice layouts[] = {{"16:9", "16:9", "off"}, {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
+    if (mode != "21x9" && mode != "32x9") mode = "off";
+    const char* preview = "16:9";
+    for (const auto& c : layouts) if (mode == c.value) preview = T(c.es, c.en);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+    if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
+        for (const auto& c : layouts) {
+            if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
+                mode = c.value;
+                a.game.Set("widescreen_layout", mode);
+                if (mode != "off") {
+                    a.game.Set("ultrawide", "0");
+                    const std::string output = a.game.Get("widescreen_output");
+                    const bool wide = output == "3440x1440" || output == "2560x1080";
+                    if (wide != (mode == "21x9") || output.empty())
+                        a.game.Set("widescreen_output", mode == "21x9" ? "3440x1440" : "5120x1440");
+                }
+                SaveGameIni();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (mode == "off") return;
+    static constexpr Choice wide[] = {{"3440 x 1440", "3440 x 1440", "3440x1440"},
+                                      {"2560 x 1080", "2560 x 1080", "2560x1080"}};
+    static constexpr Choice super[] = {{"5120 x 1440", "5120 x 1440", "5120x1440"},
+                                       {"3840 x 1080", "3840 x 1080", "3840x1080"},
+                                       {"2560 x 720", "2560 x 720", "2560x720"},
+                                       {"7680 x 2160", "7680 x 2160", "7680x2160"}};
+    const char* label = T("Tamaño de pantalla", "Screen size");
+    if (mode == "21x9") {
+        if (GameChoiceCombo(label, "widescreen_output", wide, "3440x1440", 16.0f)) SaveGameIni();
+    } else {
+        if (GameChoiceCombo(label, "widescreen_output", super, "5120x1440", 16.0f)) SaveGameIni();
+    }
+    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
+        "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
+        "Corrected menus, backgrounds and a centered HUD. Online or offline, with the 1.21 update, USA or Europe "
+        "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
+}
+
 void SettingsTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Se aplican al pulsar Jugar. El menú del juego (Insert o L3+R3) cambia los mismos ajustes.",
@@ -2606,13 +2764,6 @@ void SettingsTab() {
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
 
     ImGui::SeparatorText(T("Pantalla", "Display"));
-    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
-               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
-               "Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
-               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
-               "Needs a restart."));
     const std::string temporal = GameTemporal();
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
@@ -2622,6 +2773,14 @@ void SettingsTab() {
         ImGui::SameLine();
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
+    WidescreenSettings();
+    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
+             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
+               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
+               "Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
+               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+               "Needs a restart."));
     {
         // temporal=off|fsr1|fsr3|dlss (bbport.ini): one upscaler at a time.
         static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
@@ -2887,7 +3046,8 @@ void StartDiscordLink(DiscordLinkMode mode) {
             } else {
                 const std::string body =
                     HttpRequest(server, L"POST", L"/ryunet/discord/link",
-                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000);
+                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000,
+                                true);
                 const std::string status = JsonField(body, "status"), account = JsonField(body, "discord");
                 if (status == "linked") {
                     error = false;
@@ -3125,7 +3285,7 @@ void NatTypeSection(const std::string& server) {
                                    "3074 to this PC helps."));
         break;
     case NatCheck::Type::Unknown:
-        ImGui::TextColored(kGrey, "%s",
+        ImGui::TextColored(result.error == "server" ? kRed : kGrey, "%s",
                            result.error == "server" ? T("El servidor no respondió (¿está bien escrito? ¿UDP 3074 bloqueado?).",
                                                         "The server did not answer (is it spelled right? UDP 3074 blocked?).")
                            : result.error == "dns" ? T("No se encontró el servidor.", "The server was not found.")
@@ -3133,6 +3293,18 @@ void NatTypeSection(const std::string& server) {
                                                         "Could not compare (the STUN server did not answer).")
                                                     : T("No se pudo comprobar.", "Could not check."));
         break;
+    }
+    if (result.replies_blocked || result.error == "server") {
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::TextWrapped("%s", T("Tu red bloquea las respuestas del servidor (UDP 3074): el juego dirá \"Failed to initialize "
+                                   "network\" al entrar en Online. Permite sacredfire.exe en el Firewall de Windows (redes "
+                                   "privadas y públicas), revisa la protección de red del antivirus, reinicia el router o "
+                                   "prueba otra red (los datos del móvil).",
+                                   "Your network blocks the server's replies (UDP 3074): the game will say \"Failed to "
+                                   "initialize network\" when you enter Online. Allow sacredfire.exe in Windows Firewall "
+                                   "(private and public networks), check your antivirus' network protection, restart your "
+                                   "router or try another network (a phone hotspot)."));
+        ImGui::PopStyleColor();
     }
 }
 
@@ -3212,13 +3384,10 @@ void OnlineTab() {
             DiscordAccountSection();
         }
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-        if (ImGui::InputText(T("Amigos (Friends)", "Friends"), a.online_friends_buf, sizeof(a.online_friends_buf))) {
-            a.game.Set("online_friends", a.online_friends_buf);
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
-        HelpMarker(T("Lista de amigos para Partidas Privadas, separados por comas (ejemplo: ESDRONIX,Amigo2).",
-                     "List of friends for Private Matches, separated by commas (example: ESDRONIX,Friend2)."));
+        // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
+        // the names of the old Friends field (online_friends) get friend requests once.
+        ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
+                                          "Friends: in the game, menu (Insert / L3+R3) > Friends."));
 
         // Which Pit Stop items (characters, skins, karts) count as yours online: the server's,
         // bought with coins and tied to the nickname, or the save's (run.py sends it at login).
@@ -3245,6 +3414,19 @@ void OnlineTab() {
 
         ImGui::EndDisabled();
     }
+
+    // The rules of the online, and where to report and appeal.
+    ImGui::SeparatorText(T("Reglas del online", "Online rules"));
+    for (const char* rule : {T("Nada de trampas: hacks, trainers, modificaciones de velocidad u objetos, ni tiempos falsos en los récords. Arruinan la partida de todos.", "No cheating: hacks, trainers, speed or item modifications, or fake leaderboard times. They ruin the game for everyone."), T("Respeta a los demás: sin apodos ofensivos, insultos ni acoso.", "Respect others: no offensive nicknames, insults or harassment."), T("No sabotees partidas ni abandones a propósito para molestar.", "Do not sabotage races or quit on purpose to annoy others."), T("Usa tu propio apodo: no te hagas pasar por otra persona.", "Use your own nickname: do not impersonate anyone."), T("¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.", "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.")}) {
+        ImGui::Bullet();
+        ImGui::TextWrapped("%s", rule);
+    }
+    ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
+    CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
+    // Record validation now; ranked play with ranks and MMR, tied to the server, later.
+    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)", "Crash Team Rank: validate your records (ranked play with MMR coming)"));
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
 
     ImGui::SeparatorText("Discord");
     LauncherFlag("discord_rpc", T("Mostrar actividad en Discord", "Show activity on Discord"), true,
@@ -5034,6 +5216,551 @@ void UpdateSection() {
                    "restarts. Never while you play. Starting straight into the game (shortcut, Steam) does not update."));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Achievements tab (v0.4): the game's trophies (sce_sys/trophy/trophy00.trp), with the ones
+// unlocked while playing (<user>/trophies/<TITLE_ID>/unlocked.txt, written by the runtime:
+// src/runtime_services.c). Icons are plain PNGs in the TRP. Names, descriptions and grades are
+// in its ESFM files, AES-encrypted with the console's trophy key, which is not part of this
+// port: with the player's own key (the one shadPS4 uses: entered here or imported from
+// shadPS4's keys.json) they are decrypted as shadPS4 does (src/core/file_format/trp.cpp) and
+// written to trophies.tsv, which the runtime reads for its in-game notice and the platinum.
+
+ID3D11ShaderResourceView* MakeTexture(const uint32_t* bgra, int width, int height);  // after g_device
+
+// The 48 trophies' names, grades and what to do (src/ctr_trophies.h, shared with the runtime).
+#include "../../src/ctr_trophies.h"
+#define kCtrTrophies ctr_trophies
+
+
+struct Trophy {
+    int id = 0;
+    char grade = 0;  // 'P' 'G' 'S' 'B', 0 unknown
+    bool hidden = false;
+    std::string name, detail;
+    ID3D11ShaderResourceView* icon = nullptr;
+    uint64_t unlocked = 0;  // unix time, 0 locked
+};
+
+struct TrophySet {
+    fs::path game;              // the game folder it was read from
+    std::string language;       // the game language its names are in
+    std::string title_id, np_comm_id, title_name;
+    std::vector<Trophy> list;
+    ID3D11ShaderResourceView* icon = nullptr;
+    bool names = false;         // names and grades known
+    std::string error, note;
+    fs::file_time_type unlocked_time{};
+    double next_poll = 0.0;
+};
+TrophySet g_trophies;
+bool g_trophies_reload = true;
+int g_trophy_filter = 0;  // 0 all, 1 unlocked, 2 locked
+bool g_trophy_reset_confirm = false;
+char g_trophy_key_input[64] = "";
+
+fs::path TrophyDir(const std::string& title) { return g_app.root / L"user" / L"trophies" / Widen(title); }
+
+void ReleaseTrophies(TrophySet& t) {
+    for (auto& tr : t.list)
+        if (tr.icon) tr.icon->Release();
+    if (t.icon) t.icon->Release();
+    t = TrophySet{};
+}
+
+/// A PNG to a texture, through WIC.
+ID3D11ShaderResourceView* PngTexture(const std::string& png) {
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return nullptr;
+    ID3D11ShaderResourceView* view = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    UINT w = 0, h = 0;
+    if (SUCCEEDED(wic->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(reinterpret_cast<BYTE*>(const_cast<char*>(png.data())), DWORD(png.size()))) &&
+        SUCCEEDED(wic->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(converter->GetSize(&w, &h)) && w && h && w <= 4096 && h <= 4096) {
+        std::vector<uint32_t> pixels(size_t(w) * h);
+        if (SUCCEEDED(converter->CopyPixels(nullptr, w * 4, UINT(pixels.size() * 4), reinterpret_cast<BYTE*>(pixels.data()))))
+            view = MakeTexture(pixels.data(), int(w), int(h));
+    }
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    wic->Release();
+    return view;
+}
+
+/// The 16-byte trophy key from hex ("" when it is not 32 hex digits).
+std::string TrophyKeyBytes(const std::string& hex) {
+    std::string clean;
+    for (char c : hex)
+        if (std::isxdigit(static_cast<unsigned char>(c))) clean += c;
+    if (clean.size() != 32) return {};
+    std::string out;
+    for (size_t i = 0; i < 32; i += 2) out += char(std::stoi(clean.substr(i, 2), nullptr, 16));
+    return out;
+}
+
+/// AES-128-CBC without padding (Windows CNG). encrypt: true to encrypt.
+bool AesCbc(const std::string& key, const unsigned char iv_in[16], const unsigned char* in, size_t size, unsigned char* out,
+            bool encrypt) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_KEY_HANDLE handle = nullptr;
+    bool ok = false;
+    unsigned char iv[16];
+    std::memcpy(iv, iv_in, 16);
+    if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0)) &&
+        BCRYPT_SUCCESS(BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC,
+                                         sizeof(BCRYPT_CHAIN_MODE_CBC), 0)) &&
+        BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(alg, &handle, nullptr, 0, (PUCHAR)key.data(), ULONG(key.size()), 0))) {
+        ULONG done = 0;
+        ok = BCRYPT_SUCCESS(encrypt ? BCryptEncrypt(handle, (PUCHAR)in, ULONG(size), nullptr, iv, 16, out, ULONG(size), &done, 0)
+                                    : BCryptDecrypt(handle, (PUCHAR)in, ULONG(size), nullptr, iv, 16, out, ULONG(size), &done, 0)) &&
+             done == size;
+    }
+    if (handle) BCryptDestroyKey(handle);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    return ok;
+}
+
+/// One ESFM entry decrypted to its XML (shadPS4's DecryptEFSM): the key for the file is the
+/// NP communication ID (16 bytes, zero-padded) encrypted with the trophy key (CBC, zero IV); the
+/// entry is IV (16 bytes) + data, CBC-decrypted with that key and IV.
+std::string DecryptEsfm(const std::string& trophy_key, const std::string& np_comm_id, const std::string& entry) {
+    if (entry.size() <= 32 || (entry.size() - 16) % 16) return {};
+    unsigned char comm[16]{}, zero[16]{}, file_key[16];
+    std::memcpy(comm, np_comm_id.data(), std::min<size_t>(np_comm_id.size(), 16));
+    if (!AesCbc(trophy_key, zero, comm, 16, file_key, true)) return {};
+    std::string xml(entry.size() - 16, '\0');
+    if (!AesCbc(std::string(reinterpret_cast<char*>(file_key), 16), reinterpret_cast<const unsigned char*>(entry.data()),
+                reinterpret_cast<const unsigned char*>(entry.data()) + 16, entry.size() - 16,
+                reinterpret_cast<unsigned char*>(xml.data()), false))
+        return {};
+    const size_t end = xml.rfind('>');
+    if (end == std::string::npos) return {};
+    xml.resize(end + 1);
+    return xml.rfind("<?xml", 0) == 0 || xml.find("<trophyconf") != std::string::npos ? xml : std::string{};
+}
+
+std::string XmlTag(const std::string& xml, const std::string& tag, size_t from = 0, size_t until = std::string::npos) {
+    const size_t a = xml.find("<" + tag + ">", from);
+    if (a == std::string::npos || a >= until) return {};
+    const size_t b = xml.find("</" + tag + ">", a);
+    if (b == std::string::npos || b > until) return {};
+    return XmlUnescape(xml.substr(a + tag.size() + 2, b - a - tag.size() - 2));
+}
+
+/// The trophies in a decrypted TROP*.XML: id -> (grade, hidden, name, detail).
+void ParseTrophyXml(const std::string& xml, TrophySet& t) {
+    t.title_name = XmlTag(xml, "title-name");
+    for (size_t at = 0; (at = xml.find("<trophy ", at)) != std::string::npos;) {
+        const size_t close = xml.find('>', at), end = xml.find("</trophy>", at);
+        if (close == std::string::npos || end == std::string::npos) break;
+        const auto attr = XmlAttributes(xml.substr(at + 8, close - at - 8));
+        auto get = [&](const char* k) {
+            const auto it = attr.find(k);
+            return it == attr.end() ? std::string() : it->second;
+        };
+        const int id = std::atoi(get("id").c_str());
+        for (auto& tr : t.list) {
+            if (tr.id != id) continue;
+            const std::string type = get("ttype");
+            tr.grade = type.empty() ? 0 : type[0];
+            tr.hidden = get("hidden") == "yes";
+            tr.name = XmlTag(xml, "name", close, end);
+            tr.detail = XmlTag(xml, "detail", close, end);
+        }
+        at = end;
+    }
+}
+
+std::string Sanitize(std::string s) {
+    for (char& c : s)
+        if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+    return s;
+}
+
+/// trophies.tsv: "#lang<TAB>code" then id, grade, hidden, name, detail per line.
+bool ReadTrophyTsv(const fs::path& file, const std::string& language, TrophySet& t) {
+    std::stringstream ss(ReadText(file));
+    std::string line;
+    bool right_language = false, any = false;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::vector<std::string> f;
+        std::stringstream ls(line);
+        std::string field;
+        while (std::getline(ls, field, '\t')) f.push_back(field);
+        if (f.size() >= 2 && f[0] == "#lang") right_language = f[1] == language;
+        if (f.size() >= 2 && f[0] == "#title") t.title_name = f[1];
+        if (f.size() < 5 || f[0].empty() || !std::isdigit(static_cast<unsigned char>(f[0][0]))) continue;
+        for (auto& tr : t.list)
+            if (tr.id == std::atoi(f[0].c_str())) {
+                tr.grade = f[1].empty() ? 0 : f[1][0];
+                tr.hidden = f[2] == "1";
+                tr.name = f[3];
+                tr.detail = f[4];
+                any = true;
+            }
+    }
+    return any && right_language;
+}
+
+void WriteTrophyTsv(const TrophySet& t) {
+    std::string out = "#lang\t" + t.language + "\n#title\t" + Sanitize(t.title_name) + "\n";
+    for (const auto& tr : t.list)
+        out += std::to_string(tr.id) + "\t" + std::string(1, tr.grade ? tr.grade : '?') + "\t" + (tr.hidden ? "1" : "0") + "\t" +
+               Sanitize(tr.name) + "\t" + Sanitize(tr.detail) + "\n";
+    std::error_code ec;
+    fs::create_directories(TrophyDir(t.title_id), ec);
+    WriteTextAtomic(TrophyDir(t.title_id) / L"trophies.tsv", out);
+}
+
+void ReadUnlocked(TrophySet& t) {
+    for (auto& tr : t.list) tr.unlocked = 0;
+    std::stringstream ss(ReadText(TrophyDir(t.title_id) / L"unlocked.txt"));
+    std::string line;
+    while (std::getline(ss, line)) {
+        int id = -1;
+        unsigned long long at = 0;
+        if (std::sscanf(line.c_str(), "%d %llu", &id, &at) != 2) continue;
+        for (auto& tr : t.list)
+            if (tr.id == id && !tr.unlocked) tr.unlocked = at ? at : 1;
+    }
+    std::error_code ec;
+    t.unlocked_time = fs::last_write_time(TrophyDir(t.title_id) / L"unlocked.txt", ec);
+}
+
+/// The trophy key the launcher keeps, else shadPS4's (keys.json "ReleaseTrophyKey").
+std::string ShadPs4TrophyKey() {
+    const wchar_t* appdata = _wgetenv(L"APPDATA");
+    if (!appdata) return {};
+    const std::string json = ReadText(fs::path(appdata) / L"shadPS4" / L"keys.json");
+    const size_t at = json.find("\"ReleaseTrophyKey\"");
+    if (at == std::string::npos) return {};
+    const size_t colon = json.find(':', at);
+    if (colon == std::string::npos) return {};
+    size_t i = colon + 1;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i < json.size() && json[i] == '"') {  // a hex string
+        const size_t end = json.find('"', i + 1);
+        return end == std::string::npos ? std::string() : json.substr(i + 1, end - i - 1);
+    }
+    if (i < json.size() && json[i] == '[') {  // a byte array
+        const size_t end = json.find(']', i);
+        std::stringstream ss(json.substr(i + 1, end == std::string::npos ? std::string::npos : end - i - 1));
+        std::string hex, n;
+        char buf[3];
+        while (std::getline(ss, n, ',')) {
+            n = Trim(n);
+            if (n.empty()) continue;
+            std::snprintf(buf, sizeof buf, "%02x", std::atoi(n.c_str()) & 0xff);
+            hex += buf;
+        }
+        return hex;
+    }
+    return {};
+}
+
+void LoadTrophies() {
+    App& a = g_app;
+    ReleaseTrophies(g_trophies);
+    TrophySet& t = g_trophies;
+    t.game = a.game_dir;
+    t.language = GameLanguage();
+    t.title_id = Narrow(GameTitle());
+    const fs::path trp = a.game_dir / L"sce_sys" / L"trophy" / L"trophy00.trp";
+    const std::string data = ReadText(trp);
+    auto be32 = [&](size_t o) {
+        return uint32_t(uint8_t(data[o])) << 24 | uint32_t(uint8_t(data[o + 1])) << 16 | uint32_t(uint8_t(data[o + 2])) << 8 |
+               uint32_t(uint8_t(data[o + 3]));
+    };
+    auto be64 = [&](size_t o) { return uint64_t(be32(o)) << 32 | be32(o + 4); };
+    if (data.size() < 0x60 || be32(0) != 0xDCA24D00) {
+        t.error = a.game_dir.empty() ? T("Elige primero el juego en la pestaña Jugar.", "Choose the game in the Play tab first.")
+                                     : T("Este juego no trae el archivo de trofeos (sce_sys\\trophy\\trophy00.trp).",
+                                         "This game has no trophy file (sce_sys\\trophy\\trophy00.trp).");
+        return;
+    }
+    const uint32_t count = be32(0x10), entry_size = be32(0x14);
+    std::map<std::string, std::string> entries;
+    for (uint32_t i = 0; i < count && i < 1024; ++i) {
+        const size_t e = 0x60 + size_t(i) * entry_size;
+        if (e + 48 > data.size()) break;
+        const std::string name(data.c_str() + e, strnlen(data.c_str() + e, 32));
+        const uint64_t pos = be64(e + 32), size = be64(e + 40);
+        if (pos + size <= data.size()) entries[name] = data.substr(size_t(pos), size_t(size));
+    }
+    for (const auto& [name, bytes] : entries) {
+        int id = -1;
+        if (name.size() == 11 && name.rfind("TROP", 0) == 0 && name.substr(7) == ".PNG" && std::sscanf(name.c_str() + 4, "%3d", &id) == 1) {
+            Trophy tr;
+            tr.id = id;
+            tr.icon = PngTexture(bytes);
+            t.list.push_back(std::move(tr));
+        }
+    }
+    std::sort(t.list.begin(), t.list.end(), [](const Trophy& x, const Trophy& y) { return x.id < y.id; });
+    if (entries.count("ICON0.PNG")) t.icon = PngTexture(entries["ICON0.PNG"]);
+    // The NP communication ID (npbind.dat), needed to decrypt.
+    const std::string npbind = ReadText(a.game_dir / L"sce_sys" / L"npbind.dat");
+    for (size_t i = 0; i + 12 <= npbind.size(); ++i)
+        if (npbind.compare(i, 4, "NPWR") == 0 && npbind[i + 9] == '_') {
+            t.np_comm_id = npbind.substr(i, 12);
+            break;
+        }
+    // Names: trophies.tsv in this language, else decrypt with the key.
+    if (ReadTrophyTsv(TrophyDir(t.title_id) / L"trophies.tsv", t.language, t)) {
+        t.names = true;
+    } else {
+        const std::string key = TrophyKeyBytes(a.launcher.Get("trophy_key"));
+        if (!key.empty() && !t.np_comm_id.empty()) {
+            char localized[32];
+            std::snprintf(localized, sizeof localized, "TROP_%02d.ESFM", std::atoi(t.language.c_str()));
+            const std::string file = entries.count(localized) ? localized : "TROP.ESFM";
+            const std::string xml = entries.count(file) ? DecryptEsfm(key, t.np_comm_id, entries[file]) : std::string{};
+            if (!xml.empty()) {
+                ParseTrophyXml(xml, t);
+                t.names = true;
+                WriteTrophyTsv(t);
+            } else {
+                t.note = T("La clave de trofeos no descifra este juego: revisa que sea la de tu PS4 (32 cifras hexadecimales).",
+                           "The trophy key does not decrypt this game: check it is your PS4's (32 hex digits).");
+            }
+        }
+    }
+    ReadUnlocked(t);
+}
+
+void TrophiesTab() {
+    App& a = g_app;
+    const std::string language = GameLanguage();
+    if (g_trophies_reload || g_trophies.game != a.game_dir || g_trophies.language != language) {
+        g_trophies_reload = false;
+        LoadTrophies();
+    }
+    TrophySet& t = g_trophies;
+    // The game writes unlocked.txt while it runs: re-read it when it changes.
+    if (ImGui::GetTime() > t.next_poll && !t.title_id.empty()) {
+        t.next_poll = ImGui::GetTime() + 1.0;
+        std::error_code ec;
+        const auto time = fs::last_write_time(TrophyDir(t.title_id) / L"unlocked.txt", ec);
+        if (!ec && time != t.unlocked_time) ReadUnlocked(t);
+    }
+    if (!t.error.empty()) {
+        BeginCard("trophy_error");
+        ImGui::TextColored(kYellow, "%s  %s", ICON_INFO, t.error.c_str());
+        EndCard();
+        return;
+    }
+    auto points = [](char g) { return g == 'P' ? 180 : g == 'G' ? 90 : g == 'S' ? 30 : g == 'B' ? 15 : 0; };
+    int unlocked = 0, earned = 0, total_points = 0;
+    int by_grade[4][2]{};  // B S G P: unlocked, total
+    for (const auto& tr : t.list) {
+        unlocked += tr.unlocked != 0;
+        total_points += points(tr.grade);
+        if (tr.unlocked) earned += points(tr.grade);
+        const int g = tr.grade == 'B' ? 0 : tr.grade == 'S' ? 1 : tr.grade == 'G' ? 2 : tr.grade == 'P' ? 3 : -1;
+        if (g >= 0) {
+            by_grade[g][1]++;
+            if (tr.unlocked) by_grade[g][0]++;
+        }
+    }
+    const int total = int(t.list.size());
+    const float progress = total_points ? float(earned) / float(total_points) : total ? float(unlocked) / float(total) : 0.0f;
+    static const ImVec4 grade_colors[] = {ImVec4(0.82f, 0.54f, 0.32f, 1.0f), ImVec4(0.80f, 0.83f, 0.88f, 1.0f),
+                                          ImVec4(1.0f, 0.80f, 0.29f, 1.0f), ImVec4(0.55f, 0.83f, 1.0f, 1.0f)};
+    auto grade_index = [](char g) { return g == 'B' ? 0 : g == 'S' ? 1 : g == 'G' ? 2 : g == 'P' ? 3 : -1; };
+    auto grade_name = [](int g) {
+        static const char* es[] = {"Bronce", "Plata", "Oro", "Platino"};
+        static const char* en[] = {"Bronze", "Silver", "Gold", "Platinum"};
+        return g_spanish ? es[g] : en[g];
+    };
+
+    // Summary.
+    BeginCard("trophy_summary");
+    const float big = 72.0f * g_ui_scale;
+    if (t.icon) {
+        ImGui::Image(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(t.icon))), ImVec2(big * 1.78f, big));
+        ImGui::SameLine(0.0f, 16.0f * g_ui_scale);
+    }
+    ImGui::BeginGroup();
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.25f);
+    ImGui::TextUnformatted(t.title_name.empty() ? "Crash Team Racing Nitro-Fueled" : t.title_name.c_str());
+    if (g_font_heading) ImGui::PopFont();
+    ImGui::Text(T("%d de %d logros  ·  %d %%", "%d of %d trophies  ·  %d %%"), unlocked, total, int(progress * 100.0f + 0.5f));
+    ImGui::ProgressBar(progress, ImVec2(-FLT_MIN, 8.0f * g_ui_scale), "");
+    if (t.names) {
+        for (int g = 3; g >= 0; --g) {
+            if (!by_grade[g][1]) continue;
+            ImGui::TextColored(grade_colors[g], "\xE2\x97\x8F");
+            ImGui::SameLine(0.0f, 4.0f * g_ui_scale);
+            ImGui::Text("%s %d/%d", grade_name(g), by_grade[g][0], by_grade[g][1]);
+            ImGui::SameLine(0.0f, 16.0f * g_ui_scale);
+        }
+        ImGui::NewLine();
+    }
+    ImGui::EndGroup();
+    EndCard();
+
+    // Names: the player's trophy key.
+    if (!t.names) {
+        ImGui::Spacing();
+        BeginCard("trophy_key");
+        ImGui::TextColored(kBlue, "%s", ICON_INFO);
+        ImGui::SameLine();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(T("Los logros se guardan igual al jugar y aquí se ven con su imagen. Sus nombres y descripciones "
+                                 "vienen cifrados en el juego con la clave de trofeos de la PS4, que no se incluye: si la tienes "
+                                 "(es la misma que usa shadPS4), pégala o impórtala para verlos.",
+                                 "Trophies are recorded while you play and shown here with their pictures. Their names and "
+                                 "descriptions are encrypted in the game with the PS4's trophy key, which is not included: if "
+                                 "you have it (the same shadPS4 uses), paste or import it to see them."));
+        ImGui::PopTextWrapPos();
+        if (!t.note.empty()) ImGui::TextColored(kRed, "%s", t.note.c_str());
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
+        ImGui::InputTextWithHint("##trophykey", T("Clave de trofeos (32 cifras hex)", "Trophy key (32 hex digits)"), g_trophy_key_input,
+                                 sizeof g_trophy_key_input, ImGuiInputTextFlags_Password | ImGuiInputTextFlags_CharsHexadecimal);
+        ImGui::SameLine();
+        if (ImGui::Button(T("Guardar", "Save"))) {
+            if (TrophyKeyBytes(g_trophy_key_input).empty()) {
+                a.notice = T("La clave tiene que tener 32 cifras hexadecimales.", "The key must be 32 hex digits.");
+            } else {
+                a.launcher.Set("trophy_key", g_trophy_key_input);
+                SaveLauncher();
+                g_trophies_reload = true;
+            }
+            std::memset(g_trophy_key_input, 0, sizeof g_trophy_key_input);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Importar de shadPS4", "Import from shadPS4"))) {
+            const std::string key = ShadPs4TrophyKey();
+            if (TrophyKeyBytes(key).empty()) {
+                a.notice = T("shadPS4 no tiene una clave de trofeos guardada (keys.json).",
+                             "shadPS4 has no trophy key saved (keys.json).");
+            } else {
+                a.launcher.Set("trophy_key", key);
+                SaveLauncher();
+                g_trophies_reload = true;
+            }
+        }
+        EndCard();
+    }
+
+    // Filter and actions.
+    ImGui::Spacing();
+    ImGui::RadioButton(T("Todos", "All"), &g_trophy_filter, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton(T("Desbloqueados", "Unlocked"), &g_trophy_filter, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton(T("Por conseguir", "Locked"), &g_trophy_filter, 2);
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 13.0f);
+    if (ImGui::Button((std::string(ICON_FOLDER "  ") + T("Carpeta", "Folder")).c_str())) {
+        std::error_code ec;
+        fs::create_directories(TrophyDir(t.title_id), ec);
+        OpenInShell(TrophyDir(t.title_id));
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!unlocked || a.game_running);
+    if (ImGui::Button((std::string(ICON_UNDO "  ") + T("Reiniciar", "Reset")).c_str())) g_trophy_reset_confirm = true;
+    ImGui::EndDisabled();
+
+    // The list.
+    ImGui::Spacing();
+    const float icon = 60.0f * g_ui_scale;
+    if (ImGui::BeginTable("trophies", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("icon", ImGuiTableColumnFlags_WidthFixed, icon);
+        ImGui::TableSetupColumn("text", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 9.0f);
+        // The latest unlocked first, then the rest in the game's order.
+        std::vector<const Trophy*> order;
+        for (const auto& tr : t.list) order.push_back(&tr);
+        std::stable_sort(order.begin(), order.end(), [](const Trophy* x, const Trophy* y) {
+            if (bool(x->unlocked) != bool(y->unlocked)) return bool(x->unlocked);
+            return x->unlocked > y->unlocked;
+        });
+        for (const Trophy* item : order) {
+            const Trophy& tr = *item;
+            if ((g_trophy_filter == 1 && !tr.unlocked) || (g_trophy_filter == 2 && tr.unlocked)) continue;
+            const bool secret = tr.hidden && !tr.unlocked;
+            ImGui::TableNextRow(0, icon + 8.0f * g_ui_scale);
+            ImGui::TableNextColumn();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (tr.icon && !secret) {
+                dl->AddImageRounded(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(tr.icon))), p, ImVec2(p.x + icon, p.y + icon),
+                                    ImVec2(0, 0), ImVec2(1, 1),
+                                    tr.unlocked ? IM_COL32_WHITE : IM_COL32(110, 110, 120, 255), 8.0f * g_ui_scale);
+            } else {
+                dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), Col(kFrame), 8.0f * g_ui_scale);
+                const ImVec2 q = ImGui::CalcTextSize("?");
+                dl->AddText(ImVec2(p.x + (icon - q.x) * 0.5f, p.y + (icon - q.y) * 0.5f), Col(kGrey), "?");
+            }
+            if (!tr.unlocked) dl->AddRect(p, ImVec2(p.x + icon, p.y + icon), Col(kBorder), 8.0f * g_ui_scale);
+            ImGui::Dummy(ImVec2(icon, icon));
+            ImGui::TableNextColumn();
+            if (g_font_heading) ImGui::PushFont(g_font_heading, 0.0f);
+            std::string name = secret ? T("Logro oculto", "Hidden trophy")
+                               : tr.name.empty() ? std::string(T("Logro #", "Trophy #")) + std::to_string(tr.id)
+                                                 : tr.name;
+            ImGui::TextColored(tr.unlocked ? kText : kGrey, "%s", name.c_str());
+            if (g_font_heading) ImGui::PopFont();
+            ImGui::PushTextWrapPos(0.0f);
+            if (secret) ImGui::TextColored(kGrey, "%s", T("Sigue jugando para descubrirlo.", "Keep playing to find it."));
+            else if (!tr.detail.empty()) ImGui::TextColored(kGrey, "%s", tr.detail.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::TableNextColumn();
+            const int g = grade_index(tr.grade);
+            if (g >= 0) {
+                ImGui::TextColored(grade_colors[g], "\xE2\x97\x8F %s", grade_name(g));
+            }
+            if (tr.unlocked > 1) {
+                const std::time_t when = std::time_t(tr.unlocked);
+                std::tm local{};
+                localtime_s(&local, &when);
+                char date[32];
+                std::strftime(date, sizeof date, "%d/%m/%Y %H:%M", &local);
+                ImGui::TextColored(kGreen, "%s %s", ICON_CHECK, date);
+            } else if (tr.unlocked) {
+                ImGui::TextColored(kGreen, "%s %s", ICON_CHECK, T("Conseguido", "Unlocked"));
+            } else {
+                ImGui::TextColored(kGrey, "%s", T("Por conseguir", "Locked"));
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::TextColored(kGrey, "%s", T("Se desbloquean jugando, como en la PS4; el platino llega solo al tener todos los demás.",
+                                      "They unlock as you play, as on a PS4; the platinum comes once all the others are."));
+
+    if (g_trophy_reset_confirm) {
+        ImGui::OpenPopup("trophy_reset");
+        g_trophy_reset_confirm = false;
+    }
+    if (ImGui::BeginPopupModal("trophy_reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextUnformatted(T("¿Volver a bloquear todos los logros? Se guarda una copia por si acaso.",
+                                 "Lock every trophy again? A copy is kept just in case."));
+        if (ImGui::Button(T("Reiniciar", "Reset"))) {
+            std::error_code ec;
+            const fs::path file = TrophyDir(t.title_id) / L"unlocked.txt";
+            fs::path backup = file;
+            backup += L"." + std::to_wstring(std::time(nullptr)) + L".bak";
+            fs::rename(file, backup, ec);
+            if (ec) a.notice = std::string(T("No se pudo reiniciar: ", "Could not reset: ")) + ec.message();
+            ReadUnlocked(t);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 void ToolsTab() {
     App& a = g_app;
     UpdateSection();
@@ -5362,8 +6089,8 @@ void Frame() {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
     const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
                            T("Teclado", "Keyboard"), T("Parches", "Patches"), T("Guardados", "Saves"), "DLC",
-                           T("Herramientas", "Tools")};
-    for (int i=0; i<9; ++i) {
+                           T("Logros", "Achievements"), T("Herramientas", "Tools")};
+    for (int i=0; i<10; ++i) {
         ImGui::SetCursorPosX(8.0f);
         if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
             a.active_page = i;
@@ -5390,6 +6117,7 @@ void Frame() {
     case 5: PatchesTab(); break;
     case 6: SavesTab(); break;
     case 7: DlcTab(); break;
+    case 8: TrophiesTab(); break;
     default: ToolsTab(); break;
     }
     ImGui::PopStyleColor();
@@ -5491,6 +6219,24 @@ IDXGISwapChain* g_swapchain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
 UINT g_resize_w = 0, g_resize_h = 0;
 bool g_occluded = false;
+
+ID3D11ShaderResourceView* MakeTexture(const uint32_t* bgra, int width, int height) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(width);
+    td.Height = UINT(height);
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{bgra, UINT(width * 4), 0};
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* view = nullptr;
+    if (!g_device || FAILED(g_device->CreateTexture2D(&td, &data, &texture))) return nullptr;
+    g_device->CreateShaderResourceView(texture, nullptr, &view);
+    texture->Release();
+    return view;
+}
 
 void CreateRenderTarget() {
     ID3D11Texture2D* back = nullptr;
@@ -5634,6 +6380,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (op == L"--dlc") {
                 for (const auto& d : ScanDlc())
                     result += d.file + " | " + d.title + " | " + d.label + " | " + (d.ok ? "ok" : d.problem) + "\n";
+            } else if (op == L"--aes") {
+                // FIPS-197 C.1: AES-128, key 00..0f, plaintext 00112233..ff.
+                std::string key;
+                unsigned char plain[16], out[16], zero[16]{};
+                for (int i = 0; i < 16; ++i) {
+                    key += char(i);
+                    plain[i] = (unsigned char)(i * 0x11);
+                }
+                AesCbc(key, zero, plain, 16, out, true);
+                char hex[40]{};
+                for (int i = 0; i < 16; ++i) std::snprintf(hex + i * 2, 3, "%02x", out[i]);
+                result = std::string("aes ") + hex + (std::string(hex) == "69c4e0d86a7b0430d8cdb78070b4c55a" ? " ok" : " BAD");
+            } else if (op == L"--esfm" && argc == 6) {
+                // --esfm <key hex> <NP comm ID> <entry file> <port>
+                const std::string xml = DecryptEsfm(TrophyKeyBytes(PathText(fs::path(argv[2]))), PathText(fs::path(argv[3])),
+                                                    ReadText(argv[4]));
+                result = xml.empty() ? "esfm: no xml" : "esfm: " + xml.substr(0, 200);
+            } else if (op == L"--trophies" && argc == 4) {
+                // --trophies <game folder> <port>
+                g_app.game_dir = argv[2];
+                LoadTrophies();
+                result = "title " + g_trophies.title_id + " np " + g_trophies.np_comm_id + " trophies " +
+                         std::to_string(g_trophies.list.size()) + (g_trophies.error.empty() ? "" : " error " + g_trophies.error) + "\n";
+                for (const auto& tr : g_trophies.list)
+                    result += std::to_string(tr.id) + " " + (tr.unlocked ? "unlocked" : "locked") + "\n";
             } else if (op == L"--patches") {
                 for (const auto& p : LoadPatches())
                     result += p.key + " | " + p.author + " | " + p.version + " | " + (p.ini_key ? p.ini_key : "-") +
@@ -5850,6 +6621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         else g_app.worker.join();
     }
     if (g_app.probe.joinable()) g_app.probe.join();
+    ReleaseTrophies(g_trophies);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

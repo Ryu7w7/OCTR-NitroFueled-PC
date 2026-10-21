@@ -17,6 +17,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/bb_hud_scale.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -337,8 +338,10 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     // bbport: a module the driver rejects is a damaged entry (WarmUp rebuilds the cache), not a
     // fatal error as in CompileSPV.
     const auto compile = [&] {
+        const auto hud = BbHud::ForModule(program->info.pgm_hash, perm_idx, spv);
+        const auto& code = hud ? *hud : spv; // the cache keeps the shader as it is
         auto [result, created] = instance.GetDevice().createShaderModule(
-            {.codeSize = spv.size() * sizeof(u32), .pCode = spv.data()});
+            {.codeSize = code.size() * sizeof(u32), .pCode = code.data()});
         if (result != vk::Result::eSuccess) {
             throw Serialization::CorruptData{"cached SPIR-V rejected by the driver"};
         }

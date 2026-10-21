@@ -122,7 +122,7 @@ class LoaderTests(unittest.TestCase):
         # xor eax,eax; call rax leaves the next guest instruction at the top of the stack.
         r = self.run_image(package(b'\x31\xc0\xff\xd0\xc3'))
         self.assertEqual(r.returncode, 139, r.stderr)
-        self.assertIn('stack return candidate: guest offset 0x4', r.stderr)
+        self.assertIn('return candidate: guest offset 0x4', r.stderr)  # stack [rsp+0x0] return candidate: ...
 
     def test_runtime_returns_from_verified_init_env(self):
         # Align stack, call _init_env through +32, then tail-jump to unknown +40.

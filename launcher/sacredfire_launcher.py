@@ -37,6 +37,7 @@ import steam_shortcuts  # noqa: E402
 import discord_ipc  # noqa: E402
 import discord_oauth  # noqa: E402
 import ryunet_http  # noqa: E402
+import appimage_update  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
 
@@ -56,6 +57,9 @@ DATA_DIR = Path(os.environ.get("BB_DATA_DIR", PORT_DIR))
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "sacredfire-launcher"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 MAX_LOG_LINES = 5000
+COMMUNITY_DISCORD = "https://discord.gg/PAT5SJzdXw"  # bugs, questions, ban appeals
+RANK_SITE = "https://crashteamrank.vercel.app"  # record validation; ranked play later
+UNSUPPORTED_GPU_CODE = 24  # the game found no Vulkan 1.3 (GPU, driver or loader): vk_platform.h
 TITLE = "SacredFire"
 GAME = "Crash Team Racing: Nitro-Fueled"
 
@@ -98,6 +102,13 @@ RENDER_RESOLUTIONS = [("Game default (the PS4 Pro switches decide)", ""),
                       ("1440p (2560 x 1440, PS4 Pro)", "1440"),
                       ("1620p (2880 x 1620)", "1620"),
                       ("4K (3840 x 2160)", "2160")]
+# bbport.ini widescreen_layout / widescreen_output: the corrected 21:9 and 32:9 layouts (menus,
+# backgrounds and a centered HUD, scripts/widescreen.py, by tcosi), for each of their screen sizes.
+WIDESCREEN_LAYOUTS = [("16:9", "off"), ("21:9 (corrected menus and HUD)", "21x9"),
+                      ("32:9 (corrected menus and HUD)", "32x9")]
+WIDESCREEN_OUTPUTS = {"21x9": [("3440 x 1440", "3440x1440"), ("2560 x 1080", "2560x1080")],
+                      "32x9": [("5120 x 1440", "5120x1440"), ("3840 x 1080", "3840x1080"),
+                               ("2560 x 720", "2560x720"), ("7680 x 2160", "7680x2160")]}
 # bbport.ini temporal: one upscaler at a time (the game reads it). DLSS is Windows-only (its
 # NVIDIA library is a Windows DLL); there "dlss" falls back to FSR 3, so it is not offered here.
 UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
@@ -112,6 +123,7 @@ INI_PATCHES = {"CrashTeamRacing.xml/60 FPS Unlock": "patch_60fps",
                "CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p",
                "CrashTeamRacingUnlockAll.xml/Unlock Everything": "patch_unlock_all",
                # The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+               "CrashTeamRacingUnlockAllEU.xml/Unlock Everything": "patch_unlock_all",
                "CrashTeamRacingEU.xml/60 FPS Unlock": "patch_60fps",
                "CrashTeamRacingEU.xml/Disable Motion Blur": "patch_no_motion_blur",
                "CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p"}
@@ -802,6 +814,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.launch_button.connect("clicked", self.on_launch)
         header.pack_end(self.launch_button)
         toolbar.add_top_bar(header)
+        # A newer release (check_update): its version and an Update button, under the header.
+        self.update_banner = Adw.Banner(revealed=False)
+        self.update_banner.connect("button-clicked", self.on_update)
+        toolbar.add_top_bar(self.update_banner)
         self.toasts = Adw.ToastOverlay()
         self.toasts.set_child(self.stack)
         toolbar.set_content(self.toasts)
@@ -821,6 +837,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.update_launch_button()
         self.update_game_status()
         self.ask_nick_status()
+        self.check_update()
 
     def update_launch_button(self):
         running = self.process is not None
@@ -882,15 +899,39 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.server_row = Adw.EntryRow(title=tr("Server"), text=self.ini.get("online_server") or ONLINE_SERVER)
         self.server_row.connect("changed", lambda _row: self.nick_changed())
         online.add(self.server_row)
-        # The friends whose rooms the game lists under Friends (online_friends in bbport.ini,
-        # the Windows launcher's Friends field).
-        self.friends_row = Adw.EntryRow(title=tr("Friends: their nicknames, separated by commas"),
-                                        text=self.ini.get("online_friends", ""))
-        online.add(self.friends_row)
+        # Friends are found, added and invited in the game's menu (Insert / L3+R3 > Friends); the
+        # old field's names (online_friends) get friend requests once (src/runtime_friends.c).
+        online.add(Adw.ActionRow(title=tr("Friends"),
+                                 subtitle=tr("In the game: menu (Insert or L3+R3) > Friends")))
         self.inventory_row = combo_row(tr("Pit Stop items"), None, [(tr(label), value) for label, value in INVENTORIES],
                                        self.ini.get("online_inventory", "server"))
         online.add(self.inventory_row)
         page.add(online)
+
+        # The rules of the online, and where to report and appeal.
+        online_rules = (
+            tr("No cheating: hacks, trainers, speed or item modifications, or fake leaderboard times. "
+               "They ruin the game for everyone."),
+            tr("Respect others: no offensive nicknames, insults or harassment."),
+            tr("Do not sabotage races or quit on purpose to annoy others."),
+            tr("Use your own nickname: do not impersonate anyone."),
+            tr("See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player."),
+        )
+        rules = Adw.PreferencesGroup(
+            title=tr("Online rules"),
+            description="\n".join("• " + rule for rule in online_rules) + "\n\n" +
+            tr("Breaking the rules can cost you your records and a ban from online play, temporary or permanent, "
+               "also by IP."))
+        for title, button, url in (
+                (tr("Bugs, questions or a ban appeal: our Discord"), tr("Open Discord"), COMMUNITY_DISCORD),
+                (tr("Crash Team Rank: validate your records (ranked play with MMR coming)"), tr("Open page"), RANK_SITE)):
+            row = Adw.ActionRow(title=title)
+            row.set_title_lines(0)
+            open_button = flat_button("web-browser-symbolic", button, lambda _b, url=url: open_external(url))
+            row.add_suffix(open_button)
+            row.set_activatable_widget(open_button)
+            rules.add(row)
+        page.add(rules)
 
         discord = Adw.PreferencesGroup(
             title="Discord",
@@ -959,6 +1000,16 @@ class LauncherWindow(Adw.ApplicationWindow):
                "PCs and the Steam Deck."))
         self.render_res_row.connect("notify::selected", lambda *_: self.update_render_res())
         screen.add(self.render_res_row)
+        self.layout_row = combo_row(
+            tr("Aspect ratio"),
+            tr("21:9 and 32:9 correct the menus, backgrounds and HUD for that screen. Online or offline, with the 1.21 "
+               "update, USA or Europe (otherwise the game starts at 16:9); no FSR. The internal resolution picks the variant."),
+            WIDESCREEN_LAYOUTS, self.ini.get("widescreen_layout", "off"))
+        screen.add(self.layout_row)
+        self.layout_output_row = Adw.ComboRow(title=tr("Screen size"))
+        self.layout_output_row.values = []
+        screen.add(self.layout_output_row)
+        self.layout_row.connect("notify::selected", lambda *_: self.update_layout())
         self.msaa_row = Adw.SwitchRow(
             title=tr("Game MSAA (2x)"),
             subtitle=tr("The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and in light "
@@ -1011,6 +1062,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         self.update_render_res()
         self.update_upscaler()
+        self.update_layout()
 
         dev = Adw.PreferencesGroup(title=tr("Developer"))
         self.mangohud_row = Adw.SwitchRow(title="MangoHud", active=self.settings["mangohud"])
@@ -1055,8 +1107,93 @@ class LauncherWindow(Adw.ApplicationWindow):
         steam_row.add_suffix(add_button)
         steam.add(steam_row)
         page.add(steam)
+
+        # The version, and updates from GitHub releases (appimage_update.py), as on Windows.
+        about = Adw.PreferencesGroup(title=tr("Version"))
+        self.version_row = Adw.ActionRow(title=port_version() or tr("Unknown version"),
+                                         subtitle=tr("Checked against the latest release at start"))
+        check_button = Gtk.Button(label=tr("Check for updates"), valign=Gtk.Align.CENTER)
+        check_button.connect("clicked", lambda _b: self.check_update(manual=True))
+        self.version_row.add_suffix(check_button)
+        about.add(self.version_row)
+        page.add(about)
         self.update_user_status()
         return page
+
+    # --- updates ---------------------------------------------------------------------------
+
+    def check_update(self, manual=False):
+        """Asks GitHub for the latest release in the background; a newer one shows the banner."""
+        import threading
+        if manual:
+            self.version_row.set_subtitle(tr("Checking..."))
+
+        def run():
+            try:
+                release = appimage_update.check(port_version())
+                error = None
+            except (OSError, ValueError) as e:
+                release, error = None, str(e)
+            GLib.idle_add(lambda: self.show_update(release, error, manual) and False)
+        threading.Thread(target=run, daemon=True).start()
+
+    def show_update(self, release, error, manual):
+        self.update_release = release
+        if error:
+            self.version_row.set_subtitle(tr("Could not ask GitHub: ") + error)
+            return
+        if not release:
+            self.version_row.set_subtitle(tr("This is the latest version") if manual
+                                          else tr("Checked against the latest release at start"))
+            return
+        print(f"Launcher: new version {release['tag']} available ({release['name']})", flush=True)
+        self.version_row.set_subtitle(tr("New version: %s") % release["tag"])
+        self.update_banner.set_title(tr("New version: %s") % release["tag"])
+        self.update_banner.set_button_label(tr("Update") if appimage_update.running_appimage() else tr("Download"))
+        self.update_banner.set_revealed(True)
+
+    def on_update(self, _banner):
+        release = getattr(self, "update_release", None)
+        appimage = appimage_update.running_appimage()
+        if not release:
+            return
+        if not appimage:  # a checkout or a Nix build: the release page
+            open_external(appimage_update.RELEASES_PAGE)
+            return
+        if self.process is not None:
+            self.toasts.add_toast(Adw.Toast(title=tr("Close the game to update.")))
+            return
+        import threading
+        self.update_banner.set_button_label("")
+        state = {"shown": -1}
+
+        def progress(done, total):
+            percent = done * 100 // max(total, 1)
+            if percent != state["shown"]:
+                state["shown"] = percent
+                GLib.idle_add(lambda: self.update_banner.set_title(
+                    tr("Downloading %s... %d%%") % (release["tag"], percent)) and False)
+
+        def run():
+            try:
+                new = appimage_update.install(release, appimage, progress)
+                GLib.idle_add(lambda: self.restart_into(new) and False)
+            except OSError as e:
+                message = str(e)
+                GLib.idle_add(lambda: self.update_failed(message) and False)
+        threading.Thread(target=run, daemon=True).start()
+
+    def update_failed(self, message):
+        self.update_banner.set_title(tr("The update failed (nothing was changed): ") + message)
+        self.update_banner.set_button_label(tr("Retry"))
+
+    def restart_into(self, appimage):
+        """The new AppImage starts in place of this launcher (the stable Steam link follows it)."""
+        self.store()
+        subprocess.Popen([str(appimage)], env=host_environment(), start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.presence.shutdown()
+        self.get_application().quit()
 
     def update_render_res(self):
         """A chosen internal resolution decides the PS4 Pro path and the 1080p Pro patch."""
@@ -1065,6 +1202,17 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.neo_row.set_subtitle(tr("Set by the internal resolution (Display)") if chosen else
                                   tr("Neo mode, 7 CPUs, 5568 MiB direct memory: the game's Pro rendering path"))
         self.fill_patches()  # the 1080p Pro patch follows the internal resolution
+
+    def update_layout(self, output=None):
+        """The screen sizes of the chosen layout (none for 16:9)."""
+        layout = combo_value(self.layout_row)
+        choices = WIDESCREEN_OUTPUTS.get(layout, [])
+        current = output or (combo_value(self.layout_output_row) if self.layout_output_row.values else None)             or self.ini.get("widescreen_output", "")
+        values = [v for _l, v in choices]
+        self.layout_output_row.set_model(Gtk.StringList.new([label for label, _v in choices]))
+        self.layout_output_row.values = values
+        self.layout_output_row.set_selected(values.index(current) if current in values else 0)
+        self.layout_output_row.set_visible(bool(choices))
 
     def update_upscaler(self):
         self.sharpness_row.set_visible(combo_value(self.upscaler_row) == "fsr3")
@@ -1178,11 +1326,14 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini["volume"] = str(int(self.volume_scale.get_value()))
         self.ini["fps_limit"] = combo_value(self.fps_limit_row)
         self.ini["render_res"] = combo_value(self.render_res_row) or None  # "": the Pro switches decide
+        layout = combo_value(self.layout_row)
+        self.ini["widescreen_layout"] = layout
+        if layout != "off":
+            self.ini["widescreen_output"] = combo_value(self.layout_output_row)
+            self.ini["ultrawide"] = "0"  # the layout sets the size (the in-game ultrawide would not correct the menus)
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
         self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
-        friends = [name.strip() for name in self.friends_row.get_text().split(",")]
-        self.ini["online_friends"] = ",".join(name for name in friends if name)
         self.ini["online_inventory"] = combo_value(self.inventory_row)
         save_ini(self.ini, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
@@ -1209,6 +1360,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         res = self.ini.get("render_res", "")
         self.render_res_row.set_selected(self.render_res_row.values.index(res) if res in self.render_res_row.values else 0)
         self.update_render_res()
+        layout = self.ini.get("widescreen_layout", "off")
+        self.layout_row.set_selected(self.layout_row.values.index(layout) if layout in self.layout_row.values else 0)
+        self.update_layout(self.ini.get("widescreen_output", ""))
 
     def environment(self):
         return game_environment(self.settings)
@@ -1745,6 +1899,17 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.fill_dlc()
         dialog.open_multiple(self, None, done)
 
+    def inform(self, heading, body):
+        """A message with a single OK."""
+        if hasattr(Adw, "AlertDialog"):
+            dialog = Adw.AlertDialog(heading=heading, body=body)
+            dialog.add_response("ok", "OK")
+            dialog.present(self)
+        else:
+            dialog = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
+            dialog.add_response("ok", "OK")
+            dialog.present()
+
     def confirm(self, heading, body, action, on_yes):
         """A yes/no question; on_yes runs on yes."""
         if hasattr(Adw, "AlertDialog"):
@@ -1822,7 +1987,17 @@ class LauncherWindow(Adw.ApplicationWindow):
         link_available = bool(info and info.get("discord_link"))
         status = (info or {}).get("status", "")
         linked = bool(info and info.get("linked"))
-        if self.discord_busy:
+        ban = (info or {}).get("banned")
+        if ban:
+            until = (info or {}).get("ban_until") or 0
+            text = " ".join((
+                tr("Your connection (IP) is banned from online play.") if (info or {}).get("ban_kind") == "ip"
+                else tr("Your account is banned from online play."),
+                tr("Reason: {}").format(ban),
+                tr("Until: {}").format(time.strftime("%Y-%m-%d %H:%M", time.localtime(until))) if until
+                else tr("Duration: permanent"),
+                tr("If you think it is a mistake, appeal on our Discord.")))
+        elif self.discord_busy:
             text = tr("Authorize your account in the Discord tab that opened in the browser…")
         elif not nick_ok(nick):
             text = tr("Choose a nickname: 3 to 16 letters, digits, _ or - (not RyuPC or Player)")
@@ -2003,11 +2178,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         """The host becomes a friend (the game lists friends' lobbies as joinable) and the game
         joins their session by itself, as a PS4 invitation accepted in the system UI
         (src/runtime_services.c reads ryunet_join.txt next to bbport.ini)."""
-        friends = apply_join(server, nick)
+        apply_join(server, nick)
         self.ini, self.ini_lines = load_ini()
         self.online_row.set_active(True)
         self.server_row.set_text(server)
-        self.friends_row.set_text(friends)
         if self.process is not None:
             self.toasts.add_toast(Adw.Toast(title=tr("{}'s invite accepted: the game joins their match in a few seconds. "
                                                      "If it does not, open Friends in the game and join {}.").format(nick, nick),
@@ -2239,6 +2413,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         if not self.get_visible():
             self.set_visible(True)
         self.present()
+        if status == UNSUPPORTED_GPU_CODE:
+            self.inform("Vulkan 1.3", tr("Your graphics card or its driver doesn't support Vulkan 1.3, which the game "
+                                         "needs. Update the GPU driver; if it is already the latest, the card is too "
+                                         "old for this system."))
 
     def on_close(self, _window):
         self.store()

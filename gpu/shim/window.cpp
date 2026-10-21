@@ -10,6 +10,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 
@@ -87,6 +88,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    // On scaled Wayland desktops, window coordinates are logical units. Request a native
+    // pixel drawable so the compositor does not enlarge a low-resolution Vulkan surface.
+    // The swapchain uses SDL_GetWindowSizeInPixels, including after pixel-size changes.
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
     const char* fullscreen_env = std::getenv("BB_FULLSCREEN");
     // SacredFire: the setting already folds BB_FULLSCREEN in (Load runs before the window is
     // created); the environment is read again here in case it does not.
@@ -102,6 +107,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
+    if (!window && std::strstr(SDL_GetError(), "Vulkan")) {
+        // bbport: SDL found no usable Vulkan (no driver, or a loader without surfaces).
+        LOG_CRITICAL(Frontend, "Failed to create window: {}", SDL_GetError());
+        Vulkan::StopUnsupportedVulkan("this PC", 0);
+    }
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
 
     const char* driver = SDL_GetCurrentVideoDriver();
@@ -127,6 +137,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
     height = h;
+    int logical_w = 0, logical_h = 0;
+    SDL_GetWindowSize(window, &logical_w, &logical_h);
+    std::printf("Window: %dx%d logical, %dx%d pixels on %s (pixel density %.3f)\n",
+                logical_w, logical_h, w, h, driver ? driver : "?",
+                SDL_GetWindowPixelDensity(window));
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
 }
 

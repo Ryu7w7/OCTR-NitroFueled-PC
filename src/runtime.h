@@ -22,6 +22,7 @@ typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
+void runtime_set_report_hook(void (*hook)(void));
 void runtime_finalize(void *dso);
 uintptr_t runtime_mutex_resolve(const char *name);
 void runtime_mutex_report(void);
@@ -128,6 +129,8 @@ void runtime_services_user_change(int user, int login);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 void runtime_savedata_configure(const char *title);
+/* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
+void runtime_trophy_configure(const char *title);
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
 void runtime_thread_attach_host(const char *name);

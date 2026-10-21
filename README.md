@@ -38,6 +38,8 @@ compile them; the few the recipe lacks are compiled when first seen and cached.
 
 | Release | What it brought |
 |---|---|
+| [v0.6](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6) | Friends inside the game (search, requests, invitations, notices when they come online; the game's Invite button works); report players from the game, reviewed by the server's moderators (bans, cheated records removed); messages and announcements from the administrators as in-game notices; online rules and the community Discord in the launchers, which also say why a player is banned; online races end 30 s after the first player finishes; notice position and a notice when a new version is out; the Linux AppImage updates itself; NVIDIA laptops on Linux; a GPU without Vulkan 1.3 is named as such instead of code 23 (code 23 itself is not fixed); the NAT test detects networks that drop the server's replies; identical controllers in split screen. Versions 0.4.1 and older can no longer play online |
+| [v0.5.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.4) | Every race track in public matchmaking, at the same chance (Koala Carnival and the later Grand Prix tracks included); regional relays for the online tunnel; corrected 21:9 and 32:9 menus and centered HUD (tcosi; USA and EU 1.21, offline); CPUs without MOVBE/BMI1/LZCNT (Sandy and Ivy Bridge) can play; achievements with in-game notices and a launcher page; the in-game menu in Spanish, General tab first; a badly extracted game is reported instead of a code 3 (contributions from GetLostIn's repository by MetaHeart and Naif Alqurashi). Code 23 is not fixed and can still happen. |
 | [v0.5.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.3) | The European edition (CUSA14876, with or without its 1.21 update), online with the USA one; ultrawide screens; the first start prepares the game's shaders for your GPU (far fewer stalls in the first races); one more cause of the code 23 GPU hang removed (a stale GPU idle signal; code 23 itself is not fixed and can still happen); shadPS4 crash fixes; Bluetooth controllers no longer drop from rumble; the launcher checks for updates and installs them keeping your files; the Linux launcher gets the Windows options (volume, player per controller, window settings, more languages, patches) |
 | [v0.5.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.2) | Two causes of the code 23 GPU hang mitigated (garbage buffer descriptors, a minimised window) and more detail in crash logs; Linux launcher close to the Windows one: controls, DLC, friends, internal resolution, Discord account link, status and invites (also from Steam), AppImage icon, Steam shortcut that survives updates |
 | [v0.5.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.1) (pre-release) | Fix for the code 3 crash at start; the game no longer stops when VRAM runs short; GPU hangs (code 23) report their cause in the log; a server tunnel for players who cannot reach each other directly; redesigned launcher, now named *Crash™ Team Racing Nitro-Fueled*, in nine languages, with the NAT type on its Play page; Linux launcher: FPS limit, Unlock Everything, in-game settings kept |
@@ -168,6 +170,12 @@ launcher's log and `user\last_run.log` say which file is missing; attach `last_r
 
 For local builds, GitHub Actions builds, and tagged releases, follow the [desktop build guide](docs/MANUAL_BUILDS.md).
 
+CPUs without MOVBE, BMI1 or LZCNT (Sandy Bridge, Ivy Bridge) also need `iced-x86` for the Python
+that runs `run.py`, which the port uses to rewrite those instructions at start
+([15-isa-rewrite.md](docs/sacredfire/15-isa-rewrite.md), issue #31). MSYS2's Python cannot install
+the wheel: use a python.org Python 3 (`pip install iced-x86`) or the portable ZIP from Releases,
+which bundles it.
+
 ### Credits
 
 This fork stands on the work of:
@@ -248,9 +256,11 @@ full play-through has not been verified, and the Steam Deck (RADV) is the only t
   the base game, replacing files (eboot.bin and sce_sys too), or use `tools/merge_update.py`
   (it also reads PS4 PKG Tool's Image0 + Sc0 layout; see "Which game dumps work" above). The launcher and `run.sh` check
   the executable image and say what is missing (`BB_SKIP_GAME_CHECK=1` skips the check).
-- To build: GCC, CMake, Ninja, Python 3, glslang, SDL3, Vulkan headers and the libraries in
-  `shell.nix` (with [Nix](https://nixos.org), `shell.nix` provides them). On Arch:
-  `tools/deps.sh` fetches the header-only libraries the distribution lacks.
+- To build: GCC, CMake, Ninja, Python 3 (for CPUs without MOVBE, BMI1 or LZCNT,
+  `pip install iced-x86`: [15-isa-rewrite.md](docs/sacredfire/15-isa-rewrite.md)), glslang, SDL3,
+  Vulkan headers and the libraries in `shell.nix` (with [Nix](https://nixos.org), `shell.nix`
+  provides them). On Arch: `tools/deps.sh` fetches the header-only libraries the distribution
+  lacks.
 
 ## Build and run
 
@@ -289,6 +299,14 @@ The keyboard works next to a gamepad: WASD left stick, arrow keys right stick, S
 LShift Circle, E Square, Q Triangle, 1/3 L1/R1, R/F L2/R2, Z/C L3/R3, Enter Options, IJKL
 d-pad. The launcher's *Keyboard* page rebinds them (`key.<input>=` lines in `bbport.ini`;
 `pad.<input>=` rebinds gamepad buttons).
+
+**Achievements** (v0.4). The game's trophies unlock as on a PS4: each one is kept in
+`user\trophies\<TITLE_ID>\unlocked.txt` with its date, shows a notice over the game, and the
+platinum comes once all the others are. The launcher's *Achievements* tab shows them with their
+pictures (from `sce_sys\trophy\trophy00.trp`), progress, dates and a reset (with a backup). Names,
+descriptions and grades are encrypted in the game with the PS4's trophy key, which this port does
+not include: with your own key (the same shadPS4 uses; paste it, or import it from shadPS4's
+`keys.json`) they are decrypted as shadPS4 does and kept in `trophies.tsv`.
 
 **PS4 Pro mode** (`BB_NEO=1`, the launcher's switch): the game sees a PS4 Pro (7-CPU mode,
 5568 MiB of direct memory) and takes its Pro rendering path; with the 1080p patch it renders
@@ -398,3 +416,10 @@ recompiler, [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.s
 (MIT), DejaVu fonts, [miniz](https://github.com/richgel999/miniz) (MIT). Game patches by illusion
 and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch)). Import
 names from shadPS4's aerolib list.
+
+### Corrected widescreen layouts (Windows)
+
+Display settings include Resolution followed by Aspect ratio (16:9 default, 21:9, 32:9).
+The corrected layouts include menu/background/HUD asset fixes and centered-HUD shaders.
+The initial integration is for the tested USA 1.21 game and official v0.5.3 Windows engine, offline.
+See [setup, verification and limitations](docs/sacredfire/18-widescreen-layouts.md).

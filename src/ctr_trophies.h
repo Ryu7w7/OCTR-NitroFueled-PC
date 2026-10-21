@@ -1,0 +1,58 @@
+/* CTR Nitro-Fueled's trophies, by id (both editions, CUSA13795 and CUSA14876, share the list):
+ * the official names, their grade and what to do (said in our own words, Spanish and English).
+ * Checked against the trophy icons in sce_sys/trophy/trophy00.trp. The game's own texts are
+ * encrypted with the console's trophy key; these are used without it, by the runtime's in-game
+ * notice and the launcher's Achievements tab. C and C++. */
+#pragma once
+typedef struct { int id; char grade; const char *name, *es, *en; } CtrTrophy;
+#define CTR_TROPHY_COUNT 48
+static const CtrTrophy ctr_trophies[CTR_TROPHY_COUNT] = {
+    {0, 'P', "Woah!", "Consigue todos los demás logros.", "Earn every other trophy."},
+    {1, 'B', "Off to a Good Start", "Gana tu primera carrera en el modo Aventura.", "Win your first Adventure race."},
+    {2, 'B', "Crazier than the Ripper", "Vence a Ripper Roo en el modo Aventura.", "Beat Ripper Roo in Adventure."},
+    {3, 'B', "Me Fast, You Slow", "Vence a Papu Papu en el modo Aventura.", "Beat Papu Papu in Adventure."},
+    {4, 'B', "Komodone", "Vence a Komodo Joe en el modo Aventura.", "Beat Komodo Joe in Adventure."},
+    {5, 'B', "Why don't you get a job?", "Vence a Pinstripe en el modo Aventura.", "Beat Pinstripe in Adventure."},
+    {6, 'S', "Interstellar Challenge", "Vence a Nitros Oxide por primera vez.", "Beat Nitros Oxide for the first time."},
+    {7, 'G', "Galaxy's Fastest", "Vence a Nitros Oxide otra vez con la Aventura al 100 %.", "Beat Nitros Oxide again with Adventure at 100%."},
+    {8, 'B', "Arena Explorer", "Completa un desafío de cristales en el modo Aventura.", "Complete a Crystal Challenge in Adventure."},
+    {9, 'B', "Spare Change", "Gana un desafío CTR en el modo Aventura.", "Win a CTR Challenge in Adventure."},
+    {10, 'B', "Sprinter", "Gana una carrera de reliquias en el modo Aventura.", "Win a Relic Race in Adventure."},
+    {11, 'B', "Booyah, Grandma!", "Gana una copa en el modo Aventura.", "Win a Cup in Adventure."},
+    {12, 'S', "Relic Collector", "Consigue al menos la reliquia más baja en cada pista de la Aventura.", "Earn at least the lowest Relic on every Adventure track."},
+    {13, 'S', "Gem Collector", "Gana las cinco copas de gemas.", "Win all five Gem Cups."},
+    {14, 'S', "Token Collector", "Reúne todas las fichas CTR.", "Collect every CTR Token."},
+    {15, 'B', "Photo Finish", "Gana por menos de 0,3 segundos sobre el segundo.", "Finish less than 0.3 s ahead of second place."},
+    {16, 'B', "BOOM!", "Alcanza a dos rivales con una sola bomba.", "Hit two opponents with one Bowling Bomb."},
+    {17, 'B', "Super Boost!", "Haz un superturbo.", "Perform a Super Boost."},
+    {18, 'B', "Expert Dodger", "Vence a un jefe sin que te den sus objetos.", "Beat a boss without being hit by its Power-Ups."},
+    {19, 'B', "Drifter", "Derrapa 15 veces seguidas.", "Drift 15 times in a row."},
+    {20, 'S', "Master Drifter", "Encadena cinco triples turbos seguidos.", "Chain five triple Turbo Boosts in a row."},
+    {21, 'B', "Burning Rubber!", "Haz 500 turbos de derrape en total.", "Perform 500 Drift Boosts in total."},
+    {22, 'S', "Yeeee HAW!", "Completa el modo Aventura en Difícil.", "Complete Adventure on Hard."},
+    {23, 'B', "Hyper Speed", "Gana una carrera yendo último al empezar la última vuelta.", "Win after being last on the final lap."},
+    {24, 'B', "Rear-viewed", "Bloquea un misil con un frasco, una caja y una bomba.", "Block a missile with a Beaker, a Crate and a Bowling Bomb."},
+    {25, 'S', "The New Time-Master", "Supera todos los tiempos de N. Tropy en contrarreloj.", "Beat every N. Tropy Time Trial time."},
+    {26, 'G', "Gasmoxian Slug", "Supera todos los tiempos de Nitros Oxide en contrarreloj.", "Beat every Nitros Oxide Time Trial time."},
+    {27, 'B', "Natural", "Gana una carrera sin usar objetos.", "Win a race without using any Power-Ups."},
+    {28, 'S', "Nitrostalgia", "Gana en primer lugar en todas las pistas de CTR y CNK.", "Win first place on every CTR and CNK track."},
+    {29, 'B', "Can't Hide From Me", "Alcanza a un rival con los tres misiles de un triple misil.", "Hit an opponent with all three missiles of a Triple Missile."},
+    {30, 'B', "Weapon Technician", "Usa cada objeto al menos una vez.", "Use every Power-Up once."},
+    {31, 'B', "Dungeon Vaulter", "Usa el atajo del castillo de Cortex.", "Use the Cortex Castle shortcut."},
+    {32, 'B', "Arctic Hurdler", "Usa el atajo de Polar Pass.", "Use the Polar Pass shortcut."},
+    {33, 'B', "Winter Time Off-Roading", "Usa los cuatro atajos de Blizzard Bluff en una carrera.", "Use all four Blizzard Bluff shortcuts in one race."},
+    {34, 'B', "Pyramid Parkour", "Usa los dos atajos de la pirámide de Papu en una carrera.", "Use both Papu's Pyramid shortcuts in one race."},
+    {35, 'B', "Puddle Hopper", "Usa el atajo de Crash Cove.", "Use the Crash Cove shortcut."},
+    {36, 'B', "Half-Pipe Karting", "Usa el atajo de Sewer Speedway.", "Use the Sewer Speedway shortcut."},
+    {37, 'B', "Let me in!", "Usa el atajo de Tiger Temple.", "Use the Tiger Temple shortcut."},
+    {38, 'B', "Minekarting", "Usa el atajo de Dragon Mines sin que te aplasten.", "Use the Dragon Mines shortcut without being crushed."},
+    {39, 'B', "I know the way!", "Consigue los ocho logros de atajos.", "Earn all eight shortcut trophies."},
+    {40, 'B', "Juiced Up!", "Usa cada objeto potenciado (Juiced Up) una vez.", "Use every Juiced Up Power-Up once."},
+    {41, 'S', "Unstoppable", "Mantén el turbo activo durante una vuelta entera.", "Keep your boost active for a whole lap."},
+    {42, 'B', "The Dominator!", "Gana una partida en cada modo de Batalla.", "Win a match in each Battle mode."},
+    {43, 'B', "Get off me!", "Quítate de encima una caja de TNT.", "Escape a TNT crate."},
+    {44, 'B', "Alchemist", "Da a un rival con un frasco lanzado de frente.", "Hit an opponent directly with a thrown Beaker."},
+    {45, 'B', "That's How I Roll", "Personaliza tu kart.", "Customize your kart."},
+    {46, 'S', "Is everyone here?", "Desbloquea todos los personajes del plantel original.", "Unlock every character from the original roster."},
+    {47, 'B', "Oh, Shiny!", "Completa todos los desafíos de cristales (CTR y CNK).", "Complete every Crystal Challenge (CTR and CNK)."},
+};

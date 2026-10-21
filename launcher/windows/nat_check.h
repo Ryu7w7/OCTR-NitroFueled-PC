@@ -24,6 +24,9 @@ enum class Type {
 struct Result {
     Type type = Type::Unknown;
     std::string error;  ///< why it is Unknown: "dns", "socket", "server" (no NAT reply), "stun"
+    /// The server answered the address request (type 30) but none of its NAT test replies
+    /// (type 20) arrived: the game then says "Failed to initialize network" (issue #42).
+    bool replies_blocked = false;
 };
 
 /// Blocking, a few seconds at most (run it on a worker thread). server: the online_server
@@ -34,6 +37,9 @@ Result Check(const std::string& server, int nat_port = 3074);
 
 /// The RyuNET NAT reply to a type 30 request: 31, 2, 0, IPv4 (network order), port (little endian).
 bool ParseServerReply(const std::uint8_t* data, std::size_t size, std::uint32_t& ip, std::uint16_t& port);
+/// The RyuNET reply to the game's NAT test (type 20): 21, 2, 0, the client's address and port,
+/// the server's address and port (15 bytes).
+bool IsServerTestReply(const std::uint8_t* data, std::size_t size);
 /// A STUN Binding success response for this transaction: XOR-MAPPED-ADDRESS (or MAPPED-ADDRESS).
 /// ip in network byte order, port in host order.
 bool ParseStunReply(const std::uint8_t* data, std::size_t size, const std::uint8_t transaction[12],

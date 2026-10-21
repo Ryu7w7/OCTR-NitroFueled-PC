@@ -220,14 +220,14 @@ class GamePatchTests(unittest.TestCase):
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.00'), [])
 
     def test_eu_edition_patches_follow_menu_keys(self):
-        # The three game patches of the menu (60 FPS, motion blur, 1080p Pro); Camiloop's unlock
-        # patch is for the USA executable only, the online key patch has its own EU file for 1.21.
+        # The three base-game patches (60 FPS, motion blur, 1080p Pro); the online key and
+        # Camiloop's unlock patch also have EU files for the 1.21 update.
         classic = [k for k in GAME_PATCH_KEYS if k not in ('patch_unlock_all', 'patch_online_key')]
         found = external_patches(ROOT / 'patches', app_version='01.00', title_id='CUSA14876')
         self.assertEqual({key.split('/')[0] for key, _, _ in found}, {'CrashTeamRacingEU.xml'})
         self.assertEqual(len(found), len(classic))
         found_121 = external_patches(ROOT / 'patches', app_version='01.21', title_id='CUSA14876')
-        self.assertEqual(len(found_121), len(classic) + 1)  # EU with the 1.21 update, and its online key
+        self.assertEqual(len(found_121), len(classic) + 2)  # EU 1.21 also has online and unlock patches
         self.assertIn('CrashTeamRacingOnlineEU.xml/Online: custom Demonware key', [k for k, _, _ in found_121])
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.10', title_id='CUSA14876'), [])
         selected = external_selection(found, None, {'patch_60fps': '1'})

@@ -69,3 +69,12 @@ runs the Pro path with the scales above and a 4K output; 720 and 480 use scales 
 also drop the Pro path's output doubling (`add %ecx,%ecx` at 0x17aa648 and `add %r8d,%r8d` at
 0x17aa658 become NOPs), so the picture stays 1920x1080. All six tested on an RTX 3070
 (2026-10-12). The game sizes its targets at start, so a change needs a restart (the menu does it).
+
+## Linux desktop scaling (SDL window)
+
+`gpu/shim/window.cpp` sets `SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN=true` so
+the Vulkan drawable uses physical pixels on scaled desktops, avoiding compositor upscaling
+that can blur the final image. `SDL_GetWindowSizeInPixels` supplies the drawable extent;
+`SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` updates it, and the presenter recreates the swapchain
+on an extent mismatch. Startup logs report logical size, pixel size and pixel density.
+The guest's internal resolution and Pro render scale remain unchanged.

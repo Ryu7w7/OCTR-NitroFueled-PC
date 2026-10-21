@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <mutex>
 #include <string>
 
@@ -16,8 +17,13 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <vector>
+#include <miniz.h>
 #include "bbport_settings.h"
+#include "../../src/runtime_friends.h"
 #include "imgui.h"
+#include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -69,6 +75,192 @@ float base_scale = 1.0f;
 std::mutex prompt_mutex;
 std::atomic<bool> prompt_active{false};
 std::string prompt_title, prompt_text;
+
+// v0.4: notices over the game (an unlocked trophy), one at a time, each for a few seconds, in the
+// launcher's look: the trophy's picture, its grade, name and what it was for.
+struct Notice {
+    std::string title, name, detail;
+    int kind = 0; // trophy grade: 1 bronze, 2 silver, 3 gold, 4 platinum, 0 unknown
+    std::shared_ptr<std::vector<unsigned char>> rgba; // the picture, RGBA, icon_size x icon_size
+    ImTextureData* texture = nullptr;                // made from rgba on the present thread
+    std::chrono::steady_clock::time_point start{};
+};
+std::mutex notice_mutex;
+std::deque<Notice> notices;
+constexpr float kNoticeSeconds = 7.0f;
+constexpr int kIconSize = 128;
+std::vector<std::unique_ptr<ImTextureData>> notice_textures; // kept: a handful per session
+
+/// An 8-bit, non-interlaced PNG (grey, RGB, grey+alpha, RGBA) to RGBA, scaled to kIconSize.
+bool DecodePng(const unsigned char* png, size_t size, std::vector<unsigned char>& out) {
+    if (size < 33 || std::memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) return false;
+    auto be32 = [](const unsigned char* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; };
+    uint32_t w = 0, h = 0;
+    int channels = 0;
+    std::vector<unsigned char> idat;
+    for (size_t at = 8; at + 12 <= size;) {
+        const uint32_t len = be32(png + at);
+        const unsigned char* type = png + at + 4;
+        if (at + 12 + len > size) return false;
+        const unsigned char* data = png + at + 8;
+        if (!std::memcmp(type, "IHDR", 4) && len >= 13) {
+            w = be32(data);
+            h = be32(data + 4);
+            const int depth = data[8], color = data[9], interlace = data[12];
+            channels = color == 0 ? 1 : color == 2 ? 3 : color == 4 ? 2 : color == 6 ? 4 : 0;
+            if (depth != 8 || interlace || !channels || !w || !h || w > 4096 || h > 4096) return false;
+        } else if (!std::memcmp(type, "IDAT", 4)) {
+            idat.insert(idat.end(), data, data + len);
+        } else if (!std::memcmp(type, "IEND", 4)) {
+            break;
+        }
+        at += 12 + len;
+    }
+    if (!channels || idat.empty()) return false;
+    const size_t stride = size_t(w) * channels;
+    std::vector<unsigned char> raw((stride + 1) * h);
+    mz_ulong raw_size = mz_ulong(raw.size());
+    if (mz_uncompress(raw.data(), &raw_size, idat.data(), mz_ulong(idat.size())) != MZ_OK || raw_size != raw.size()) return false;
+    std::vector<unsigned char> pixels(stride * h);
+    for (uint32_t y = 0; y < h; ++y) {
+        const unsigned char filter = raw[y * (stride + 1)];
+        const unsigned char* src = &raw[y * (stride + 1) + 1];
+        unsigned char* row = &pixels[y * stride];
+        const unsigned char* up = y ? &pixels[(y - 1) * stride] : nullptr;
+        for (size_t x = 0; x < stride; ++x) {
+            const int a = x >= size_t(channels) ? row[x - channels] : 0, b = up ? up[x] : 0,
+                      c = up && x >= size_t(channels) ? up[x - channels] : 0;
+            int v = src[x];
+            switch (filter) {
+            case 1: v += a; break;
+            case 2: v += b; break;
+            case 3: v += (a + b) / 2; break;
+            case 4: {
+                const int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+                v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                break;
+            }
+            default: break;
+            }
+            row[x] = (unsigned char)v;
+        }
+    }
+    // Box filter down to kIconSize (trophy pictures are 240 x 240).
+    out.assign(size_t(kIconSize) * kIconSize * 4, 0);
+    for (int oy = 0; oy < kIconSize; ++oy) {
+        for (int ox = 0; ox < kIconSize; ++ox) {
+            const uint32_t x0 = ox * w / kIconSize, x1 = std::max(x0 + 1, (ox + 1) * w / kIconSize);
+            const uint32_t y0 = oy * h / kIconSize, y1 = std::max(y0 + 1, (oy + 1) * h / kIconSize);
+            uint32_t sum[4]{}, n = 0;
+            for (uint32_t y = y0; y < y1; ++y) {
+                for (uint32_t x = x0; x < x1; ++x, ++n) {
+                    const unsigned char* px = &pixels[y * stride + x * channels];
+                    const unsigned char r = px[0], g = channels >= 3 ? px[1] : px[0], bl = channels >= 3 ? px[2] : px[0];
+                    const unsigned char al = channels == 4 ? px[3] : channels == 2 ? px[1] : 255;
+                    sum[0] += r; sum[1] += g; sum[2] += bl; sum[3] += al;
+                }
+            }
+            for (int k = 0; k < 4; ++k) out[(size_t(oy) * kIconSize + ox) * 4 + k] = (unsigned char)(sum[k] / n);
+        }
+    }
+    return true;
+}
+
+/// The notice to draw now (its age in seconds), dropping finished ones. Present thread, with the
+/// ImGui context: makes the picture's texture the first time.
+Notice* CurrentNotice(float& age) {
+    std::scoped_lock lock{notice_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    while (!notices.empty()) {
+        Notice& n = notices.front();
+        if (n.start == std::chrono::steady_clock::time_point{}) {
+            n.start = now;
+        }
+        age = std::chrono::duration<float>(now - n.start).count();
+        if (age < kNoticeSeconds) {
+            if (!n.texture && n.rgba && !n.rgba->empty()) {
+                auto texture = std::make_unique<ImTextureData>();
+                texture->Create(ImTextureFormat_RGBA32, kIconSize, kIconSize);
+                std::memcpy(texture->GetPixels(), n.rgba->data(), n.rgba->size());
+                texture->UsedRect = {0, 0, (unsigned short)kIconSize, (unsigned short)kIconSize};
+                ImGui::RegisterUserTexture(texture.get());
+                n.texture = texture.get();
+                notice_textures.push_back(std::move(texture));
+            }
+            return &n;
+        }
+        notices.pop_front();
+    }
+    return nullptr;
+}
+
+// The launcher's palette (launcher/windows/launcher.cpp ApplyTheme).
+const ImVec4 kMenuAccent{1.0f, 0.54f, 0.12f, 1.0f};
+const ImVec4 kMenuGrey{0.58f, 0.61f, 0.70f, 1.0f};
+const ImVec4 kMenuYellow{1.0f, 0.78f, 0.30f, 1.0f};
+const ImVec4 kMenuText{0.92f, 0.93f, 0.96f, 1.0f};
+
+void ApplyMenuTheme() {
+    ImGuiStyle& st = ImGui::GetStyle();
+    st.WindowRounding = 12.0f;
+    st.ChildRounding = 8.0f;
+    st.FrameRounding = 6.0f;
+    st.PopupRounding = 8.0f;
+    st.GrabRounding = 6.0f;
+    st.TabRounding = 6.0f;
+    st.ScrollbarRounding = 8.0f;
+    st.WindowPadding = ImVec2(16.0f, 12.0f);
+    st.FramePadding = ImVec2(10.0f, 5.0f);
+    st.ItemSpacing = ImVec2(10.0f, 7.0f);
+    st.WindowBorderSize = 1.0f;
+    st.TabBarOverlineSize = 2.0f;
+    st.SeparatorTextBorderSize = 2.0f;
+    st.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+    ImVec4* c = st.Colors;
+    const ImVec4 bg{0.067f, 0.075f, 0.102f, 0.96f}, panel{0.098f, 0.110f, 0.149f, 1.0f}, card{0.118f, 0.133f, 0.188f, 1.0f},
+        frame{0.149f, 0.169f, 0.231f, 1.0f}, hover{0.184f, 0.208f, 0.314f, 1.0f}, active{0.220f, 0.251f, 0.388f, 1.0f},
+        border{0.173f, 0.192f, 0.259f, 1.0f};
+    c[ImGuiCol_Text] = kMenuText;
+    c[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.48f, 0.56f, 1.0f);
+    c[ImGuiCol_WindowBg] = bg;
+    c[ImGuiCol_PopupBg] = panel;
+    c[ImGuiCol_Border] = border;
+    c[ImGuiCol_TitleBg] = ImVec4(0.16f, 0.11f, 0.24f, 1.0f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.11f, 0.24f, 1.0f);
+    c[ImGuiCol_TitleBgCollapsed] = panel;
+    c[ImGuiCol_FrameBg] = frame;
+    c[ImGuiCol_FrameBgHovered] = hover;
+    c[ImGuiCol_FrameBgActive] = active;
+    c[ImGuiCol_Button] = frame;
+    c[ImGuiCol_ButtonHovered] = hover;
+    c[ImGuiCol_ButtonActive] = active;
+    c[ImGuiCol_CheckMark] = kMenuAccent;
+    c[ImGuiCol_SliderGrab] = kMenuAccent;
+    c[ImGuiCol_SliderGrabActive] = ImVec4(1.0f, 0.63f, 0.26f, 1.0f);
+    c[ImGuiCol_Header] = ImVec4(1.0f, 0.54f, 0.12f, 0.20f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(1.0f, 0.54f, 0.12f, 0.32f);
+    c[ImGuiCol_HeaderActive] = ImVec4(1.0f, 0.54f, 0.12f, 0.45f);
+    c[ImGuiCol_Separator] = border;
+    c[ImGuiCol_Tab] = panel;
+    c[ImGuiCol_TabHovered] = hover;
+    c[ImGuiCol_TabSelected] = card;
+    c[ImGuiCol_TabSelectedOverline] = kMenuAccent;
+    c[ImGuiCol_TabDimmed] = panel;
+    c[ImGuiCol_TabDimmedSelected] = card;
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = hover;
+    c[ImGuiCol_ResizeGrip] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_NavCursor] = kMenuAccent;
+    c[ImGuiCol_PlotHistogram] = kMenuAccent;
+}
+
+/// A section title in the accent colour.
+void MenuSection(const char* label) {
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, kMenuAccent);
+    ImGui::SeparatorText(label);
+    ImGui::PopStyleColor();
+}
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
@@ -184,6 +376,363 @@ void Hint(const char* text) {
     }
 }
 
+// RyuNET friends (src/runtime_friends.c): the Friends tab and its notices.
+
+const char* FriendResultText(const std::string& action, const char* word) {
+    const std::string w = word;
+    if (w == "sent") {
+        return action == "invite" ? BbSettings::MenuText("Invitation sent to %s", "Приглашение отправлено: %s")
+                                  : BbSettings::MenuText("Friend request sent to %s", "Запрос отправлен: %s");
+    }
+    if (w == "friends") return BbSettings::MenuText("%s is now your friend", "%s теперь ваш друг");
+    if (w == "removed") return BbSettings::MenuText("Removed: %s", "Удалено: %s");
+    if (w == "busy") return BbSettings::MenuText("%s has too many pending requests", "У %s слишком много запросов");
+    if (w == "full") return BbSettings::MenuText("The friend list is full", "Список друзей заполнен");
+    if (w == "unknown") return BbSettings::MenuText("No registered player is called %s", "Нет игрока с ником %s");
+    if (w == "not_friends") return BbSettings::MenuText("%s is not your friend", "%s не ваш друг");
+    if (w == "none") return BbSettings::MenuText("That request is gone", "Этого запроса больше нет");
+    if (w == "refused") return BbSettings::MenuText("The server refused it", "Сервер отказал");
+    return BbSettings::MenuText("Could not reach the server", "Сервер недоступен");
+}
+
+/// Friend notices: checked every frame. The menu's options leave out friends coming online, or
+/// every notice from friends (the Invite button's own result still shows).
+void PollFriends() {
+    const auto& s = BbSettings::Get();
+    // A newer release (run.py update_notice: BB_UPDATE_AVAILABLE), once, after the boot screens.
+    static const auto started = std::chrono::steady_clock::now();
+    static bool update_told = false;
+    if (!update_told && std::chrono::steady_clock::now() - started > std::chrono::seconds(15)) {
+        update_told = true;
+        if (const char* tag = std::getenv("BB_UPDATE_AVAILABLE"); tag && *tag) {
+            Notify(BbSettings::MenuText("Update available", "Доступно обновление"), tag,
+                   BbSettings::MenuText("Update from the launcher", "Обновите через лаунчер"), 6, nullptr, 0);
+        }
+    }
+    static bool privacy_sent = false;
+    if (!privacy_sent) { // the server learns "appear offline" once per game
+        privacy_sent = true;
+        runtime_friends_set_hidden(s.friends_hide_me);
+    }
+    // The server administrators' messages: always shown, whatever the
+    // friends options say.
+    char message[RF_MESSAGE];
+    while (runtime_friends_take_message(message)) {
+        Notify(BbSettings::MenuText("Message from the server", "Сообщение сервера"), message, "", 7, nullptr, 0);
+    }
+    char name[RF_NAME];
+    for (int kind; (kind = runtime_friends_take_event(name));) {
+        const bool own = kind == RF_EVENT_INVITED || kind == RF_EVENT_NO_ONE_ONLINE;
+        if ((s.friends_no_notices && !own) || (s.friends_hide_activity && kind == RF_EVENT_ONLINE)) {
+            continue;
+        }
+        const char *title = "", *detail = "";
+        std::string shown = name;
+        switch (kind) {
+        case RF_EVENT_ONLINE:
+            title = BbSettings::MenuText("Friend online", "Друг в сети");
+            detail = BbSettings::MenuText("has come online", "в сети");
+            break;
+        case RF_EVENT_REQUEST:
+            title = BbSettings::MenuText("Friend request", "Запрос в друзья");
+            detail = BbSettings::MenuText("Menu (Insert / L3+R3) > Friends to accept",
+                                          "Меню (Insert / L3+R3) > Друзья, чтобы принять");
+            break;
+        case RF_EVENT_INVITE:
+            title = BbSettings::MenuText("Invitation", "Приглашение");
+            detail = BbSettings::MenuText("invites you to their room: Menu > Friends > Join",
+                                          "зовёт вас в свою комнату: Меню > Друзья > Войти");
+            break;
+        case RF_EVENT_INVITED: {
+            // The game's Invite button: every friend online ("+N" for several).
+            title = BbSettings::MenuText("Invitation sent", "Приглашение отправлено");
+            if (name[0] == '+') {
+                char count[64];
+                std::snprintf(count, sizeof count, BbSettings::MenuText("%d friends", "друзей: %d"), std::atoi(name + 1));
+                shown = count;
+            }
+            break;
+        }
+        case RF_EVENT_NO_ONE_ONLINE:
+            title = BbSettings::MenuText("Invitation", "Приглашение");
+            shown = BbSettings::MenuText("No friend online", "Нет друзей в сети");
+            detail = BbSettings::MenuText("Add friends in Menu (Insert / L3+R3) > Friends",
+                                          "Добавьте друзей: Меню (Insert / L3+R3) > Друзья");
+            break;
+        case RF_EVENT_ACCEPTED:
+            title = BbSettings::MenuText("New friend", "Новый друг");
+            detail = BbSettings::MenuText("accepted your request", "принял ваш запрос");
+            break;
+        default: continue;
+        }
+        Notify(title, shown, detail, 5, nullptr, 0);
+    }
+}
+
+constexpr ImVec4 kFriendGreen{0.36f, 0.85f, 0.47f, 1.0f};
+
+/// A filled green dot (online) or a grey ring (offline), the height of a line of text.
+void StatusDot(bool online) {
+    const float size = ImGui::GetFontSize();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 centre(p.x + size * 0.5f, p.y + ImGui::GetFrameHeight() * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (online) {
+        dl->AddCircleFilled(centre, size * 0.3f, ImGui::GetColorU32(kFriendGreen));
+    } else {
+        dl->AddCircle(centre, size * 0.28f, ImGui::GetColorU32(kMenuGrey), 0, 1.5f * base_scale);
+    }
+    ImGui::Dummy(ImVec2(size, ImGui::GetFrameHeight()));
+}
+
+// The community's Discord server: bug reports, questions, ban appeals.
+constexpr const char* kCommunityDiscord = "https://discord.gg/PAT5SJzdXw";
+
+void CommunityDiscordLine(const char* why) {
+    ImGui::TextDisabled("%s", why);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(kCommunityDiscord + 8); // without https://
+    ImGui::SameLine();
+    if (ImGui::SmallButton(BbSettings::MenuText("Open", "Открыть"))) SDL_OpenURL(kCommunityDiscord);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(BbSettings::MenuText("Copy link", "Копировать"))) SDL_SetClipboardText(kCommunityDiscord);
+}
+
+// Friends tab > Report a player: to the server's administrators.
+void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
+    static int reason = 0;
+    static char comment[RF_REPORT_COMMENT] = "";
+    static bool sent_here = false;
+    static const char* const reasons[] = {"cheating", "name", "behavior", "other"};
+    MenuSection(BbSettings::MenuText("Report a player", "Пожаловаться на игрока"));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    ImGui::InputTextWithHint("##report_who", BbSettings::MenuText("Nickname", "Ник"), who, sizeof who);
+    ImGui::SameLine();
+    const char* labels[] = {BbSettings::MenuText("Cheating / hacks", "Читы / взлом"),
+                            BbSettings::MenuText("Offensive name", "Оскорбительный ник"),
+                            BbSettings::MenuText("Behavior", "Поведение"), BbSettings::MenuText("Other reason", "Другое")};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    ImGui::Combo("##report_reason", &reason, labels, 4);
+    ImGui::TextDisabled("%s", BbSettings::MenuText("Comment (optional): what happened, which track, when",
+                                                   "Комментарий (необязательно): что случилось, трасса, когда"));
+    ImGui::InputTextMultiline("##report_comment", comment, 301,
+                              ImVec2(ImGui::GetFontSize() * 23.0f, ImGui::GetTextLineHeight() * 3.5f));
+    ImGui::BeginDisabled(view.reporting || std::strlen(who) < 3);
+    if (ImGui::Button(BbSettings::MenuText("Send report", "Отправить жалобу"))) {
+        runtime_friends_report(who, reasons[reason], comment);
+        sent_here = true;
+    }
+    ImGui::EndDisabled();
+    const std::string result = view.report_result;
+    if (view.reporting) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Sending...", "Отправка..."));
+    } else if (sent_here && !result.empty()) {
+        if (result == "sent") {
+            ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("Report sent. Thank you: the administrators will review it.",
+                                                                       "Жалоба отправлена. Спасибо: администраторы её рассмотрят."));
+            who[0] = '\0';
+            comment[0] = '\0';
+            reason = 0;
+        } else {
+            const char* why = result == "already"   ? BbSettings::MenuText("You already reported this player today.", "Вы уже жаловались на этого игрока сегодня.")
+                              : result == "limit"   ? BbSettings::MenuText("You have sent the most reports for today.", "Лимит жалоб на сегодня исчерпан.")
+                              : result == "unknown" ? BbSettings::MenuText("No registered player has that nickname.", "Нет игрока с таким ником.")
+                              : result == "self"    ? BbSettings::MenuText("You cannot report yourself.", "Нельзя пожаловаться на себя.")
+                                                    : BbSettings::MenuText("The report could not be sent; try again later.", "Не удалось отправить жалобу; попробуйте позже.");
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", why);
+        }
+        if (result == "sent") sent_here = false; // the fields are cleared; the next report starts anew
+    }
+    ImGui::Spacing();
+    CommunityDiscordLine(BbSettings::MenuText("Bugs, questions or a ban appeal: our Discord",
+                                              "Ошибки, вопросы или обжалование бана: наш Discord"));
+}
+
+void FriendsTab() {
+    static RfView view;
+    static unsigned seen = ~0u;
+    static char query[RF_NAME] = "";
+    static char report_who[RF_NAME] = "";
+    static std::string last_action;
+    if (const unsigned serial = runtime_friends_serial(); serial != seen) {
+        runtime_friends_view(&view);
+        seen = view.serial;
+    }
+    const ImVec4 green = kFriendGreen;
+    auto act = [](const char* action, const char* who) {
+        last_action = action;
+        runtime_friends_action(action, who);
+    };
+
+    if (view.state == RF_OFF) {
+        ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                     "Friends need online play on and a nickname of your own (launcher > Online).",
+                                     "Для друзей нужен онлайн и свой ник (лаунчер > Онлайн)."));
+        return;
+    }
+    if (view.state == RF_WAITING) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Connecting to the server...", "Подключение к серверу..."));
+        return;
+    }
+    if (view.state == RF_REFUSED) {
+        ImGui::TextColored(kMenuYellow, "%s",
+                           BbSettings::MenuText("The server did not accept this nickname for friends: it must be "
+                                                "registered (it is when you log in once with this launcher).",
+                                                "Сервер не принял этот ник для друзей: он должен быть "
+                                                "зарегистрирован."));
+        return;
+    }
+    if (view.state == RF_UNREACHABLE) {
+        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("The server is not answering; retrying...",
+                                                                   "Сервер не отвечает; повтор..."));
+    }
+    if (view.result[0] && !last_action.empty()) {
+        char line[160];
+        std::snprintf(line, sizeof line, FriendResultText(last_action, view.result), view.result_who);
+        ImGui::TextColored(kMenuGrey, "%s", line);
+    }
+
+    if (view.invite_count) {
+        MenuSection(BbSettings::MenuText("Invitations", "Приглашения"));
+        for (int i = 0; i < view.invite_count; ++i) {
+            const RfInvite& inv = view.invites[i];
+            ImGui::PushID(i);
+            ImGui::Text(BbSettings::MenuText("%s invites you to their room", "%s зовёт вас в комнату"), inv.from);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Join", "Войти"))) {
+                runtime_friends_join(inv.from);
+                SetOpen(false);
+            }
+            ImGui::PopID();
+        }
+    }
+    if (view.incoming_count) {
+        MenuSection(BbSettings::MenuText("Friend requests", "Запросы в друзья"));
+        for (int i = 0; i < view.incoming_count; ++i) {
+            ImGui::PushID(view.incoming[i]);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(view.incoming[i]);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Accept", "Принять"))) act("accept", view.incoming[i]);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Decline", "Отклонить"))) act("decline", view.incoming[i]);
+            ImGui::PopID();
+        }
+    }
+
+    char title[64];
+    std::snprintf(title, sizeof title, BbSettings::MenuText("Friends (%d)", "Друзья (%d)"), view.friend_count);
+    MenuSection(title);
+    if (!view.friend_count) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("No friends yet: search for a nickname below.",
+                                                       "Друзей пока нет: найдите ник ниже."));
+    }
+    static std::string confirm_remove;
+    for (int i = 0; i < view.friend_count; ++i) {
+        const RfFriend& f = view.friends[i];
+        ImGui::PushID(f.name);
+        ImGui::AlignTextToFramePadding();
+        StatusDot(f.online);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(f.name);
+        ImGui::SameLine();
+        if (!f.online) {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Offline", "Не в сети"));
+        } else if (f.players > 1) {
+            ImGui::TextColored(green, BbSettings::MenuText("In a room (%d/%d)", "В комнате (%d/%d)"), f.players, f.max);
+        } else {
+            ImGui::TextColored(green, "%s", BbSettings::MenuText("Online", "В сети"));
+        }
+        if (f.online) {
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Invite", "Пригласить"))) act("invite", f.name);
+        }
+        ImGui::SameLine();
+        if (confirm_remove == f.name) {
+            if (ImGui::Button(BbSettings::MenuText("Sure? Remove", "Точно удалить?"))) {
+                act("remove", f.name);
+                confirm_remove.clear();
+            }
+        } else if (ImGui::SmallButton(BbSettings::MenuText("Remove", "Удалить"))) {
+            confirm_remove = f.name;
+        }
+        ImGui::PopID();
+    }
+
+    MenuSection(BbSettings::MenuText("Options", "Настройки"));
+    {
+        auto& s = BbSettings::Get();
+        Checkbox(BbSettings::MenuText("Don't show friends' activity", "Не показывать активность друзей"),
+                 s.friends_hide_activity);
+        Hint(BbSettings::MenuText("No notice when a friend comes online.", "Без уведомлений, когда друг заходит в сеть."));
+        bool hide_me = s.friends_hide_me;
+        if (ImGui::Checkbox(BbSettings::MenuText("Don't show my activity", "Не показывать мою активность"), &hide_me)) {
+            Store(s.friends_hide_me, hide_me, true);
+            runtime_friends_set_hidden(hide_me);
+        }
+        Hint(BbSettings::MenuText("Your friends see you offline and get no notice when you come online.",
+                                  "Друзья видят вас не в сети и не получают уведомлений."));
+        Checkbox(BbSettings::MenuText("Don't show notifications", "Не показывать уведомления"), s.friends_no_notices);
+        Hint(BbSettings::MenuText("No friend notices (requests, invitations, friends online). This tab still shows "
+                                  "them.",
+                                  "Без уведомлений от друзей (запросы, приглашения, друзья в сети). Эта вкладка "
+                                  "их по-прежнему показывает."));
+    }
+
+    MenuSection(BbSettings::MenuText("Add a friend", "Добавить друга"));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    const bool enter = ImGui::InputTextWithHint("##friend_search", BbSettings::MenuText("Nickname", "Ник"), query,
+                                                sizeof query, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::Button(BbSettings::MenuText("Search", "Найти")) || enter) && std::strlen(query) >= 2) {
+        runtime_friends_search(query);
+    }
+    if (view.searching) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Searching...", "Поиск..."));
+    } else if (view.search_query[0] && !view.search_count) {
+        ImGui::TextDisabled(BbSettings::MenuText("No registered nickname starts with \"%s\"",
+                                                 "Нет ников, начинающихся с \"%s\""),
+                            view.search_query);
+    }
+    for (int i = 0; i < view.search_count; ++i) {
+        const RfPlayer& p = view.search[i];
+        const std::string relation = p.relation;
+        ImGui::PushID(1000 + i);
+        ImGui::AlignTextToFramePadding();
+        StatusDot(p.online);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(p.name);
+        ImGui::SameLine();
+        if (relation == "friend") {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Friend", "Друг"));
+        } else if (relation == "sent") {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Request sent", "Запрос отправлен"));
+        } else if (relation == "received") {
+            if (ImGui::Button(BbSettings::MenuText("Accept", "Принять"))) act("accept", p.name);
+        } else if (ImGui::Button(BbSettings::MenuText("Add", "Добавить"))) {
+            act("request", p.name);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(BbSettings::MenuText("Report", "Пожаловаться"))) {
+            std::snprintf(report_who, sizeof report_who, "%s", p.name);
+        }
+        ImGui::PopID();
+    }
+    if (view.outgoing_count) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Requests you sent:", "Ваши запросы:"));
+        for (int i = 0; i < view.outgoing_count; ++i) {
+            ImGui::PushID(2000 + i);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(view.outgoing[i]);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(BbSettings::MenuText("Cancel", "Отменить"))) act("remove", view.outgoing[i]);
+            ImGui::PopID();
+        }
+    }
+    ReportSection(view, report_who);
+}
+
 void Menu() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -201,8 +750,8 @@ void Menu() {
     bool keep_open = true;
     // SacredFire: the menu title.
     if (!ImGui::Begin(
-            BbSettings::MenuText("SacredFire  (Insert / L3+R3)###bbport_settings",
-                                 "SacredFire  (Insert / L3+R3)###bbport_settings"),
+            BbSettings::MenuText("CTR Nitro-Fueled PC  ·  Insert / L3+R3###bbport_settings",
+                                 "CTR Nitro-Fueled PC  ·  Insert / L3+R3###bbport_settings"),
             &keep_open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
@@ -218,16 +767,8 @@ void Menu() {
             dirty = true;
         }
     }
-    // Always readable, even when the rest of the menu is in Russian.
-    static const char* languages[] = {"English", "Русский"};
-    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
-    if (ImGui::Combo("Language", &language, languages, 2)) {
-        s.menu_language =
-            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
-        BbSettings::Save();
-    }
-    ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-                frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, frame_ms_avg);
+    ImGui::TextColored(kMenuGrey, BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
+                       frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, frame_ms_avg);
 
     // sacredfire: bbport's temporal upscalers, reactive mask and output scaling read the scene of
     // the game bbport was built for and stay off here (bbport_settings.cpp); their sections show
@@ -500,8 +1041,82 @@ void Menu() {
     }
     // Game patches (patches/CrashTeamRacing.xml): bbport's own game-effect patches went with its
     // Bloodborne profile (removed 2026-10-09).
-    ImGui::SeparatorText(BbSettings::MenuText("Game patches (restart required)",
-                                              "Патчи игры (после перезапуска)"));
+    // v0.4: the menu in tabs, in the launcher's look (ApplyMenuTheme).
+    if (!ImGui::BeginTabBar("menu_tabs")) {
+        ImGui::End();
+        return;
+    }
+    if (ImGui::BeginTabItem(BbSettings::MenuText("General", "Общие"))) {
+    MenuSection(BbSettings::MenuText("Display", "Экран"));
+    {
+        Checkbox(BbSettings::MenuText("Fullscreen", "Полный экран"), s.fullscreen);
+        Hint(BbSettings::MenuText("Fullscreen on the game's display (BB_DISPLAY). "
+                                  "Applies at once; BB_FULLSCREEN=1 at start.",
+                                  "Полный экран на дисплее игры (BB_DISPLAY). "
+                                  "Сразу; BB_FULLSCREEN=1 при запуске."));
+        Checkbox(BbSettings::MenuText("Borderless window", "Без рамок"), s.borderless);
+        Hint(BbSettings::MenuText("Remove window borders in windowed mode.",
+                                  "Убрать рамку окна в оконном режиме."));
+    }
+
+    // SacredFire: the game's volume (runtime_audio.c reads it for every buffer).
+    MenuSection(BbSettings::MenuText("Sound", "Звук"));
+    {
+        int volume = s.volume;
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Volume", "Громкость"), &volume, 0, 200, "%d%%");
+        Store(s.volume, std::clamp(volume, 0, 200), changed);
+        Hint(BbSettings::MenuText("100% is the level the game was mixed at; above it the loudest peaks are "
+                                  "rounded off. Applies at once.",
+                                  "100% — уровень, на котором сведена игра; выше самые громкие пики "
+                                  "сглаживаются. Сразу."));
+    }
+
+    MenuSection(BbSettings::MenuText("Other", "Прочее"));
+    Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
+    {
+        // Where trophy and friend notices show (NoticeBox), in NoticePosition order.
+        const char* places[] = {BbSettings::MenuText("Top right", "Вверху справа"),
+                                BbSettings::MenuText("Top left", "Вверху слева"),
+                                BbSettings::MenuText("Bottom right", "Внизу справа"),
+                                BbSettings::MenuText("Bottom left", "Внизу слева"),
+                                BbSettings::MenuText("Top centre", "Вверху по центру"),
+                                BbSettings::MenuText("Bottom centre", "Внизу по центру")};
+        int place = std::clamp(s.notice_position.load(), 0, int(BbSettings::NoticeCount) - 1);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 13.0f);
+        if (ImGui::Combo(BbSettings::MenuText("Notifications position", "Положение уведомлений"), &place, places,
+                         int(BbSettings::NoticeCount))) {
+            Store(s.notice_position, place, true);
+            Notify(BbSettings::MenuText("Notifications", "Уведомления"), BbSettings::MenuText("They show here", "Они появятся здесь"),
+                   "", 0, nullptr, 0);
+        }
+        Hint(BbSettings::MenuText("Trophies, friends and other notices. Applies at once.",
+                                  "Трофеи, друзья и другие уведомления. Сразу."));
+    }
+    {
+        // Always readable, whatever the menu's language.
+        static const char* languages[] = {"English", "Русский", "Español"};
+        int language = s.menu_language == BbSettings::MenuLanguage::Russian   ? 1
+                       : s.menu_language == BbSettings::MenuLanguage::Spanish ? 2
+                                                                              : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        if (ImGui::Combo("Language / Idioma", &language, languages, 3)) {
+            s.menu_language = language == 1   ? BbSettings::MenuLanguage::Russian
+                              : language == 2 ? BbSettings::MenuLanguage::Spanish
+                                              : BbSettings::MenuLanguage::English;
+            BbSettings::Save();
+        }
+    }
+    ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Friends", "Друзья"))) {
+        FriendsTab();
+        ImGui::EndTabItem();
+    }
+
+    const bool picture_tab = ImGui::BeginTabItem(BbSettings::MenuText("Picture", "Изображение"));
+    if (picture_tab) {
+    MenuSection(BbSettings::MenuText("Resolution and upscaling", "Разрешение и апскейл"));
     // SacredFire: the scene resolution (render_res) replaces the 1080p Pro patch's checkbox; a
     // DLSS quality mode sets it instead (scripts/patches.py render_plan).
     const bool dlss_sized = s.temporal == BbSettings::TemporalDlss && s.dlss_quality > 0;
@@ -558,9 +1173,9 @@ void Menu() {
         static constexpr const char* labels[BbSettings::TemporalCount] = {
             "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)"};
         const int current = std::clamp(s.temporal.load(), 0, BbSettings::TemporalCount - 1);
-        if (ImGui::BeginCombo(BbSettings::MenuText("Upscaling", "Апскейл"), labels[current])) {
+        if (ImGui::BeginCombo(BbSettings::MenuText("Upscaling", "Апскейл"), BbSettings::Label(labels[current]))) {
             for (int t = 0; t < BbSettings::TemporalCount; ++t) {
-                if (ImGui::Selectable(labels[t], t == current)) {
+                if (ImGui::Selectable(BbSettings::Label(labels[t]), t == current)) {
                     Store(s.temporal, t, t != current);
                 }
             }
@@ -579,9 +1194,9 @@ void Menu() {
             "Auto (internal resolution)", "DLAA (native)", "Quality", "Balanced", "Performance",
             "Ultra Performance"};
         const int quality = std::clamp(s.dlss_quality.load(), 0, BbSettings::DlssQualityCount - 1);
-        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS quality", "Качество DLSS"), qualities[quality])) {
+        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS quality", "Качество DLSS"), BbSettings::Label(qualities[quality]))) {
             for (int q = 0; q < BbSettings::DlssQualityCount; ++q) {
-                if (ImGui::Selectable(qualities[q], q == quality)) {
+                if (ImGui::Selectable(BbSettings::Label(qualities[q]), q == quality)) {
                     Store(s.dlss_quality, q, q != quality);
                 }
             }
@@ -606,9 +1221,9 @@ void Menu() {
         }
         static constexpr const char* models[] = {"Transformer (recommended)", "CNN"};
         const int model = s.dlss_model ? 1 : 0;
-        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS model", "Модель DLSS"), models[model])) {
+        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS model", "Модель DLSS"), BbSettings::Label(models[model]))) {
             for (int m = 0; m < 2; ++m) {
-                if (ImGui::Selectable(models[m], m == model)) {
+                if (ImGui::Selectable(BbSettings::Label(models[m]), m == model)) {
                     Store(s.dlss_model, m, m != model);
                 }
             }
@@ -637,6 +1252,10 @@ void Menu() {
             "на экране до 120. Немного увеличивает задержку. Сразу."));
     }
 
+    ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Game", "Игра"))) {
+    MenuSection(BbSettings::MenuText("Game patches (restart required)", "Патчи игры (после перезапуска)"));
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         const auto& patch = BbSettings::GamePatches[g];
         if (std::strcmp(patch.key, "patch_pro_1080p") == 0) continue; // see Internal resolution
@@ -649,41 +1268,36 @@ void Menu() {
     Hint(BbSettings::MenuText("From patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), applied to the executable at start.",
                               "Из patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), применяются к исполняемому файлу при запуске."));
 
-    bool restart =
-        s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
-    for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        restart |= s.effects[e] != s.startup_effects[e];
+    ImGui::EndTabItem();
     }
-    for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
-        restart |= s.game_patches[g] != s.startup_game_patches[g];
-    }
-    restart |= BbSettings::RenderSizeNeedsRestart();
-    if (restart) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
-                           BbSettings::MenuText("Changes apply after restarting the game",
-                                                "Изменения применятся после перезапуска игры"));
-        if (ImGui::Button(
-                BbSettings::MenuText("Apply and restart game", "Применить и перезапустить игру"))) {
-            BbSettings::Save();
-            runtime_restart();
-        }
-    }
-
     // SacredFire: controller ports for split screen. Each port takes one connected gamepad; the
     // runtime logs the matching user in and reads that pad for it. Port 1 is the player.
-    ImGui::SeparatorText(BbSettings::MenuText("Controllers (split screen)", "Контроллеры (разделённый экран)"));
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Controllers", "Контроллеры"))) {
+    MenuSection(BbSettings::MenuText("Controllers (split screen)", "Контроллеры (разделённый экран)"));
     {
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        // Identical controllers share one GUID and name: they are listed once ("x2"), and choosing
+        // that entry for two ports gives each port one of them (runtime_pad.c). Listed twice, they
+        // were two menu items with one ImGui ID (issue #43).
         std::vector<std::pair<std::string, std::string>> pads; // guid, label
+        std::vector<int> copies;
         for (int i = 0; ids && i < count; ++i) {
             char guid[33];
             SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
+            const auto known = std::find_if(pads.begin(), pads.end(), [&](const auto& pad) { return pad.first == guid; });
+            if (known != pads.end()) {
+                ++copies[size_t(known - pads.begin())];
+                continue;
+            }
             const char* name = SDL_GetGamepadNameForID(ids[i]);
             pads.emplace_back(guid, std::string(name ? name : "gamepad") + "  [" + std::string(guid).substr(0, 8) + "]");
+            copies.push_back(1);
         }
         SDL_free(ids);
+        for (size_t i = 0; i < pads.size(); ++i) {
+            if (copies[i] > 1) pads[i].second += "  x" + std::to_string(copies[i]);
+        }
         bool changed = false;
         for (int p = 0; p < BbSettings::ControllerPorts; ++p) {
             std::string current;
@@ -714,12 +1328,15 @@ void Menu() {
                     std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "keyboard");
                     changed = true;
                 }
-                for (const auto& [guid, text] : pads) {
+                for (size_t i = 0; i < pads.size(); ++i) {
+                    const auto& [guid, text] = pads[i];
+                    ImGui::PushID(int(i));
                     if (ImGui::Selectable(text.c_str(), guid == current)) {
                         std::lock_guard lk{BbSettings::PortsMutex()};
                         std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "%s", guid.c_str());
                         changed = true;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }
@@ -733,20 +1350,19 @@ void Menu() {
                                                  "(клавиатура: всегда; у порта 1 тогда только геймпад)"));
     }
 
-    // SacredFire: the game's volume (runtime_audio.c reads it for every buffer).
-    ImGui::SeparatorText(BbSettings::MenuText("Sound", "Звук"));
-    {
-        int volume = s.volume;
-        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Volume", "Громкость"), &volume, 0, 200, "%d%%");
-        Store(s.volume, std::clamp(volume, 0, 200), changed);
-        Hint(BbSettings::MenuText("100% is the level the game was mixed at; above it the loudest peaks are "
-                                  "rounded off. Applies at once.",
-                                  "100% — уровень, на котором сведена игра; выше самые громкие пики "
-                                  "сглаживаются. Сразу."));
+    // SacredFire: the Steam Deck sometimes shows a controller connected after launch only to a
+    // fresh enumeration; the runtime restarts SDL's gamepad subsystem on the next input sample.
+    if (ImGui::Button(BbSettings::MenuText("Rescan controllers", "Переопознать контроллеры"))) {
+        pad_rescan_requested.store(true, std::memory_order_relaxed);
+    }
+    Hint(BbSettings::MenuText("For a controller connected after the game started and not seen by it.",
+                              "Для контроллера, подключённого после запуска игры и не замеченного ею."));
+    ImGui::EndTabItem();
     }
 
     // SacredFire: performance (both apply at once).
-    ImGui::SeparatorText(BbSettings::MenuText("Performance", "Производительность"));
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Performance", "Производительность"))) {
+    MenuSection(BbSettings::MenuText("Performance", "Производительность"));
     {
         static constexpr int limits[] = {0, 30, 60, 72, 90, 120, 144, 240};
         const char* names[] = {BbSettings::MenuText("No limit", "Без ограничения"), "30", "60",
@@ -787,28 +1403,33 @@ void Menu() {
             "Уже виденные шейдеры загружаются при запуске в любом случае. Экспериментально."));
     }
 
-    ImGui::SeparatorText(BbSettings::MenuText("Display", "Экран"));
-    {
-        Checkbox(BbSettings::MenuText("Fullscreen", "Полный экран"), s.fullscreen);
-        Hint(BbSettings::MenuText("Fullscreen on the game's display (BB_DISPLAY). "
-                                  "Applies at once; BB_FULLSCREEN=1 at start.",
-                                  "Полный экран на дисплее игры (BB_DISPLAY). "
-                                  "Сразу; BB_FULLSCREEN=1 при запуске."));
-        Checkbox(BbSettings::MenuText("Borderless window", "Без рамок"), s.borderless);
-        Hint(BbSettings::MenuText("Remove window borders in windowed mode.",
-                                  "Убрать рамку окна в оконном режиме."));
+    ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+
+    bool restart =
+        s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
+        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
+    for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        restart |= s.effects[e] != s.startup_effects[e];
+    }
+    for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
+        restart |= s.game_patches[g] != s.startup_game_patches[g];
+    }
+    restart |= BbSettings::RenderSizeNeedsRestart();
+    if (restart) {
+        ImGui::TextColored(kMenuYellow, "%s",
+                           BbSettings::MenuText("Changes apply after restarting the game",
+                                                "Изменения применятся после перезапуска игры"));
+        if (ImGui::Button(
+                BbSettings::MenuText("Apply and restart game", "Применить и перезапустить игру"))) {
+            BbSettings::Save();
+            runtime_restart();
+        }
     }
 
-    ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
-    Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
-    // SacredFire: the Steam Deck sometimes shows a controller connected after launch only to a
-    // fresh enumeration; the runtime restarts SDL's gamepad subsystem on the next input sample.
-    if (ImGui::Button(BbSettings::MenuText("Rescan controllers", "Переопознать контроллеры"))) {
-        pad_rescan_requested.store(true, std::memory_order_relaxed);
-    }
-    Hint(BbSettings::MenuText("For a controller connected after the game started and not seen by it.",
-                              "Для контроллера, подключённого после запуска игры и не замеченного ею."));
 
+    ImGui::Separator();
     ImGui::Spacing();
     if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
         keep_open = false;
@@ -817,8 +1438,14 @@ void Menu() {
     // second press confirms; the window thread then closes like the window's own close button.
     static bool quit_armed;
     ImGui::SameLine();
-    if (ImGui::Button(quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
-                                 : BbSettings::MenuText("Quit game", "Выйти из игры"))) {
+
+    const char *quit_button_text = quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
+                                              : BbSettings::MenuText("Quit game", "Выйти из игры");
+
+    // keep a stable ID so changing the label preserves gamepad focus
+    const std::string quit_button_text_with_id = std::string(quit_button_text) + "###quit_game";
+
+    if (ImGui::Button(quit_button_text_with_id.c_str())) {
         if (quit_armed) {
             SDL_Event quit{};
             quit.type = SDL_EVENT_QUIT;
@@ -976,6 +1603,124 @@ void AnnouncementBanner() {
     ImGui::PopStyleVar(3);
 }
 
+void NoticeBox(const Notice& n, float age) {
+    // Slides in from the top, stays, fades out.
+    const float in = std::min(age / 0.35f, 1.0f), out = std::clamp((kNoticeSeconds - age) / 0.6f, 0.0f, 1.0f);
+    const float alpha = std::min(in, out);
+    static const ImVec4 grades[] = {
+        ImVec4(1.0f, 0.54f, 0.12f, 1.0f),  // unknown: the port's orange
+        ImVec4(0.82f, 0.54f, 0.32f, 1.0f), // bronze
+        ImVec4(0.80f, 0.83f, 0.88f, 1.0f), // silver
+        ImVec4(1.0f, 0.80f, 0.29f, 1.0f),  // gold
+        ImVec4(0.55f, 0.83f, 1.0f, 1.0f),  // platinum
+        ImVec4(0.36f, 0.85f, 0.47f, 1.0f), // a friend (PollFriends)
+        ImVec4(0.45f, 0.70f, 1.0f, 1.0f),  // an update (PollFriends)
+        ImVec4(1.0f, 0.54f, 0.12f, 1.0f),  // a message from the server (PollFriends)
+    };
+    static const char* const grade_es[] = {"", "Bronce", "Plata", "Oro", "Platino"};
+    static const char* const grade_en[] = {"", "Bronze", "Silver", "Gold", "Platinum"};
+    const int kind = std::clamp(n.kind, 0, 7);
+    const ImVec4 color = grades[kind];
+    const bool spanish = BbSettings::Get().menu_language == BbSettings::MenuLanguage::Spanish ||
+                         n.title.rfind("Logro", 0) == 0;
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // Where (the menu's Notifications position): a corner, or the top centre. It slides in from the
+    // nearest edge; at the top right it goes under the FPS counter when that shows.
+    const auto& settings = BbSettings::Get();
+    const int where = std::clamp(settings.notice_position.load(), 0, int(BbSettings::NoticeCount) - 1);
+    const bool centre = where == BbSettings::NoticeTopCentre || where == BbSettings::NoticeBottomCentre;
+    const bool right = where == BbSettings::NoticeTopRight || where == BbSettings::NoticeBottomRight;
+    const bool bottom = where == BbSettings::NoticeBottomRight || where == BbSettings::NoticeBottomLeft ||
+                        where == BbSettings::NoticeBottomCentre;
+    const float width = (centre ? 520.0f : 440.0f) * s, icon = 84.0f * s, pad = 14.0f * s;
+    const float margin = 22.0f * s, slide = (1.0f - in) * 80.0f * s;
+    const float under_fps = where == BbSettings::NoticeTopRight && settings.show_fps ? 34.0f * s : 0.0f;
+    const float x = centre  ? viewport->WorkPos.x + viewport->WorkSize.x * 0.5f
+                    : right ? viewport->WorkPos.x + viewport->WorkSize.x - margin
+                            : viewport->WorkPos.x + margin;
+    const float y = bottom ? viewport->WorkPos.y + viewport->WorkSize.y - margin + slide
+                           : viewport->WorkPos.y + margin + under_fps - slide;
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always,
+                            ImVec2(centre ? 0.5f : right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.118f, 0.133f, 0.188f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(color.x, color.y, color.z, 0.55f));
+    ImGui::Begin("##notice", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImU32 c = ImGui::GetColorU32(color);
+    // The picture (or a cup in the grade's colour), with a ring in that colour.
+    if (n.texture) {
+        dl->AddImageRounded(ImTextureRef(n.texture->GetTexRef()), p, ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0),
+                            ImVec2(1, 1), ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
+    } else if (kind == 7) {
+        // A message: a speech bubble with three dots.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const ImVec2 a(p.x + icon * 0.18f, p.y + icon * 0.22f), b(p.x + icon * 0.82f, p.y + icon * 0.66f);
+        dl->AddRectFilled(a, b, c, icon * 0.12f);
+        dl->AddTriangleFilled(ImVec2(p.x + icon * 0.30f, b.y - 1.0f), ImVec2(p.x + icon * 0.46f, b.y - 1.0f),
+                              ImVec2(p.x + icon * 0.28f, p.y + icon * 0.82f), c);
+        const ImU32 dot = ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f));
+        for (int i = 0; i < 3; ++i) {
+            dl->AddCircleFilled(ImVec2(p.x + icon * (0.36f + 0.14f * i), p.y + icon * 0.44f), icon * 0.045f, dot);
+        }
+    } else if (kind == 6) {
+        // An update: a download arrow over a tray, in the update colour.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const float cx = p.x + icon * 0.5f, w = icon * 0.09f;
+        dl->AddRectFilled(ImVec2(cx - w, p.y + icon * 0.20f), ImVec2(cx + w, p.y + icon * 0.52f), c);
+        dl->AddTriangleFilled(ImVec2(cx - icon * 0.22f, p.y + icon * 0.48f), ImVec2(cx + icon * 0.22f, p.y + icon * 0.48f),
+                              ImVec2(cx, p.y + icon * 0.70f), c);
+        dl->AddRectFilled(ImVec2(p.x + icon * 0.24f, p.y + icon * 0.76f), ImVec2(p.x + icon * 0.76f, p.y + icon * 0.82f), c,
+                          2.0f * s);
+    } else if (kind == 5) {
+        // A friend: head and shoulders in the friend colour.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const float cx = p.x + icon * 0.5f;
+        dl->AddCircleFilled(ImVec2(cx, p.y + icon * 0.38f), icon * 0.15f, c);
+        dl->PathArcTo(ImVec2(cx, p.y + icon * 0.86f), icon * 0.27f, 3.14159265f, 6.28318531f);
+        dl->PathFillConvex(c);
+    } else {
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const float w = icon * 0.5f, x = p.x + icon * 0.25f, top = p.y + icon * 0.2f;
+        dl->AddRectFilled(ImVec2(x + w * 0.15f, top), ImVec2(x + w * 0.85f, top + w * 0.55f), c, w * 0.3f,
+                          ImDrawFlags_RoundCornersBottom);
+        dl->AddRectFilled(ImVec2(x + w * 0.44f, top + w * 0.55f), ImVec2(x + w * 0.56f, top + w * 0.85f), c);
+        dl->AddRectFilled(ImVec2(x + w * 0.22f, top + w * 0.85f), ImVec2(x + w * 0.78f, top + w), c, 2.0f * s);
+    }
+    dl->AddRect(p, ImVec2(p.x + icon, p.y + icon), c, 10.0f * s, 0, 2.0f * s);
+    ImGui::Dummy(ImVec2(icon, icon));
+    ImGui::SameLine(0.0f, 14.0f * s);
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - icon - pad * 2.0f - 14.0f * s);
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.85f);
+    std::string header = n.title;
+    if (kind >= 1 && kind <= 4) header += std::string("  ·  ") + (spanish ? grade_es[kind] : grade_en[kind]);
+    ImGui::TextColored(color, "%s", header.c_str());
+    ImGui::PopFont();
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.3f);
+    ImGui::TextUnformatted(n.name.c_str());
+    ImGui::PopFont();
+    if (!n.detail.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kMenuGrey);
+        ImGui::TextUnformatted(n.detail.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(4);
+}
+
 void TextPrompt() {
     std::string title, text;
     {
@@ -1066,11 +1811,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     io.BackendPlatformName = "bbport";
 
     ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    ApplyMenuTheme();
 
     ImFontConfig font_config;
     font_config.FontDataOwnedByAtlas = false;
@@ -1094,7 +1835,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     info.Device = instance.GetDevice();
     info.QueueFamily = instance.GetGraphicsQueueFamilyIndex();
     info.Queue = instance.GetGraphicsQueue();
-    info.DescriptorPoolSize = 16;
+    info.DescriptorPoolSize = 96; // the font atlas and the trophy pictures
     info.MinImageCount = std::max(image_count, 2u);
     info.ImageCount = std::max(image_count, 2u);
     info.UseDynamicRendering = true;
@@ -1218,6 +1959,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
+    PollFriends();
     if (initialized && !ultrawide_prompt_checked) {
         // Once, at the first presented frame: the first start, or every start with ultrawide_ask.
         ultrawide_prompt_checked = true;
@@ -1226,8 +1968,30 @@ bool Visible() {
             ultrawide_prompt = true;
         }
     }
+    bool notice = false;
+    {
+        std::scoped_lock lock{notice_mutex};
+        notice = !notices.empty();
+    }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
-                           AnnouncementActive());
+                           AnnouncementActive() || notice);
+}
+
+void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
+            const void* png, size_t png_size) {
+    Notice n;
+    n.title = title;
+    n.name = name;
+    n.detail = detail;
+    n.kind = kind;
+    if (png && png_size) {
+        auto rgba = std::make_shared<std::vector<unsigned char>>();
+        if (DecodePng(static_cast<const unsigned char*>(png), png_size, *rgba)) n.rgba = rgba;
+    }
+    std::scoped_lock lock{notice_mutex};
+    if (notices.size() < 16) {
+        notices.push_back(std::move(n));
+    }
 }
 
 bool MenuOpen() {
@@ -1287,6 +2051,13 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, b
     }
     if (prompt_active && !menu_open) {
         TextPrompt();
+    }
+    {
+        float age = 0.0f;
+        if (Notice* notice = CurrentNotice(age)) {
+            const Notice copy = *notice;
+            NoticeBox(copy, age);
+        }
     }
     AnnouncementBanner();
     if (ultrawide_prompt && !menu_open) {

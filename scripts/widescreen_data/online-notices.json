@@ -1,0 +1,23 @@
+[
+  {
+    "archive": "juicedomain_permanent.pak",
+    "asset": "ui/OnlineInvitation_2015.igz",
+    "index": 132,
+    "original_sha256": "5efb1b4af2ff73c607e9681936085d01959ac274c54339217c96560351e79ffd",
+    "kind": "online_notice"
+  },
+  {
+    "archive": "update.pak",
+    "asset": "ui/OnlineInvitation_2015.igz",
+    "index": 2363,
+    "original_sha256": "69363e3810726265af2af798891260fdf2a9a9a38800fcce5a92ce33d9102852",
+    "kind": "online_notice"
+  },
+  {
+    "archive": "update2.pak",
+    "asset": "ui/OnlineInvitation_2015.igz",
+    "index": 6574,
+    "original_sha256": "1114f26c4d1f584df7be68d3028ce1696e916b6a0346444467cea3c86992f6e5",
+    "kind": "online_notice"
+  }
+]

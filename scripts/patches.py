@@ -38,6 +38,7 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
+               'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
                'CrashTeamRacingOnlineEU.xml':'CrashTeamRacingOnline.xml'}
 
 
@@ -173,6 +174,29 @@ def theme_patches(settings):
                   Value=f'4c89efbe{value:02x}0000000f1f440000',Signature=THEME_SIGNATURE,
                   SignatureOffset='0x0')
     return [(f'theme/{theme}',None,meta)]
+
+
+# Online race end: once the first player finishes, the others have CNetworkConfig._endRaceTimeout
+# seconds ("ends in" countdown). The official NetConfig set it; without one the game keeps the
+# default its type registration gives: 20.0, in the field's setDefault (eboot.elf 0x196b610,
+# loaded at 0x1d6b610: mov dword [rbp-34h],<float>). BB_END_RACE_TIMEOUT (run.py: what the
+# RyuNET server announces) replaces that float.
+END_RACE_SIGNATURE='4b 8b bc fe 60 02 00 00 c7 45 cc 00 00 a0 41'
+
+
+def end_race_patches():
+    """The built-in patch element for the online race-end countdown (none for the default 20 s)."""
+    try:
+        seconds=float(os.environ.get('BB_END_RACE_TIMEOUT') or 20)
+    except ValueError:
+        return []
+    if seconds==20 or not 10<=seconds<=120:
+        return []
+    value=struct.pack('<f',seconds).hex()
+    meta=ET.Element('Metadata',Name=f'Online race end {seconds:g} s',AppVer=APP_VERSION,AppElf='eboot.bin')
+    ET.SubElement(ET.SubElement(meta,'PatchList'),'Line',Type='bytes',Address='0x01d6b610',
+                  Value='4b8bbcfe60020000c745cc'+value,Signature=END_RACE_SIGNATURE,SignatureOffset='0x0')
+    return [(f'end_race/{seconds:g}',None,meta)]
 
 
 def read_settings(path):
@@ -431,7 +455,7 @@ def external_selection(found, config, ini=None):
 def compile_external(selected, segments, elf=None):
     """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
     eboot.elf bytes) is needed for lines with a Signature."""
-    writes=[]
+    writes,claims=[],[]
     for key,_,meta in selected:
         try:
             ours=[]
@@ -449,6 +473,14 @@ def compile_external(selected, segments, elf=None):
         except ValueError as error:
             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
             continue
+        # Two patches writing the same bytes: the later one's bytes win, and neither works as
+        # made (a widescreen layout and a patch of the same code, scripts/widescreen.py).
+        for offset,data in ours:
+            for start,end,other in claims:
+                if other!=key and offset<end and start<offset+len(data):
+                    print(f'Patches: {key} and {other} both write {offset+EBOOT_BASE:#010x}: the later one wins',file=sys.stderr)
+                    break
+        claims+=[(offset,offset+len(data),key) for offset,data in ours]
         writes+=ours
         print(f'Patches: external {key} ({len(ours)} writes)')
     return writes
@@ -498,7 +530,7 @@ def main():
     found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
-                            +theme_patches(settings),
+                            +theme_patches(settings)+end_race_patches(),
                             segments,elf)
     write_blob(a.out,writes)
     print(f'Patches: {len(writes)} writes from {len(found)} available patches')

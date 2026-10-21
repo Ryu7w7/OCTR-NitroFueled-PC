@@ -69,6 +69,8 @@ bool ParseServerReply(const std::uint8_t* data, std::size_t size, std::uint32_t&
     return port != 0;
 }
 
+bool IsServerTestReply(const std::uint8_t* data, std::size_t size) { return size >= 15 && data[0] == 21; }
+
 void StunRequest(std::uint8_t out[20], const std::uint8_t transaction[12]) {
     out[0] = 0x00, out[1] = 0x01;  // Binding request
     out[2] = 0x00, out[3] = 0x00;  // no attributes
@@ -153,6 +155,10 @@ Result Check(const std::string& server_setting, int nat_port) {
     const bool have_a = Ask(s, server, request, 3, [&](const std::uint8_t* d, std::size_t n) {
         return ParseServerReply(d, n, a_ip, a_port);
     });
+    // The game's second request, whose reply is longer: some networks let the first reply
+    // through and drop these, and the game cannot start online then.
+    const std::uint8_t test_request[4] = {20, 2, 0, 0};
+    if (have_a && !Ask(s, server, test_request, 4, IsServerTestReply)) result.replies_blocked = true;
     bool have_b = false;
     if (have_a && have_stun && a_ip != local_ip) {
         std::uint8_t transaction[12];

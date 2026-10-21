@@ -1,9 +1,13 @@
-#include "runtime_http.h"
+/* runtime_net.h first: on Linux it turns on _GNU_SOURCE (getaddrinfo, used by
+ * runtime_ryunet_request), which must come before any system header. */
 #include "runtime_net.h"
+#include "runtime_http.h"
 #include "runtime_net_overrides.h"
+#include "bb_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -308,6 +312,84 @@ int32_t runtime_http_add_request_header(int32_t req, const char *name, const cha
     return ORBIS_OK;
 }
 
+/* X-RyuNET-Proof for one request to the RyuNET server (its nick_proof.go): an HMAC-SHA256,
+ * keyed with the hash of this installation's key for the server (BB_ONLINE_KEYHASH, from
+ * run.py), of the time, a nonce, the method and the request target. 0 without a key. */
+int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size) {
+    const char *key_hash = getenv("BB_ONLINE_KEYHASH");
+    if (!key_hash || strlen(key_hash) != 64 || strspn(key_hash, "0123456789abcdef") != 64) return 0;
+    static unsigned long long counter;
+    struct timespec now;
+    timespec_get(&now, TIME_UTC);
+    char nonce[33], message[1200];
+    snprintf(nonce, sizeof nonce, "%016llx%016llx",
+             (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec,
+             __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) ^ (unsigned long long)(uintptr_t)&now);
+    const int n = snprintf(message, sizeof message, "%lld\n%s\n%s\n%s", (long long)now.tv_sec, nonce, method, target);
+    if (n <= 0 || n >= (int)sizeof message) return 0;
+    uint8_t mac[32];
+    bb_hmac_sha256((const unsigned char *)key_hash, 64, (const unsigned char *)message, (size_t)n, mac);
+    char mac_hex[65];
+    for (int i = 0; i < 32; i++) snprintf(mac_hex + 2 * i, 3, "%02x", mac[i]);
+    const int len = snprintf(out, out_size, "1.%lld.%s.%s", (long long)now.tv_sec, nonce, mac_hex);
+    return len > 0 && (size_t)len < out_size;
+}
+
+/* A signed request of the port's own (not the game's) to the RyuNET server's HTTP port
+ * (BB_ONLINE_SERVER, BB_ONLINE_HTTP_PORT): the body goes to body (NUL-terminated, cut to
+ * body_size). The HTTP status, or 0 when the server could not be reached. Blocking, with
+ * 8-second timeouts: for background threads. */
+int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
+    if (body_size) body[0] = '\0';
+    const char *host = getenv("BB_ONLINE_SERVER");
+    const char *port = getenv("BB_ONLINE_HTTP_PORT");
+    if (!host || !*host) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        freeaddrinfo(res);
+        return 0;
+    }
+#ifdef _WIN32
+    DWORD timeout = 8000;
+#else
+    struct timeval timeout = {8, 0};
+#endif
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+    const int connected = connect(s, res->ai_addr, (int)res->ai_addrlen) == 0;
+    freeaddrinfo(res);
+    if (!connected) {
+        closesocket(s);
+        return 0;
+    }
+    char proof[160], request[4096]; /* a report's comment rides in the target */
+    const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
+    const int n = snprintf(request, sizeof request,
+                           "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n%s%s%s\r\n",
+                           method, target, host, signed_ok ? "X-RyuNET-Proof: " : "", signed_ok ? proof : "",
+                           signed_ok ? "\r\n" : "");
+    if (n <= 0 || n >= (int)sizeof request || send(s, request, n, 0) != n) {
+        closesocket(s);
+        return 0;
+    }
+    char reply[32768];
+    int got = 0;
+    for (int r; got < (int)sizeof reply - 1 && (r = recv(s, reply + got, (int)sizeof reply - 1 - got, 0)) > 0;) got += r;
+    closesocket(s);
+    reply[got] = '\0';
+    int status = 0;
+    if (strncmp(reply, "HTTP/", 5) != 0 || sscanf(strchr(reply, ' ') ? strchr(reply, ' ') : reply, "%d", &status) != 1)
+        return 0;
+    const char *start = strstr(reply, "\r\n\r\n");
+    if (start && body_size) snprintf(body, body_size, "%s", start + 4);
+    return status;
+}
+
 int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t size) {
     int idx = req - 1;
     if (idx < 0 || idx >= MAX_HTTP_REQUESTS || !g_requests[idx].in_use) return HTTP_NETWORK;
@@ -366,13 +448,15 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
                          "%s: %s\r\n", r->req_headers[i].name, r->req_headers[i].value);
     }
-    /* RyuNET nickname ownership: the server lets this installation's secret (BB_ONLINE_KEY,
-     * written by the launcher or run.py) keep the nickname it first used. Sent only to hosts
+    /* RyuNET nickname ownership: the server lets this installation keep the nickname it first
+     * used. The request is signed (X-RyuNET-Proof, the server's nick_proof.go) with the hash of
+     * the installation's key for this server (BB_ONLINE_KEYHASH, from run.py): the key itself
+     * never crosses the network, and a copied signature is refused. Sent only to hosts
      * redirected to the RyuNET server, never to a real one. */
-    const char *key = c->is_plain_http ? getenv("BB_ONLINE_KEY") : NULL;
-    if (key && strlen(key) == 64 && strspn(key, "0123456789abcdefABCDEF") == 64 &&
-        hlen < (int)sizeof(header_buf) - 96) {
-        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Key: %s\r\n", key);
+    char proof[160];
+    if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
+        runtime_ryunet_proof(method_str, r->path, proof, sizeof proof)) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
     }
     /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
      * launcher's Online tab): the server then leaves the game its save's inventory. */

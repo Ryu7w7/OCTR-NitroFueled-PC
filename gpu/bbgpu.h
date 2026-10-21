@@ -37,6 +37,10 @@ int bbgpu_pad_rescan_take(void);
 /* The player's game volume in percent, 0..200 (bbport.ini volume; the in-game menu changes it
  * while the game runs). runtime_audio.c reads it for every buffer. */
 int bbgpu_audio_volume(void);
+/* v0.4: a notice over the game for a few seconds (an unlocked trophy: its name, what it was for,
+ * kind = its grade 1-4, its PNG picture or NULL). */
+void bbgpu_notify(const char *title_utf8, const char *name_utf8, const char *detail_utf8, int kind,
+                  const void *png, uint64_t png_size);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* Number of symbols registered by the vendored libraries (diagnostics). */

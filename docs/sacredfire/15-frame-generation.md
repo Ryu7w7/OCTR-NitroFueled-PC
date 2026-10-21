@@ -101,5 +101,6 @@ it stops (`Frame generation: ...; off for this session`), with the FSR-Vulkan va
 
 ## Status
 
-Written against the code and the FSR-Vulkan API; the changed files pass a clang semantic check.
-Not yet built with the MSYS2 CLANG64 toolchain or run in the game.
+Built with MSYS2 CLANG64 and played on Windows 11 with an RTX 3070 (144 Hz screen): the
+interpolated frames show and the motion is smoother. The karts' mask needs more testing on other
+tracks and GPUs. Not tested on Linux, the Steam Deck, AMD or Intel GPUs.

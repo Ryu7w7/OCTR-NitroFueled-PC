@@ -1,0 +1,30 @@
+{
+  "release": "ultrawide-21x9-v1.0",
+  "asset_checks": 448,
+  "manifests": {
+    "manifest-2560.json": "0d75e3a7be6631833a104b5bcf53f8414386ed6ab851cbc17f6fd751989eb104",
+    "manifest-3440.json": "adb5fd6d7e7b3917e3415d9b1ab689afacd7e5d4922c7f7bb686d317453751f7"
+  },
+  "original_archives": {
+    "h100_hub.pak": "b2e5500ffd5883c2825ac90c37495b72daf5d029828249ae72a93b81921d0d2c",
+    "juicedomain_hub.pak": "ae3fc4057acf83ed83de449d331915419f704b802ad227f34540cdec9895e48a",
+    "juicedomain_permanent.pak": "b8377967d72504cac2a0c9bd6f3c8a3307742dbe55d152c4e2f7fcc32b4e11b2",
+    "juicedomain_race.pak": "6a95fbde1d363078c8b3d6aaa8ece09446cc641eceec5c17eab6ea9d04d3411f",
+    "juicedomain_race_flareday.pak": "7aa41dcff78588b13940de4c50937bb190c09e604f122bbeb1611f97bfbfa5cd",
+    "juicedomain_race_flarenight.pak": "b723c97c09a89958a687ff10ab8dd77a4901e9638e034940c4a720281a471297",
+    "juicedomain_startscreen.pak": "0460e44fa5ec6c31e06ca12bed1930a56bc6ae94ac2945c4a4b150febc70f4c9",
+    "legal.pak": "c531ae9dd847181321340f6481e0a11b0b3651f49ecf815e1e580462d9f8bd4c",
+    "loadingscreen_octane.pak": "4d1d122a25c562ef94f93198d2a6afa3863d4bbf860cfe2d485e5d28344a66b7",
+    "octane_startscreen.pak": "e6c7952f61cf82726c71d7e32b55542b9787e8edb06d6ed4fa56cd3f794d8dd9",
+    "update.pak": "fb02abc94763a877f7fd332c2eae161a1b83d19630c51e5c4432d2b423905575",
+    "update2.pak": "b5e7e11a5a144bd3514033bd7d7f7b88351b7bf356517b9403bf4d83922c1fca",
+    "update_hub2.pak": "1088ebd1535d06352556b9a1b53efd505d5dd284e2d3261cf901fc0d8075478c"
+  },
+  "original_shader_signatures": {
+    "d4aaf527": "d0050870723e20fc7ad53b765bdc6f74b662c134419e74503784787d87976116",
+    "08948e32": "a69c2785a4e066fd76262e1837364b5ecae2f8abe80bf7d45856081603775ae6"
+  },
+  "shader_source": "Clean test runtime cache, validated against release signatures; frozen shader blobs not used.",
+  "variants": 8,
+  "resolution_algorithm_sha256": "7a2cb3aef97201ceea12d8a8cc2087f513938e324955cde5339c29f465f56a2a"
+}

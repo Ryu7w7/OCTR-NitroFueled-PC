@@ -1,6 +1,7 @@
 #include "runtime_np_online.h"
 #include "runtime_net.h"
 #include "runtime.h"
+#include "runtime_friends.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,7 +175,7 @@ static uint64_t get_online_account_id(void) {
  * that line, so a game that is already running lists them at its next friend-list refresh.
  * Readers get a pointer to a complete list: a new list is built in the other buffer and then
  * published, never written over the one being read. */
-static char s_friends_buf[2][2048];
+static char s_friends_buf[2][4096];
 static volatile int s_friends_cur = 0;
 static uint64_t s_friends_stamp = ~0ULL;  /* last write time and size of the file */
 static pthread_mutex_t s_friends_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -204,7 +205,7 @@ static void read_ini_friends(const char *cfg, char *out, size_t out_size) {
 
 /* Appends the comma-separated names of src to dst, skipping blanks and case-insensitive repeats. */
 static void merge_friends(char *dst, size_t dst_size, const char *src) {
-    char copy[2048];
+    char copy[4096];
     snprintf(copy, sizeof(copy), "%s", src ? src : "");
     char *ctx = NULL;
     for (char *tok = strtok_s(copy, ",", &ctx); tok; tok = strtok_s(NULL, ",", &ctx)) {
@@ -245,6 +246,10 @@ const char *runtime_np_get_friends_csv(void) {
         stamp = ((uint64_t)st.st_mtime << 32) ^ (uint64_t)st.st_size;
     }
 #endif
+    /* The RyuNET friends (runtime_friends.c) too: the list is made again when they change. */
+    unsigned server_serial = 0;
+    const char *from_server = runtime_friends_names(&server_serial);
+    stamp ^= (uint64_t)server_serial * 0x9e3779b97f4a7c15ULL;
     pthread_mutex_lock(&s_friends_lock);
     if (stamp != s_friends_stamp) {
         s_friends_stamp = stamp;
@@ -252,6 +257,7 @@ const char *runtime_np_get_friends_csv(void) {
         read_ini_friends(cfg, from_ini, sizeof(from_ini));
         char *next = s_friends_buf[s_friends_cur ^ 1];
         next[0] = '\0';
+        merge_friends(next, sizeof(s_friends_buf[0]), from_server);
         merge_friends(next, sizeof(s_friends_buf[0]), getenv("BB_ONLINE_FRIENDS"));
         merge_friends(next, sizeof(s_friends_buf[0]), from_ini);
         s_friends_cur ^= 1;

@@ -124,11 +124,18 @@ static void refresh_ports(uint64_t now) {
 #endif
     load_ports();
 }
-/* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). */
+/* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). A port
+ * that has its gamepad open claims that one pad only: identical controllers share one SDL GUID and
+ * name, so port.2=<GUID> matches every one of them, and port 1 would be left with none. A port still
+ * without its pad reserves every match from port 1 and from the ports after it (port 2 before 3
+ * before 4), so two ports bound to the same GUID take one pad each instead of yielding to each other. */
 static int is_preferred(SDL_JoystickID id, const char *want);
 static int claimed_by_other_port(SDL_JoystickID id, int except) {
-    for (int p=1;p<PORTS;++p)
-        if (p!=except && ports[p].want[0] && !is_keyboard(ports[p].want) && is_preferred(id,ports[p].want)) return 1;
+    for (int p=1;p<PORTS;++p) {
+        if (p==except || !ports[p].want[0] || is_keyboard(ports[p].want)) continue;
+        if (ports[p].pad) { if (SDL_GetGamepadID(ports[p].pad)==id) return 1; }
+        else if ((except==0 || p<except) && is_preferred(id,ports[p].want)) return 1;
+    }
     return 0;
 }
 /* A controller that drops (Bluetooth, battery) is logged with the time since the game first read

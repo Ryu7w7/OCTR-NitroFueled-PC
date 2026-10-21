@@ -19,7 +19,10 @@ inline bool IsFsr4(int upscaler) {
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
-enum class MenuLanguage { English, Russian };
+enum class MenuLanguage { English, Russian, Spanish };
+/// Where trophy, friend and other notices show (bbport.ini notice_position).
+enum NoticePosition : int { NoticeTopRight = 0, NoticeTopLeft, NoticeBottomRight, NoticeBottomLeft, NoticeTopCentre,
+                            NoticeBottomCentre, NoticeCount };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -102,6 +105,12 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
+    /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
+    /// friends (the server hides it); no friend notices at all.
+    std::atomic<bool> friends_hide_activity{false};
+    std::atomic<bool> friends_hide_me{false};
+    std::atomic<bool> friends_no_notices{false};
+    std::atomic<int> notice_position{NoticeTopRight};
     /// SacredFire: frames per second the present thread lets through (0: no limit). The 60 FPS
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.
     /// Applies at once. BB_FPS_LIMIT overrides it.
@@ -192,6 +201,10 @@ Values& Get();
 std::mutex& PortsMutex();
 /// Localized overlay text; the Language selector itself stays in English.
 const char* MenuText(const char* english, const char* russian);
+/// v0.4: the Spanish of an English menu text (bbport_menu_es.cpp); the English one if missing.
+const char* Spanish(const char* english);
+/// An English-only label in the menu's language (Spanish when chosen, else English).
+inline const char* Label(const char* english) { return MenuText(english, english); }
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();

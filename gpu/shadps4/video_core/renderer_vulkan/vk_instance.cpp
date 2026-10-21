@@ -127,7 +127,9 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
         debug_callback = CreateDebugCallback(*instance);
     }
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
-    ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
+    if (num_physical_devices == 0) {
+        StopUnsupportedVulkan("this PC", 0);
+    }
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
 
     if (physical_device_index < 0) {
@@ -191,10 +193,10 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     properties = physical_device.getProperties();
     memory_properties = physical_device.getMemoryProperties();
     CollectDeviceParameters();
-    ASSERT_MSG(properties.apiVersion >= TargetVulkanApiVersion,
-               "Vulkan {}.{} is required, but only {}.{} is supported by device!",
-               VK_VERSION_MAJOR(TargetVulkanApiVersion), VK_VERSION_MINOR(TargetVulkanApiVersion),
-               VK_VERSION_MAJOR(properties.apiVersion), VK_VERSION_MINOR(properties.apiVersion));
+    if (properties.apiVersion < TargetVulkanApiVersion) {
+        // Unless a GPU was chosen, the ones with Vulkan 1.3 come first: none of them has it.
+        StopUnsupportedVulkan(properties.deviceName.data(), properties.apiVersion);
+    }
 
     CreateDevice();
     CollectPhysicalMemoryInfo();
