@@ -84,7 +84,9 @@ fi
 "$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules libc.prx libSceFios2.prx libSceNpToolkit2.prx
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 "$PYTHON" tools/gen_import_names.py --out "$out"
-"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+# Optional DLC from the writable data directory (also used by the launcher).
+"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
+    --dlc-dir "${BB_DLC_DIR:-$data/dlc}"
 # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
 # own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
 # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.

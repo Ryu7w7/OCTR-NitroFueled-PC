@@ -1,6 +1,7 @@
 from paths import ROOT
 from pathlib import Path
 import struct
+import os
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,22 @@ import content_profile
 EXE=ROOT/'out/content-test'
 
 class ProfileTests(unittest.TestCase):
+    def test_linux_launch_passes_dlc_directory(self):
+        # Run the actual profile invocation with a recorder in place of Python.
+        script = (ROOT / 'run.sh').read_text()
+        start = script.index('"$PYTHON" scripts/content_profile.py')
+        command = script[start:].split('\n#', 1)[0]
+        for override in ('', '/custom DLC/packages'):
+            with self.subTest(override=override):
+                env = dict(os.environ, BB_DLC_DIR=override)
+                result = subprocess.run(
+                    ['bash', '-eu', '-c',
+                     'record() { printf "%s\\0" "$@"; }\n'
+                     'PYTHON=record; game="/game dump"; data="/user data"; out="$data/out"\n' + command],
+                    env=env, capture_output=True, check=True)
+                args = result.stdout.decode().rstrip('\0').split('\0')
+                self.assertEqual(args[args.index('--dlc-dir') + 1], override or '/user data/dlc')
+
     def test_sfo_parameters_and_explicit_trial_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp);(p/'sce_sys').mkdir();(p/'sce_sys/param.sfo').write_bytes(b'fixture')
