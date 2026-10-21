@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Crash Team Racing Nitro-Fueled, European edition (CUSA14876) 1.00: the patches of
+     CrashTeamRacing.xml (authors illusion and TroyWarez, https://github.com/illusionyy/PS-Game-Patch)
+     found in this build's executable. The in-game menu switches select them as the same three
+     patches (patches.py BUNDLED_FILES). -->
+<Patch>
+    <TitleID>
+        <ID>CUSA14876</ID>
+    </TitleID>
+    <!-- The same three patches for the European edition's base game
+         (CUSA14876 1.00), whose executable has other addresses. 60 FPS and 1080p: the 1.21
+         signature matches once unchanged. Motion blur: the same code with other registers
+         (r14/r13 for r12/r14; struct offsets 0x150, 0x168, 0x3c0 unchanged), its own signature.
+         Addresses are found by signature; the ones given are this build's. -->
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="60 FPS Unlock"
+              Author="illusion"
+              PatchVer="2.0"
+              AppVer="01.00"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x016e6bf0" Value="41899688040000"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x5"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Disable Motion Blur"
+              Author="illusion"
+              PatchVer="1.0"
+              AppVer="01.00"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00ec6f8b" Value="9090909090"
+                  Signature="41 80 be 50 01 00 00 00 75 0f 49 8b b6 68 01 00 00 4c 89 f7 e8 ?? ?? ?? ?? c4 c1 7a 10 85 c0 03 00 00" SignatureOffset="0x14"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Resolution Patch (1080p for PS4 Pro)"
+              Author="TroyWarez"
+              PatchVer="1.0"
+              AppVer="01.00"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x016e6c14" Value="84"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x29"/>
+        </PatchList>
+    </Metadata>
+    <!-- The European edition with the 1.21 update (CUSA14876 01.21): the CUSA13795 1.21 signatures
+         match once each (the same code as the USA 1.21 build). Addresses are this build's. -->
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="60 FPS Unlock"
+              Author="illusion"
+              PatchVer="2.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x017a9d80" Value="41899688040000"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x5"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Disable Motion Blur"
+              Author="illusion"
+              PatchVer="1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00ef0f52" Value="9090909090"
+                  Signature="41 80 bc 24 50 01 00 00 00 75 10 49 8b b4 24 68 01 00 00 4c 89 e7 e8 ?? ?? ?? ?? c4 c1 7a 10 86 c0 03 00 00" SignatureOffset="0x16"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Resolution Patch (1080p for PS4 Pro)"
+              Author="TroyWarez"
+              PatchVer="1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x017a9da4" Value="84"
+                  Signature="41 8b 44 24 18 41 89 86 88 04 00 00 8a 05 ?? ?? ?? ?? 84 c0 0f 84 ?? ?? ?? ?? 41 8b 8e 40 05 00 00 80 3d ?? ?? ?? ?? 00 0f 85 ?? ?? ?? ?? 45 8b 86 44 05 00 00" SignatureOffset="0x29"/>
+        </PatchList>
+    </Metadata>
+</Patch>

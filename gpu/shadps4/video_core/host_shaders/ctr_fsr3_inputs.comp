@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire: FSR 3 inputs from CTR's G-buffer (docs/sacredfire/14-fsr3.md).
+//
+// Depth: sample 0 of the scene depth (D32, possibly multisampled), copied to R32F.
+// Motion (pixels, previous minus current position, without jitter):
+// - the static world: reprojected from the depth with the camera of this frame and the last
+//   (CTR's G-buffer constants carry both views): `prev` maps a view-space position of this frame
+//   to the previous frame's clip space;
+// - moving objects: CTR's velocity target (RGBA8, the motion blur's input) marks them in memory
+//   channel 2 (red through the game's BGRA view) and stores the object's own motion, without the
+//   camera's, in channels 1 and 0 (green and blue) around 127/255. Measured on the player's kart
+//   (docs/sacredfire/14-fsr3.md) no decoding beat leaving it still on the screen (the camera
+//   follows it), the default; the settings can add a decoded object term to the camera's motion.
+// `debug` replaces the frame shown with a view of these inputs (RGBA8 at render size).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef DEPTH_MSAA
+layout(binding = 0) uniform texture2DMS depth_tex;
+#else
+layout(binding = 0) uniform texture2D depth_tex;
+#endif
+#ifdef VELOCITY_MSAA
+layout(binding = 1) uniform texture2DMS velocity_tex;
+#else
+layout(binding = 1) uniform texture2D velocity_tex;
+#endif
+#define FETCH(tex, p) texelFetch(tex, p, 0)
+layout(binding = 2, r32f) uniform writeonly image2D depth_img;
+layout(binding = 3, rg16f) uniform writeonly image2D motion_img;
+layout(binding = 4, rgba8) uniform writeonly image2D debug_img;
+
+layout(push_constant) uniform Params {
+    vec4 prev_x, prev_y, prev_w; // rows 0, 1 and 3 of previous projection * view * inverse view
+    vec4 proj;                   // x scale, y scale, A, B (clip z = A z + B, clip w = -z)
+    vec4 viewport;               // x scale, y scale, x offset, y offset (pixels = offset + scale ndc)
+    vec4 depth_jitter;           // depth = zoffset + zscale ndc: zscale, zoffset; jitter x, y
+    vec4 object;                 // pixels per unit: x, y; the encoded zero; decoding (0 zero, 1 linear, 2 squared)
+    uint flags;                  // bits 0-1 / 2-3: velocity x / y channel; 4-7 debug; 8 debug image; 9 camera
+} params;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(depth_img)))) {
+        return;
+    }
+    const float depth = FETCH(depth_tex, pixel).r;
+    const vec4 raw = FETCH(velocity_tex, pixel);
+    imageStore(depth_img, pixel, vec4(depth));
+
+    // The surface seen at this pixel sits at the pixel centre minus this frame's jitter.
+    const vec2 here = vec2(pixel) + 0.5 - params.depth_jitter.zw;
+    vec2 motion = vec2(0.0);
+    const bool camera = (params.flags & 0x200u) != 0u;
+    if (camera) {
+        const vec2 ndc = (here - params.viewport.zw) / params.viewport.xy;
+        const float ndc_z = (depth - params.depth_jitter.y) / params.depth_jitter.x;
+        const float denominator = params.proj.z + ndc_z;
+        const float view_z = abs(denominator) > 1e-7 ? -params.proj.w / denominator : -1e7;
+        const vec4 view = vec4(ndc.x * -view_z / params.proj.x, ndc.y * -view_z / params.proj.y,
+                               view_z, 1.0);
+        const float w = dot(params.prev_w, view);
+        if (w > 1e-4) {
+            const vec2 prev_ndc = vec2(dot(params.prev_x, view), dot(params.prev_y, view)) / w;
+            motion = params.viewport.zw + params.viewport.xy * prev_ndc - here;
+        }
+    }
+    const bool moving = raw[2] > 0.5;
+    const float decoding = params.object.w;
+    if (moving && decoding > 0.5) {
+        const vec2 e = vec2(raw[params.flags & 3u], raw[(params.flags >> 2) & 3u]) - params.object.z;
+        const vec2 v = decoding > 1.5 ? sign(e) * e * e : e;
+        motion += v * params.object.xy;
+    } else if (moving) {
+        // A moving object near the camera (the player's kart) barely moves on the screen: closer
+        // than the world's motion behind it.
+        motion = vec2(0.0);
+    }
+    // No infinities or NaNs into FSR 3 (sky, odd cameras in menus).
+    motion = any(isnan(motion)) ? vec2(0.0) : clamp(motion, vec2(-2048.0), vec2(2048.0));
+    imageStore(motion_img, pixel, vec4(motion, 0.0, 0.0));
+
+    if ((params.flags & 0x100u) == 0u) {
+        return;
+    }
+    const uint debug = (params.flags >> 4) & 15u;
+    vec4 shown = raw;
+    if (debug == 1u) {
+        // Motion: red right, green down, blue left/up; 16 pixels of motion is full brightness.
+        const vec2 m = motion / 16.0;
+        shown = vec4(clamp(m.x, 0.0, 1.0) + clamp(-m.x, 0.0, 1.0) * 0.25,
+                     clamp(m.y, 0.0, 1.0) + clamp(-m.y, 0.0, 1.0) * 0.25,
+                     clamp(-m.x - m.y, 0.0, 1.0), 1.0);
+        shown.rgb = max(shown.rgb, moving ? vec3(0.4, 0.0, 0.4) : vec3(0.06));
+    } else if (debug == 2u) {
+        shown = vec4(vec3(fract(depth * 64.0)) * 0.5 + vec3(depth) * 0.5, 1.0);
+    }
+    imageStore(debug_img, pixel, shown);
+}

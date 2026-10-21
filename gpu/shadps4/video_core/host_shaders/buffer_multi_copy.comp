@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: many buffer-to-buffer copies in one dispatch (the guest's copy shader, HLE'd in
+// vk_shader_hle.cpp: ~1024 small ranges per dispatch). One workgroup per range; offsets and
+// sizes in dwords, relative to the bound ranges of the source and destination buffers.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Source { uint src[]; };
+layout(std430, binding = 1) writeonly buffer Destination { uint dst[]; };
+layout(std430, binding = 2) readonly buffer Regions { uvec4 regions[]; }; // src, dst, dwords
+
+layout(push_constant) uniform Push { uint count; } push;
+
+void main() {
+    const uint index = gl_WorkGroupID.x;
+    if (index >= push.count) {
+        return;
+    }
+    const uvec4 region = regions[index];
+    for (uint i = gl_LocalInvocationID.x; i < region.z; i += 64) {
+        dst[region.y + i] = src[region.x + i];
+    }
+}

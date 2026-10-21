@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!-- Crash Team Racing Nitro-Fueled (CUSA13795) 1.21: "Unlock Everything" by Camiloop (shadPS4
+     patch file CrashTeamRacingNitroFueled.xml). Selected in the launcher's Patches tab or the
+     in-game menu (bbport.ini patch_unlock_all), compiled by scripts/patches.py at start.
+     Each line replaces one "cmp byte [reg+0x81], 0" (CBuildData::_unlockAll, read by the game's
+     unlock conditions) with "test rsp, rsp" and a NOP of the same length, so every check sees the
+     flag set; all 24 checked against the 1.21 eboot.
+     Change from the published file: isEnabled="false", so the patch stays off until chosen. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled" Name="Unlock Everything" Note="Makes every check of CBuildData::_unlockAll (+0x81) on the current build see 'true', the same flag the Kiosk/PAX/E3 demo builds use. Backup your save first." Author="Camiloop" PatchVer="1.0" AppVer="01.21" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x0126B342" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x0126B49A" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x0126B5DA" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x0126B716" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x0126B826" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x0126B976" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A2C07" Value="4885E40F1F440000"/>
+            <Line Type="bytes" Address="0x013A2D28" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A2ECA" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3042" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3118" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3309" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A39DE" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3A40" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3C5A" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3CBD" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3EDA" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A3F34" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A414A" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A41A4" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A43CA" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A4424" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A465D" Value="4885E40F1F4000"/>
+            <Line Type="bytes" Address="0x013A46FD" Value="4885E40F1F4000"/>
+        </PatchList>
+    </Metadata>
+</Patch>

@@ -1,0 +1,110 @@
+CTR Nitro-Fueled PC - portable para Windows 10 (1903+) / 11 de 64 bits
+=====================================================================
+Port nativo de Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21).
+El codigo del juego corre directamente en tu CPU y el video va por Vulkan.
+
+REQUISITOS (no incluidos, los pones tu)
+----------------------------------------
+1. Tu dump del juego base (carpeta CUSA13795) y de la actualizacion 1.21
+   (carpeta CUSA13795-patch). Sin archivos del juego esto no arranca.
+   Que dumps sirven:
+   - Archivos descifrados de CUSA13795 (la edicion USA). El nombre de las
+     carpetas da igual; el launcher dice en verde o rojo que encontro.
+   - Dump hecho desde tu PS4 con un dumper: eboot.bin, sce_module y
+     sce_sys\param.sfo directamente en cada carpeta. Funciona.
+   - Extraido con PS4 PKG Tool: carpetas Image0 (eboot.bin, sce_module,
+     datos) y Sc0 (param.sfo). Funciona: elige la carpeta que contiene
+     Image0 y Sc0 y pulsa "Preparar el juego".
+   - No sirven: un .pkg sin extraer (solo la pestana DLC usa .pkg), otra
+     region o edicion (EU CUSA14876, JP...) ni archivos cifrados ("eboot.bin
+     could not be read as a decrypted PS4 executable").
+2. GPU con Vulkan 1.3 y sus drivers al dia.
+Python ya viene incluido (carpeta python\): no hay que instalar nada.
+
+PUESTA EN MARCHA
+----------------
+1. Abre "Crash™ Team Racing Nitro-Fueled.exe" (el launcher).
+2. En "Juego base" elige tu carpeta CUSA13795 y en "Actualizacion 1.21"
+   tu carpeta CUSA13795-patch. Pulsa "Preparar el juego": crea
+   CUSA13795-1.21 al lado del juego base con enlaces duros (no ocupa el
+   doble ni cambia tus carpetas). Solo se hace una vez.
+   Si ya tienes el juego mergeado, usa "Ya tengo el juego preparado".
+3. Pulsa JUGAR. El primer arranque tarda (compila shaders; se guarda
+   cache en user\ y los siguientes son rapidos).
+En la pestana Ajustes estan el limite de FPS, la pantalla completa, el
+monitor, el mando, el idioma del juego y la imagen:
+  - Resolucion interna: de 480p (PCs modestos) a 4K nativo; por encima
+    de 1080p la imagen sale en 4K (en pantallas 1080p suaviza los bordes).
+    Necesita reiniciar el juego (el menu lo hace).
+  - Escalado (uno a la vez, se cambia en vivo): AMD FSR 1 (por defecto,
+    escalado espacial ligero), AMD FSR 3 (experimental, cualquier GPU) o
+    NVIDIA DLSS (experimental, tarjetas RTX; sus archivos vienen incluidos).
+    FSR 3 y DLSS reconstruyen detalle con varios cuadros; si ves estelas,
+    vuelve a FSR 1.
+  - Con DLSS: Calidad de DLSS (Automatica = la resolucion interna; DLAA,
+    Calidad, Equilibrado, Rendimiento, Ultra rendimiento dibujan a la
+    proporcion de NVIDIA de la salida 1080p o 4K; tras reiniciar) y Modelo
+    de DLSS (Transformer recomendado, o CNN mas ligero).
+  - Idioma del juego (Ajustes > Consola): ingles, espanol latinoamericano,
+    frances y portugues de Brasil (los que trae esta version del juego).
+En Parches, los
+parches del juego; en Guardados, copias de seguridad e importar partidas;
+en DLC, tus paquetes DLC de PS4 (.pkg), opcionales: el juego funciona
+igual sin ellos.
+
+Sin launcher: "Jugar sin launcher.bat" arranca .\CUSA13795-1.21
+(o la ruta de BB_GAME_DIR).
+
+CONTROLES
+---------
+Mando Xbox / SDL (recomendado) y teclado al mismo tiempo:
+  WASD = stick izquierdo, flechas = stick derecho, Espacio = X,
+  LShift = circulo, E = cuadrado, Q = triangulo, 1/3 = L1/R1,
+  R/F = L2/R2, Z/C = L3/R3, Enter = Options, IJKL = cruceta.
+  Las teclas se cambian en la pestana Teclado del launcher.
+LOGROS: se desbloquean jugando, como en la PS4 (aviso en pantalla, el
+  platino llega solo) y se guardan en user\trophies. La pestana Logros
+  del launcher los muestra con su imagen, progreso y fecha. Los nombres
+  vienen cifrados en el juego: se ven si pones la clave de trofeos de tu
+  PS4 (la misma de shadPS4; se puede importar de shadPS4).
+Menu del port (parches 60 FPS, sin motion blur, resolucion interna, escalado
+FSR 1 / FSR 3 / DLSS, limite FPS hasta 240, pantalla completa, FPS, idioma del
+menu): tecla Insert o L3+R3. "Apply and restart" reinicia solo.
+Por defecto arranca en ventana y a 60 FPS; la pantalla completa y el limite de FPS
+(60/72/144/240...) se cambian en ese menu y se guardan en bbport.ini.
+
+ARCHIVOS QUE GENERA
+-------------------
+user\           partidas guardadas y cache de shaders
+bbport.ini      ajustes del juego (los mismos que el menu Insert); se crea
+                desde bbport.default.ini la primera vez
+ACTUALIZAR: descomprime la version nueva encima de esta carpeta; tus
+ajustes, partidas, DLC y la carpeta del juego se conservan.
+launcher.ini    ajustes del launcher (carpetas del juego, idioma...)
+dlc\            tus DLC (.pkg), si los anades desde el launcher
+backups\        copias de seguridad de las partidas
+out\            imagen preparada del juego (se regenera sola)
+last_run.log    salida del ultimo arranque (para reportar fallos)
+logs\           solo con "Guardar registro detallado" (Herramientas)
+
+PROBLEMAS COMUNES
+-----------------
+- "No eboot.bin in ...": falta CUSA13795-1.21 o BB_GAME_DIR mal.
+- "sacredfire.exe not found": no muevas el launcher fuera de esta carpeta.
+- Tirones la primera vez en cada pista: normal, son shaders nuevos.
+- Pantalla negra con sonido: actualiza drivers Vulkan de tu GPU.
+- El launcher no abre: necesita Direct3D 11 (cualquier GPU actual);
+  usa "Jugar sin launcher.bat".
+
+Fallos y dudas: https://github.com/GetLostIn/CTR-NitroFueled-PC/issues
+(adjunta last_run.log).
+
+NVIDIA DLSS: bin\nvngx_dlss.dll es del SDK de NVIDIA DLSS, redistribuido
+segun su licencia (licenses\NVIDIA-DLSS-SDK-LICENSE.txt); bin\sacredfire_dlss.dll
+es el puente de IFreemz (MIT). NVIDIA, DLSS y GeForce RTX son marcas de
+NVIDIA Corporation. Sin afiliacion con NVIDIA ni AMD.
+
+Proyecto: https://github.com/GetLostIn/CTR-NitroFueled-PC
+Sin afiliacion con Sony, Activision o Beenox. Necesitas tu propia copia
+del juego. Licencia GPL v2 o posterior: ver LICENSE. Las librerias de bin\
+(SDL3, FFmpeg, x264, x265...) y sus licencias estan en THIRD-PARTY.txt.

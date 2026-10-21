@@ -1,0 +1,338 @@
+/* Narrow, explicit PS4 libc contracts. No automatic success stubs. */
+#define _CRT_RAND_S
+#include "runtime.h"
+#include "gpu/bbgpu.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdatomic.h>
+#include <sched.h>
+#include <pthread.h>
+
+typedef struct {
+    union { GuestCallback plain; void (ABI *with_arg)(void *); } callback;
+    void *argument, *dso;
+    int with_arg, active;
+} ExitHandler;
+static ExitHandler *handlers;
+static size_t handler_count, handler_capacity, calls_init, calls_atexit, calls_cxa;
+static uint64_t capabilities;
+static int libc_import(const char *name);
+static _Atomic size_t guards_acquired, guards_released;
+static uint64_t stack_canary;
+static _Atomic size_t memory_calls;
+/* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
+#define TLS_MODULES 8
+static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
+static _Thread_local unsigned char *tls_blocks[TLS_MODULES];
+static void *process_param;
+void runtime_set_procparam(void *param) {
+    process_param=param;
+    /* bbport: the game's libc heap settings (SceProcParam +0x30: SceLibcParam; its +0x10.. pointers to
+     * the heap size, delayed and extended allocation flags, initial size). */
+    const uint64_t *p=(const uint64_t *)param;
+    if (!p || p[0]<0x38 || !p[6]) return;
+    const uint64_t *libc=(const uint64_t *)p[6];
+    printf("Runtime: libc param size %#llx, entries %u", (unsigned long long)libc[0], (unsigned)libc[1]);
+    static const char *names[]={"heap size","delayed alloc","extended alloc","initial size"};
+    for (int i=0;i<4 && (uint64_t)(2+i)*8<libc[0];++i) {
+        const void *field=(const void *)libc[2+i];
+        if (!field) { printf(", %s -",names[i]); continue; }
+        if (i==0 || i==3) printf(", %s %#llx",names[i],(unsigned long long)*(const uint64_t *)field);
+        else printf(", %s %u",names[i],*(const uint32_t *)field);
+    }
+    printf("\n");
+}
+static ABI void *guest_procparam(void) { return process_param; }
+static void **application_heap_api;
+static ABI void guest_set_heap_api(void **api) {
+    application_heap_api=api;
+    puts("Runtime: application heap API registered");
+}
+void **runtime_application_heap_api(void) { return application_heap_api; }
+void runtime_set_module_tls(uint64_t module, const void *data, uint64_t filesz, uint64_t memsz) {
+    if (module<2 || module>=TLS_MODULES) { fputs("STOP: unsupported TLS module id\n",stderr); exit(21); }
+    tls_modules[module].data=data; tls_modules[module].filesz=filesz; tls_modules[module].memsz=memsz;
+}
+void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz) { runtime_set_module_tls(2,data,filesz,memsz); }
+static ABI void *guest_tls_get_addr(const uint64_t *index) {
+    if (!index || index[0]<2 || index[0]>=TLS_MODULES || !tls_modules[index[0]].data || index[1]>=tls_modules[index[0]].memsz) {
+        fputs("STOP: unsupported TLS module/offset\n",stderr); exit(21);
+    }
+    unsigned char **block=&tls_blocks[index[0]];
+    if (!*block) {
+        *block=calloc(1,tls_modules[index[0]].memsz);
+        if (!*block) { fputs("Cannot allocate module TLS\n",stderr); exit(1); }
+        memcpy(*block,tls_modules[index[0]].data,tls_modules[index[0]].filesz);
+    }
+    return *block+index[1];
+}
+
+void runtime_start(uint64_t flags) {
+    capabilities = flags;
+    if (!(flags & 1)) return;
+#ifdef _WIN32
+    unsigned int halves[2];
+    if (rand_s(&halves[0]) || rand_s(&halves[1])) { fputs("Cannot initialize stack canary\n", stderr); exit(1); }
+    memcpy(&stack_canary, halves, sizeof(stack_canary));
+#else
+    FILE *random = fopen("/dev/urandom", "rb");
+    if (!random || fread(&stack_canary, sizeof(stack_canary), 1, random) != 1) {
+        fputs("Cannot initialize stack canary\n", stderr); exit(1);
+    }
+    fclose(random);
+#endif
+    stack_canary &= ~UINT64_C(255);
+}
+static void (*report_hook)(void); /* loader extras (ISA site counts) */
+void runtime_report(void) {
+    printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
+           calls_init, calls_atexit, calls_cxa, handler_count);
+    printf("Runtime: static guards acquired=%zu, released=%zu\n", (size_t)guards_acquired, (size_t)guards_released);
+    runtime_thread_report();
+    runtime_mutex_report();
+    runtime_rwlock_report();
+    runtime_sema_report();
+    runtime_eventflag_report();
+    runtime_content_report();
+    runtime_memory_report();
+    runtime_ajm_report();
+    runtime_audio_report();
+    runtime_pad_report();
+    runtime_savedata_report();
+    runtime_file_report();
+    printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
+    if (report_hook) report_hook();
+}
+void runtime_set_report_hook(void (*hook)(void)) { report_hook = hook; }
+static ABI void init_env(void) {
+    /* prepare.py verified the supplied libc export consists of exactly C3. */
+    ++calls_init;
+    puts("Runtime: _init_env returned (verified libc implementation: RET)");
+}
+static pthread_mutex_t handler_lock = PTHREAD_MUTEX_INITIALIZER;
+static int register_handler(ExitHandler value) {
+    pthread_mutex_lock(&handler_lock);
+    if (handler_count == handler_capacity) {
+        size_t capacity = handler_capacity ? handler_capacity * 2 : 64;
+        ExitHandler *next = capacity > 1024 * 1024 ? NULL : realloc(handlers, capacity * sizeof(*handlers));
+        if (!next) { pthread_mutex_unlock(&handler_lock); return -1; }
+        handlers = next; handler_capacity = capacity;
+    }
+    value.active = 1; handlers[handler_count++] = value;
+    pthread_mutex_unlock(&handler_lock);
+    return 0;
+}
+static ABI int guest_atexit(GuestCallback callback) {
+    if (!callback) return -1;
+    ++calls_atexit;
+    return register_handler((ExitHandler){.callback.plain=callback});
+}
+static ABI int guest_cxa_atexit(void (ABI *callback)(void *), void *argument, void *dso) {
+    if (!callback) return -1;
+    ++calls_cxa;
+    return register_handler((ExitHandler){.callback.with_arg=callback, .argument=argument, .dso=dso, .with_arg=1});
+}
+void runtime_finalize(void *dso) {
+    /* Mark before invoking: repeated or recursive finalization cannot run twice.
+       Restart at the end to include handlers registered by a destructor. */
+    for (;;) {
+        pthread_mutex_lock(&handler_lock);
+        size_t i = handler_count;
+        while (i && (!handlers[i-1].active || (dso && handlers[i-1].dso != dso))) --i;
+        if (!i) { pthread_mutex_unlock(&handler_lock); return; }
+        ExitHandler handler = handlers[i-1]; handlers[i-1].active = 0;
+        pthread_mutex_unlock(&handler_lock);
+        if (handler.with_arg) handler.callback.with_arg(handler.argument);
+        else handler.callback.plain();
+    }
+}
+static ABI void guest_finalize(void *dso) { runtime_finalize(dso); }
+static _Atomic uint32_t next_guard_owner=1;
+static _Thread_local uint32_t guard_owner;
+static ABI int guard_acquire(uint64_t *guard) {
+    _Atomic uint64_t *state = (_Atomic uint64_t *)guard;
+    /* Dump libc uses the low byte for completion and the dword at +4 as lock.
+       The lock word holds a per-thread owner tag so recursion is detectable. */
+    if (!guard_owner) guard_owner = atomic_fetch_add(&next_guard_owner, 1);
+    for (;;) {
+        uint64_t expected = 0;
+        if (atomic_load_explicit(state, memory_order_acquire) & 1) return 0;
+        if (atomic_compare_exchange_strong_explicit(state, &expected, (uint64_t)guard_owner << 32,
+                                                    memory_order_acq_rel, memory_order_acquire)) break;
+        if (expected & 1) return 0;
+        if ((uint32_t)(expected >> 32) == guard_owner) {
+            fputs("STOP: recursive/concurrent static initialization is not supported yet\n", stderr);
+            exit(21);
+        }
+        sched_yield(); /* another thread is running the initializer */
+    }
+    atomic_fetch_add(&guards_acquired, 1);
+    return 1;
+}
+static ABI void guard_release(uint64_t *guard) {
+    atomic_store_explicit((_Atomic uint64_t *)guard, 1, memory_order_release);
+    atomic_fetch_add(&guards_released, 1);
+}
+static ABI void guard_abort(uint64_t *guard) {
+    atomic_fetch_and_explicit((_Atomic uint64_t *)guard, UINT64_C(0xffffffff), memory_order_release);
+}
+static ABI __attribute__((noreturn)) void stack_fail(void) {
+    fputs("STOP: guest stack protector detected corruption\n", stderr);
+    exit(22);
+}
+static ABI void *guest_memset(void *dst, int value, size_t size) {
+    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    memset(dst, value, size); runtime_memory_note_cpu_write((uintptr_t)dst, size); return dst;
+}
+static ABI void *guest_memcpy(void *dst, const void *src, size_t size) {
+    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    memcpy(dst, src, size); runtime_memory_note_cpu_write((uintptr_t)dst, size); return dst;
+}
+static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
+    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    memmove(dst, src, size); runtime_memory_note_cpu_write((uintptr_t)dst, size); return dst;
+}
+static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
+    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
+}
+static ABI size_t guest_strlen(const char *text) { return strlen(text); }
+static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
+    printf("Runtime: guest requested exit(%d)\n", status);
+    runtime_finalize(NULL);
+    runtime_report();
+    exit(status);
+}
+uintptr_t runtime_resolve(const char *name, int is_data) {
+    if (!(capabilities & 1)) return 0;
+    if (is_data) {
+        static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
+        if (runtime_nid_equals(name,"f7uOxY9mM1U#libkernel")) return (uintptr_t)&stack_canary;
+        if (runtime_nid_equals(name,"ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
+        /* __progname (SDK 6.00 libc): the process name libkernel sets from the executable. */
+        static const char *progname="eboot.bin";
+        if (runtime_nid_equals(name,"djxxOmW6-aw#libkernel")) return (uintptr_t)&progname;
+        return 0;
+    }
+    /* Imports named NID#library (link_modules.py); patterns name the library they are meant for. */
+    if (runtime_nid_equals(name,"bzQExy189ZI#libc")) return (uintptr_t)init_env;
+    if (runtime_nid_equals(name,"8G2LB+A3rzg#libc")) return (uintptr_t)guest_atexit;
+    if (runtime_nid_equals(name,"tsvEmnenz48#libc")) return (uintptr_t)guest_cxa_atexit;
+    if (runtime_nid_equals(name,"uMei1W9uyNo#libc")) return (uintptr_t)guest_libc_exit;
+    /* Not imported by the current eboot, exposed for ABI tests/future use. */
+    if (runtime_nid_equals(name,"H2e8t5ScQGc#libc")) return (uintptr_t)guest_finalize;
+    if (runtime_nid_equals(name,"3GPpjQdAMTw#libc")) return (uintptr_t)guard_acquire;
+    if (runtime_nid_equals(name,"9rAeANT2tyE#libc")) return (uintptr_t)guard_release;
+    if (runtime_nid_equals(name,"2emaaluWzUw#libc")) return (uintptr_t)guard_abort;
+    if (runtime_nid_equals(name,"Ou3iL1abvng#libkernel")) return (uintptr_t)stack_fail;
+    if (runtime_nid_equals(name,"8zTFvBIAIN8#libc")) return (uintptr_t)guest_memset;
+    if (runtime_nid_equals(name,"Q3VBxCXhUHs#libc")) return (uintptr_t)guest_memcpy;
+    if (runtime_nid_equals(name,"+P6FRGH4LfA#libc")) return (uintptr_t)guest_memmove;
+    if (runtime_nid_equals(name,"DfivPArhucg#libc")) return (uintptr_t)guest_memcmp;
+    if (runtime_nid_equals(name,"j4ViWNHEgww#libc")) return (uintptr_t)guest_strlen;
+    if (runtime_nid_equals(name,"vNe1w4diLCs#libkernel")) return (uintptr_t)guest_tls_get_addr;
+    if (runtime_nid_equals(name,"959qrazPIrg#libkernel")) return (uintptr_t)guest_procparam;
+    if (runtime_nid_equals(name,"p5EcQeEeJAE#libkernel")) return (uintptr_t)guest_set_heap_api;
+    /* Everything else a libc import needs comes from the linked libc.prx itself. */
+    if (libc_import(name)) return 0;
+    uintptr_t mutex = runtime_mutex_resolve(name);
+    if (mutex) return mutex;
+    uintptr_t thread = runtime_thread_resolve(name);
+    if (thread) return thread;
+    uintptr_t content=runtime_content_resolve(name);
+    if (content) return content;
+    uintptr_t timer = runtime_time_resolve(name);
+    if (timer) return timer;
+    uintptr_t sema = runtime_sema_resolve(name);
+    if (sema) return sema;
+    uintptr_t eventflag = runtime_eventflag_resolve(name);
+    if (eventflag) return eventflag;
+    uintptr_t json = runtime_json2_resolve(name);
+    if (json) return json;
+    uintptr_t rwlock = runtime_rwlock_resolve(name);
+    if (rwlock) return rwlock;
+    uintptr_t memory = runtime_memory_resolve(name);
+    if (memory) return memory;
+    uintptr_t kernel = runtime_kernel_resolve(name);
+    if (kernel) return kernel;
+    uintptr_t services = runtime_services_resolve(name);
+    if (services) return services;
+    uintptr_t ajm = runtime_ajm_resolve(name);
+    if (ajm) return ajm;
+    uintptr_t audio = runtime_audio_resolve(name);
+    if (audio) return audio;
+    uintptr_t pad = runtime_pad_resolve(name);
+    if (pad) return pad;
+    uintptr_t rtc = runtime_rtc_resolve(name);
+    if (rtc) return rtc;
+    uintptr_t save = runtime_savedata_resolve(name);
+    if (save) return save;
+    uintptr_t file = runtime_file_resolve(name);
+    if (file) return file;
+    return bbgpu_resolve(name);
+}
+static const struct { const char *nid, *symbol; } import_names[]={
+#include "import_names.inc"
+};
+/* SacredFire: names generated for the eboot being run (--import-names), searched before the
+ * compiled fallback table (src/import_names.inc). Both are matched on the bare NID: a NID is a hash of the symbol name. */
+static struct { char nid[12]; char *symbol; } *loaded_names;
+static size_t loaded_count;
+static size_t nid_length(const char *name) { const char *h=strchr(name,'#'); return h ? (size_t)(h-name) : strlen(name); }
+int runtime_load_import_names(const char *path) {
+    FILE *f=fopen(path,"r");
+    if (!f) return -1;
+    char line[512];
+    size_t capacity=0;
+    while (fgets(line,sizeof(line),f)) {
+        char nid[16], library[128], symbol[384];
+        if (line[0]=='#' || sscanf(line,"%15s %127s %383s",nid,library,symbol)!=3 || strlen(nid)!=11 || symbol[0]=='?') continue;
+        if (loaded_count==capacity) {
+            capacity=capacity ? capacity*2 : 1024;
+            void *grown=realloc(loaded_names,capacity*sizeof(*loaded_names));
+            if (!grown) { fclose(f); return -1; }
+            loaded_names=grown;
+        }
+        memcpy(loaded_names[loaded_count].nid,nid,12);
+        size_t length=strlen(symbol)+1;
+        loaded_names[loaded_count].symbol=malloc(length);
+        if (!loaded_names[loaded_count].symbol) { fclose(f); return -1; }
+        memcpy(loaded_names[loaded_count].symbol,symbol,length);
+        ++loaded_count;
+    }
+    fclose(f);
+    return (int)loaded_count;
+}
+/* Symbol name for an import, or NULL when nothing names its NID. */
+const char *runtime_symbol(const char *nid) {
+    size_t n=nid_length(nid);
+    if (n!=11) return NULL;
+    for (size_t i=0;i<loaded_count;++i)
+        if (!memcmp(nid,loaded_names[i].nid,11)) return loaded_names[i].symbol;
+    for (size_t i=0;i<sizeof(import_names)/sizeof(*import_names);++i)
+        if (!memcmp(nid,import_names[i].nid,11)) return import_names[i].symbol;
+    return NULL;
+}
+/* Same symbol name means same contract whether imported from libkernel or
+ * libScePosix, so newer modules resolve by name through runtime_symbol. */
+/* SacredFire: the symbol-keyed tables model the system libraries, never libc: an import from libc or
+ * libSceLibcInternal binds to the linked libc.prx (link_modules.py). The few libc symbols the runtime
+ * takes over (_init_env, atexit, memcpy, ...) are named explicitly in runtime_resolve. */
+static int libc_import(const char *name) {
+    const char *library=strchr(name,'#');
+    if (!library) return 0;
+    ++library;
+    return (!strncmp(library,"libc",4) && (!library[4] || library[4]=='#')) ||
+           (!strncmp(library,"libSceLibcInternal",18) && (!library[18] || library[18]=='#'));
+}
+uintptr_t runtime_lookup(const RuntimeExport *table,size_t count,const char *nid) {
+    if (libc_import(nid)) return 0;
+    const char *symbol=runtime_symbol(nid);
+    if (!symbol) return 0;
+    for (size_t i=0;i<count;++i) if (!strcmp(symbol,table[i].name)) return (uintptr_t)table[i].function;
+    return 0;
+}
+const char *runtime_import_name(const char *name) {
+    const char *symbol=runtime_symbol(name);
+    return symbol ? symbol : "name not resolved; see out/import_names.txt and analysis.json import_name_hints";
+}

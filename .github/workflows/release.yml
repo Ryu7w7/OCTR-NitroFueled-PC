@@ -1,0 +1,165 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Source checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # scripts/isa_rewrite.py scans the linked image with iced-x86 (docs/sacredfire/15-isa-rewrite.md).
+      - name: Python packages
+        run: pip install iced-x86
+      # Tests needing the executable run separately with `bash build.sh --test`.
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Shell syntax
+        run: bash -n run.sh build.sh launcher/bb-launcher.sh launcher/install-desktop.sh packaging/appimage.sh
+      - name: Launcher compiles
+        run: python3 -m py_compile launcher/*.py tools/gen_import_names.py tools/shader_recipe.py scripts/*.py
+      - name: Patch file parses
+        run: python3 -c "import xml.etree.ElementTree as ET; ET.parse('patches/CrashTeamRacing.xml'); print('ok')"
+
+  linux:
+    name: Linux AppImage
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Build inside Nix shell
+        run: nix-shell shell.nix --run 'BB_IN_NIX_SHELL=1 bash build.sh'
+      - name: Package AppImage
+        run: bash packaging/appimage.sh
+      - name: Name and verify AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(git describe --tags --match 'v*' --always)
+          asset="SacredFire-${version}-x86_64.AppImage"
+          mv dist/SacredFire-x86_64.AppImage "dist/$asset"
+          mv dist/SacredFire-x86_64.AppImage.sha256 "dist/$asset.sha256"
+          mv dist/SacredFire-x86_64.AppImage.build.txt "dist/$asset.build.txt"
+          (cd dist && sha256sum "$asset" > "$asset.sha256" && sha256sum --check "$asset.sha256")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-build
+          path: |
+            dist/*.AppImage
+            dist/*.AppImage.sha256
+            dist/*.AppImage.build.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  windows:
+    name: Windows portable ZIP
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: checks
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git patch
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-vulkan-headers
+            mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-vulkan-memory-allocator
+            mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-sdl3
+            mingw-w64-clang-x86_64-fmt
+            mingw-w64-clang-x86_64-boost
+            mingw-w64-clang-x86_64-robin-map
+            mingw-w64-clang-x86_64-xxhash
+            mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-zydis
+            mingw-w64-clang-x86_64-spirv-tools
+            mingw-w64-clang-x86_64-spirv-headers
+            mingw-w64-clang-x86_64-spirv-cross
+      - name: Build and package Windows ZIP
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          set -euo pipefail
+          version=$(git describe --tags --match 'v*' --always)
+          bash build.sh
+          python3 packaging/windows/make_portable.py --version "$version"
+          asset="CTR-NitroFueled-PC-portable-${version}-windows.zip"
+          mv dist/CTR-NitroFueled-PC-portable-windows.zip "dist/$asset"
+          mv dist/CTR-NitroFueled-PC-portable-windows.zip.sha256 "dist/$asset.sha256"
+          (cd dist && sha256sum "$asset" > "$asset.sha256" && sha256sum --check "$asset.sha256")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-build
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+  # A draft release with the two packages only: the maintainer writes the notes, tries the
+  # packages and publishes it. The checksum and build files stay in the workflow's artifacts.
+  release:
+    name: Draft GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: linux-build
+          path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-build
+          path: dist
+      - name: Verify both packages
+        run: cd dist && sha256sum --check *.sha256
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.AppImage dist/*.zip --verify-tag --draft --generate-notes
+          fi
