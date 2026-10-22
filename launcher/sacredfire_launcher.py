@@ -1817,7 +1817,7 @@ class LauncherWindow(Adw.ApplicationWindow):
     # --- DLC page ----------------------------------------------------------------------------
 
     def dlc_dir(self):
-        return DATA_DIR / "dlc"
+        return Path(os.environ.get("BB_DLC_DIR") or DATA_DIR / "dlc")
 
     def build_dlc_page(self):
         page = Adw.PreferencesPage()
