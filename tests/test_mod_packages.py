@@ -302,6 +302,13 @@ class PackageTests(unittest.TestCase):
         ET.ElementTree(xml).write(profile/'patches/test.xml')
         with self.assertRaisesRegex(ValueError,'Overlapping executable patches'):adapter.preflight(profile,self.ini,self.prefs)
 
+    def test_preflight_takes_the_settings_path_as_text(self):
+        # run.py without a widescreen layout: bbport.ini's path as mod_packages.prepare returns it.
+        from test_prepare import fixture
+        profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
+        (profile/'game/eboot.bin').write_bytes(fixture())
+        self.assertEqual(adapter.preflight(profile,str(self.ini),self.prefs),0)
+
     def test_preflight_rejects_signature_skip(self):
         from test_prepare import fixture
         profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()

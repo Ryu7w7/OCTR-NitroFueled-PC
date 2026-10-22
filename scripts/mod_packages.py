@@ -22,7 +22,7 @@ def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_ve
     from prepare import parse_self
     from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments
     elf,*_=parse_self(((Path(game) if game is not None else profile/'game')/'eboot.bin').read_bytes())
-    settings=read_settings(config)
+    settings=read_settings(Path(config))  # run.py passes bbport.ini's path as text without a widescreen layout
     selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
     claims=[]
     for key,path,meta in selected:

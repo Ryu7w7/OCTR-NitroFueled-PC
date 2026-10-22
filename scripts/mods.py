@@ -102,12 +102,13 @@ def mod_files(folder):
 
 
 # Windows without the symlink privilege (Developer Mode off): directories become junctions,
-# files hard links (no copying fallback). Those are not symlinks, so the overlay remembers
-# what it linked and where to.
+# files hard links. Those are not symlinks, so the overlay remembers what it linked and where to.
+# A game file is never copied; a mod's file (copy=True) is when it cannot be linked: hard links
+# only reach the same volume, and the overlay sits beside a game on another drive than the mods.
 LINKED = {}
 
 
-def make_link(link, target):
+def make_link(link, target, copy=False):
     try:
         link.symlink_to(target, target_is_directory=target.is_dir())
         return
@@ -121,6 +122,9 @@ def make_link(link, target):
         try:
             os.link(target, link)
         except OSError as error:
+            if copy:
+                shutil.copy2(target, link)
+                return
             raise OSError('Mod overlays require filesystem links; no game files will be copied. '
                           'Enable Windows Developer Mode or keep mods and game on the same volume: '
                           + str(target)) from error
@@ -210,7 +214,7 @@ def build_overlay(game, out, mods, replacements=None):
                 raise ValueError(f'File/directory conflict: {relative}')
             else:
                 added += 1
-            make_link(destination, source)
+            make_link(destination, source, copy=True)
         print(f'Mods: {replaced} game files replaced, {added} added', file=sys.stderr)
         return overlay
     except BaseException:

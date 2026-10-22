@@ -59,6 +59,29 @@ class ModTests(unittest.TestCase):
         config.write_text(json.dumps({'order': ['B', 'A', 'deleted'], 'disabled': ['A']}))
         self.assertEqual(mods.selected(self.moddir, config), ['B', 'C'])
 
+    @unittest.skipUnless(os.name == 'nt', 'junctions and hard links: the Windows fallback')
+    def test_mod_files_on_another_volume_are_copied_but_game_files_never(self):
+        # Developer Mode off (no symlinks) and the mods on another drive than the game: their
+        # files cannot be hard-linked into the overlay beside the game, so they are copied.
+        from unittest.mock import patch
+        a = self.mod('A')
+        real_link = os.link
+
+        def link(target, link_path):
+            if Path(target).is_relative_to(self.moddir):
+                raise OSError(17, 'not the same device')
+            real_link(target, link_path)
+
+        with patch.object(Path, 'symlink_to', side_effect=OSError('no privilege')), patch.object(mods.os, 'link', link):
+            result = mods.build_overlay(self.game, self.root / 'out', [('A', a)])
+            self.assertEqual((result / 'dvdroot_ps4/chr/a.dcx').read_bytes(), b'mod')
+            self.assertEqual((result / 'eboot.bin').read_bytes(), b'original executable')
+        with patch.object(Path, 'symlink_to', side_effect=OSError('no privilege')), \
+                patch.object(mods.os, 'link', side_effect=OSError(17, 'not the same device')):
+            with self.assertRaisesRegex(OSError, 'no game files will be copied'):
+                mods.make_link(self.root / 'game-link', self.game / 'eboot.bin')
+        self.assertFalse((self.root / 'game-link').exists())
+
     def test_no_mod_returns_original_game(self):
         self.assertEqual(mods.build_overlay(self.game, self.root / 'out', []), self.game)
         self.assertFalse((self.root / 'out').exists())

@@ -741,7 +741,7 @@ def main():
                 apply_render_res(env, settings)
                 if mod_packages.ACTIVE:
                     mod_packages.preflight(Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
-                                           [layout_patches] if layout_patches else [], title_id, app_version)
+                                           [layout_patches] if layout_patches else [], title_id, app_version, game=game)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
                        *(['--strict-overlap'] if mod_packages.ACTIVE else []),
