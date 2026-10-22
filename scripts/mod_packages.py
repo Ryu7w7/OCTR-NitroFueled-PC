@@ -1,11 +1,22 @@
 """Native launcher adapter for declarative Mod packages. Author: tcosi. GPL-2.0-or-later."""
 from pathlib import Path
-import atexit,json,os,shutil,sys,uuid
+import atexit,json,os,shutil,sys,uuid,subprocess
+from functools import lru_cache
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from mod_components import copy_tree,save_json,apply_shader,under
 from mod_library import scan,PREFIX
 from mod_session import launch_lock,sync_saves
 ACTIVE=None
+
+@lru_cache(maxsize=8)
+def engine_features(executable,digest):
+    """Negotiate features once per engine, without any per-mod build allowlist."""
+    try:
+        result=subprocess.run([str(executable),'--mod-capabilities'],capture_output=True,text=True,
+            timeout=15,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        value=json.loads(result.stdout) if result.returncode==0 else {}
+        return value if isinstance(value,dict) else {}
+    except (OSError,ValueError,subprocess.TimeoutExpired):return {}
 
 def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21',game=None):
     from prepare import parse_self
@@ -83,6 +94,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
         plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
+        import struct
+        file_count,=struct.unpack_from('<I',plan['file_map'].read_bytes(),8)
+        if file_count and engine_features(Path(port)/'bin/sacredfire.exe',plan['engine']).get('file_overlays')!=1:
+            raise ValueError('This engine lacks native mod file redirection. Update the engine and launcher together; no game-copy fallback is permitted.')
         prune_sessions(state/'sessions')
         session=state/'sessions'/uuid.uuid4().hex;session.mkdir(parents=True)
         user=session/'user';user.mkdir()

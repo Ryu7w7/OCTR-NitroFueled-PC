@@ -46,7 +46,7 @@ class PackageTests(unittest.TestCase):
     def enable(self,*names):save_json(self.prefs,{'enabled':[library.PREFIX+n for n in names],'disabled':[]})
     def prepare(self):
         self.environment={}
-        with patch.object(adapter,'preflight',return_value=0),patch.object(adapter,'launch_lock',return_value=nullcontext()),patch('atexit.register'):
+        with patch.object(adapter,'preflight',return_value=0),patch.object(adapter,'engine_features',return_value={'file_overlays':1}),patch.object(adapter,'launch_lock',return_value=nullcontext()),patch('atexit.register'):
             return adapter.prepare(self.port,self.port,self.environment,self.game,self.ini,prepare_only=True)
     def read_game(self,relative):
         import mod_file_paths
@@ -122,12 +122,11 @@ class PackageTests(unittest.TestCase):
         result=self.scan();self.assertNotIn('sample',result['entries'])
         self.assertIn('Conflicting content',result['messages'][0])
 
-    def test_newer_unsupported_engine_keeps_compatible_version(self):
+    def test_newest_version_ignores_legacy_engine_allowlist(self):
         self.package(filename='older.zip')
         m=self.manifest()|{'version':'2.0.0'};m['compatibility']['runtime_versions']=['future']
         self.package(manifest=m,filename='future.zip')
-        result=self.scan();self.assertEqual(result['entries']['sample']['version'],'1.0.0')
-        self.assertIn('unsupported engine',result['entries']['sample']['version_notice'])
+        result=self.scan();self.assertEqual(result['entries']['sample']['version'],'2.0.0')
 
     def test_preparation_never_copies_or_links_source_game(self):
         self.package();self.enable('sample')
@@ -223,9 +222,26 @@ class PackageTests(unittest.TestCase):
     def test_offline_package_cannot_start_online(self):
         self.package();self.enable('sample');self.ini.write_text(self.ini.read_text().replace('online=0','online=1'))
         with self.assertRaisesRegex(ValueError,'offline-only'):self.prepare()
-    def test_wrong_runtime_rejected(self):
+    def test_engine_update_does_not_require_repackaging(self):
         self.package();self.enable('sample');(self.port/'bin/sacredfire.exe').write_bytes(b'other engine')
-        with self.assertRaisesRegex(ValueError,'unsupported runtime'):self.prepare()
+        (self.port/'bin/VERSION').write_text('future-release')
+        self.assertEqual(self.prepare()[0],self.game)
+
+    def test_package_can_omit_engine_versions_and_hashes(self):
+        m=self.manifest();m['compatibility'].pop('runtime_versions');m['compatibility'].pop('runtime_sha256')
+        self.package(manifest=m);self.enable('sample')
+        self.assertEqual(self.prepare()[0],self.game)
+
+    def test_game_executable_checksum_still_required(self):
+        self.package();self.enable('sample');(self.game/'eboot.bin').write_bytes(b'unsupported game')
+        with self.assertRaisesRegex(ValueError,'unsupported game executable'):self.prepare()
+
+    def test_engine_feature_negotiation_is_not_a_version_allowlist(self):
+        adapter.engine_features.cache_clear()
+        from types import SimpleNamespace
+        with patch.object(adapter.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='{"file_overlays":1}')):
+            self.assertEqual(adapter.engine_features('any-future-engine','digest'),{'file_overlays':1})
+        adapter.engine_features.cache_clear()
     def test_dependency_and_conflict_checks(self):
         self.package('child',self.manifest('child')|{'requiresCapabilities':['dependencies'],'requires':[{'id':'base','version':'>=1.0.0'}]})
         self.enable('child')

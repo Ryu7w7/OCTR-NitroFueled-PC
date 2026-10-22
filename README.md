@@ -325,9 +325,14 @@ no original game files are copied, linked, repacked or overwritten. Disabling mo
 restores source reads. Only mod payloads, generated metadata and separate user saves/
 shader caches are stored. This path requires the matching updated engine, not only
 new launcher scripts. Multiple versions of a stable mod ID appear once, using the
-newest validated version compatible with the installed engine; older inputs remain
+newest validated version; older inputs remain
 available for rollback. Different content claiming the same selected version is
 reported as a conflict.
+
+Mods do not need an engine-version/hash allowlist. Older manifests containing
+those fields still load; the fields are no longer a launch gate. Engine features
+are negotiated automatically, while game executable hashes, resource checksums,
+XML signatures, conflicts and online declarations remain enforced.
 
 The existing loose-folder CLI loader and `mods.json` remain available for older
 workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The unified

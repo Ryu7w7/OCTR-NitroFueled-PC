@@ -106,7 +106,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     problems=conflicts(mod_root,selection,base)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
-    runtime=sha(root/'bin/sacredfire.exe');runtime_version=(root/'bin/VERSION').read_text().strip();eboot=sha(game/'eboot.bin')
+    runtime=sha(root/'bin/sacredfire.exe');eboot=sha(game/'eboot.bin')
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
     for name in names:
         folder=package_folder(mod_root,name)
@@ -116,8 +116,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             if variant:chosen_variants[name]=variant
             if m['id']!=name:raise ValueError('Package ID/folder mismatch: '+name)
             compat=m['compatibility']
-            if runtime_version not in compat['runtime_versions'] or runtime not in compat['runtime_sha256']:
-                raise ValueError(name+': unsupported runtime build; package must declare this exact engine')
+            # Engine releases are not a mod allowlist. Source checksums and XML
+            # signature/overlap checks validate the data the mod actually changes.
             if eboot not in compat['eboot_sha256']:raise ValueError(name+': unsupported game executable')
             if compat['online']=='offline-only' and environment.get('BB_ONLINE',effective.get('online','0'))=='1':
                 raise ValueError(name+': offline-only until online compatibility is tested. Set online=0 in this profile bbport.ini.')
