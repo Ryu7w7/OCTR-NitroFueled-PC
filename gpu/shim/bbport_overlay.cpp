@@ -265,6 +265,9 @@ void MenuSection(const char* label) {
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+// Frame generation: the game's own frames (real presents) and when an interpolated one last showed.
+std::chrono::steady_clock::time_point last_game_present{}, last_generated{};
+float game_ms_avg = 0.0f;
 
 float PixelDensity(SDL_WindowID id);
 
@@ -1234,6 +1237,20 @@ void Menu() {
     if (s.temporal == BbSettings::TemporalFsr3) {
         Slider(BbSettings::MenuText("FSR 3 sharpness", "Резкость FSR 3"), s.fsr3_sharpness, 0.0f, 1.0f);
     }
+    if (s.temporal == BbSettings::TemporalFsr3 || s.temporal == BbSettings::TemporalDlss) {
+        const bool before = s.frame_generation;
+        Checkbox(BbSettings::MenuText("Frame generation (FSR 3, experimental)",
+                                      "Генерация кадров (FSR 3, экспериментально)"),
+                 s.frame_generation);
+        if (before != s.frame_generation) {
+            std::printf("Menu: frame_generation = %d\n", int(s.frame_generation.load()));
+        }
+        Hint(BbSettings::MenuText(
+            "Creates extra frames so the game looks smoother: with the FPS limit at 60, you see "
+            "up to 120. Adds a little input lag. Applies at once.",
+            "Создаёт дополнительные кадры, чтобы игра выглядела плавнее: при ограничении FPS 60 "
+            "на экране до 120. Немного увеличивает задержку. Сразу."));
+    }
 
     ImGui::EndTabItem();
     }
@@ -1460,6 +1477,15 @@ void FpsCounter() {
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
     const auto& s = BbSettings::Get();
+    // Frame generation in the last half second: the frames shown and the game's own.
+    if (std::chrono::steady_clock::now() - last_generated < std::chrono::milliseconds(500) &&
+        game_ms_avg > 0.0f) {
+        ImGui::Text(BbSettings::MenuText("%.0f FPS (game %.0f, FG: On)",
+                                         "%.0f FPS (игра %.0f, FG: On)"),
+                    frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, 1000.0f / game_ms_avg);
+        ImGui::End();
+        return;
+    }
     ImGui::Text(BbSettings::MenuText("%.0f FPS  %.1f ms  %s", "%.0f FPS  %.1f мс  %s"),
                 frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, frame_ms_avg,
                 s.upscaler == BbSettings::UpscalerFsr3     ? "FSR 3.1"
@@ -1981,13 +2007,23 @@ bool CapturesInput() {
     return menu_open || prompt_active || ultrawide_prompt;
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool generated) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
+    }
+    if (generated) {
+        last_generated = now;
+    } else {
+        const float game_ms =
+            std::chrono::duration<float, std::milli>(now - last_game_present).count();
+        last_game_present = now;
+        if (game_ms > 0.0f && game_ms < 1000.0f) {
+            game_ms_avg = game_ms_avg == 0.0f ? game_ms : game_ms_avg * 0.95f + game_ms * 0.05f;
+        }
     }
     if (!Visible()) {
         return;

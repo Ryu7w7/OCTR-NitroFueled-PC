@@ -143,6 +143,28 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
+// SacredFire: frame generation's interpolated frames are dropped rather than waited for.
+bool Swapchain::TryAcquireNextImage() {
+    if (needs_recreation) {
+        return false;
+    }
+    const vk::Result result = instance.GetDevice().acquireNextImageKHR(
+        swapchain, 0, image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
+    switch (result) {
+    case vk::Result::eSuccess:
+        return true;
+    case vk::Result::eSuboptimalKHR:
+        needs_recreation = true;
+        return true; // acquired: it is presented, then the swapchain is recreated
+    case vk::Result::eNotReady:
+    case vk::Result::eTimeout:
+        return false;
+    default:
+        needs_recreation = true;
+        return false;
+    }
+}
+
 bool Swapchain::Present() {
     const vk::PresentInfoKHR present_info = {
         .waitSemaphoreCount = 1,

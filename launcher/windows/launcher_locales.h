@@ -6,6 +6,8 @@
 inline const std::map<std::string, std::map<std::string, std::string>>& GeneratedLocales() {
     static const std::map<std::string, std::map<std::string, std::string>> table = {
         {"pt_BR", {
+            {"Frame generation (FSR 3, experimental)", "Geração de quadros (FSR 3, experimental)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Cria quadros extras para o jogo parecer mais fluido: com o limite de FPS em 60, você vê até 120. Adiciona um pouco de atraso no controle. Precisa do upscaling FSR 3 ou DLSS."},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: valide seus recordes (em breve, competitivo com ranks e MMR)"},
             {"Open page", "Abrir página"},
             {"Your account is banned from online play.", "Sua conta está banida do online."},
@@ -359,6 +361,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Pare o jogo e saia"},
         }},
         {"fr", {
+            {"Frame generation (FSR 3, experimental)", "Génération d'images (FSR 3, expérimental)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Crée des images supplémentaires pour un jeu plus fluide : avec la limite de FPS à 60, vous en voyez jusqu'à 120. Ajoute un peu de latence. Nécessite la mise à l'échelle FSR 3 ou DLSS."},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank : faites valider vos records (bientôt, compétitif avec rangs et MMR)"},
             {"Open page", "Ouvrir la page"},
             {"Your account is banned from online play.", "Votre compte est banni du jeu en ligne."},
@@ -712,6 +716,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Arrêtez le jeu et quittez"},
         }},
         {"de", {
+            {"Frame generation (FSR 3, experimental)", "Bildgenerierung (FSR 3, experimentell)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Erzeugt zusätzliche Bilder, damit das Spiel flüssiger wirkt: Mit dem FPS-Limit auf 60 siehst du bis zu 120. Erhöht die Eingabeverzögerung etwas. Benötigt FSR 3 oder DLSS als Hochskalierung."},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: lass deine Bestzeiten bestätigen (bald: Ranglistenspiele mit Rängen und MMR)"},
             {"Open page", "Seite öffnen"},
             {"Your account is banned from online play.", "Dein Konto ist vom Online-Spiel gesperrt."},
@@ -1065,6 +1071,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Stoppen Sie das Spiel und beenden Sie"},
         }},
         {"it", {
+            {"Frame generation (FSR 3, experimental)", "Generazione di fotogrammi (FSR 3, sperimentale)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Crea fotogrammi extra per rendere il gioco più fluido: con il limite di FPS a 60, ne vedi fino a 120. Aggiunge un po' di ritardo ai comandi. Richiede l'upscaling FSR 3 o DLSS."},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: fai convalidare i tuoi record (presto, competitivo con gradi e MMR)"},
             {"Open page", "Apri pagina"},
             {"Your account is banned from online play.", "Il tuo account è bannato dall'online."},
@@ -1418,6 +1426,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Interrompi il gioco ed esci"},
         }},
         {"ja", {
+            {"Frame generation (FSR 3, experimental)", "フレーム生成（FSR 3、実験的）"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "追加のフレームを作り、ゲームをより滑らかに見せます。FPS制限が60なら、最大120で表示されます。入力遅延がわずかに増えます。FSR 3またはDLSSのアップスケーリングが必要です。"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: 記録の認定（近日、ランクと MMR による対戦モード）"},
             {"Open page", "ページを開く"},
             {"Your account is banned from online play.", "あなたのアカウントはオンラインから BAN されています。"},
@@ -1771,6 +1781,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "ゲームを停止して終了します"},
         }},
         {"zh_CN", {
+            {"Frame generation (FSR 3, experimental)", "帧生成（FSR 3，实验性）"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "生成额外的帧，让游戏看起来更流畅：FPS 限制为 60 时，最多可显示 120。会略微增加输入延迟。需要 FSR 3 或 DLSS 超分辨率。"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank：验证你的纪录（即将推出：带段位和 MMR 的排位赛）"},
             {"Open page", "打开页面"},
             {"Your account is banned from online play.", "你的账号已被禁止在线游戏。"},
@@ -2124,6 +2136,8 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "停止游戏并退出"},
         }},
         {"ru", {
+            {"Frame generation (FSR 3, experimental)", "Генерация кадров (FSR 3, экспериментально)"},
+            {"Creates extra frames so the game looks smoother: with the FPS limit at 60, you see up to 120. Adds a little input lag. Needs FSR 3 or DLSS upscaling.", "Создаёт дополнительные кадры, чтобы игра выглядела плавнее: при ограничении FPS 60 на экране до 120. Немного увеличивает задержку управления. Нужно масштабирование FSR 3 или DLSS."},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: подтверждение рекордов (скоро — рейтинговая игра с рангами и MMR)"},
             {"Open page", "Открыть страницу"},
             {"Your account is banned from online play.", "Ваш аккаунт заблокирован в онлайне."},

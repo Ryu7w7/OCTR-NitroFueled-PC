@@ -116,6 +116,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.dlss_model = value == "cnn" ? 1 : 0;
     } else if (key == "fsr3_sharpness") {
         v.fsr3_sharpness = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "frame_generation") {
+        v.frame_generation = i != 0;
     } else if (key == "render_res") {
         for (int r = 0; r < RenderResCount; ++r) {
             if (i == RenderResHeights[r]) v.render_res = r;
@@ -410,6 +412,7 @@ void Save() {
     put("dlss_output", std::to_string(DlssOutputHeights[v.dlss_output ? 1 : 0]));
     put("dlss_model", DlssModelNames[v.dlss_model ? 1 : 0]);
     put("fsr3_sharpness", fixed(v.fsr3_sharpness, 2));
+    put("frame_generation", flag(v.frame_generation));
     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                           std::to_string(OutputHeights[v.output_res]));
     // Read by run.sh at start.

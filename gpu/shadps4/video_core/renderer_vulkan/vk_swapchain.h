@@ -31,6 +31,10 @@ public:
     /// Acquires the next image in the swapchain.
     bool AcquireNextImage();
 
+    /// SacredFire: AcquireNextImage without waiting (frame generation): false when no image is
+    /// free now or the swapchain needs recreating.
+    bool TryAcquireNextImage();
+
     /// Presents the current image and move to the next one
     bool Present();
 
@@ -77,6 +81,11 @@ public:
 
     vk::Extent2D GetExtent() const {
         return extent;
+    }
+
+    /// SacredFire: the present mode in use (frame generation checks for vsync).
+    [[nodiscard]] vk::PresentModeKHR GetPresentMode() const {
+        return present_mode;
     }
 
     [[nodiscard]] vk::Semaphore GetImageAcquiredSemaphore() const {

@@ -58,6 +58,11 @@ public:
         return *upscaler;
     }
 
+    /// SacredFire: CTR's FSR 3/DLSS path; the presenter takes its frame generation inputs.
+    [[nodiscard]] CtrFsr3& GetCtrFsr3() noexcept {
+        return *ctr_fsr3;
+    }
+
     [[nodiscard]] VideoCore::TextureCache& GetTextureCache() noexcept {
         return texture_cache;
     }
@@ -632,6 +637,7 @@ private:
     bool display_fsr_created = false;
     bool fsr_pending = false; ///< in a display pass, fsr_source not yet replaced or replaced
     bool fsr_done = false;    ///< fsr_view holds this frame's upscale
+    bool ctr_hudless_pending = false; ///< SacredFire: frame generation's HUD-less copy is due
     VideoCore::ImageId fsr_source{};
     vk::ImageView fsr_view{};
     vk::ImageLayout fsr_layout = vk::ImageLayout::eShaderReadOnlyOptimal;

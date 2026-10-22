@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <atomic>
 #include <deque>
+#include <memory>
 
 #include <condition_variable>
 #include <mutex>
@@ -11,6 +14,7 @@
 #include "core/libraries/videoout/buffer.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/vk_ctr_framegen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -38,6 +42,9 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+    /// SacredFire: frame generation made an interpolated frame to show before this one
+    /// (CtrFrameGen::Generated). Set by the recording thread, read after the frame is submitted.
+    bool generated{false};
 
 };
 
@@ -109,6 +116,15 @@ private:
 
     void SetExpectedGameSize(s32 width, s32 height);
 
+    /// bbport: the frame letterboxed into the acquired swapchain image (left ready to present,
+    /// or for the overlay when `overlay`). `source` is in General layout and stays there.
+    void BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height,
+                         bool overlay, bool generated = false);
+    /// SacredFire: presents `frame`'s interpolated frame if a swapchain image is free at once;
+    /// Present then shows the real frame half a game frame later.
+    bool PresentGenerated(Frame* frame); ///< false: dropped (nothing presented)
+    bool GameWaitsForFrame();
+
 private:
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
@@ -138,6 +154,13 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+    /// SacredFire: FSR 3 frame generation (vk_ctr_framegen) and the pace of real frames.
+    std::unique_ptr<CtrFrameGen> frame_gen;
+    std::chrono::steady_clock::time_point last_real_present{};
+    float real_interval_ms = 16.6f;
+    /// Threads waiting in GetRenderFrame for a free presentation frame: the game is held back
+    /// by presentation, so frame generation drops its frames and stops waiting.
+    std::atomic<u32> render_frame_waiters{0};
 };
 
 } // namespace Vulkan

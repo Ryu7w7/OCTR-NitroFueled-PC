@@ -161,6 +161,11 @@ struct Values {
     int legacy_fsr1 = -1;
     bool legacy_fsr3 = false;
     std::atomic<float> fsr3_sharpness{0.3f}; ///< FSR 3's RCAS, 0 off .. 1
+    /// SacredFire: FSR 3 frame generation (bbport.ini frame_generation): one interpolated frame
+    /// between two game frames, presented first, from the FSR 3/DLSS inputs (vk_ctr_fsr3,
+    /// vk_presenter; docs/sacredfire/15-frame-generation.md). Needs temporal fsr3 or dlss.
+    /// Applies at once. BB_FRAMEGEN=1/0 overrides it.
+    std::atomic<bool> frame_generation{false};
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.

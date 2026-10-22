@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_ctr_framegen.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include <cmath>
 #include "bbport_threads.h"
@@ -1500,8 +1501,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         fsr_source = cb_descs[0].first;
         fsr_done = false;
         ctr_fsr3->OnFrameEnd();
+        ctr_hudless_pending = true;
+    } else if (display_draw && ctr_hudless_pending) {
+        // SacredFire: the second draw of the display pass, CTR's first HUD draw: the display
+        // buffer (the previous draw's target) holds the stretched frame without its HUD.
+        ctr_hudless_pending = false;
+        if (cb_descs[0].first && ctr_fsr3->Enabled() && CtrFrameGen::Wanted()) {
+            ctr_fsr3->CaptureHudless(texture_cache.GetImage(cb_descs[0].first));
+        }
     } else if (!display_draw) {
         fsr_pending = false;
+        ctr_hudless_pending = false;
     }
     if (camera_motion->Enabled() && display_start) {
         scene_started = false;

@@ -122,6 +122,10 @@ for the game or the port.
 - With DLSS: *DLSS quality* (Auto follows the internal resolution; DLAA, Quality, Balanced,
   Performance and Ultra Performance render at NVIDIA's share of the *DLSS output*, 1080p or 4K,
   after a restart) and *DLSS model* (Transformer, recommended, or the lighter CNN).
+- With FSR 3 or DLSS: *Frame generation* (experimental, any GPU): FSR 3 shows an interpolated
+  frame between two game frames, twice the frames on screen with half a frame more lag. For a
+  screen of at least twice the game's frame rate (60 FPS on 120 Hz); races only
+  ([details](docs/sacredfire/15-frame-generation.md)).
 
 **Game language** (launcher: Settings > Console): the languages this build (CUSA13795, the
 Americas) has: English, Latin American Spanish, French and Brazilian Portuguese. Spain's Spanish is
