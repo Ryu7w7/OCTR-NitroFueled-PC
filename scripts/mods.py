@@ -34,10 +34,10 @@ def content_root(folder):
     folder = Path(folder)
     if not folder.is_dir():
         return None
-    for wrapper in ('', 'app0', 'CUSA03173'):
+    for wrapper in ('', 'app0', 'CUSA13795', 'CUSA14876', 'CUSA03173'):
         base = child(folder, wrapper) if wrapper else folder
         dvdroot = child(base, 'dvdroot_ps4')
-        if dvdroot.is_dir():
+        if dvdroot.is_dir() or child(base, 'archives').is_dir():
             return base, ''
     entries = [e for e in folder.iterdir() if not e.name.startswith('.')]
     folders = [e for e in entries if e.is_dir()]
@@ -92,7 +92,7 @@ def mod_files(folder):
             relative = Path(prefix) / source.relative_to(root) if prefix else source.relative_to(root)
             # Readme/metadata stay outside the mounted game. This loader handles assets;
             # executable patches use the existing patch compiler, with address validation.
-            if relative.parts[0].casefold() != 'dvdroot_ps4':
+            if relative.parts[0].casefold() not in ('dvdroot_ps4', 'archives'):
                 if relative.parts[0].casefold() in ('eboot.bin', 'sce_module', 'sce_sys'):
                     raise ValueError(f'Executable/system replacement is unsupported: {source}')
                 continue

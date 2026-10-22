@@ -1,0 +1,7 @@
+Open Nitro-Creator-Handbook.html in a browser. It works offline. Use search to filter chapters or Print / Save as PDF.
+
+Scope: Blender rigging and fitting, native skeletons/animations, character and skin registration, textures/portraits/voices, tracks and collision, Nitro Editor, and conceptual multiplayer asset sync. Launcher implementation and product instructions are intentionally excluded.
+
+SOURCE-INDEX.json identifies creator source files by path/hash; the original source and game/mod assets must be obtained separately. RELEASE-TEST-MATRIX.csv is an uncompleted template, not test evidence.
+
+Edition 1, 19 October 2026. Neon lap/sky fixes are NOT claimed complete.

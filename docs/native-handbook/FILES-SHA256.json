@@ -1,0 +1,37 @@
+[
+  {
+    "file": "images/jade-contact-review.png",
+    "bytes": 971782,
+    "sha256": "c23ffb57461441be851e71b2825fbe3ab464eaa5fdf7a87cfe09f911424339ba"
+  },
+  {
+    "file": "images/smoke-rig-reference.png",
+    "bytes": 822403,
+    "sha256": "9814f5f65fe49de9782b09281ca4c1d43ec42d51f0d026cb73ac6a5f54b1aa84"
+  },
+  {
+    "file": "Nitro-Creator-Handbook.html",
+    "bytes": 77137,
+    "sha256": "0fd89129be9db09ab446fb0d784af765b33cc328ca91f1f7a41bf1ebc5295953"
+  },
+  {
+    "file": "RELEASE-TEST-MATRIX.csv",
+    "bytes": 1212,
+    "sha256": "14d6e07634bdd3bf7b9ecf4de0caf6151087c716803cbdcccb6a9ecc10564e95"
+  },
+  {
+    "file": "Source-index.html",
+    "bytes": 10188,
+    "sha256": "ff458fe5356195bb7ff3788e3d97ff35f7df680420cbc80edc7f8601446b7f9c"
+  },
+  {
+    "file": "SOURCE-INDEX.json",
+    "bytes": 14500,
+    "sha256": "1239645b7d95f42afab0b06fe8266b4946ab3a21b4fd7a835437c77f05e11a1f"
+  },
+  {
+    "file": "START-HERE.txt",
+    "bytes": 683,
+    "sha256": "2fe1df0ebf17a153409e66091671a0a43e1bf3664130253911f7e55fdb2e9c7f"
+  }
+]
