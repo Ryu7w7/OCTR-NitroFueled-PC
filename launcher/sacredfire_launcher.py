@@ -1040,6 +1040,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.sharpness_row)
         self.fps_row = Adw.SwitchRow(title=tr("FPS counter in the corner"), active=self.ini.get("show_fps") == "1")
         screen.add(self.fps_row)
+        self.ping_row = Adw.SwitchRow(
+            title=tr("Ping counter in the corner"),
+            subtitle=tr("In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
+                        "(Insert or L3+R3), Room tab."),
+            active=self.ini.get("show_ping") == "1")
+        screen.add(self.ping_row)
         page.add(screen)
 
         sound = Adw.PreferencesGroup(title=tr("Sound"))
@@ -1319,6 +1325,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         save_settings(s)
         self.ini, self.ini_lines = load_ini()
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
+        self.ini["show_ping"] = "1" if self.ping_row.get_active() else "0"
         self.ini["split_auto"] = "1" if self.split_auto_row.get_active() else "0"
         self.ini["button_prompts"] = combo_value(self.button_prompts_row)
         self.ini["async_pipelines"] = "1" if self.async_row.get_active() else "0"
@@ -1347,6 +1354,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini, self.ini_lines = load_ini()
         self.fill_patches()
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
+        self.ping_row.set_active(self.ini.get("show_ping") == "1")
         self.split_auto_row.set_active(self.ini.get("split_auto") != "0")
         prompts = self.ini.get("button_prompts", "playstation")
         self.button_prompts_row.set_selected(self.button_prompts_row.values.index(prompts)

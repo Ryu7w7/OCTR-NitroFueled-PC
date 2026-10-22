@@ -107,6 +107,8 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
+    /// show_ping: the round trip to the players in the online room, under the FPS counter.
+    std::atomic<bool> show_ping{false};
     /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
     /// friends (the server hides it); no friend notices at all.
     std::atomic<bool> friends_hide_activity{false};

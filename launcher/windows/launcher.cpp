@@ -2985,6 +2985,11 @@ void SettingsTab() {
     GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
              T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
     GameFlag("show_fps", T("Contador de FPS en la esquina", "FPS counter in the corner"), false);
+    GameFlag("show_ping", T("Contador de ping en la esquina", "Ping counter in the corner"), false,
+             T("En una sala online, el ping de cada jugador en ms, debajo del contador de FPS. También en el menú "
+               "del juego (Insert o L3+R3), pestaña Sala.",
+               "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
+               "(Insert or L3+R3), Room tab."));
     {
         std::scoped_lock lock{a.mutex};
         const std::string current = a.launcher.Get("display");
@@ -3945,6 +3950,10 @@ void ModsTab() {
     const char* guide=T("Lee la guía de empaquetado","Read the packaging guide");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
     if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-packaging.html");
+    // The game's page on GameBanana, where the community shares its mods.
+    const char* gamebanana=T("Buscar mods en GameBanana","Find mods on GameBanana");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
+    if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);

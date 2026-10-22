@@ -316,5 +316,7 @@
  "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "Игрок 1 использует выбранный контроллер. Если он отключится, контроллер игрока 2–4 временно станет игроком 1. Игроки 2–4 играют как гости: после закрытия игры для них ничего не сохраняется. Меню игры (Insert / L3+R3) тоже меняет порты.",
  "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "Игроки 2–4 с «Не назначен» получают остальные контроллеры в порядке подключения. Выкл.: они не используются, а взятый вами другой контроллер управляет игроком 1.",
  "Button prompts": "Значки кнопок",
- "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Кнопки, которые игра показывает в меню и подсказках. Xbox: A, B, X, Y, LB, RB, LT, RT и View. Применяется при нажатии «Играть»."
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Кнопки, которые игра показывает в меню и подсказках. Xbox: A, B, X, Y, LB, RB, LT, RT и View. Применяется при нажатии «Играть».",
+ "Ping counter in the corner": "Счётчик пинга в углу",
+ "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "В онлайн-комнате — пинг каждого игрока в мс под счётчиком FPS. Также в меню игры (Insert или L3+R3), вкладка «Комната»."
 }
