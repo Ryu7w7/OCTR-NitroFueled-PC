@@ -319,6 +319,16 @@ is still read. See the [creator and packaging guide](docs/mod-packaging.html) an
 No actual mod payloads are bundled with this feature. Online compatibility is a
 package declaration, not a server approval or whitelist service.
 
+Enabled mods override matching relative paths through the engine's read-only file
+map and sparse archive overlays. The selected source game directory stays unchanged:
+no original game files are copied, linked, repacked or overwritten. Disabling mods
+restores source reads. Only mod payloads, generated metadata and separate user saves/
+shader caches are stored. This path requires the matching updated engine, not only
+new launcher scripts. Multiple versions of a stable mod ID appear once, using the
+newest validated version compatible with the installed engine; older inputs remain
+available for rollback. Different content claiming the same selected version is
+reported as a conflict.
+
 The existing loose-folder CLI loader and `mods.json` remain available for older
 workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The unified
 Mods UI/import flow is Windows-only in this revision; AppImage `run.sh` integration

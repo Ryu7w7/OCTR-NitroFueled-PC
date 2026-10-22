@@ -131,7 +131,7 @@ def sync_xml(root,patchdir):
 def scan(root,patchdir):
     root=Path(root);root.mkdir(parents=True,exist_ok=True);patchdir=Path(patchdir)
     cache=storage(root)/'packages';cache.mkdir(parents=True,exist_ok=True)
-    found={};messages=sync_xml(root,patchdir);duplicates=set()
+    found={};messages=sync_xml(root,patchdir);candidates={}
     for source in sorted(root.iterdir(),key=lambda p:p.name.casefold()):
         if not source.is_dir() and source.suffix.lower() not in ('.zip','.pak'):continue
         try:
@@ -173,17 +173,34 @@ def scan(root,patchdir):
             item=dict(source=source.name,sha256=digest,name=manifest['name'] if manifest else source.stem,
                 version=manifest['version'] if manifest else '1.0.0',author=manifest['author'] if manifest else 'Local asset mod',
                 description=manifest['description'] if manifest else '',kind='package' if manifest else 'assets')
-            if ident in found:duplicates.add(ident)
-            else:found[ident]=item
+            item['content_sha256']=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest() if manifest else digest
+            compat=manifest.get('compatibility') if manifest else None
+            engine=root.parent/'bin/sacredfire.exe';version_file=root.parent/'bin/VERSION'
+            item['compatible']=not compat or not engine.is_file() or not version_file.is_file() or (
+                version_file.read_text().strip() in compat['runtime_versions'] and sha(engine) in compat['runtime_sha256'])
+            candidates.setdefault(ident,[]).append(item)
         except (ValueError,OSError,KeyError,TypeError,zipfile.BadZipFile,RuntimeError,AssertionError,struct.error,IndexError) as error:
             messages.append(source.name+': '+str(error))
-    for ident in duplicates:found.pop(ident,None);messages.append('Duplicate mod ID: '+ident+'; keep one copy')
+    for ident,items in candidates.items():
+        usable=[i for i in items if i['compatible']] or items
+        latest=max(fmt.version(i['version']) for i in usable)
+        top=[i for i in usable if fmt.version(i['version'])==latest]
+        if len({i['content_sha256'] for i in top})>1:
+            messages.append('Conflicting content for '+ident+' version '+top[0]['version']+'; remove one of: '+', '.join(i['source'] for i in top))
+            continue
+        item=top[0]
+        item['version_notice']=''
+        if len(items)>1:
+            item['version_notice']='Using '+item['version']+'. Other copies retained: '+', '.join(i['source']+' ('+i['version']+')' for i in items if i is not item)
+            if any(not i['compatible'] for i in items):item['version_notice']+='; unsupported engine versions skipped.'
+        found[ident]=item
     result={'entries':found,'messages':messages};save_json(storage(root)/'library.json',result)
     xml=ET.Element('Patch');ids=ET.SubElement(xml,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795'
     for ident,item in sorted(found.items()):
         meta=ET.SubElement(xml,'Metadata',Title='Crash Team Racing Nitro-Fueled',Name='Mod: '+ident,
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',
             ModName=item['name'],ModHash=item['sha256'],ModSource=item['source'],ModDescription=item['description'],Note='OCTR mod: assets and any logic patches switch together. Relaunch after changes.')
+        meta.set('ModVersions',item['version_notice'])
         ET.SubElement(meta,'PatchList')
     patchdir.mkdir(parents=True,exist_ok=True);target=patchdir/FILENAME
     payload=ET.tostring(xml,encoding='utf-8',xml_declaration=True)

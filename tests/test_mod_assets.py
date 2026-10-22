@@ -10,7 +10,7 @@ from mod_components import sha_bytes
 def pak(payload=b'synthetic texture'):
     names=struct.pack('<I',4)+b'kind\0ui/example.igz\0'
     b=bytearray(2048);struct.pack_into('<5I',b,0,0x1a414749,13,0,1,2048)
-    struct.pack_into('<Q',b,40,76);struct.pack_into('<I',b,56,0)
+    struct.pack_into('<QI',b,40,76,len(names));struct.pack_into('<I',b,56,0)
     struct.pack_into('<4I',b,60,2048,0,len(payload),0xffffffff)
     b[76:76+len(names)]=names
     return bytes(b)+payload
@@ -22,6 +22,7 @@ class AssetTests(unittest.TestCase):
     scan=fixtures.PackageTests.scan
     enable=fixtures.PackageTests.enable
     prepare=fixtures.PackageTests.prepare
+    read_game=fixtures.PackageTests.read_game
     def raw(self,name='update3.pak',payload=b'modded'):
         p=self.mods/name;p.write_bytes(pak(payload));return p
     def test_pak_is_listed_disabled_by_default(self):
@@ -29,13 +30,14 @@ class AssetTests(unittest.TestCase):
         self.assertEqual(self.prepare(),(self.game,str(self.ini)))
     def test_loose_pak_goes_to_archives_unchanged(self):
         p=self.raw();ident=next(iter(self.scan()['entries']));self.enable(ident)
-        view,_=self.prepare();self.assertEqual((view/'archives/update3.pak').read_bytes(),p.read_bytes())
+        view,_=self.prepare();self.assertEqual(view,self.game)
+        self.assertEqual(self.read_game('archives/update3.pak'),p.read_bytes())
         self.assertFalse((self.game/'archives').exists())
-        self.assertEqual((view/'archives/update3.pak').stat().st_nlink,1)
+        self.assertFalse((self.game/'archives/update3.pak').exists())
     def test_single_pak_zip_requires_no_manifest(self):
         with zipfile.ZipFile(self.mods/'Driver.zip','w') as z:z.writestr('update3.pak',pak())
         ident=next(iter(self.scan()['entries']));self.enable(ident)
-        view,_=self.prepare();self.assertEqual((view/'archives/update3.pak').read_bytes(),pak())
+        view,_=self.prepare();self.assertEqual(self.read_game('archives/update3.pak'),pak())
     def test_wrapped_native_zip(self):
         with zipfile.ZipFile(self.mods/'Driver.zip','w') as z:
             z.writestr('Driver/archives/update3.pak',pak());z.writestr('Driver/README.txt','readme')
@@ -45,11 +47,13 @@ class AssetTests(unittest.TestCase):
         m=self.manifest('hud')|{'requiresCapabilities':['game-files'],'operations':[
             {'kind':'game_file','target':'data.txt','payload':'payload.bin','original_sha256':sha_bytes(b'original'),'patched_sha256':sha_bytes(b'HUD')}]}
         self.package('hud',m,{'payload.bin':b'HUD'});self.enable(*self.scan()['entries'])
-        view,_=self.prepare();self.assertEqual((view/'data.txt').read_bytes(),b'HUD')
-        self.assertEqual((view/'archives/update3.pak').read_bytes(),pak())
+        view,_=self.prepare();self.assertEqual(self.read_game('data.txt'),b'HUD')
+        self.assertEqual(self.read_game('archives/update3.pak'),pak())
     def test_distinct_paks_compose(self):
         self.raw('update3.pak');self.raw('juicedomain_race.pak');self.enable(*self.scan()['entries'])
-        view,_=self.prepare();self.assertEqual(len(list((view/'archives').glob('*.pak'))),2)
+        view,_=self.prepare();self.assertEqual(view,self.game)
+        self.assertEqual(self.read_game('archives/update3.pak'),pak(b'modded'))
+        self.assertEqual(self.read_game('archives/juicedomain_race.pak'),pak(b'modded'))
     def test_same_archive_blocks_rather_than_silently_overwriting(self):
         self.raw()
         with zipfile.ZipFile(self.mods/'Driver.zip','w') as z:z.writestr('update3.pak',pak(b'other'))

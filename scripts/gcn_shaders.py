@@ -29,7 +29,8 @@ ENDPGM = struct.pack('<I', 0xBF810000)
 
 def pak_entries(path):
     """[(name, offset, length, mode)] of an IGA v13 archive."""
-    with open(path, 'rb') as f:
+    from mod_file_paths import resolve
+    with open(resolve(path), 'rb') as f:
         h = f.read(0x38)
         if len(h) < 0x38:
             return []
@@ -109,7 +110,8 @@ def shaders_in(data):
 
 def archives(game):
     folder = Path(game) / 'archives'
-    return sorted(folder.glob('*.pak')) if folder.is_dir() else []
+    from mod_file_paths import archives as redirected_archives
+    return redirected_archives(folder)
 
 
 def stamp(paths):

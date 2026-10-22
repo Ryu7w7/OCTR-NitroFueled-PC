@@ -36,6 +36,7 @@ typedef struct stat HostStat;
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
 #define MAX_MOUNTS 16
+#include "runtime_mod_files.h"
 
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 typedef struct {
@@ -165,6 +166,10 @@ static int translate(const char *guest,char *out,size_t size) {
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
+    if (!result) {
+        int redirected=mod_file_translate(buffer,out,size);
+        if (redirected<0) result=-redirected;
+    }
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;
@@ -223,7 +228,7 @@ static int host_flags(int flags) {
     return r|O_CLOEXEC;
 }
 static void free_listing(Listing *l) { if (l) { free(l->names); free(l->offsets); free(l->types); free(l); } }
-static Listing *list_directory(const char *path) {
+static Listing *list_directory(const char *path,const char *guest) {
     DIR *d=opendir(path);
     if (!d) return NULL;
     Listing *l=calloc(1,sizeof(*l));
@@ -258,6 +263,29 @@ static Listing *list_directory(const char *path) {
         ++l->count; bytes+=n;
     }
     closedir(d);
+    const char *relative=mod_relative(guest);
+    if (l && relative) {
+        pthread_once(&mod_files_once,load_mod_files);
+        size_t prefix=strlen(relative);
+        for (uint32_t i=0;i<mod_file_count;++i) {
+            const char *p=mod_files[i].guest;
+            if (prefix) {
+                if (strncasecmp(p,relative,prefix) || p[prefix]!='/') continue;
+                p+=prefix+1;
+            }
+            const char *slash=strchr(p,'/');size_t n=slash ? (size_t)(slash-p) : strlen(p);
+            int found=0;
+            for (size_t j=0;j<l->count;++j) if (strlen(l->names+l->offsets[j])==n && !strncasecmp(p,l->names+l->offsets[j],n)) {
+                l->types[j]=slash ? 4 : 8;found=1;break;
+            }
+            if (found) continue;
+            l->offsets=realloc(l->offsets,(l->count+1)*sizeof(size_t));
+            l->types=realloc(l->types,l->count+1);l->names=realloc(l->names,bytes+n+1);
+            if (!l->offsets || !l->types || !l->names) { fputs("Out of memory listing mod files\n",stderr);exit(1); }
+            l->offsets[l->count]=bytes;l->types[l->count]=slash ? 4 : 8;
+            memcpy(l->names+bytes,p,n);l->names[bytes+n]=0;bytes+=n+1;++l->count;
+        }
+    }
     return l;
 }
 static void convert_stat(const HostStat *s,GuestStat *g) {
@@ -471,7 +499,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int host=-1;
     if (!host_stat(current,&s) && S_ISDIR(s.st_mode)) {
         if (flags&3) return -EISDIR;
-        if (!(dir=list_directory(current))) return -EACCES;
+        if (!(dir=list_directory(current,guest))) return -EACCES;
     } else if (flags&0x20000) {
         e=errno==ENOENT ? ENOENT : ENOTDIR;
         if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
@@ -513,7 +541,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     }
     struct stat s;
     Listing *dir=NULL;
-    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
+    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path,guest);
 #endif
     pthread_mutex_lock(&lock);
     int fd=-1;

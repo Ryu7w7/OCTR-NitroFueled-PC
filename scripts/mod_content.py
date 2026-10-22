@@ -2,20 +2,26 @@
 SPDX-License-Identifier: GPL-2.0-or-later
 """
 from pathlib import Path
-import hashlib,json,os,shutil,struct,subprocess,sys,tempfile,time,uuid
+import json,os,shutil,tempfile,time
 import xml.etree.ElementTree as ET
 import mods
 import mod_format as fmt
 from mod_library import folder as package_folder,entries as zip_entries
-from mod_components import sha,sha_bytes,under,regular_tree,snapshot,copy_tree,read_ini,save_json,apply_file,patch_archive,apply_shader
+from mod_components import sha,sha_bytes,under,regular_tree,snapshot,read_ini,save_json
 
 def metadata(folder):
     path=Path(folder)/'mod.json'
     return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
 def extended(folder):return 'schemaVersion' in metadata(folder)
 
+def overlay_files(cache):
+    files=[cache/'archive-plan.json']
+    for name in ('files','archives','patches'):
+        files.extend(regular_tree(cache/name))
+    return {p.relative_to(cache).as_posix():sha(p) for p in files}
+
 def publish_profile(staging,cache,log):
-    """Allow transient Windows locks to clear after writing a private game view."""
+    """Publish generated mod metadata, allowing transient Windows locks to clear."""
     for attempt in range(8):
         try:
             os.replace(staging,cache)
@@ -137,27 +143,35 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
         'patch_compiler':sha(root/'scripts/patches.py'),
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]
-    cache=state/'extensions/profiles'/key;ready=cache/'ready.json'
+    # New namespace: old full-game profiles must never be reused by this loader.
+    cache=state/'extensions/overlays'/key;ready=cache/'ready.json'
     if ready.exists():
         r=json.loads(ready.read_text())
-        if r['identity']!=identity or r['game_files']!=snapshot(cache/'game') or r['patches']!={p.name:sha(p) for p in (cache/'patches').glob('*.xml')}:
+        if r['identity']!=identity or r['files']!=overlay_files(cache):
             raise ValueError('Prepared files changed; preserved for inspection: '+str(cache))
     else:
         cache.parent.mkdir(parents=True,exist_ok=True)
         staging=Path(tempfile.mkdtemp(prefix='building-',dir=cache.parent))
         try:
-            required=sum(v[0] for v in source_state.values())+sum(p.stat().st_size for p,_ in whole)
-            if shutil.disk_usage(staging).free<required+1024**3:raise ValueError('Insufficient space for private modded game')
-            log('Preparing private game view: '+', '.join(names));copy_tree(game,staging/'game')
-            for source,target in whole:
-                dest=under(staging/'game',target);dest.parent.mkdir(parents=True,exist_ok=True)
-                shutil.copy2(source,dest)
-            groups={}
+            log('Preparing mod overlays (no game copies): '+', '.join(names))
+            (staging/'files').mkdir()
             for op,folder in operations:
-                if op['kind']=='archive_asset':groups.setdefault(op['archive'],[]).append((op,folder))
-                elif op['kind']=='game_file':apply_file(under(staging/'game',op['target']),op,folder)
-            for archive,items in groups.items():
-                log('Patching private archive: '+archive);patch_archive(under(staging/'game','archives/'+archive),items)
+                if op['kind']=='game_file':
+                    original=under(game,op['target'])
+                    if op.get('original_sha256') is None:
+                        if original.exists():raise ValueError('Expected a new file: '+op['target'])
+                        data=under(folder,op['payload']).read_bytes()
+                        if sha_bytes(data)!=op['patched_sha256']:raise ValueError('Replacement checksum mismatch')
+                    else:
+                        if sha(original)!=op['original_sha256']:raise ValueError('Original content checksum mismatch')
+                        data=under(folder,op['payload']).read_bytes()
+                        if sha_bytes(data)!=op['patched_sha256']:raise ValueError('Replacement checksum mismatch')
+                    # Only the mod's replacement content, never an unchanged game file.
+                    dest=under(staging/'files',op['target']);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+            records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind']=='archive_asset']
+            save_json(staging/'archive-plan.json',records)
+            from mod_overlays import compose
+            compose(game,staging/'archives',[(r['operation'],r['folder']) for r in records],{})
             (staging/'patches').mkdir()
             for p in (root/'patches').glob('*.xml'):shutil.copy2(p,staging/'patches'/p.name)
             if (staging/'patches/OCTR-Mod-Content.xml').exists():raise ValueError('Reserved generated patch filename is already used')
@@ -167,12 +181,17 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     meta.set('Name',name+': '+meta.get('Name',''));meta.set('isEnabled','true');xml.append(meta)
             ET.ElementTree(xml).write(staging/'patches/OCTR-Mod-Content.xml',encoding='utf-8',xml_declaration=True)
             if source_state!=snapshot(game):raise ValueError('Original game changed while preparing the view')
-            save_json(staging/'ready.json',{'identity':identity,'game_files':snapshot(staging/'game'),
-                'patches':{p.name:sha(p) for p in (staging/'patches').glob('*.xml')}})
+            save_json(staging/'ready.json',{'identity':identity,
+                'files':overlay_files(staging)})
             publish_profile(staging,cache,log)
         except BaseException:
             log('Incomplete preparation preserved at '+str(staging));raise
-    return {'profile':cache,'settings':effective,'environment':overrides,'operations':operations,
+    # Full PAKs/loose files are read directly from mod storage by the engine.
+    replacements=[(Path(target),source) for source,target in whole]
+    replacements.extend((p.relative_to(cache/'files'),p) for p in regular_tree(cache/'files'))
+    from mod_overlays import file_map
+    file_map(game,cache/'file-map.bin',cache/'directories',replacements)
+    return {'profile':cache,'game':game,'archive_plan':cache/'archive-plan.json','file_map':cache/'file-map.bin','file_dirs':cache/'directories','settings':effective,'environment':overrides,'operations':operations,
             'engine':runtime,'packages':names,'variants':chosen_variants,
             'selection_settings':base,'automatic_settings':automatic_settings,
             'has_shaders':any(op['kind'].startswith('shader_') for op,_ in operations)}

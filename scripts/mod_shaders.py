@@ -111,11 +111,11 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     env={k:v for k,v in environment.items() if not k.startswith('BB_')}
     for key in ('BB_LANGUAGE','BB_ONLINE_NAME','BB_USER_NAME'):
         if key in environment:env[key]=environment[key]
-    env.update(BB_MOD_PACKAGES_SKIP='1',BB_GAME_DIR=str(baseline['profile']/'game'),BB_USER_DIR=str(setup_user),BB_DATA_DIR=str(data),
+    env.update(BB_MOD_PACKAGES_SKIP='1',BB_GAME_DIR=str(baseline['game']),BB_USER_DIR=str(setup_user),BB_DATA_DIR=str(data),
         BB_CONFIG=str(ini),BB_MODS_ENABLED='0',BB_PATCHES_DIR=str(baseline['profile']/'patches'),
         BB_PATCHES_CONFIG=str(setup/'patches.json'),BB_ONLINE='0',BB_NEO='0')
     save_json(setup/'patches.json',{'enabled':[],'disabled':[]})
-    save_json(setup/'setup.json',{'requested_packages':plan['packages'],'game':str(baseline['profile']/'game'),'mods':[]})
+    save_json(setup/'setup.json',{'requested_packages':plan['packages'],'game':str(baseline['game']),'mods':[]})
     status('shader_setup','First-time shader setup: reach the main menu and accept the game agreement if asked. The game will restart with your mods when the required shaders are ready. Some mods may need their game content visited first.')
     python=str(root/'python/python.exe') if (root/'python/python.exe').exists() else os.sys.executable
     try:

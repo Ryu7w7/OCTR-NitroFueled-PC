@@ -280,7 +280,8 @@ def prepare(game, out, config, env, base):
     import json
     art_path = ART / f'{style}.png'
     folder = Path(out) / 'button_prompts'
-    archives = [Path(game) / 'archives' / name for name in ARCHIVES if (Path(game) / 'archives' / name).is_file()]
+    from mod_file_paths import resolve
+    archives = [resolve(Path(game) / 'archives' / name) for name in ARCHIVES if resolve(Path(game) / 'archives' / name).is_file()]
     stamp = {'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}

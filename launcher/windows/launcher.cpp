@@ -660,7 +660,7 @@ struct Backup {
 };
 
 struct PatchInfo {
-    std::string mod_name, mod_hash, mod_source, mod_description;
+    std::string mod_name, mod_hash, mod_source, mod_description, mod_versions;
     std::string key, name, author, note, version;
     std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
@@ -2380,6 +2380,7 @@ std::vector<PatchInfo> LoadPatches() {
             p.mod_hash = get("ModHash");
             p.mod_source = get("ModSource");
             p.mod_description = get("ModDescription");
+            p.mod_versions = get("ModVersions");
             for (const auto& [key, ini] : kIniPatches)
                 if (p.key == key) p.ini_key = ini;
             list.push_back(std::move(p));
@@ -3796,6 +3797,7 @@ bool ModCard(const PatchInfo& p) {
             ? T("El creador no ha añadido una descripción.","The creator has not provided a description.")
             : p.mod_description.c_str());
         ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"mods/%s",p.mod_source.c_str());
+        if (!p.mod_versions.empty()) ImGui::TextWrapped("%s",p.mod_versions.c_str());
     }
     if (details && !package) {
         ImGui::Spacing();
@@ -3896,9 +3898,26 @@ void UpdateModCopies(bool remove) {
         if (g_mod_copies.busy) return;
         g_mod_copies.busy = true;
     }
-    std::thread([remove, dir = ModCopiesDir()] {
+    std::thread([remove, dir = ModCopiesDir(), game = g_app.game_dir] {
         std::error_code ec;
-        if (remove) fs::remove_all(dir, ec);
+        if (remove) {
+            // Never delete a selected game or traverse a redirected legacy cache.
+            const auto real_dir=fs::weakly_canonical(dir,ec);
+            const auto real_game=fs::weakly_canonical(game,ec);
+            const auto cache_text=fs::path(real_dir).make_preferred().native();
+            const auto game_text=fs::path(real_game).make_preferred().native();
+            const bool game_inside=game_text.size()>=cache_text.size() &&
+                !_wcsnicmp(game_text.c_str(),cache_text.c_str(),cache_text.size()) &&
+                (game_text.size()==cache_text.size() || game_text[cache_text.size()]==L'\\');
+            bool safe=!ec && !game_inside;
+            DWORD attributes=GetFileAttributesW(dir.c_str());
+            if (attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT)) safe=false;
+            for (fs::recursive_directory_iterator it(dir,ec),end;safe && !ec && it!=end;it.increment(ec)) {
+                attributes=GetFileAttributesW(it->path().c_str());
+                if (attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT)) safe=false;
+            }
+            if (safe && !ec) fs::remove_all(dir,ec);
+        }
         std::uint64_t bytes = 0;
         int count = 0;
         for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
@@ -3923,12 +3942,10 @@ void UpdateModCopies(bool remove) {
 void ModConsequences() {
     App& a = g_app;
     ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
-    ImGui::TextWrapped("%s", T("Los mods de juego (los .pak/.zip de esta lista) no se aplican sobre tu juego: el launcher "
-                               "prepara una copia completa del juego (unos 22 GB) para cada combinación de mods que "
-                               "actives, y la primera vez tarda varios minutos. Las copias se guardan para la próxima vez.",
-                               "Game mods (the .pak/.zip in this list) are not applied over your game: the launcher prepares "
-                               "a whole copy of the game (about 22 GB) for each combination of mods you turn on, and the "
-                               "first time takes several minutes. The copies are kept for next time."));
+    ImGui::TextWrapped("%s", T("Los mods activos se leen mediante redirecciones y pequeños parches. Los archivos originales "
+                               "no se modifican ni se copian. Al desactivar un mod se vuelve a leer el juego original.",
+                               "Enabled mods use file redirection and small overlays. Original game files are never modified "
+                               "or copied. Disabling a mod restores reads from the original game."));
     ImGui::TextWrapped("%s", T("Las partidas con mods se guardan aparte: tu progreso normal no cambia, y lo que avances con "
                                "mods solo se ve jugando con mods.",
                                "Modded play is saved separately: your normal progress does not change, and what you "
@@ -3948,7 +3965,7 @@ void ModConsequences() {
     } else {
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(kGrey, T("Copias del juego preparadas para mods: %d (%.1f GB)",
-                                    "Game copies prepared for mods: %d (%.1f GB)"),
+                                    "Legacy game copies from older loaders: %d (%.1f GB)"),
                            copies.count, double(copies.bytes) / (1024.0 * 1024.0 * 1024.0));
         ImGui::SameLine();
         ImGui::BeginDisabled(copies.busy || copies.count == 0 || a.game_running);
@@ -3957,10 +3974,10 @@ void ModConsequences() {
     }
     if (ImGui::BeginPopupModal("delete_mod_copies", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-        ImGui::TextUnformatted(T("¿Borrar las copias del juego preparadas para mods? Se vuelven a preparar la próxima vez que "
-                                 "juegues con esos mods. Las partidas no se tocan.",
-                                 "Delete the game copies prepared for mods? They are prepared again the next time you play "
-                                 "with those mods. Saves are not touched."));
+        ImGui::TextUnformatted(T("¿Borrar las copias del juego del cargador anterior? El nuevo cargador no las volverá a crear. "
+                                 "Los archivos originales, mods y partidas no se tocan.",
+                                 "Delete the game copies left by the old mod loader? The new loader will not recreate them. "
+                                 "Original game files, mods and saves are not touched."));
         ImGui::PopTextWrapPos();
         if (ImGui::Button(T("Borrar", "Delete"))) {
             UpdateModCopies(true);
