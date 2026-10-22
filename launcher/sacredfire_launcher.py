@@ -1353,7 +1353,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.volume_scale.set_value(max(0, min(200, int(self.ini.get("volume", VOLUME_DEFAULT)))))
         except ValueError:
             pass
-        self.show_keyboard_player()
+        self.show_port_players()
         limit = self.ini.get("fps_limit", "60")
         values = self.fps_limit_row.values
         self.fps_limit_row.set_selected(values.index(limit) if limit in values else values.index("60"))
@@ -1385,25 +1385,28 @@ class LauncherWindow(Adw.ApplicationWindow):
     def build_controls_page(self):
         page = Adw.PreferencesPage()
         controls = Adw.PreferencesGroup(title=tr("Controller"),
-                                        description=tr("Any connected gamepad plus the keyboard; the one used last takes over. "
-                                                       "Split-screen ports are assigned in the in-game menu (Insert / L3+R3)."))
+                                        description=tr("Player 1 uses the selected controller; other unassigned controllers can take over. "
+                                                       "If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. "
+                                                       "Each player's save is separate. The in-game menu (Insert / L3+R3) can also change ports."))
         pads = connected_gamepads()
-        choices = [(tr("First connected"), "")] + [(name, guid) for guid, name in pads]
-        if self.settings["gamepad"] and self.settings["gamepad"] not in [g for g, _ in pads]:
-            choices.append((tr("{} (not connected)").format(self.settings["gamepad_name"] or self.settings["gamepad"]), self.settings["gamepad"]))
-        self.gamepad_row = combo_row(tr("Controller"), None, choices, self.settings["gamepad"])
+        primary = self.ini.get("port.1") or self.settings["gamepad"]
+        choices = [(tr("First available"), "")] + [(name, guid) for guid, name in pads]
+        if primary and primary not in [guid for guid, _name in pads]:
+            choices.append((tr("{} (not connected)").format(self.settings["gamepad_name"] or primary), primary))
+        self.gamepad_row = combo_row(tr("Player 1 controller"), None, choices, primary)
+        self.gamepad_row.connect("notify::selected", lambda *_: self.on_primary_controller())
         controls.add(self.gamepad_row)
-        # bbport.ini port.N=keyboard (N 2..4): that split-screen player plays on the keyboard and
-        # player 1 on the controller alone (src/runtime_pad.c). Player 1: the keyboard drives it too.
-        self.keyboard_player_row = combo_row(
-            tr("Keyboard"),
-            tr("For two players in split screen, one on the keyboard and one on a controller, choose Player 2: the "
-               "controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on the "
-               "keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."),
-            [(tr("Player 1 (with the controller)"), "1")] + [(tr("Player {}").format(n), str(n)) for n in (2, 3, 4)],
-            self.keyboard_player())
-        self.keyboard_player_row.connect("notify::selected", lambda *_: self.on_keyboard_player())
-        controls.add(self.keyboard_player_row)
+        self.port_rows = {}
+        for n in (2, 3, 4):
+            current = self.ini.get(f"port.{n}", "")
+            choices = [(tr("Not assigned"), ""), (tr("Keyboard"), "keyboard")]
+            choices += [(name, guid) for guid, name in pads]
+            if current and current not in [value for _label, value in choices]:
+                choices.append((tr("{} (not connected)").format(current), current))
+            row = combo_row(tr("Player {}").format(n), None, choices, current)
+            row.connect("notify::selected", lambda _row, _param, player=n: self.on_port_player(player))
+            self.port_rows[n] = row
+            controls.add(row)
         page.add(controls)
 
         # Bindings: "Change" waits for a key or button in a small window (bb-gpu-capabilities
@@ -1447,26 +1450,38 @@ class LauncherWindow(Adw.ApplicationWindow):
             page.add(group)
         return page
 
-    def keyboard_player(self):
-        """The split-screen player the keyboard plays ("1": with player 1's controller)."""
-        for n in (2, 3, 4):
-            if self.ini.get(f"port.{n}", "").strip().lower() == "keyboard":
-                return str(n)
-        return "1"
-
-    def on_keyboard_player(self):
-        chosen = combo_value(self.keyboard_player_row)
-        if chosen == self.keyboard_player():
+    def on_primary_controller(self):
+        chosen = combo_value(self.gamepad_row)
+        if chosen == (self.ini.get("port.1") or self.settings["gamepad"]):
             return
-        changes = {f"port.{n}": None for n in (2, 3, 4) if self.ini.get(f"port.{n}", "").strip().lower() == "keyboard"}
-        if chosen != "1":
-            changes[f"port.{chosen}"] = "keyboard"
-        self.set_ini(changes)
+        self.settings["gamepad"] = chosen
+        self.settings["gamepad_name"] = self.gamepad_row.get_selected_item().get_string() if chosen else ""
+        save_settings(self.settings)
+        self.set_ini({"port.1": chosen or None})
 
-    def show_keyboard_player(self):
-        current = self.keyboard_player()
-        if combo_value(self.keyboard_player_row) != current:
-            self.keyboard_player_row.set_selected(self.keyboard_player_row.values.index(current))
+    def on_port_player(self, player):
+        chosen = combo_value(self.port_rows[player])
+        if chosen == self.ini.get(f"port.{player}", ""):
+            return
+        changes = {f"port.{player}": chosen or None}
+        if chosen == "keyboard":
+            changes.update({f"port.{n}": None for n in (2, 3, 4) if n != player and
+                            self.ini.get(f"port.{n}", "").lower() == "keyboard"})
+        self.set_ini(changes)
+        self.show_port_players()
+
+    def show_port_players(self):
+        primary = self.ini.get("port.1") or self.settings["gamepad"]
+        if primary not in self.gamepad_row.values:
+            self.gamepad_row.get_model().append(tr("{} (not connected)").format(primary))
+            self.gamepad_row.values.append(primary)
+        self.gamepad_row.set_selected(self.gamepad_row.values.index(primary))
+        for n, row in self.port_rows.items():
+            current = self.ini.get(f"port.{n}", "")
+            if current not in row.values:
+                row.get_model().append(tr("{} (not connected)").format(current))
+                row.values.append(current)
+            row.set_selected(row.values.index(current))
 
     def binding_text(self, kind, value):
         names = [n.strip() for n in value.split(",") if n.strip()]
