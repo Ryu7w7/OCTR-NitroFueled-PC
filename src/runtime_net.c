@@ -1,6 +1,7 @@
 #include "runtime_net.h"
 #include "runtime_net_overrides.h"
 #include "runtime_net_tunnel.h"
+#include "runtime_net_ping.h"
 #include "runtime_friends.h"
 #include "runtime.h"
 #include <stdio.h>
@@ -374,6 +375,61 @@ static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
     }
 }
 
+/* RyuNET ping (runtime_net_ping.h): the round trip to the players in the room, on the game
+ * socket of a port with the tunnel. Off with BB_ONLINE_PING=0. */
+static int ping_enabled(void) {
+    static int state = -1;
+    if (state < 0) {
+        const char *v = getenv("BB_ONLINE_PING");
+        state = !(v && strcmp(v, "0") == 0) && tunnel_server(NULL);
+        if (state) ping_set_name(getenv("BB_ONLINE_NAME"));
+    }
+    return state;
+}
+
+int runtime_net_ping_view(PingPeer *out, int max) {
+    return ping_view(now_ms(), out, max);
+}
+
+static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to);
+
+/* A ping packet the way the game's packets to that peer go: direct, and through the tunnel
+ * while the direct path is not proven. */
+static void ping_send(VSocket *vs, const uint8_t *packet, size_t n, const struct sockaddr_in *to) {
+    sendto(vs->s, (const char *)packet, (int)n, 0, (const struct sockaddr *)to, sizeof(*to));
+    tunnel_copy(vs, packet, n, to);
+}
+
+/* After the game's send to a peer: the pings that are due. */
+static void ping_after_send(VSocket *vs, const struct sockaddr_in *to) {
+    struct sockaddr_in server;
+    if (!ping_enabled() || !tunnel_server(&server)) return;
+    if (!tun_candidate(to->sin_addr.s_addr, server.sin_addr.s_addr) ||
+        tun_relay_index(to->sin_addr.s_addr, ntohs(to->sin_port)) >= 0)
+        return;
+    const uint64_t now = now_ms();
+    ping_on_game_send(to->sin_addr.s_addr, ntohs(to->sin_port), now);
+    uint8_t packet[PING_PACKET_MAX];
+    uint32_t ip;
+    uint16_t port;
+    for (size_t n; (n = ping_next(now, packet, sizeof(packet), &ip, &port));) {
+        const struct sockaddr_in peer = addr_of(ip, port);
+        ping_send(vs, packet, n, &peer);
+    }
+}
+
+/* A datagram from a peer (unwrapped): 1 when it was a ping packet, answered here. */
+static int ping_take(VSocket *vs, const uint8_t *data, int len, const struct sockaddr_in *from) {
+    if (len < PING_MAGIC_LEN || memcmp(data, PING_MAGIC, PING_MAGIC_LEN) != 0 || !ping_enabled()) return 0;
+    uint8_t reply[PING_PACKET_MAX];
+    size_t reply_len = 0;
+    if (!ping_on_packet(data, (size_t)len, from->sin_addr.s_addr, ntohs(from->sin_port), now_ms(), reply,
+                        sizeof(reply), &reply_len))
+        return 0;
+    if (reply_len) ping_send(vs, reply, reply_len, from);
+    return 1;
+}
+
 /* After the game's own send to a peer: a wrapped copy through the nearest relay and/or the
  * server while the direct path is not proven both ways. */
 static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to) {
@@ -386,6 +442,7 @@ static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct s
     int relay = -1;
     const int route = tun_on_send(to->sin_addr.s_addr, ntohs(to->sin_port), now_ms(), &flags, &relay);
     if (!route) return;
+    if (ping_enabled()) flags |= TUN_FLAG_PING;
     uint8_t wrapped[2048 + TUN_HEADER_LEN];
     size_t n = tun_wrap(wrapped, sizeof(wrapped), flags, to->sin_addr.s_addr, ntohs(to->sin_port), msg, len);
     if (!n) return;
@@ -599,7 +656,10 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
         runtime_net_trace("sceNetSendto(fd=%d) failed: win err %d", s, err);
         return -1;
     }
-    if (to && vs->tunnel) tunnel_copy(vs, msg, len, &sin);
+    if (to && vs->tunnel) {
+        tunnel_copy(vs, msg, len, &sin);
+        ping_after_send(vs, &sin);
+    }
     return ret;
 }
 
@@ -693,6 +753,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             /* The server's own NAT replies (0x15, 0x1F, 0x0B...) go to the game unchanged. */
             if (tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
                 tun_on_tunnelled(ip, port, tflags, 0, now_ms());
+                if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
                 sin.sin_addr.s_addr = ip;
                 sin.sin_port = htons(port);
                 payload = wrapped + TUN_HEADER_LEN;
@@ -706,6 +767,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
                 goto next_datagram;
             }
             tun_on_tunnelled(ip, port, tflags, 1, now_ms());
+            if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
             sin.sin_addr.s_addr = ip;
             sin.sin_port = htons(port);
             payload = wrapped + TUN_HEADER_LEN;
@@ -722,6 +784,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             if (direct_off && tun_candidate(sin.sin_addr.s_addr, server.sin_addr.s_addr)) goto next_datagram;
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
         }
+        if (ping_take(vs, payload, ret, &sin)) goto next_datagram;
         if ((win_flags & MSG_PEEK) && ret <= (int)sizeof(peeked.data)) {
             peeked.fd = s;
             peeked.len = ret;

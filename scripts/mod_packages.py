@@ -24,6 +24,30 @@ def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_ve
     print('OCTR mods:',len(claims),'verified non-overlapping executable writes',flush=True)
     return len(claims)
 
+KEEP_SESSIONS = 3
+
+
+def prune_sessions(sessions, keep=KEEP_SESSIONS):
+    """Deletes old mod sessions (each one a copy of user/: saves and shader cache), keeping the
+    `keep` latest. Only sessions that ended normally go: their saves were synced to the mod
+    profile (finish). One that crashed or is unfinished stays, as it may hold the only copy of
+    its saves. Returns the deleted folders."""
+    sessions = Path(sessions)
+    if not sessions.is_dir():
+        return []
+    found = sorted((p for p in sessions.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
+    deleted = []
+    for session in found[keep:]:
+        try:
+            ended = json.loads((session / 'result.json').read_text()).get('exit_code') == 0
+        except (OSError, ValueError, AttributeError):
+            ended = False
+        if ended:
+            shutil.rmtree(session, ignore_errors=True)
+            deleted.append(session)
+    return deleted
+
+
 def finish(code):
     if ACTIVE is None:return
     session,state=ACTIVE
@@ -55,6 +79,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
         plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
+        prune_sessions(state/'sessions')
         session=state/'sessions'/uuid.uuid4().hex;session.mkdir(parents=True)
         user=session/'user';user.mkdir()
         canonical=state/'user';original_user=Path(environment.get('BB_USER_DIR',Path(data)/'user'))

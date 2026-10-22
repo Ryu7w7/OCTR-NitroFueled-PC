@@ -186,7 +186,7 @@
  "Portuguese (Brazil)": "Portugués (Brasil)",
  "Presentation": "Presentación",
  "Press a gamepad button… (Escape cancels)": "Pulsa un botón del mando… (Escape cancela)",
- "Press a key… (Escape cancels)": "Pulsa una tecla… (Escape cancela)",
+ "Press a key or a mouse button… (Escape cancels)": "Pulsa una tecla o un botón del ratón… (Escape cancela)",
  "Primary": "Principal",
  "R1 / RB (hop / drift)": "R1 / RB (saltar / derrapar)",
  "R2 / RT (look back)": "R2 / RT (mirar atrás)",
@@ -310,5 +310,15 @@
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.",
  "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)",
- "Open page": "Abrir página"
+ "Open page": "Abrir página",
+ "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "La hora de este PC va {} min desfasada: el online la corrige, pero activa la fecha y hora automáticas en la configuración del sistema.",
+ "This nickname is yours (recovered from another installation on this PC).": "Este apodo es tuyo (recuperado de otra instalación de este PC).",
+ "Split screen: assign controllers automatically": "Pantalla dividida: asignar los mandos automáticamente",
+ "First available": "El primero disponible",
+ "Player 1 controller": "Mando del jugador 1",
+ "Not assigned": "Sin asignar",
+ "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "El jugador 1 usa el mando elegido. Si se desconecta, un mando asignado a los jugadores 2–4 pasa a ser el jugador 1 mientras tanto. Los jugadores 2–4 juegan como invitados: no se les guarda nada al cerrar el juego. El menú del juego (Insert / L3+R3) también cambia los puertos.",
+ "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "Los jugadores 2–4 que estén en Sin asignar reciben los demás mandos en el orden en que se conectaron. Desactivado, no se usan, y otro mando que cojas pasa a controlar al jugador 1.",
+ "Button prompts": "Iconos de botones",
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Los botones que muestra el juego en menús y avisos. Xbox: A, B, X, Y, LB, RB, LT, RT y View. Se aplica al pulsar Jugar."
 }

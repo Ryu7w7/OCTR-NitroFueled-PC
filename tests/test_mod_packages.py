@@ -161,6 +161,23 @@ class PackageTests(unittest.TestCase):
         p=self.package()
         with zipfile.ZipFile(p,'a') as z:z.writestr('../escape.txt',b'bad')
         self.assertFalse(self.scan()['entries']);self.assertFalse((self.port/'escape.txt').exists())
+    def test_old_finished_sessions_are_pruned(self):
+        sessions=self.root/'mod-state/sessions'
+        results={'a':0,'b':0,'c':0,'d':0,'e':139,'f':None}  # oldest first; e crashed, f unfinished
+        for age,(name,code) in enumerate(results.items()):
+            path=sessions/name;(path/'user/savedata').mkdir(parents=True)
+            if code is not None:save_json(path/'result.json',{'exit_code':code})
+            os.utime(path,(1000+age,1000+age))
+        os.utime(sessions/'a',(1,1))
+        deleted=adapter.prune_sessions(sessions,keep=3)
+        # The three newest (d, e, f) stay; of the older a-c only finished ones go.
+        self.assertEqual(sorted(p.name for p in deleted),['a','b','c'])
+        self.assertEqual(sorted(p.name for p in sessions.iterdir()),['d','e','f'])
+        # A crashed session past the latest three is kept: it may hold the only copy of its saves.
+        for name in ('g','h','i'):
+            (sessions/name).mkdir();save_json(sessions/name/'result.json',{'exit_code':0})
+        self.assertEqual(adapter.prune_sessions(sessions,keep=3),[sessions/'d'])
+        self.assertTrue((sessions/'e').exists() and (sessions/'f').exists())
     def test_offline_package_cannot_start_online(self):
         self.package();self.enable('sample');self.ini.write_text(self.ini.read_text().replace('online=0','online=1'))
         with self.assertRaisesRegex(ValueError,'offline-only'):self.prepare()

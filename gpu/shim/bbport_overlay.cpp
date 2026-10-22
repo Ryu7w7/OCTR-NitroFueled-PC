@@ -22,6 +22,7 @@
 #include <miniz.h>
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
+#include "../../src/runtime_net_ping.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -495,7 +496,12 @@ void CommunityDiscordLine(const char* why) {
     if (ImGui::SmallButton(BbSettings::MenuText("Copy link", "Копировать"))) SDL_SetClipboardText(kCommunityDiscord);
 }
 
-// Friends tab > Report a player: to the server's administrators.
+// The Report tab's player (filled in by a search result's Report button in the Friends tab, which
+// also brings that tab up).
+char g_report_who[RF_NAME] = "";
+bool g_show_report_tab = false;
+
+// Report tab: a player, to the server's administrators.
 void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
     static int reason = 0;
     static char comment[RF_REPORT_COMMENT] = "";
@@ -545,11 +551,57 @@ void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
                                               "Ошибки, вопросы или обжалование бана: наш Discord"));
 }
 
+/// The players in the room the game talks to, with their round trip (src/runtime_net_ping.h):
+/// nothing outside a room.
+void RoomPingSection() {
+    PingPeer peers[PING_MAX_PEERS];
+    const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
+    if (count <= 0) return;
+    MenuSection(BbSettings::MenuText("Players in the room", "Игроки в комнате"));
+    int older = 0;
+    for (int i = 0; i < count; ++i) {
+        const PingPeer& p = peers[i];
+        if (p.ms == PING_OLDER_PORT) {
+            ++older;
+            continue;
+        }
+        const char* name = p.name[0] ? p.name : "...";
+        if (p.ms == PING_NO_ANSWER) {
+            ImGui::TextColored(kMenuGrey, "%s  -", name);
+            continue;
+        }
+        const ImVec4 color = p.ms < 80 ? kFriendGreen : p.ms < 150 ? kMenuYellow : ImVec4{1.0f, 0.42f, 0.38f, 1.0f};
+        ImGui::Text("%s", name);
+        ImGui::SameLine();
+        ImGui::TextColored(color, "%d ms", p.ms);
+    }
+    if (older) {
+        ImGui::TextColored(kMenuGrey, BbSettings::MenuText("+%d with an older version (no ping)",
+                                                           "+%d со старой версией (без пинга)"),
+                           older);
+    }
+}
+
+void ReportTab() {
+    static RfView view;
+    static unsigned seen = ~0u;
+    if (const unsigned serial = runtime_friends_serial(); serial != seen) {
+        runtime_friends_view(&view);
+        seen = view.serial;
+    }
+    if (view.state == RF_OFF) {
+        ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                     "Reporting a player needs online play on and a nickname of your own (launcher > Online).",
+                                     "Для жалобы нужен онлайн и свой ник (лаунчер > Онлайн)."));
+        return;
+    }
+    ReportSection(view, g_report_who);
+}
+
 void FriendsTab() {
     static RfView view;
     static unsigned seen = ~0u;
     static char query[RF_NAME] = "";
-    static char report_who[RF_NAME] = "";
     static std::string last_action;
     if (const unsigned serial = runtime_friends_serial(); serial != seen) {
         runtime_friends_view(&view);
@@ -567,6 +619,7 @@ void FriendsTab() {
                                      "Для друзей нужен онлайн и свой ник (лаунчер > Онлайн)."));
         return;
     }
+    RoomPingSection();
     if (view.state == RF_WAITING) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("Connecting to the server...", "Подключение к серверу..."));
         return;
@@ -711,7 +764,8 @@ void FriendsTab() {
         }
         ImGui::SameLine();
         if (ImGui::SmallButton(BbSettings::MenuText("Report", "Пожаловаться"))) {
-            std::snprintf(report_who, sizeof report_who, "%s", p.name);
+            std::snprintf(g_report_who, sizeof g_report_who, "%s", p.name);
+            g_show_report_tab = true;
         }
         ImGui::PopID();
     }
@@ -727,7 +781,6 @@ void FriendsTab() {
             ImGui::PopID();
         }
     }
-    ReportSection(view, report_who);
 }
 
 void Menu() {
@@ -1110,6 +1163,14 @@ void Menu() {
         FriendsTab();
         ImGui::EndTabItem();
     }
+    {
+        const ImGuiTabItemFlags bring_up = g_show_report_tab ? ImGuiTabItemFlags_SetSelected : 0;
+        g_show_report_tab = false;
+        if (ImGui::BeginTabItem(BbSettings::MenuText("Report", "Пожаловаться"), nullptr, bring_up)) {
+            ReportTab();
+            ImGui::EndTabItem();
+        }
+    }
 
     const bool picture_tab = ImGui::BeginTabItem(BbSettings::MenuText("Picture", "Изображение"));
     if (picture_tab) {
@@ -1258,6 +1319,17 @@ void Menu() {
     if (ImGui::BeginTabItem(BbSettings::MenuText("Controllers", "Контроллеры"))) {
     MenuSection(BbSettings::MenuText("Controllers (split screen)", "Контроллеры (разделённый экран)"));
     {
+        bool split_auto = s.split_auto;
+        if (ImGui::Checkbox(BbSettings::MenuText("Assign controllers automatically (each one connected is the next player)",
+                                                 "Назначать контроллеры автоматически (каждый подключённый — следующий игрок)"),
+                            &split_auto)) {
+            s.split_auto = split_auto;
+            BbSettings::Save();
+        }
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Players 2-4 left on (none) get the controllers in the order they were "
+                                                       "connected. Off: one person can switch controllers freely.",
+                                                       "Игроки 2-4 с (нет) получают контроллеры в порядке подключения. "
+                                                       "Выкл.: один человек может свободно менять контроллеры."));
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
         // Identical controllers share one GUID and name: they are listed once ("x2"), and choosing

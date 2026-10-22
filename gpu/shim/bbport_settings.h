@@ -92,6 +92,8 @@ inline constexpr const char* DlssModelNames[] = {"transformer", "cnn"};
 
 struct Values {
     std::array<std::array<char, 64>, ControllerPorts> ports{}; ///< guarded by PortsMutex()
+    /// split_auto: ports 2-4 without a controller chosen take the next connected one (runtime_pad.c).
+    std::atomic<bool> split_auto{true};
     std::atomic<MenuLanguage> menu_language{MenuLanguage::Russian};
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};

@@ -182,7 +182,7 @@
  "Portuguese (Brazil)": "ポルトガル語（ブラジル）",
  "Presentation": "表示方式",
  "Press a gamepad button… (Escape cancels)": "ゲームパッドのボタンを押してください…（Escape でキャンセル）",
- "Press a key… (Escape cancels)": "キーを押してください…（Escape でキャンセル）",
+ "Press a key or a mouse button… (Escape cancels)": "キーかマウスボタンを押してください…（Escでキャンセル）",
  "Primary": "メイン",
  "R1 / RB (hop / drift)": "R1 / RB（ジャンプ／ドリフト）",
  "R2 / RT (look back)": "R2 / RT（後方を見る）",
@@ -306,5 +306,15 @@
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "チートをしている人を見つけたら、ゲーム内で報告してください: メニュー（Insert / L3+R3）> フレンド > プレイヤーを報告。",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "ルール違反は、記録の削除やオンラインの BAN（一時的または永久、IP 単位も含む）につながることがあります。",
  "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank: 記録の認定（近日、ランクと MMR による対戦モード）",
- "Open page": "ページを開く"
+ "Open page": "ページを開く",
+ "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "このPCの時計が{}分ずれています。オンラインでは補正されますが、システム設定で日付と時刻を自動にしてください。",
+ "This nickname is yours (recovered from another installation on this PC).": "このニックネームはあなたのものです（このPCの別のインストールから復元しました）。",
+ "Split screen: assign controllers automatically": "画面分割：コントローラーを自動で割り当てる",
+ "First available": "最初に使えるもの",
+ "Player 1 controller": "プレイヤー1のコントローラー",
+ "Not assigned": "未割り当て",
+ "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "プレイヤー1は選んだコントローラーを使います。切断されると、プレイヤー2〜4に割り当てたコントローラーが一時的にプレイヤー1になります。プレイヤー2〜4はゲストとして遊び、ゲームを閉じると何も保存されません。ゲーム内メニュー（Insert / L3+R3）でもポートを変更できます。",
+ "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "未割り当てのプレイヤー2〜4には、接続した順に残りのコントローラーが割り当てられます。オフの場合は使われず、手に取った別のコントローラーがプレイヤー1を操作します。",
+ "Button prompts": "ボタン表示",
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "ゲームがメニューや案内で表示するボタン。Xbox: A、B、X、Y、LB、RB、LT、RT、View。「プレイ」を押したときに適用されます。"
 }

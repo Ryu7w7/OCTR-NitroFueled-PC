@@ -136,4 +136,10 @@ if [[ ${1:-} == --test ]]; then
     out/eventflag-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_tunnel.c src/runtime_net_tunnel.c -o out/net-tunnel-test
     out/net-tunnel-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_ping.c src/runtime_net_ping.c -o out/net-ping-test
+    out/net-ping-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc "${includes[@]}" tests/test_savedata_guest.c -o out/savedata-guest-test
+    out/savedata-guest-test > /dev/null
+    "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_http_ryunet.c src/runtime_http.c -o out/http-ryunet-test
+    out/http-ryunet-test > /dev/null
 fi

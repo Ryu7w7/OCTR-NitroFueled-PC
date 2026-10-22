@@ -258,6 +258,7 @@ if (WIN32)
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
     add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
         ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp ../launcher/windows/port_update.cpp
+        ../launcher/windows/settings_import.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
@@ -273,6 +274,13 @@ if (WIN32)
     target_compile_definitions(port-update-test PRIVATE UNICODE _UNICODE)
     target_link_options(port-update-test PRIVATE -static)
     target_link_libraries(port-update-test PRIVATE winhttp bcrypt)
+    # Bringing the settings from another installation: the list, finding one, what is copied.
+    add_executable(settings-import-test EXCLUDE_FROM_ALL ../tests/test_settings_import.cpp
+        ../launcher/windows/settings_import.cpp)
+    target_compile_options(settings-import-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_include_directories(settings-import-test PRIVATE ../launcher/windows)
+    target_compile_definitions(settings-import-test PRIVATE UNICODE _UNICODE)
+    target_link_options(settings-import-test PRIVATE -static)
     # Discord presence and invites against a fake Discord pipe; never touches the real one.
     add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp
         ../launcher/windows/discord_presence.cpp)

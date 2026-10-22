@@ -53,6 +53,7 @@ typedef struct {
     char target_ip[64];
     uint16_t port;
     int is_plain_http;
+    int redirected; /* to the RyuNET server (runtime_net_overrides) */
 } HttpConnection;
 
 typedef struct {
@@ -172,9 +173,11 @@ int32_t runtime_http_create_connection(int32_t tmpl, const char *url, int32_t ke
                 strncpy(c->target_ip, target, sizeof(c->target_ip) - 1);
                 if (port_override) c->port = port_override;
                 if (is_http) c->is_plain_http = 1;
+                c->redirected = 1;
                 runtime_net_trace("sceHttpCreateConnectionWithURL('%s') -> override %s:%u (HTTP)",
                                   url, c->target_ip, c->port);
             } else {
+                c->redirected = 0;
                 strncpy(c->target_ip, c->host, sizeof(c->target_ip) - 1);
                 runtime_net_trace("sceHttpCreateConnectionWithURL('%s') -> %s:%u",
                                   url, c->target_ip, c->port);
@@ -312,26 +315,90 @@ int32_t runtime_http_add_request_header(int32_t req, const char *name, const cha
     return ORBIS_OK;
 }
 
+/* Seconds to add to this PC's clock to get the RyuNET server's. Signatures carry the time and
+ * the server takes them only within 5 minutes of its own clock, so a PC whose clock is off could
+ * not log in at all ("nickname signature out of time"). run.py measures it before the game
+ * starts (BB_ONLINE_CLOCK_OFFSET) and every answer of the server corrects it (its Date header):
+ * a login refused for the time goes through on the game's next try. */
+static long long g_clock_offset;
+static int g_clock_offset_read;
+
+static long long ryunet_clock_offset(void) {
+    if (!__atomic_load_n(&g_clock_offset_read, __ATOMIC_ACQUIRE)) {
+        const char *env = getenv("BB_ONLINE_CLOCK_OFFSET");
+        long long offset = 0;
+        if (env && sscanf(env, "%lld", &offset) == 1 && offset > -400000000ll && offset < 400000000ll) {
+            long long unset = 0;
+            __atomic_compare_exchange_n(&g_clock_offset, &unset, offset, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&g_clock_offset_read, 1, __ATOMIC_RELEASE);
+    }
+    return __atomic_load_n(&g_clock_offset, __ATOMIC_RELAXED);
+}
+
+/* Unix time of an HTTP date ("Wed, 22 Oct 2026 00:10:00 GMT"), or -1. */
+static long long http_date_seconds(const char *text) {
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char month[4] = "";
+    int day, year, hour, minute, second;
+    const char *comma = strchr(text, ',');
+    if (!comma || sscanf(comma + 1, " %d %3s %d %d:%d:%d", &day, month, &year, &hour, &minute, &second) != 6)
+        return -1;
+    const char *found = strlen(month) == 3 ? strstr(months, month) : NULL;
+    if (!found || (found - months) % 3 || year < 2000 || year > 2200) return -1;
+    int m = (int)(found - months) / 3 + 1;
+    /* days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's days_from_civil) */
+    long long y = year - (m <= 2);
+    const long long era = y / 400, yoe = y - era * 400;
+    const long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const long long days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    return days * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+/* An answer of the RyuNET server: its Date header sets the clock offset. */
+static void ryunet_note_server_clock(const char *headers) {
+    for (const char *line = headers; line && *line && *line != '\r' && *line != '\n';) {
+        if (!_strnicmp(line, "Date:", 5)) {
+            const long long server = http_date_seconds(line + 5);
+            if (server < 0) return;
+            ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
+            const long long offset = server - (long long)time(NULL);
+            /* The header has whole seconds: a few seconds either way change nothing. */
+            const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
+            if (llabs(offset - old) > 30) {
+                runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
+                                  offset > 0 ? "behind" : "ahead of",
+                                  llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
+            }
+            return;
+        }
+        line = strchr(line, '\n');
+        if (line) line++;
+    }
+}
+
 /* X-RyuNET-Proof for one request to the RyuNET server (its nick_proof.go): an HMAC-SHA256,
  * keyed with the hash of this installation's key for the server (BB_ONLINE_KEYHASH, from
- * run.py), of the time, a nonce, the method and the request target. 0 without a key. */
+ * run.py), of the time (the server's: ryunet_clock_offset), a nonce, the method and the
+ * request target. 0 without a key. */
 int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size) {
     const char *key_hash = getenv("BB_ONLINE_KEYHASH");
     if (!key_hash || strlen(key_hash) != 64 || strspn(key_hash, "0123456789abcdef") != 64) return 0;
     static unsigned long long counter;
     struct timespec now;
     timespec_get(&now, TIME_UTC);
+    const long long ts = (long long)now.tv_sec + ryunet_clock_offset();
     char nonce[33], message[1200];
     snprintf(nonce, sizeof nonce, "%016llx%016llx",
              (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec,
              __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) ^ (unsigned long long)(uintptr_t)&now);
-    const int n = snprintf(message, sizeof message, "%lld\n%s\n%s\n%s", (long long)now.tv_sec, nonce, method, target);
+    const int n = snprintf(message, sizeof message, "%lld\n%s\n%s\n%s", ts, nonce, method, target);
     if (n <= 0 || n >= (int)sizeof message) return 0;
     uint8_t mac[32];
     bb_hmac_sha256((const unsigned char *)key_hash, 64, (const unsigned char *)message, (size_t)n, mac);
     char mac_hex[65];
     for (int i = 0; i < 32; i++) snprintf(mac_hex + 2 * i, 3, "%02x", mac[i]);
-    const int len = snprintf(out, out_size, "1.%lld.%s.%s", (long long)now.tv_sec, nonce, mac_hex);
+    const int len = snprintf(out, out_size, "1.%lld.%s.%s", ts, nonce, mac_hex);
     return len > 0 && (size_t)len < out_size;
 }
 
@@ -382,6 +449,7 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     for (int r; got < (int)sizeof reply - 1 && (r = recv(s, reply + got, (int)sizeof reply - 1 - got, 0)) > 0;) got += r;
     closesocket(s);
     reply[got] = '\0';
+    ryunet_note_server_clock(reply);
     int status = 0;
     if (strncmp(reply, "HTTP/", 5) != 0 || sscanf(strchr(reply, ' ') ? strchr(reply, ' ') : reply, "%d", &status) != 1)
         return 0;
@@ -431,9 +499,38 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         closesocket(s);
         return HTTP_NETWORK;
     }
+    if (c->redirected) {
+        /* The RyuNET server answers at once: a request that something on the way holds (a
+         * player's antivirus) ends after 20 s instead of keeping the game waiting. */
+#ifdef _WIN32
+        DWORD timeout = 20000;
+#else
+        struct timeval timeout = {20, 0};
+#endif
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+    }
 
     /* Build HTTP request: prefer the stored method name (covers CUSTOM). */
     const char *method_str = r->method_str[0] ? r->method_str : "GET";
+
+    /* The game names its requests by the real servers' URLs (the login's is
+     * "https://lavender-ps4-auth3.prod.demonware.net:443/auth/"). To the RyuNET server they go
+     * as a plain request for its own host: antivirus web shields and some networks hold a plain
+     * HTTP request that names an https:// URL or Demonware's host, and the login never came
+     * back ("sceHttpSendRequest empty response"). The server reads only the path. */
+    const char *target = r->path;
+    char host_header[96];
+    snprintf(host_header, sizeof host_header, "%s", c->host);
+    if (c->redirected) {
+        const char *scheme = strstr(target, "://");
+        if (scheme && scheme - target <= 5) {
+            target = strchr(scheme + 3, '/');
+            if (!target) target = "/";
+        }
+        if (c->port == 80) snprintf(host_header, sizeof host_header, "%s", c->target_ip);
+        else snprintf(host_header, sizeof host_header, "%s:%u", c->target_ip, (unsigned)c->port);
+    }
 
     char header_buf[4096];
     int hlen = snprintf(header_buf, sizeof(header_buf),
@@ -442,7 +539,7 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
                         "User-Agent: CTR-NitroFueled/1.21 PS4\r\n"
                         "Connection: close\r\n"
                         "Content-Length: %zu\r\n",
-                        method_str, r->path, c->host, size);
+                        method_str, target, host_header, size);
 
     for (int i = 0; i < r->req_header_count; i++) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
@@ -455,7 +552,7 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
      * redirected to the RyuNET server, never to a real one. */
     char proof[160];
     if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
-        runtime_ryunet_proof(method_str, r->path, proof, sizeof proof)) {
+        runtime_ryunet_proof(method_str, target, proof, sizeof proof)) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
     }
     /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
@@ -486,6 +583,7 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         runtime_net_trace("sceHttpSendRequest empty response");
         return HTTP_NETWORK;
     }
+    if (c->redirected) ryunet_note_server_clock(resp_buf);
 
     /* Parse response */
     char *body_start = strstr(resp_buf, "\r\n\r\n");

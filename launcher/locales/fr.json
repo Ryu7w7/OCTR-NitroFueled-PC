@@ -182,7 +182,7 @@
  "Portuguese (Brazil)": "Portugais (Brésil)",
  "Presentation": "Présentation",
  "Press a gamepad button… (Escape cancels)": "Appuyez sur un bouton de la manette… (Échap annule)",
- "Press a key… (Escape cancels)": "Appuyez sur une touche… (Échap annule)",
+ "Press a key or a mouse button… (Escape cancels)": "Appuyez sur une touche ou un bouton de la souris… (Échap annule)",
  "Primary": "Principal",
  "R1 / RB (hop / drift)": "R1 / RB (saut / dérapage)",
  "R2 / RT (look back)": "R2 / RT (regarder derrière)",
@@ -306,5 +306,15 @@
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "Vous voyez quelqu'un tricher ? Signalez-le dans le jeu : menu (Insert / L3+R3) > Amis > Signaler un joueur.",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "Enfreindre les règles peut vous coûter vos records et un bannissement du jeu en ligne, temporaire ou définitif, y compris par IP.",
  "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank : faites valider vos records (bientôt, compétitif avec rangs et MMR)",
- "Open page": "Ouvrir la page"
+ "Open page": "Ouvrir la page",
+ "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "L'horloge de ce PC est décalée de {} min : le jeu en ligne la corrige, mais réglez la date et l'heure en automatique dans les paramètres du système.",
+ "This nickname is yours (recovered from another installation on this PC).": "Ce pseudo est à vous (récupéré d'une autre installation de ce PC).",
+ "Split screen: assign controllers automatically": "Écran partagé : attribuer les manettes automatiquement",
+ "First available": "Le premier disponible",
+ "Player 1 controller": "Manette du joueur 1",
+ "Not assigned": "Non attribué",
+ "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "Le joueur 1 utilise la manette choisie. Si elle est déconnectée, une manette attribuée aux joueurs 2–4 devient temporairement le joueur 1. Les joueurs 2–4 jouent en invités : rien n'est conservé pour eux à la fermeture du jeu. Le menu du jeu (Insert / L3+R3) change aussi les ports.",
+ "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "Les joueurs 2–4 laissés sur Non attribué prennent les autres manettes dans l'ordre de connexion. Désactivé, ils ne sont pas utilisés, et une autre manette que vous prenez contrôle le joueur 1.",
+ "Button prompts": "Icônes des boutons",
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Les boutons que le jeu affiche dans les menus et les messages. Xbox : A, B, X, Y, LB, RB, LT, RT et View. S'applique en appuyant sur Jouer."
 }

@@ -54,18 +54,20 @@ GPL-2.0), in `scripts/widescreen_data/eu`:
 The launch says why (`Widescreen: ...`) and goes on at 16:9 when:
 
 - the game's title or update is not USA or EU 1.21;
+- a line of the layout's executable patches does not find its one place in the executable
+  (`out/eboot.elf`, searched by its signature as `scripts/patches.py` places it);
 - an asset is not the expected one (a mod changed it), or the data does not validate.
 
 Online mode does not change the selected layout. The online playlist archive patch is
 composed with the layout patches, so both remain active.
 
-USA and EU 1.21 executable builds are not restricted to a single executable checksum. A v0.6
-user with a different build was falling back to 16:9 despite selecting 21:9; removing
-that checksum gate was confirmed to restore the layout on that user's machine.
-The title/update checks, archive content checks and executable patch signatures remain
-in place. The USA whole-file check and EU loaded-image check are both removed from
-layout selection. The alternate EU path is source-tested but has not had a new live
-test. This does not certify every alternate executable build.
+The executable is not held to one checksum (PR #46, tcosi): a v0.6 player whose 1.21 build
+differed from the recorded one fell back to 16:9. Any build qualifies whose code the patches
+fit, so the 5.05 and 6.72+ firmware builds both do. The check is all or nothing for a reason:
+`patches.py` skips a patch whose line it cannot place, and the menus and HUD made for the layout
+would then show over a 16:9 game. Checked against real dumps: the USA and EU 1.21 executables
+fit every line, while the base game's executable under a 1.21 `param.sfo` does not (one signature
+matches twice) and keeps 16:9.
 
 ## Startup and online interface corrections
 

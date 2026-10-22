@@ -83,8 +83,24 @@ static int make_dirs(const char *path) {
     for (char *p=buffer+1;*p;++p) if (*p=='/') { *p=0; mkdir(buffer,0755); *p='/'; }
     return mkdir(buffer,0755) && errno!=EEXIST ? -1 : 0;
 }
+static void remove_tree(const char *path);
+/* Players 2-4 of split screen are guests: their saves go to savedata/guest<N>, emptied the first
+ * time the game asks for them in a run, so picking up a second controller makes no lasting profile.
+ * Player 1 keeps savedata/1. */
 static void root(int32_t user, const char *title, char *out, size_t size) {
-    snprintf(out,size,"%s/savedata/%d/%s",runtime_file_user_dir(),user,title && *title ? title : title_id);
+    const char *dir=runtime_file_user_dir();
+    if (user>=2 && user<=4) {
+        static int emptied[5];
+        char guest[700];
+        snprintf(guest,sizeof(guest),"%s/savedata/guest%d",dir,user);
+        if (!__atomic_exchange_n(&emptied[user],1,__ATOMIC_ACQ_REL)) {
+            remove_tree(guest);
+            printf("Runtime: savedata: player %d plays as a guest (%s, emptied at start)\n",user,guest);
+        }
+        snprintf(out,size,"%s/savedata/guest%d/%s",dir,user,title && *title ? title : title_id);
+        return;
+    }
+    snprintf(out,size,"%s/savedata/%d/%s",dir,user,title && *title ? title : title_id);
 }
 static int valid_name(const char *name, size_t max) {
     size_t n=strnlen(name,max);

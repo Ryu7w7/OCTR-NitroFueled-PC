@@ -182,7 +182,7 @@
  "Portuguese (Brazil)": "Португальский (Бразилия)",
  "Presentation": "Вывод кадров",
  "Press a gamepad button… (Escape cancels)": "Нажмите кнопку геймпада… (Escape — отмена)",
- "Press a key… (Escape cancels)": "Нажмите клавишу… (Escape — отмена)",
+ "Press a key or a mouse button… (Escape cancels)": "Нажмите клавишу или кнопку мыши… (Esc — отмена)",
  "Primary": "Основной",
  "R1 / RB (hop / drift)": "R1 / RB (прыжок / дрифт)",
  "R2 / RT (look back)": "R2 / RT (взгляд назад)",
@@ -306,5 +306,15 @@
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "Видите читера? Пожалуйтесь в игре: меню (Insert / L3+R3) > Друзья > Пожаловаться на игрока.",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "Нарушение правил может стоить вам рекордов и бана в онлайне, временного или навсегда, в том числе по IP.",
  "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank: подтверждение рекордов (скоро — рейтинговая игра с рангами и MMR)",
- "Open page": "Открыть страницу"
+ "Open page": "Открыть страницу",
+ "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "Часы этого ПК сбиты на {} мин: онлайн это исправляет, но включите автоматические дату и время в системных настройках.",
+ "This nickname is yours (recovered from another installation on this PC).": "Этот ник ваш (восстановлен из другой установки на этом ПК).",
+ "Split screen: assign controllers automatically": "Разделённый экран: назначать контроллеры автоматически",
+ "First available": "Первый доступный",
+ "Player 1 controller": "Контроллер игрока 1",
+ "Not assigned": "Не назначен",
+ "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "Игрок 1 использует выбранный контроллер. Если он отключится, контроллер игрока 2–4 временно станет игроком 1. Игроки 2–4 играют как гости: после закрытия игры для них ничего не сохраняется. Меню игры (Insert / L3+R3) тоже меняет порты.",
+ "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "Игроки 2–4 с «Не назначен» получают остальные контроллеры в порядке подключения. Выкл.: они не используются, а взятый вами другой контроллер управляет игроком 1.",
+ "Button prompts": "Значки кнопок",
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Кнопки, которые игра показывает в меню и подсказках. Xbox: A, B, X, Y, LB, RB, LT, RT и View. Применяется при нажатии «Играть»."
 }

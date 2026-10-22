@@ -436,9 +436,11 @@ def set_game_title(game_dir):
 def save_root(user_dir):
     title = GAME_TITLE[0]
     base = Path(user_dir) / "savedata"
+    if (base / "1" / title).is_dir():
+        return base / "1" / title  # player 1's: guest<N> holds players 2-4's (src/runtime_savedata.c)
     try:
         for entry in sorted(base.iterdir()):
-            if (entry / title).is_dir():
+            if not entry.name.startswith("guest") and (entry / title).is_dir():
                 return entry / title
     except OSError:
         pass
@@ -1317,6 +1319,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         save_settings(s)
         self.ini, self.ini_lines = load_ini()
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
+        self.ini["split_auto"] = "1" if self.split_auto_row.get_active() else "0"
+        self.ini["button_prompts"] = combo_value(self.button_prompts_row)
         self.ini["async_pipelines"] = "1" if self.async_row.get_active() else "0"
         self.ini["msaa"] = "1" if self.msaa_row.get_active() else "0"
         self.ini["borderless"] = "1" if self.borderless_row.get_active() else "0"
@@ -1343,6 +1347,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini, self.ini_lines = load_ini()
         self.fill_patches()
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
+        self.split_auto_row.set_active(self.ini.get("split_auto") != "0")
+        prompts = self.ini.get("button_prompts", "playstation")
+        self.button_prompts_row.set_selected(self.button_prompts_row.values.index(prompts)
+                                             if prompts in self.button_prompts_row.values else 0)
         self.async_row.set_active(self.ini.get("async_pipelines") == "1")
         self.msaa_row.set_active(self.ini.get("msaa") == "1")
         self.borderless_row.set_active(self.ini.get("borderless") == "1")
@@ -1385,9 +1393,10 @@ class LauncherWindow(Adw.ApplicationWindow):
     def build_controls_page(self):
         page = Adw.PreferencesPage()
         controls = Adw.PreferencesGroup(title=tr("Controller"),
-                                        description=tr("Player 1 uses the selected controller; other unassigned controllers can take over. "
-                                                       "If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. "
-                                                       "Each player's save is separate. The in-game menu (Insert / L3+R3) can also change ports."))
+                                        description=tr("Player 1 uses the selected controller. If it is disconnected, an assigned controller "
+                                                       "from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: "
+                                                       "nothing is kept for them after the game closes. The in-game menu "
+                                                       "(Insert / L3+R3) can also change ports."))
         pads = connected_gamepads()
         primary = self.ini.get("port.1") or self.settings["gamepad"]
         choices = [(tr("First available"), "")] + [(name, guid) for guid, name in pads]
@@ -1407,6 +1416,21 @@ class LauncherWindow(Adw.ApplicationWindow):
             row.connect("notify::selected", lambda _row, _param, player=n: self.on_port_player(player))
             self.port_rows[n] = row
             controls.add(row)
+        # bbport.ini split_auto (src/runtime_pad.c): players 2-4 without a controller chosen take the
+        # next connected one.
+        self.split_auto_row = Adw.SwitchRow(
+            title=tr("Split screen: assign controllers automatically"),
+            subtitle=tr("Players 2–4 left on Not assigned take the other controllers in the order they were connected. "
+                        "Off, they are not used, and another controller you pick up takes over Player 1."),
+            active=self.ini.get("split_auto") != "0")
+        controls.add(self.split_auto_row)
+        # bbport.ini button_prompts (scripts/button_prompts.py): the buttons the game shows.
+        self.button_prompts_row = combo_row(
+            tr("Button prompts"),
+            tr("The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. "
+               "Applies when you press Play."),
+            [("PlayStation", "playstation"), ("Xbox", "xbox")], self.ini.get("button_prompts", "playstation"))
+        controls.add(self.button_prompts_row)
         page.add(controls)
 
         # Bindings: "Change" waits for a key or button in a small window (bb-gpu-capabilities
@@ -1518,7 +1542,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         row, _default = self.binding_rows[(kind, name)]
         row.set_subtitle(tr("Press a gamepad button… (Escape cancels)") if kind == "pad"
-                         else tr("Press a key… (Escape cancels)"))
+                         else tr("Press a key or a mouse button… (Escape cancels)"))
 
         def done(proc, result):
             try:
@@ -2020,6 +2044,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             text = tr("Checking the nickname with the server…")
         elif status == "free":
             text = tr("Available: it becomes yours the first time you play online.")
+        elif status == "yours" and info.get("key_switched"):
+            text = tr("This nickname is yours (recovered from another installation on this PC).")
         elif status == "yours" and linked:
             text = tr("This nickname is yours. Discord account: {}").format(info.get("discord") or "?")
         elif status == "yours":
@@ -2033,6 +2059,10 @@ class LauncherWindow(Adw.ApplicationWindow):
             text = tr("The server does not accept that nickname: choose another one.")
         else:
             text = tr("The server could not be asked (it checks again when you play).")
+        clock_off = abs(ryunet_http.clock_offset())
+        if clock_off > 240:
+            text += " " + tr("This PC's clock is {} min off: online corrects it, but set the date and time "
+                             "to automatic in the system settings.").format(round(clock_off / 60))
         self.nick_status_row.set_subtitle(GLib.markup_escape_text(text))
         idle = not self.discord_busy
         self.discord_link_button.set_visible(link_available and idle and nick_ok(nick) and status in ("free", "yours")

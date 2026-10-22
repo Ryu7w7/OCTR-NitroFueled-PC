@@ -253,8 +253,8 @@ def main():
     shutil.copytree(ROOT / 'docs' / 'native-handbook', folder / 'docs' / 'native-handbook')
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
-    shutil.copytree(ROOT / 'scripts' / 'widescreen_data',
-                    folder / 'scripts' / 'widescreen_data', dirs_exist_ok=True)
+    for data in ('widescreen_data', 'button_prompts'):
+        shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     for patch in (ROOT / 'patches').glob('*.xml'):

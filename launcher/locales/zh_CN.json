@@ -182,7 +182,7 @@
  "Portuguese (Brazil)": "葡萄牙语（巴西）",
  "Presentation": "呈现方式",
  "Press a gamepad button… (Escape cancels)": "请按手柄按键…（Escape 取消）",
- "Press a key… (Escape cancels)": "请按一个键…（Escape 取消）",
+ "Press a key or a mouse button… (Escape cancels)": "请按一个键或鼠标按钮…（Esc 取消）",
  "Primary": "主显示器",
  "R1 / RB (hop / drift)": "R1 / RB（跳跃 / 漂移）",
  "R2 / RT (look back)": "R2 / RT（向后看）",
@@ -306,5 +306,15 @@
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "看到有人作弊？请在游戏中举报：菜单（Insert / L3+R3）> 好友 > 举报玩家。",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "违反规则可能导致你的纪录被删除，并被禁止在线游戏（临时或永久，也可能按 IP 封禁）。",
  "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank：验证你的纪录（即将推出：带段位和 MMR 的排位赛）",
- "Open page": "打开页面"
+ "Open page": "打开页面",
+ "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "此电脑的时钟偏差了 {} 分钟：联机时会自动校正，但请在系统设置中将日期和时间设为自动。",
+ "This nickname is yours (recovered from another installation on this PC).": "这个昵称是你的（已从此电脑上的另一个安装中恢复）。",
+ "Split screen: assign controllers automatically": "分屏：自动分配手柄",
+ "First available": "第一个可用的",
+ "Player 1 controller": "玩家 1 的手柄",
+ "Not assigned": "未分配",
+ "Player 1 uses the selected controller. If it is disconnected, an assigned controller from Players 2–4 temporarily becomes Player 1. Players 2–4 play as guests: nothing is kept for them after the game closes. The in-game menu (Insert / L3+R3) can also change ports.": "玩家 1 使用所选手柄。断开时，分配给玩家 2–4 的手柄会暂时成为玩家 1。玩家 2–4 以访客身份游玩：关闭游戏后不会为他们保留任何内容。游戏内菜单（Insert / L3+R3）也可以更改端口。",
+ "Players 2–4 left on Not assigned take the other controllers in the order they were connected. Off, they are not used, and another controller you pick up takes over Player 1.": "保持“未分配”的玩家 2–4 会按连接顺序获得其余手柄。关闭时不使用它们，你拿起的其他手柄会接管玩家 1。",
+ "Button prompts": "按键图标",
+ "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "游戏在菜单和提示中显示的按键。Xbox：A、B、X、Y、LB、RB、LT、RT 和 View。按“开始游戏”时生效。"
 }

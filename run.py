@@ -37,6 +37,7 @@ UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3: GPU, driver or loader (gpu/.../vk_pl
 
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
+import button_prompts  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
@@ -180,22 +181,73 @@ def nick_ok(name):
             and name.lower() not in RESERVED_NICKS)
 
 
+def key_store():
+    """Where this PC keeps its keys outside the game folders, so that a deleted, moved or
+    re-downloaded folder keeps the nicknames: %APPDATA% on Windows (as the launcher keeps them),
+    the XDG data folder (~/.local/share) on Linux. None when there is no such folder."""
+    if os.name == 'nt':
+        base = os.environ.get('APPDATA')
+    else:
+        base = os.environ.get('XDG_DATA_HOME') or (os.path.join(os.path.expanduser('~'), '.local', 'share')
+                                                   if os.environ.get('HOME') else None)
+    return Path(base) / 'CTR-NitroFueled-PC' if base else None
+
+
+def valid_key(k):
+    return len(k) == 64 and all(c in '0123456789abcdef' for c in k)
+
+
+def known_keys():
+    """Every key used on this PC (ryunet_online_keys.txt next to the backup; the Windows
+    launcher's KnownKeys): a nickname this folder's key does not own may be another folder's."""
+    store = key_store()
+    try:
+        lines = (store / 'ryunet_online_keys.txt').read_text(encoding='ascii', errors='replace').split()
+    except (OSError, TypeError):
+        return []
+    keys = []
+    for k in (line.strip().lower() for line in lines):
+        if valid_key(k) and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def remember_key(key):
+    store = key_store()
+    if not store or not valid_key(key) or key in known_keys():
+        return
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        with open(store / 'ryunet_online_keys.txt', 'a', encoding='ascii') as f:
+            f.write(key + '\n')
+    except OSError:
+        pass
+
+
+def use_key(data, key):
+    """This folder plays with another of this PC's keys from now on. True when saved."""
+    try:
+        (Path(data) / 'ryunet_online.key').write_text(key + '\n', encoding='ascii')
+    except OSError:
+        return False
+    return True
+
+
 def online_key(data):
     """This installation's secret: the server lets the first key to use a nickname keep it, so
     nobody else can play under it. Created once, next to run.py; the launcher reads the same
     file. Copying the folder to another PC keeps the nicknames; losing the file loses them."""
     path = Path(data) / 'ryunet_online.key'
-    # A second copy outside the game folder (as the launcher keeps it), so that a deleted, moved
-    # or re-downloaded folder on the same PC keeps the nicknames.
-    appdata = os.environ.get('APPDATA')
-    backup = Path(appdata) / 'CTR-NitroFueled-PC' / 'ryunet_online.key' if appdata else None
+    # A second copy outside the game folder (key_store).
+    store = key_store()
+    backup = store / 'ryunet_online.key' if store else None
 
     def read(p):
         try:
             k = p.read_text(encoding='ascii', errors='replace').strip().lower() if p else ''
         except OSError:
             return ''
-        return k if len(k) == 64 and all(c in '0123456789abcdef' for c in k) else ''
+        return k if valid_key(k) else ''
 
     key = read(path) or read(backup) or secrets.token_hex(32)
     if read(path) != key:
@@ -210,6 +262,8 @@ def online_key(data):
             backup.write_text(key + '\n', encoding='ascii')
         except OSError:
             pass
+    remember_key(read(backup))
+    remember_key(key)
     return key
 
 
@@ -225,10 +279,30 @@ def key_hash(skey):
     return hashlib.sha256(skey.strip().lower().encode('ascii')).hexdigest()
 
 
+# Seconds to add to this PC's clock to get the RyuNET server's. Signatures carry the time and the
+# server takes them only within 5 minutes of its own clock: with the PC's clock off, every signed
+# request was refused ("nickname signature out of time") and the nickname read as taken.
+SERVER_CLOCK_OFFSET = 0
+
+
+def note_server_clock(reply):
+    """An answer of the RyuNET server (a urllib response or HTTPError): its Date header sets
+    SERVER_CLOCK_OFFSET."""
+    global SERVER_CLOCK_OFFSET
+    import email.utils
+    try:
+        server = email.utils.parsedate_to_datetime(reply.headers.get('Date', '')).timestamp()
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return
+    offset = round(server - time.time())
+    # The header has whole seconds: a few seconds either way change nothing.
+    SERVER_CLOCK_OFFSET = offset if abs(offset) > 5 else 0
+
+
 def proof_header(khash, method, target):
     """X-RyuNET-Proof for one request (the server's nick_proof.go): signed with the key's hash, so
-    the key never crosses the network, and good once, for a few minutes."""
-    ts, nonce = str(int(time.time())), secrets.token_hex(16)
+    the key never crosses the network, and good once, for a few minutes of the server's time."""
+    ts, nonce = str(int(time.time()) + SERVER_CLOCK_OFFSET), secrets.token_hex(16)
     mac = hmac.new(khash.encode('ascii'), f'{ts}\n{nonce}\n{method}\n{target}'.encode('utf-8'),
                    hashlib.sha256).hexdigest()
     return f'1.{ts}.{nonce}.{mac}'
@@ -265,6 +339,7 @@ def server_settings(host, port):
     import urllib.request
     try:
         with urllib.request.urlopen(f'http://{host}:{port}/ryunet/theme', timeout=3) as reply:
+            note_server_clock(reply)
             reply = json.loads(reply.read(4096))
     except (OSError, ValueError):
         return {}
@@ -350,6 +425,17 @@ def setup_online(env, config, data):
     env['BB_ONLINE_SERVER'] = host
     env['BB_ONLINE_HTTP_PORT'] = auth_port  # the runtime's own requests (Friends tab)
     env['BB_ONLINE_NAME'] = name
+    # The server's announcements (used below); its answer also tells its clock, before anything
+    # is signed.
+    announced = server_settings(host, auth_port)
+    if SERVER_CLOCK_OFFSET:
+        env['BB_ONLINE_CLOCK_OFFSET'] = str(SERVER_CLOCK_OFFSET)
+        if abs(SERVER_CLOCK_OFFSET) > 60:
+            minutes = round(abs(SERVER_CLOCK_OFFSET) / 60)
+            say(f"This PC's clock is {minutes} min {'behind' if SERVER_CLOCK_OFFSET > 0 else 'ahead of'} "
+                "the server's: online uses the server's time, but sync it (Windows: Settings > Time > Sync now).")
+    else:
+        env.pop('BB_ONLINE_CLOCK_OFFSET', None)
     key = online_key(data)
     env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
     if key:
@@ -403,7 +489,6 @@ def setup_online(env, config, data):
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
     # Every player loads the theme the server announces (bbport.ini theme= only applies offline),
     # and the server's race-end countdown.
-    announced = server_settings(host, auth_port)
     theme = announced.get('theme')
     if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden'):
         env['BB_THEME'] = theme
@@ -550,7 +635,7 @@ def main():
         run_python('tools/gen_import_names.py', '--out', out)
         # DLC (optional): the player's add-on packages in dlc\ (BB_DLC_DIR), reported installed.
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
-                   '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
+                   '--dlc-dir', env.get('BB_DLC_DIR') or data / 'dlc')  # empty: dlc\, as run.sh
         # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the
         # game's own shaders, so new tracks and racers do not stop the game to compile them.
         # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
@@ -572,6 +657,12 @@ def main():
         base_patches = {}
         if playlist_patch.is_file():
             base_patches[archive_patch.read(playlist_patch)[1]] = playlist_patch
+        # Xbox button prompts (bbport.ini button_prompts, scripts/button_prompts.py): the fonts'
+        # button image through archive patches, each keeping the playlist's for the same archive.
+        try:
+            base_patches.update(button_prompts.prepare(game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f'Button prompts: {error}; PlayStation buttons')
         env.setdefault('BB_NEO', '0')
         # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),

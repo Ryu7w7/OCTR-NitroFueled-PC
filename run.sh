@@ -105,6 +105,11 @@ unset BB_ARCHIVE_PATCHES
 "$PYTHON" scripts/online_playlist.py "$game" --out "$out"
 base_patches=()
 if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online_playlist.bbpatch"); fi
+# Xbox button prompts (bbport.ini button_prompts, scripts/button_prompts.py), as run.py: the fonts'
+# button image through archive patches, each keeping the patch before it for the same archive.
+while IFS= read -r patch; do
+    if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
+done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
 # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
