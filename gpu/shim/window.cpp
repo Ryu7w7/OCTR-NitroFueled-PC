@@ -65,7 +65,13 @@ SDL_DisplayID ChooseDisplay() {
 } // namespace
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
-    // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
+    // Gamepads are updated and sampled by runtime_pad.c's own thread; their events are pumped here
+    // with the window's. SacredFire: this pump no longer updates the joysticks, and SDL's device
+    // notifications get their own thread: detecting devices after a controller connects or turns
+    // off can block for a long time on Windows (DirectInput asking a slow HID device its name), and
+    // the window stopped responding meanwhile.
+    SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
