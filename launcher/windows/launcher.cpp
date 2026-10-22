@@ -3878,117 +3878,6 @@ bool ModActionIcon(const char* id, const char* tooltip, bool folder, float size)
     return clicked;
 }
 
-/// The game copies prepared for mod sessions (scripts/mod_content.py: a whole game for each mix of
-/// mod packages, in mod-state\extensions\profiles) and their size, measured in the background.
-struct ModCopies {
-    std::mutex mutex;
-    bool busy = false;
-    ULONGLONG at = 0;  // GetTickCount64 of the last measure
-    std::uint64_t bytes = 0;
-    int count = 0;
-};
-ModCopies g_mod_copies;
-
-fs::path ModCopiesDir() { return g_app.root / L"mod-state" / L"extensions" / L"profiles"; }
-
-/// Measures (or, with remove, deletes and then measures) the prepared copies in a thread.
-void UpdateModCopies(bool remove) {
-    {
-        std::scoped_lock lock{g_mod_copies.mutex};
-        if (g_mod_copies.busy) return;
-        g_mod_copies.busy = true;
-    }
-    std::thread([remove, dir = ModCopiesDir(), game = g_app.game_dir] {
-        std::error_code ec;
-        if (remove) {
-            // Never delete a selected game or traverse a redirected legacy cache.
-            const auto real_dir=fs::weakly_canonical(dir,ec);
-            const auto real_game=fs::weakly_canonical(game,ec);
-            const auto cache_text=fs::path(real_dir).make_preferred().native();
-            const auto game_text=fs::path(real_game).make_preferred().native();
-            const bool game_inside=game_text.size()>=cache_text.size() &&
-                !_wcsnicmp(game_text.c_str(),cache_text.c_str(),cache_text.size()) &&
-                (game_text.size()==cache_text.size() || game_text[cache_text.size()]==L'\\');
-            bool safe=!ec && !game_inside;
-            DWORD attributes=GetFileAttributesW(dir.c_str());
-            if (attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT)) safe=false;
-            for (fs::recursive_directory_iterator it(dir,ec),end;safe && !ec && it!=end;it.increment(ec)) {
-                attributes=GetFileAttributesW(it->path().c_str());
-                if (attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_REPARSE_POINT)) safe=false;
-            }
-            if (safe && !ec) fs::remove_all(dir,ec);
-        }
-        std::uint64_t bytes = 0;
-        int count = 0;
-        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            std::error_code e2;
-            if (!it->is_directory(e2)) continue;
-            ++count;
-            for (fs::recursive_directory_iterator f(it->path(), e2), fend; !e2 && f != fend; f.increment(e2)) {
-                std::error_code e3;
-                if (f->is_regular_file(e3)) bytes += f->file_size(e3);
-            }
-        }
-        std::scoped_lock lock{g_mod_copies.mutex};
-        g_mod_copies.bytes = bytes;
-        g_mod_copies.count = count;
-        g_mod_copies.at = GetTickCount64();
-        g_mod_copies.busy = false;
-    }).detach();
-}
-
-/// What mod packages cost, said plainly, and the copies they left: their size and a button that
-/// deletes them (they are prepared again when those mods are played).
-void ModConsequences() {
-    App& a = g_app;
-    ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
-    ImGui::TextWrapped("%s", T("Los mods activos se leen mediante redirecciones y pequeños parches. Los archivos originales "
-                               "no se modifican ni se copian. Al desactivar un mod se vuelve a leer el juego original.",
-                               "Enabled mods use file redirection and small overlays. Original game files are never modified "
-                               "or copied. Disabling a mod restores reads from the original game."));
-    ImGui::TextWrapped("%s", T("Las partidas con mods se guardan aparte: tu progreso normal no cambia, y lo que avances con "
-                               "mods solo se ve jugando con mods.",
-                               "Modded play is saved separately: your normal progress does not change, and what you "
-                               "achieve with mods only shows when playing with mods."));
-    ImGui::PopStyleColor();
-    ModCopies copies;
-    {
-        std::scoped_lock lock{g_mod_copies.mutex};
-        copies.busy = g_mod_copies.busy;
-        copies.at = g_mod_copies.at;
-        copies.bytes = g_mod_copies.bytes;
-        copies.count = g_mod_copies.count;
-    }
-    if (!copies.busy && (!copies.at || GetTickCount64() - copies.at > 15000)) UpdateModCopies(false);
-    if (!copies.at) {
-        ImGui::TextColored(kGrey, "%s", T("Midiendo las copias de mods...", "Measuring the mod copies..."));
-    } else {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(kGrey, T("Copias del juego preparadas para mods: %d (%.1f GB)",
-                                    "Legacy game copies from older loaders: %d (%.1f GB)"),
-                           copies.count, double(copies.bytes) / (1024.0 * 1024.0 * 1024.0));
-        ImGui::SameLine();
-        ImGui::BeginDisabled(copies.busy || copies.count == 0 || a.game_running);
-        if (ImGui::SmallButton(T("Borrar copias", "Delete copies"))) ImGui::OpenPopup("delete_mod_copies");
-        ImGui::EndDisabled();
-    }
-    if (ImGui::BeginPopupModal("delete_mod_copies", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-        ImGui::TextUnformatted(T("¿Borrar las copias del juego del cargador anterior? El nuevo cargador no las volverá a crear. "
-                                 "Los archivos originales, mods y partidas no se tocan.",
-                                 "Delete the game copies left by the old mod loader? The new loader will not recreate them. "
-                                 "Original game files, mods and saves are not touched."));
-        ImGui::PopTextWrapPos();
-        if (ImGui::Button(T("Borrar", "Delete"))) {
-            UpdateModCopies(true);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
 void ModsTab() {
     App& a = g_app;
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
@@ -4033,8 +3922,6 @@ void ModsTab() {
         ImportMods(PickFiles(a.hwnd,L"Add mods or patches",L"Mods (*.pak;*.zip;*.xml)",L"*.pak;*.zip;*.xml"));
     ImGui::PopStyleColor(2); ImGui::EndDisabled();
     ImGui::EndGroup();
-    ImGui::Spacing();
-    ModConsequences();
     ImGui::Spacing();
     std::string remove_id, remove_hash;
     for (const auto& p : a.patches) if (VisibleMod(p) && !p.ini_key) {

@@ -100,7 +100,6 @@ silently select a winner. Removing a selected version disables the stable ID;
 reload may then offer an older retained version, still disabled.
 
 Legacy full-game profiles under mod-state/extensions/profiles are never reused.
-The Mods page retains an explicit cleanup option for those old profiles only.
 New state lives in extensions/overlays and contains mod data/metadata, not a game
 copy. Separate user saves/shader caches remain, and are not original game content.
 
