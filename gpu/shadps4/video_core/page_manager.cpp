@@ -19,7 +19,11 @@
 #ifndef _WIN32
 #include <sys/uio.h>
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#else
 #include <ucontext.h>
+#endif
 #endif
 #include <string>
 #include <fmt/format.h>

@@ -1,0 +1,27 @@
+{
+  "name": "sacredfire-macos-deps",
+  "version-string": "1",
+  "description": "x86-64 libraries of the macOS build (triplet x64-osx); Vulkan comes from the LunarG SDK.",
+  "dependencies": [
+    "sdl3",
+    "fmt",
+    "robin-map",
+    "xxhash",
+    "zydis",
+    "magic-enum",
+    "vulkan-memory-allocator",
+    "boost-headers",
+    "boost-asio",
+    "boost-container",
+    "boost-container-hash",
+    "boost-icl",
+    "boost-intrusive",
+    "boost-pool",
+    "boost-preprocessor",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample"]
+    }
+  ]
+}

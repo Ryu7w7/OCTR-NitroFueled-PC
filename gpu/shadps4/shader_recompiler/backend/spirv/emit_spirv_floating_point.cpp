@@ -7,7 +7,12 @@
 namespace Shader::Backend::SPIRV {
 
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
+#ifndef __APPLE__
+    // bbport (macOS): not there. SPIRV-Cross turns every NoContraction operation into a call of an
+    // [[clang::optnone]] helper (spvFMul, spvFAdd, ...): a scene shader of CTR took 43 ms a frame
+    // on an M1 that way.
     ctx.Decorate(op, spv::Decoration::NoContraction);
+#endif
     return op;
 }
 

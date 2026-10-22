@@ -42,6 +42,21 @@ import ryunet_http  # noqa: E402
 import appimage_update  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
+# macOS: the game starts through packaging/macos/play.sh (Homebrew's bash for run.sh, the Vulkan
+# driver, a Python with a working XML parser); folders and pages open with `open`; no Steam page.
+MACOS = sys.platform == "darwin"
+# The macOS app (packaging/macos/make-dmg.sh) sets up play.sh's environment itself and has no
+# packaging/ folder: run.sh directly, as in the AppImage.
+GAME_SCRIPT = PORT_DIR / ("packaging/macos/play.sh" if MACOS and not PACKAGED else "run.sh")
+
+
+def session_command(*command):
+    """The command in a session of its own (stop_game signals the whole process group): setsid,
+    or on macOS (no setsid program) this Python doing it before the exec."""
+    if MACOS:
+        return [sys.executable, "-c",
+                "import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])", *command]
+    return ["setsid", *command]
 
 
 def port_version():
@@ -840,7 +855,8 @@ def open_external(target):
     xdg-open (or gio, kde-open) with host_environment(); GIO as a last resort. True when one of
     them started (whether the page opened is up to the desktop)."""
     env = host_environment()
-    for command in (["xdg-open"], ["gio", "open"], ["kde-open"], ["exo-open"]):
+    commands = [["open"]] if MACOS else [["xdg-open"], ["gio", "open"], ["kde-open"], ["exo-open"]]
+    for command in commands:
         for folder in env["PATH"].split(":"):
             exe = Path(folder) / command[0]
             if not exe.is_file() or str(exe).startswith("/nix/"):
@@ -1338,7 +1354,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         window.add(self.close_on_play_row)
         page.add(window)
 
-        steam = Adw.PreferencesGroup(title=tr("Steam"))
+        steam = Adw.PreferencesGroup(title=tr("Steam"), visible=not MACOS)
         exe, _start, _options = steam_shortcuts.launcher_command()
         steam_row = Adw.ActionRow(title=tr("Add to Steam"),
                                   subtitle=tr("A non-Steam shortcut that starts the game with these settings (Steam Deck game mode). Close Steam before adding."))
@@ -3065,7 +3081,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         launcher.set_environ([f"{k}={v}" for k, v in self.environment().items()])
         launcher.set_cwd(str(PORT_DIR))
         try:
-            self.process = launcher.spawnv(["setsid", "bash", str(PORT_DIR / "run.sh")])
+            self.process = launcher.spawnv(session_command("bash", str(GAME_SCRIPT)))
         except GLib.Error as error:
             self.toasts.add_toast(Adw.Toast(title=tr("Could not start: {}").format(error.message)))
             return
@@ -3172,8 +3188,8 @@ def play():
     env = game_environment(settings)
     steam_shortcuts.stable_appimage_link()
     if not settings.get("discord_rpc", True):
-        os.execvpe("bash", ["bash", str(PORT_DIR / "run.sh")], env)  # nothing to do alongside
-    child = subprocess.Popen(["bash", str(PORT_DIR / "run.sh")], env=env)
+        os.execvpe("bash", ["bash", str(GAME_SCRIPT)], env)  # nothing to do alongside
+    child = subprocess.Popen(["bash", str(GAME_SCRIPT)], env=env)
 
     def forward(signum, _frame):
         # Steam stops the game by signalling this process: the game gets it too.

@@ -16,6 +16,7 @@ void EmitPrologue(EmitContext& ctx) {
         ctx.DefineWorkgroupIndex();
     }
     ctx.DefineBufferProperties();
+    EmitGsEmulationPrologue(ctx);
 }
 
 void ConvertDepthMode(EmitContext& ctx) {
@@ -187,6 +188,7 @@ static void EmitFragmentMotion(EmitContext& ctx) {
 }
 
 void EmitEpilogue(EmitContext& ctx) {
+    EmitGsEmulationEpilogue(ctx);
     if (Sirit::ValidId(ctx.motion_out_cur)) {
         EmitVertexMotion(ctx);
     }
@@ -218,10 +220,17 @@ void EmitDiscardCond(EmitContext& ctx, Id condition) {
 }
 
 void EmitEmitVertex(EmitContext& ctx) {
+    if (ctx.GsEmulated()) {
+        EmitGsEmulationVertex(ctx);
+        return;
+    }
     ctx.OpEmitVertex();
 }
 
 void EmitEmitPrimitive(EmitContext& ctx) {
+    if (ctx.GsEmulated()) {
+        return; // its strips are whole triangles (vk_gs_emulation.cpp)
+    }
     ctx.OpEndPrimitive();
 }
 

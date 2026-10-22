@@ -50,6 +50,12 @@ public:
     }
 
     const Shader::Info& GetStage(Shader::SwStage stage) const noexcept {
+        // bbport: an emulated geometry shader's expansion pass has its geometry stage in the
+        // vertex stage's place (GraphicsPipelineKey::gs_emulation).
+        if (stage == Shader::SwStage::Vertex && !stages[u32(stage)] &&
+            stages[u32(Shader::SwStage::Geometry)]) {
+            return *stages[u32(Shader::SwStage::Geometry)];
+        }
         return *stages[u32(stage)];
     }
 

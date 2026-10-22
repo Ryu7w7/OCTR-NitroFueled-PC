@@ -53,6 +53,12 @@ if ! "$PYTHON" scripts/online_config.py --config "$BB_CONFIG" --data "$data" --e
 fi
 while IFS= read -r -d '' setting; do export "$setting"; done < "$online_env"
 rm -f "$online_env"
+# The season theme for the GPU library too (macOS skips the emulated fur during the Halloween
+# event, vk_rasterizer.cpp): the server's online, else bbport.ini theme= (as patches.py reads it).
+if [[ -z ${BB_THEME:-} && -f $BB_CONFIG ]]; then
+    theme_setting=$(sed -n 's/^theme=//p' "$BB_CONFIG" | tail -n 1)
+    if [[ -n $theme_setting ]]; then export BB_THEME=$theme_setting; fi
+fi
 if [[ ${BB_ONLINE:-0} == 1 ]]; then
     export BB_SESSIONS_DIR=${BB_SESSIONS_DIR:-$data/sessions}
     mkdir -p "$BB_SESSIONS_DIR"

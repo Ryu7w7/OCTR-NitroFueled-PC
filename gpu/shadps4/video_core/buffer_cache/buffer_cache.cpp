@@ -503,6 +503,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         --arena_page_bits;
     }
 #endif
+    if constexpr (DENSE_ARENAS) {
+        arena_page_bits = MIN_ARENA_PAGE_BITS;
+    }
     arena_page_size = u64{1} << arena_page_bits;
     num_arena_pages = u64{1} << (ADDRESS_SPACE_BITS - arena_page_bits);
     if (arena_page_bits != MAX_ARENA_PAGE_BITS) {
@@ -510,8 +513,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                  arena_page_size >> 20, instance.GetMaxBufferSize() >> 20);
     }
     const vk::BufferCreateInfo probe_ci = {
-        .flags =
-            vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+        .flags = DENSE_ARENAS ? vk::BufferCreateFlags{}
+                              : vk::BufferCreateFlagBits::eSparseBinding |
+                                    vk::BufferCreateFlagBits::eSparseResidency,
         .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = shared ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
@@ -536,8 +540,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                        reqs.memoryTypeBits)
             .value();
 
+    // Dense arenas never fill the BDA page table (EnsureResident): only shaders built with
+    // BB_DIRECT_MEMORY_ACCESS read it, and 512 MiB of it would not fit an 8 GiB Mac.
     const u64 bda_pagetable_size =
-        (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
+        DENSE_ARENAS ? 64_KB
+                     : (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
                                                    blocks_per_arena_page * num_arena_pages);
     bda_pagetable_buffer = std::make_unique<Buffer>(
@@ -1185,8 +1192,22 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 total_size = first_size + last_size;
     const u64 end_block = (first_addr + total_size) >> block_shift;
     auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
-    auto* bind = BindsForArena(new_arena);
+    if constexpr (DENSE_ARENAS) {
+        // The old arenas' contents (what the GPU wrote there included) are copied over; commands
+        // already recorded keep reading the old ones.
+        for (const auto* old_arena : {first_arena, last_arena}) {
+            if (old_arena) {
+                const vk::BufferCopy copy{0, old_arena->cpu_addr - first_addr,
+                                          old_arena->size_bytes};
+                runtime.CopyBuffer(old_arena, new_arena, std::span{&copy, 1});
+            }
+        }
+    }
+    auto* bind = DENSE_ARENAS ? nullptr : BindsForArena(new_arena);
     resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
+        if (!bind) {
+            return;
+        }
         const u64 start = std::max(base_block, backing.start);
         const u64 end = std::min(end_block, backing.end);
         bind->binds.push_back(vk::SparseMemoryBind{
@@ -1231,6 +1252,18 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         return;
     }
     BbStats::Timer timer{BbStats::t_resident};
+    if constexpr (DENSE_ARENAS) {
+        // The arena has memory behind all of it: the blocks are only recorded as resident.
+        for (const auto& range : bind_ranges) {
+            Backing backing;
+            backing.start = range.start;
+            backing.end = range.end;
+            backing.memory = vk::DeviceMemory{};
+            backing.offset = range.start; // contiguous ranges merge (CanMergeWith)
+            resident_ranges.Add(backing);
+        }
+        return;
+    }
 
     // bbport BB_GUEST_IN_PLACE: blocks of the game's direct memory are bound to the memory it
     // lives in; the rest (and everything without it) gets VRAM as before.
@@ -2638,7 +2671,7 @@ void BufferCache::Preupload(u64 budget) {
         }
         while (at < end && visited < MaxRegions) {
             const VAddr region = at & ~(TRACKER_HIGHER_PAGE_SIZE - 1);
-            const VAddr stop = std::min(end, region + TRACKER_HIGHER_PAGE_SIZE);
+            const VAddr stop = std::min<VAddr>(end, region + TRACKER_HIGHER_PAGE_SIZE);
             ++visited;
             preupload_cursor = stop;
             if (memory_tracker->PreuploadCandidate(region, quiet_since, !full)) {
@@ -2693,6 +2726,13 @@ void BufferCache::Preupload(u64 budget) {
 void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     // The submission going out has the tick before the current one.
     const u64 submitted = scheduler.CurrentTick() - 1;
+    if (DENSE_ARENAS && !pending_binds.empty()) {
+        static std::atomic_flag noted = ATOMIC_FLAG_INIT;
+        if (!noted.test_and_set()) {
+            std::fprintf(stderr, "Buffer cache: sparse binds dropped (dense arenas)\n");
+        }
+        pending_binds.clear();
+    }
     if (pending_binds.empty()) {
         QueueCopyBacks(submitted);
         QueuePromotions(submitted);

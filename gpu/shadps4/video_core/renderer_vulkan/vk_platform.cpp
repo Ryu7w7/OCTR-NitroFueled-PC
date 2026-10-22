@@ -206,6 +206,11 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     if (enable_debug_utils) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+#ifdef __APPLE__
+    // SacredFire (macOS): MoltenVK is a portability driver; the loader lists it only for an
+    // instance that enables this extension and the matching create flag (CreateInstance).
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
 
     // Sanitize extension list
     std::erase_if(extensions, [&](const char* extension) -> bool {
@@ -285,7 +290,11 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         _NSGetExecutablePath(path, &length);
         return std::filesystem::path(path).parent_path();
     }();
-    setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
+    // SacredFire: only a bundled ICD (an .app with MoltenVK_icd.json next to the executable)
+    // overrides the loader; otherwise it finds Homebrew's MoltenVK in /usr/local/share/vulkan.
+    if (!std::getenv("VK_DRIVER_FILES") && std::filesystem::exists(icd_path / "MoltenVK_icd.json")) {
+        setenv("VK_DRIVER_FILES", (icd_path / "MoltenVK_icd.json").c_str(), true);
+    }
 #endif
 
     static vk::detail::DynamicLoader dl;
@@ -422,6 +431,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
     vk::StructureChain<vk::InstanceCreateInfo, vk::LayerSettingsCreateInfoEXT> instance_ci_chain = {
         vk::InstanceCreateInfo{
+#ifdef __APPLE__
+            .flags = vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR,
+#endif
             .pApplicationInfo = &application_info,
             .enabledLayerCount = static_cast<u32>(layers.size()),
             .ppEnabledLayerNames = layers.data(),

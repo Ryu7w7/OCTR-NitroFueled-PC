@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__) /* needs /proc/self/maps; ultrawide screens only */
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>

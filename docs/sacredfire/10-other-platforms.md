@@ -33,6 +33,11 @@ implementation is, in these places.
   macOS has the same gap. Apple Silicon adds x86-64 translation (Rosetta 2 supports AVX2 only
   since macOS 15, and fixed-address mappings at 0x800000000 are not guaranteed), so the realistic
   macOS target is an Intel Mac, a deprecated platform.
+- **Update (2026-10-22): Apple Silicon works.** Measured on M1/M2: Rosetta 2 runs the guest's
+  instructions (cpuid hides AVX and friends, they execute), 0x800000000 is free, and the guest
+  range moves above Rosetta's reservation (0x7000000000). Fur is drawn by emulating the geometry
+  shader with vertex shaders. See [19-macos-apple-silicon.md](19-macos-apple-silicon.md) and
+  `packaging/macos/README.md`.
 
 ## Build and packaging
 

@@ -308,6 +308,10 @@ private:
     bool FilterDraw();
     bool FilterDrawPasses() const;
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
+    /// bbport: the export pass of an emulated geometry shader draw (vk_gs_emulation.h); its
+    /// parameter slot and the expansion pass's vertex count, or false when it cannot be drawn.
+    bool RecordGsExportPass(bool is_indexed, u32 index_offset, u32& param, u32& vertices);
+    const GraphicsPipeline* gs_export_pipeline = nullptr; ///< of the draw being recorded
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                     bool is_indexed, u32 index_offset);
     static bool DrawPipeWanted();

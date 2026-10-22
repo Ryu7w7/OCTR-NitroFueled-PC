@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_wait_trace.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__) // macOS: the same diagnostics stay off
 // SacredFire (Windows): BB_WAIT_TRACE needs backtrace() (glibc); off on Windows.
 namespace BbWaitTrace {
 bool Enabled() { return false; }

@@ -111,14 +111,16 @@ def damaged_archives(game):
                 header = f.read(0x38)
                 if len(header) < 0x38 or header[:4] != b'IGA\x1a':
                     continue
-                offset, size = struct.unpack_from('<I', header, 0x28)[0], struct.unpack_from('<I', header, 0x30)[0]
+                # The name table's offset is 64-bit: update2.pak is larger than 4 GiB.
+                offset, size = struct.unpack_from('<QI', header, 0x28)
                 if not size:
                     continue
                 f.seek(offset)
                 names = f.read(size)
         except OSError:
             continue
-        if len(names) == size and not any(names):
+        # Zeroed (a partial extraction) or cut short (a copy that stopped before the end).
+        if len(names) < size or not any(names):
             damaged.append(path.name)
     return damaged
 
@@ -174,7 +176,7 @@ def explain(kind, title, version):
                         'and everything in Sc0 to its sce_sys folder.',
         'unreadable': f'{found} eboot.bin could not be read as a decrypted PS4 executable: dump '
                       'the game and its update again.',
-        'damaged_archives': f'{found} Some archives/*.pak files have their file-name table filled with zeros, '
+        'damaged_archives': f'{found} Some archives/*.pak files have their file-name table filled with zeros or cut short, '
                             'so the game cannot find its files (it would stop at start with code 3). The '
                             'package was extracted badly: extract the game and its update again with another '
                             'tool, or with a LibOrbisPkg/PkgTool build that reads every compressed PFS block '

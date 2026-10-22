@@ -44,6 +44,9 @@ struct GraphicsPipelineKey {
     std::array<u8, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
     u32 mrt_mask;
     u32 motion_vectors = 0;
+    /// bbport (no geometry shader stage): 1 the export pass, 2 the expansion pass of an emulated
+    /// geometry shader draw (vk_gs_emulation.cpp); 0 otherwise.
+    u32 gs_emulation = 0;
     struct {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;
