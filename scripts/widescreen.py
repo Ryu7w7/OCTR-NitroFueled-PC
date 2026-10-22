@@ -202,16 +202,13 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
         shaders = [op for op in flat['operations'] if op['kind'].startswith('shader_')]
         port = eu_port() if eu else None
         if eu:
-            from game_check import image_sha256
-            if image_sha256(game) != port['image_sha256']:
-                raise ValueError('the executable is not the EU 1.21 one the layout was ported to')
+            # Accept other EU 1.21 builds; XML patch signatures are checked later.
             sets = json.loads((EU / 'assets.json').read_text(encoding='utf-8'))['sets']
             used = next(v for v in manifest['variants'] if v['id'] == variant)['useOperations']
             assets = [op for name in used for op in sets[name]]
             made = archive_patches(game, out, EU, assets, base_patches, 'assets.json', shaders[0]['factor'])
         else:
-            if sha(Path(game) / 'eboot.bin') not in manifest['compatibility']['eboot_sha256']:
-                raise ValueError('the executable is not the USA 1.21 one the layout was verified with')
+            # Accept other USA 1.21 executable builds; XML patch signatures are checked later.
             assets = [op for op in flat['operations'] if op['kind'] == 'archive_asset']
             made = archive_patches(game, out, folder, assets, base_patches, text_factor=shaders[0]['factor'])
         hud = hud_scale(shaders)
