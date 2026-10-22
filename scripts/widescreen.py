@@ -134,8 +134,9 @@ def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', 
     for op in operations:
         groups.setdefault(op['archive'], []).append(op)
     archives = Path(game) / 'archives'
+    from mod_file_paths import resolve
     stamp = {'format': FORMAT, 'data': sha(folder / data), 'startup_text_factor': text_factor,
-             'archives': {name: [(archives / name).stat().st_size, (archives / name).stat().st_mtime_ns]
+             'archives': {name: [str(resolve(archives / name)), resolve(archives / name).stat().st_size, resolve(archives / name).stat().st_mtime_ns]
                           for name in sorted(groups)},
              'operations': hashlib.sha256(json.dumps(operations, sort_keys=True).encode()).hexdigest(),
              'base': {g: sha(p) for g, p in sorted(base.items())}}

@@ -3,9 +3,10 @@ Only extracted copies are written; original archives are never modified.
 """
 from pathlib import Path
 import struct,lzma,zlib,json,mmap
+from mod_file_paths import resolve
 class Archive:
  def __init__(self,path):
-  self.path=Path(path)
+  self.path=resolve(path)
   self._file=self.path.open('rb')
   self.data=b=mmap.mmap(self._file.fileno(),0,access=mmap.ACCESS_READ)
   u=lambda o:struct.unpack_from('<I',b,o)[0]

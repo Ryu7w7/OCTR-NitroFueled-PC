@@ -613,6 +613,8 @@ def main():
     except (ValueError, RuntimeError, OSError) as error:
         fail('Mod launch blocked: ' + str(error) + '\nChoose compatible settings or disable the indicated mod in Mods.')
     original_game = game.resolve()
+    import mod_file_paths
+    mod_file_paths.configure(env)
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
@@ -683,6 +685,11 @@ def main():
                 layout_saved.update({key: env.get(key) for key in layout['env']})
                 env.update(layout['env'])
             archives = widescreen.archive_list(base_patches, layout)
+            if env.get('BB_MOD_ARCHIVE_PLAN'):
+                from mod_overlays import for_launch
+                builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}
+                composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
+                archives = '|'.join(str(p) for p in composed.values())
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:
@@ -692,7 +699,7 @@ def main():
         settings, layout_patches = apply_layout()
         if mod_packages.ACTIVE:
             mod_packages.preflight(Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
-                                   [layout_patches] if layout_patches else [], title_id, app_version)
+                                   [layout_patches] if layout_patches else [], title_id, app_version, game=game)
         apply_render_res(env, settings)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()

@@ -11,12 +11,14 @@ end (anything between is zeros), and the game sees the archive that much longer.
 import os
 import struct
 from pathlib import Path
+from mod_file_paths import resolve
 
 MAGIC = b'BBPAK001'
 SECTOR = 0x800
 
 
 def write(target, archive, guest, ranges):
+    archive = resolve(archive)
     size = Path(archive).stat().st_size
     path = guest.encode('utf-8')
     out = bytearray(MAGIC + struct.pack('<QI', size, len(path)) + path + struct.pack('<I', len(ranges)))
@@ -59,6 +61,7 @@ def write_entries_patch(target, archive, guest, entries, base=None):
     uncompressed after the end of the archive (on sector boundaries). base, another patch for the
     same archive (path), is kept in it: its ranges first, these entries after its data. The
     runtime takes one patch per archive, so two features changing one archive share a file."""
+    archive = resolve(archive)
     size = Path(archive).stat().st_size
     ranges, end = [], size
     if base is not None:
@@ -92,6 +95,7 @@ def write_entries_patch(target, archive, guest, entries, base=None):
 
 def view(archive, patch, offset, length):
     """What the game reads (for tests): the archive with the patch applied."""
+    archive = resolve(archive)
     size, _guest, ranges = read(patch)
     end_virtual = max([size] + [o + len(d) for o, d in ranges])
     length = max(0, min(length, end_virtual - offset))

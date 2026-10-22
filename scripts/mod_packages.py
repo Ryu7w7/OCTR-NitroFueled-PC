@@ -1,16 +1,27 @@
 """Native launcher adapter for declarative Mod packages. Author: tcosi. GPL-2.0-or-later."""
 from pathlib import Path
-import atexit,json,os,shutil,sys,uuid
+import atexit,json,os,shutil,sys,uuid,subprocess
+from functools import lru_cache
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from mod_components import copy_tree,save_json,apply_shader,under
 from mod_library import scan,PREFIX
 from mod_session import launch_lock,sync_saves
 ACTIVE=None
 
-def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21'):
+@lru_cache(maxsize=8)
+def engine_features(executable,digest):
+    """Negotiate features once per engine, without any per-mod build allowlist."""
+    try:
+        result=subprocess.run([str(executable),'--mod-capabilities'],capture_output=True,text=True,
+            timeout=15,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        value=json.loads(result.stdout) if result.returncode==0 else {}
+        return value if isinstance(value,dict) else {}
+    except (OSError,ValueError,subprocess.TimeoutExpired):return {}
+
+def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21',game=None):
     from prepare import parse_self
     from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments
-    elf,*_=parse_self((profile/'game/eboot.bin').read_bytes())
+    elf,*_=parse_self(((Path(game) if game is not None else profile/'game')/'eboot.bin').read_bytes())
     settings=read_settings(config)
     selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
     claims=[]
@@ -59,6 +70,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     from patches import external_patches,external_selection,read_settings
     import mods
     import mod_content as nx
+    for key in ('BB_MOD_FILE_MAP','BB_MOD_FILE_DIRS','BB_MOD_SOURCE_GAME','BB_MOD_ARCHIVE_PLAN'):
+        environment.pop(key,None)
+    import mod_file_paths
+    mod_file_paths.configure({})
     root=Path(environment.get('BB_MODS_DIR',Path(data)/'mods'))
     # Preserve the zero-package path, including custom patches/settings/data locations.
     if environment.get('BB_MODS_ENABLED','1')=='0' or not root.is_dir():return Path(game),str(config)
@@ -79,6 +94,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
         plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
+        import struct
+        file_count,=struct.unpack_from('<I',plan['file_map'].read_bytes(),8)
+        if file_count and engine_features(Path(port)/'bin/sacredfire.exe',plan['engine']).get('file_overlays')!=1:
+            raise ValueError('This engine lacks native mod file redirection. Update the engine and launcher together; no game-copy fallback is permitted.')
         prune_sessions(state/'sessions')
         session=state/'sessions'/uuid.uuid4().hex;session.mkdir(parents=True)
         user=session/'user';user.mkdir()
@@ -92,7 +111,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             (user/'cache').rename(session/'cache-before-reset')
         ini=session/'bbport.ini';ini.write_text(''.join(k+'='+v+'\n' for k,v in plan['settings'].items()),encoding='utf-8')
         snapshot=session/'patches.json';save_json(snapshot,original)
-        writes=preflight(plan['profile'],ini,snapshot)
+        writes=preflight(plan['profile'],ini,snapshot,game=plan['game'])
         if plan['has_shaders'] and not prepare_only:
             from mod_shaders import ensure_shaders
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))
@@ -101,11 +120,12 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         save_json(session/'launch.json',{'packages':names,'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
-        environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0')
+        environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
+        mod_file_paths.configure(environment)
         log('OCTR mod session: '+', '.join(names)+' at '+str(plan['selection_settings'].get('output_res')))
         log('Separate mod saves and logs: '+str(session))
         ACTIVE=(session,state);atexit.register(lock.__exit__,None,None,None)
-        return plan['profile']/'game',str(ini)
+        return plan['game'],str(ini)
     except BaseException:
         lock.__exit__(*sys.exc_info());raise
 

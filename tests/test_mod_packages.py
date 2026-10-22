@@ -29,6 +29,8 @@ class PackageTests(unittest.TestCase):
         self.prefs=self.port/'patches.json';save_json(self.prefs,{'enabled':[],'disabled':[]})
         adapter.ACTIVE=None;self.count=0
         self.addCleanup(setattr,adapter,'ACTIVE',None)
+        import mod_file_paths
+        self.addCleanup(mod_file_paths.configure,None)
     def manifest(self,ident='sample'):
         return {'schemaVersion':2,'id':ident,'name':ident,'version':'1.0.0','author':'tcosi',
             'description':'Synthetic fixture','requiresCapabilities':[],'files':[],
@@ -43,8 +45,13 @@ class PackageTests(unittest.TestCase):
     def scan(self):return library.scan(self.mods,self.port/'patches')
     def enable(self,*names):save_json(self.prefs,{'enabled':[library.PREFIX+n for n in names],'disabled':[]})
     def prepare(self):
-        with patch.object(adapter,'preflight',return_value=0),patch.object(adapter,'launch_lock',return_value=nullcontext()),patch('atexit.register'):
-            return adapter.prepare(self.port,self.port,{},self.game,self.ini,prepare_only=True)
+        self.environment={}
+        with patch.object(adapter,'preflight',return_value=0),patch.object(adapter,'engine_features',return_value={'file_overlays':1}),patch.object(adapter,'launch_lock',return_value=nullcontext()),patch('atexit.register'):
+            return adapter.prepare(self.port,self.port,self.environment,self.game,self.ini,prepare_only=True)
+    def read_game(self,relative):
+        import mod_file_paths
+        with patch.object(mod_file_paths,'_settings',self.environment):
+            return mod_file_paths.resolve(self.game/relative).read_bytes()
     def test_new_zip_listed_but_disabled(self):
         self.package();self.assertIn('sample',self.scan()['entries'])
         self.assertEqual(self.prepare(),(self.game,str(self.ini)))
@@ -83,7 +90,8 @@ class PackageTests(unittest.TestCase):
             {'kind':'game_file','target':'data.txt','original_sha256':sha_bytes(b'original'),'patched_sha256':sha_bytes(b'modified'),'payload':'payload.txt'}]}
         self.package('wide',uw);self.package('gauge',gauge,{'payload.txt':b'modified'});self.enable('wide','gauge')
         before=self.ini.read_bytes();game,config=self.prepare()
-        self.assertEqual((game/'data.txt').read_bytes(),b'modified')
+        self.assertEqual(game,self.game)
+        self.assertEqual(self.read_game('data.txt'),b'modified')
         self.assertIn('output_res=5120x1440',Path(config).read_text())
         self.assertEqual(self.ini.read_bytes(),before);self.assertEqual((self.game/'data.txt').read_bytes(),b'original')
         self.assertEqual((game/'data.txt').stat().st_nlink,1)
@@ -96,9 +104,42 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(set(self.scan()['entries']),{'sample'})
         p=self.mods/'renamed.zip';p.unlink();self.package(manifest=self.manifest()|{'version':'1.1.0'})
         self.assertEqual(self.scan()['entries']['sample']['version'],'1.1.0');self.prepare()
-    def test_duplicate_ids_rejected(self):
+    def test_identical_duplicate_ids_listed_once(self):
         self.package();self.package(filename='duplicate.zip')
-        result=self.scan();self.assertEqual(result['entries'],{});self.assertTrue(result['messages'])
+        result=self.scan();self.assertEqual(list(result['entries']),['sample'])
+        self.assertIn('Other copies retained',result['entries']['sample']['version_notice'])
+
+    def test_newest_version_wins_numeric_order_and_keeps_toggle(self):
+        self.package(manifest=self.manifest()|{'version':'1.9.0'},filename='older.zip')
+        self.package(manifest=self.manifest()|{'version':'1.10.0'},filename='newer.zip')
+        self.enable('sample');before=self.prefs.read_bytes()
+        result=self.scan();self.assertEqual(result['entries']['sample']['version'],'1.10.0')
+        self.assertEqual(self.prefs.read_bytes(),before)
+
+    def test_same_version_different_content_has_clear_conflict(self):
+        self.package(filename='one.zip')
+        self.package(manifest=self.manifest()|{'description':'different content'},filename='two.zip')
+        result=self.scan();self.assertNotIn('sample',result['entries'])
+        self.assertIn('Conflicting content',result['messages'][0])
+
+    def test_newest_version_ignores_legacy_engine_allowlist(self):
+        self.package(filename='older.zip')
+        m=self.manifest()|{'version':'2.0.0'};m['compatibility']['runtime_versions']=['future']
+        self.package(manifest=m,filename='future.zip')
+        result=self.scan();self.assertEqual(result['entries']['sample']['version'],'2.0.0')
+
+    def test_preparation_never_copies_or_links_source_game(self):
+        self.package();self.enable('sample')
+        real_copy=shutil.copy2
+        def guarded(source,target,*args,**kwargs):
+            self.assertFalse(Path(source).resolve().is_relative_to(self.game))
+            return real_copy(source,target,*args,**kwargs)
+        before={p.name:p.read_bytes() for p in self.game.iterdir()}
+        with patch.object(shutil,'copy2',side_effect=guarded),patch('os.link',side_effect=AssertionError('No game links')):
+            game,_=self.prepare();game2,_=self.prepare()
+        self.assertEqual((game,game2),(self.game,self.game))
+        self.assertFalse((self.port/'mod-state/extensions/profiles').exists())
+        self.assertEqual(before,{p.name:p.read_bytes() for p in self.game.iterdir()})
     def test_catalog_provides_native_mod_name_and_zip_identity(self):
         package=self.package(manifest=self.manifest()|{'name':'Readable mod name'})
         self.scan()
@@ -181,9 +222,26 @@ class PackageTests(unittest.TestCase):
     def test_offline_package_cannot_start_online(self):
         self.package();self.enable('sample');self.ini.write_text(self.ini.read_text().replace('online=0','online=1'))
         with self.assertRaisesRegex(ValueError,'offline-only'):self.prepare()
-    def test_wrong_runtime_rejected(self):
+    def test_engine_update_does_not_require_repackaging(self):
         self.package();self.enable('sample');(self.port/'bin/sacredfire.exe').write_bytes(b'other engine')
-        with self.assertRaisesRegex(ValueError,'unsupported runtime'):self.prepare()
+        (self.port/'bin/VERSION').write_text('future-release')
+        self.assertEqual(self.prepare()[0],self.game)
+
+    def test_package_can_omit_engine_versions_and_hashes(self):
+        m=self.manifest();m['compatibility'].pop('runtime_versions');m['compatibility'].pop('runtime_sha256')
+        self.package(manifest=m);self.enable('sample')
+        self.assertEqual(self.prepare()[0],self.game)
+
+    def test_game_executable_checksum_still_required(self):
+        self.package();self.enable('sample');(self.game/'eboot.bin').write_bytes(b'unsupported game')
+        with self.assertRaisesRegex(ValueError,'unsupported game executable'):self.prepare()
+
+    def test_engine_feature_negotiation_is_not_a_version_allowlist(self):
+        adapter.engine_features.cache_clear()
+        from types import SimpleNamespace
+        with patch.object(adapter.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='{"file_overlays":1}')):
+            self.assertEqual(adapter.engine_features('any-future-engine','digest'),{'file_overlays':1})
+        adapter.engine_features.cache_clear()
     def test_dependency_and_conflict_checks(self):
         self.package('child',self.manifest('child')|{'requiresCapabilities':['dependencies'],'requires':[{'id':'base','version':'>=1.0.0'}]})
         self.enable('child')

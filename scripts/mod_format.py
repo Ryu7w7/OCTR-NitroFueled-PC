@@ -125,9 +125,10 @@ def validate_manifest(m):
         files[r['file']]=r;folded.add(r['file'].casefold())
     if MARKER not in files:error('missing old-loader rejection marker')
     compatibility=m.get('compatibility')
-    if not isinstance(compatibility,dict) or set(compatibility)!={'runtime_versions','runtime_sha256','eboot_sha256','online'}:
-        error('compatibility requires runtime_versions, runtime_sha256, eboot_sha256 and online')
+    if not isinstance(compatibility,dict) or not {'eboot_sha256','online'}<=set(compatibility) or set(compatibility)-{'runtime_versions','runtime_sha256','eboot_sha256','online'}:
+        error('compatibility requires eboot_sha256 and online; legacy runtime declarations are optional')
     for key in ('runtime_versions','runtime_sha256','eboot_sha256'):
+        if key not in compatibility:continue
         values=compatibility[key]
         if not isinstance(values,list) or not values or not all(isinstance(v,str) and v for v in values):error('invalid '+key)
         if key.endswith('sha256'):

@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 import archive_patch
+import mod_file_paths
 import gcn_shaders as iga
 from igz_file import Igz
 
@@ -48,7 +49,7 @@ def track_key(name):
 def game_tracks(archives):
     """Race tracks of the game (folder names), from every archive's names."""
     found = set()
-    for pak in sorted(Path(archives).glob('*.pak')):
+    for pak in mod_file_paths.archives(archives):
         try:
             for name, *_ in iga.pak_entries(pak):
                 m = TRACK.search(name.lower())
@@ -145,7 +146,7 @@ def build(game, out, weight):
     archives = Path(game) / 'archives'
     target = out / 'online_playlist.bbpatch'
     stamp_file = out / 'online_playlist.json'
-    paks = sorted(archives.glob('*.pak')) if archives.is_dir() else []
+    paks = mod_file_paths.archives(archives)
     if not paks:
         print('Online playlist: no archives folder in the game; left as the game has it')
         target.unlink(missing_ok=True)
@@ -158,7 +159,7 @@ def build(game, out, weight):
     except (OSError, ValueError, KeyError):
         pass
     for name in ARCHIVES:
-        pak = archives / name
+        pak = mod_file_paths.resolve(archives / name)
         if not pak.is_file():
             continue
         entries = iga.pak_entries(pak)
