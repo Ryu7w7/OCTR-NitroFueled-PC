@@ -290,6 +290,13 @@ output. `--play` starts the game with the saved settings and no window (Steam De
 The menu entry and the launcher use the game's own icon (`sce_sys/icon0.png`), copied from your
 game folder into your icon theme; the game window shows it too.
 
+**Native LZMA decoder (Linux).** Recognized CTR 01.21 executables use liblzma for independent
+archive blocks, keeping the original compressed game files and requiring no disk cache. The
+patch checks the decoder and its one-shot caller before installing; unsupported layouts and
+blocks retain the original decoder. Set `BB_NATIVE_LZMA=0` in the launcher's extra environment
+to compare or disable it. On hosts with at least 12 logical CPUs, the verified streaming queue
+uses six existing background workers instead of four. Source builds require liblzma 5.4 or newer (`xz` in `shell.nix`).
+
 **In-game menu** (Insert, or L3+R3 on the pad): game patches, controller ports for split
 screen, FPS limit, fullscreen, FPS counter, menu language. It is saved to `bbport.ini`; patches apply after a restart.
 
