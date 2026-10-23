@@ -3,7 +3,7 @@
 pkgs.mkShell {
   packages = with pkgs; [
     gcc gnumake cmake ninja pkg-config python3 binutils git
-    vulkan-headers vulkan-loader sdl3
+    vulkan-headers vulkan-loader sdl3 xz
     # GPU library (gpu/): shadPS4 video core dependencies
     ffmpeg-headless boost fmt magic-enum robin-map xxhash vulkan-memory-allocator glslang spirv-cross xbyak zydis spirv-headers miniz libx11 libxcb xorgproto wayland
   ];
