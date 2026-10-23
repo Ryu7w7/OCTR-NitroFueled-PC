@@ -107,10 +107,8 @@ on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) c
 other players. If a match keeps failing with the same people, enabling UPnP on your router or
 forwarding UDP 3074 to your PC helps.
 
-**Supporting the server:** the server and its domain are paid for by Ryu7w7. If you want to help
-keep them running, you can donate on [Ko-fi](https://ko-fi.com/ryu7w7). Donations are voluntary
-and give nothing in the game: online play is the same for everyone. They pay for the server, not
-for the game or the port.
+**No donations:** this is a non-commercial fan project. It does not accept donations and sells
+nothing; online play is free and the same for everyone. You need your own copy of the game.
 
 **Picture** (launcher: Settings > Display; in game: Insert):
 
