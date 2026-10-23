@@ -80,11 +80,17 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
     try:
-        catalog=scan(root,Path(port)/'patches')
+        # BB_MOD_LIBRARY_DIR: where the library's patch file goes (run.sh: the data folder's
+        # patches/, as the Linux package's own folder is read-only); the bundled patches/ otherwise.
+        library=Path(environment.get('BB_MOD_LIBRARY_DIR') or Path(port)/'patches')
+        catalog=scan(root,library)
         for message in catalog['messages']:log('OCTR mods: '+message)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
         patchdir=Path(environment.get('BB_PATCHES_DIR',Path(port)/'patches'))
-        selected=external_selection(external_patches(patchdir),selection,read_settings(Path(config)))
+        found=external_patches(patchdir)
+        if library.resolve()!=patchdir.resolve():
+            found+=[p for p in external_patches(library) if p[0].startswith(PREFIX)]
+        selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
         original=json.loads(selection.read_text()) if selection.exists() else {'enabled':[],'disabled':[]}
         if catalog['messages'] and any(key.startswith(PREFIX) and key.removeprefix(PREFIX) not in catalog['entries'] for key in original.get('enabled',[])):
@@ -96,7 +102,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
         import struct
         file_count,=struct.unpack_from('<I',plan['file_map'].read_bytes(),8)
-        if file_count and engine_features(Path(port)/'bin/sacredfire.exe',plan['engine']).get('file_overlays')!=1:
+        if file_count and engine_features(nx.engine(port),plan['engine']).get('file_overlays')!=1:
             raise ValueError('This engine lacks native mod file redirection. Update the engine and launcher together; no game-copy fallback is permitted.')
         prune_sessions(state/'sessions')
         session=state/'sessions'/uuid.uuid4().hex;session.mkdir(parents=True)

@@ -22,6 +22,7 @@ def requirements(user,operations):
 
 def close_owned_game(parent_pid,executable):
     """Request normal window closure only for this wrapper's verified child engine."""
+    if os.name!='nt':return close_owned_game_posix(parent_pid,executable)
     import ctypes
     from ctypes import wintypes as w
     kernel=ctypes.WinDLL('kernel32',use_last_error=True);user=ctypes.WinDLL('user32',use_last_error=True)
@@ -67,6 +68,17 @@ def close_owned_game(parent_pid,executable):
     user.EnumWindows.argtypes=[callback,w.LPARAM];user.EnumWindows(visit,0)
     return bool(requested)
 
+def close_owned_game_posix(pid,executable):
+    """Linux: the setup's run.sh becomes the engine (exec, same PID). Once /proc names our engine,
+    SIGTERM, which SDL turns into a quit request: the game closes as from its window's close
+    button and ends with code 0 (gpu/shim/window.cpp). False while run.sh is still preparing."""
+    import signal
+    try:
+        if Path(f'/proc/{pid}/exe').resolve()!=Path(executable).resolve():return False
+        os.kill(pid,signal.SIGTERM)
+    except OSError:return False
+    return True
+
 def wait_for_setup(process,user,operations,executable,status,clock=time.monotonic,sleep=time.sleep,closer=close_owned_game):
     """Close normally after inputs remain complete for three seconds; never force kill."""
     stable=None;close_sent=False
@@ -106,10 +118,14 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     if (state/'user').exists():copy_tree(state/'user',setup_user)
     data=baseline['profile']/'runtime';(data/'out').mkdir(parents=True,exist_ok=True)
     for name in ('aerolib.inl','import_names.txt'):
-        source=state/'out'/name
-        if source.exists() and not (data/'out'/name).exists():shutil.copy2(source,data/'out'/name)
+        # run.sh keeps them in the data folder's out/, next to mod-state/.
+        source=next((d/name for d in (state/'out',state.parent/'out') if (d/name).exists()),None)
+        if source and not (data/'out'/name).exists():shutil.copy2(source,data/'out'/name)
     env={k:v for k,v in environment.items() if not k.startswith('BB_')}
-    for key in ('BB_LANGUAGE','BB_ONLINE_NAME','BB_USER_NAME'):
+    # Linux: BB_PREBUILT keeps run.sh on the package's engine (else it would build one); the
+    # screen and controller choices let it be played on a Steam Deck in game mode.
+    kept=('BB_LANGUAGE','BB_ONLINE_NAME','BB_USER_NAME')+(() if os.name=='nt' else ('BB_PREBUILT','BB_FULLSCREEN','BB_DISPLAY','BB_GAMEPAD'))
+    for key in kept:
         if key in environment:env[key]=environment[key]
     env.update(BB_MOD_PACKAGES_SKIP='1',BB_GAME_DIR=str(baseline['game']),BB_USER_DIR=str(setup_user),BB_DATA_DIR=str(data),
         BB_CONFIG=str(ini),BB_MODS_ENABLED='0',BB_PATCHES_DIR=str(baseline['profile']/'patches'),
@@ -118,11 +134,12 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     save_json(setup/'setup.json',{'requested_packages':plan['packages'],'game':str(baseline['game']),'mods':[]})
     status('shader_setup','First-time shader setup: reach the main menu and accept the game agreement if asked. The game will restart with your mods when the required shaders are ready. Some mods may need their game content visited first.')
     python=str(root/'python/python.exe') if (root/'python/python.exe').exists() else os.sys.executable
+    command=[python,'-X','utf8',str(root/'run.py')] if os.name=='nt' else ['bash',str(root/'run.sh')]
     try:
         with (setup/'console.log').open('w',encoding='utf-8') as log:
-            process=subprocess.Popen([python,'-X','utf8',str(root/'run.py')],cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,
+            process=subprocess.Popen(command,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-            wait_for_setup(process,setup_user,plan['operations'],root/'bin/sacredfire.exe',status)
+            wait_for_setup(process,setup_user,plan['operations'],nx.engine(root),status)
         save_json(setup/'result.json',{'exit_code':0,'required_shaders_verified':True})
     except Exception as e:
         save_json(setup/'result.json',{'error':str(e)});raise

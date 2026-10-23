@@ -9,6 +9,14 @@ import mod_format as fmt
 from mod_library import folder as package_folder,entries as zip_entries
 from mod_components import sha,sha_bytes,under,regular_tree,snapshot,read_ini,save_json
 
+def engine(root):
+    """The game executable: bin/sacredfire.exe on Windows; on Linux bin/sacredfire in a packaged
+    build (BB_PREBUILT, the AppImage), else build.sh's out/sacredfire; the first that exists."""
+    root=Path(root)
+    if os.name=='nt':return root/'bin/sacredfire.exe'
+    names=['bin/sacredfire','out/sacredfire'] if os.environ.get('BB_PREBUILT') else ['out/sacredfire','bin/sacredfire']
+    return next((root/n for n in names+['bin/sacredfire.exe'] if (root/n).is_file()),root/names[0])
+
 def metadata(folder):
     path=Path(folder)/'mod.json'
     return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
@@ -106,7 +114,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     problems=conflicts(mod_root,selection,base)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
-    runtime=sha(root/'bin/sacredfire.exe');eboot=sha(game/'eboot.bin')
+    runtime=sha(engine(root));eboot=sha(game/'eboot.bin')
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
     for name in names:
         folder=package_folder(mod_root,name)
