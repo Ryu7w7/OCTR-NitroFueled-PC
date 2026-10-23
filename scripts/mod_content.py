@@ -114,7 +114,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     problems=conflicts(mod_root,selection,base)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
-    runtime=sha(engine(root));eboot=sha(game/'eboot.bin')
+    runtime=sha(engine(root))
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
     for name in names:
         folder=package_folder(mod_root,name)
@@ -124,9 +124,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             if variant:chosen_variants[name]=variant
             if m['id']!=name:raise ValueError('Package ID/folder mismatch: '+name)
             compat=m['compatibility']
-            # Engine releases are not a mod allowlist. Source checksums and XML
-            # signature/overlap checks validate the data the mod actually changes.
-            if eboot not in compat['eboot_sha256']:raise ValueError(name+': unsupported game executable')
+            # Compatibility is established from affected assets and executable sites,
+            # not a whole-file executable or engine allowlist.
             if compat['online']=='offline-only' and environment.get('BB_ONLINE',effective.get('online','0'))=='1':
                 raise ValueError(name+': offline-only until online compatibility is tested. Set online=0 in this profile bbport.ini.')
             for field,target in (('settings',settings),('environment',overrides)):

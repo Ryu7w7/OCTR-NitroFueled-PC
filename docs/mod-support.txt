@@ -61,8 +61,14 @@ name, version, author, description, checksummed files, required capabilities,
 game-data compatibility, dependencies/conflicts, operations and patches.
 Engine versions and engine SHA256 allowlists are not required or enforced.
 Legacy runtime_versions/runtime_sha256 fields are accepted for old packages.
-Keep compatibility.eboot_sha256 and compatibility.online; original game data
-hashes and XML signatures still protect version-specific native game patches.
+Only compatibility.online is required. Legacy eboot_sha256 lists are accepted
+but are not a launch allowlist. Every declarative executable write must carry a
+Signature and/or ExpectedSHA256; unsigned writes fail before launch. ExpectedSHA256
+hashes the original file-backed bytes at the write site for the full write length.
+Declare code-signatures in requiresCapabilities for packages using this feature,
+so older launchers reject them explicitly. Fixed-address injected code is not
+automatically relocated or ported to other game revisions. Original asset hashes
+remain checked; compatibility means the affected code/resources actually match.
 The launcher queries engine features automatically rather than requiring every
 mod to list each supported launcher release.
 Supported operations include complete native PAK files, individual existing PAK

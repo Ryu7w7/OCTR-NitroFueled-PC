@@ -232,9 +232,14 @@ class PackageTests(unittest.TestCase):
         self.package(manifest=m);self.enable('sample')
         self.assertEqual(self.prepare()[0],self.game)
 
-    def test_game_executable_checksum_still_required(self):
-        self.package();self.enable('sample');(self.game/'eboot.bin').write_bytes(b'unsupported game')
-        with self.assertRaisesRegex(ValueError,'unsupported game executable'):self.prepare()
+    def test_whole_executable_checksum_is_not_an_allowlist(self):
+        self.package();self.enable('sample');(self.game/'eboot.bin').write_bytes(b'different executable wrapper')
+        self.assertEqual(self.prepare()[0],self.game)
+
+    def test_package_can_omit_all_executable_allowlists(self):
+        m=self.manifest();m['compatibility']={'online':'offline-only'}
+        self.package(manifest=m);self.enable('sample')
+        self.assertEqual(self.prepare()[0],self.game)
 
     def test_engine_feature_negotiation_is_not_a_version_allowlist(self):
         adapter.engine_features.cache_clear()
@@ -242,6 +247,32 @@ class PackageTests(unittest.TestCase):
         with patch.object(adapter.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='{"file_overlays":1}')):
             self.assertEqual(adapter.engine_features('any-future-engine','digest'),{'file_overlays':1})
         adapter.engine_features.cache_clear()
+    def test_preflight_requires_proof_for_every_generated_mod_write(self):
+        from test_prepare import fixture
+        profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
+        (profile/'game/eboot.bin').write_bytes(fixture())
+        (profile/'patches/OCTR-Mod-Content.xml').write_text('<Patch><Metadata Name="unsigned" AppVer="01.21" isEnabled="true"><PatchList><Line Type="bytes" Address="0x400002" Value="90" /></PatchList></Metadata></Patch>')
+        with self.assertRaisesRegex(ValueError,'unverified executable write'):
+            adapter.preflight(profile,self.ini,self.prefs)
+
+    def test_preflight_expected_code_accepts_unrelated_self_changes(self):
+        from test_prepare import fixture
+        profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
+        executable=fixture();executable[-1]=99
+        (profile/'game/eboot.bin').write_bytes(executable)
+        (profile/'patches/OCTR-Mod-Content.xml').write_text('<Patch><Metadata Name="signed" AppVer="01.21" isEnabled="true"><PatchList><Line Type="bytes" Address="0x400002" Value="90" ExpectedSHA256="'+sha_bytes(bytes([2]))+'" /></PatchList></Metadata></Patch>')
+        self.assertEqual(adapter.preflight(profile,self.ini,self.prefs),1)
+        executable[0x202]=99;(profile/'game/eboot.bin').write_bytes(executable)
+        with self.assertRaisesRegex(ValueError,'code signature mismatch'):
+            adapter.preflight(profile,self.ini,self.prefs)
+
+    def test_new_signature_capability_validates_all_writes(self):
+        m=self.manifest();m['compatibility']={'online':'allowed'}
+        m['requiresCapabilities']=['xml-patches','code-signatures'];m['patches']=['patches/p.xml']
+        xml=b'<Patch><TitleID><ID>CUSA13795</ID></TitleID><Metadata Name="missing" AppVer="01.21" AppElf="eboot.bin"><PatchList><Line Type="bytes" Address="0x400002" Value="90" /></PatchList></Metadata></Patch>'
+        with self.assertRaisesRegex(ValueError,'every write'):
+            self.package(manifest=m,files={'patches/p.xml':xml})
+
     def test_dependency_and_conflict_checks(self):
         self.package('child',self.manifest('child')|{'requiresCapabilities':['dependencies'],'requires':[{'id':'base','version':'>=1.0.0'}]})
         self.enable('child')

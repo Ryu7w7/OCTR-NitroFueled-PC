@@ -10,11 +10,17 @@ there (the 1.21 build for firmware 5.05); otherwise to the one place in the exec
 matches (the 6.72+ build, whose code sits at other addresses). No match, or more than one: the
 patch is skipped whole, with a log line.
 
+ExpectedSHA256="..." verifies the original bytes across the entire write length in a
+file-backed load segment. It does not search/relocate fixed-address injected code.
+Declarative mod writes must carry Signature and/or ExpectedSHA256; legacy built-in
+patches keep their existing behavior. Whole-file executable hashes are not gates.
+
 Patch files: patches/*.xml in the checkout (patches/CrashTeamRacing.xml, from
 illusionyy/PS-Game-Patch) and any folder named with --patches-dir. A patch is applied when the
 in-game menu or the launcher turned its bbport.ini key on (GAME_PATCH_KEYS), when patches.json
 lists it under "enabled", or when its file marks it isEnabled and patches.json does not disable it.
 """
+import hashlib
 import argparse
 import json
 import os
@@ -452,7 +458,7 @@ def external_selection(found, config, ini=None):
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
-def compile_external(selected, segments, elf=None, strict=False):
+def compile_external(selected, segments, elf=None, strict=False, require_verification=False):
     """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
     eboot.elf bytes) is needed for lines with a Signature."""
     writes,claims=[],[]
@@ -462,13 +468,27 @@ def compile_external(selected, segments, elf=None, strict=False):
             for line in meta.iter('Line'):
                 offset=int(line.get('Address') or '',0)-EBOOT_BASE
                 data=encode(line)
+                if require_verification and not (line.get('Signature') or line.get('ExpectedSHA256')):
+                    raise ValueError('unverified executable write; update this mod with code signatures: '+str(line.get('Address')))
                 if line.get('Signature'):
                     if elf is None: raise ValueError('signature without the executable')
                     moved=locate(line,offset,elf)
+                    if moved!=offset and line.get('ExpectedSHA256'):
+                        raise ValueError('fixed-address code signature moved; this mod needs a port: '+str(line.get('Address')))
                     if moved!=offset: print(f'Patches: {key}: {line.get("Address")} found at {moved+EBOOT_BASE:#010x}')
                     offset=moved
                 if not any(start<=offset and offset+len(data)<=end for start,end in segments):
                     raise ValueError(f'address {line.get("Address")} is outside the eboot')
+                expected=line.get('ExpectedSHA256')
+                if expected is not None:
+                    if elf is None:raise ValueError('ExpectedSHA256 without the executable')
+                    if not re.fullmatch('[0-9a-f]{64}',expected):raise ValueError('invalid ExpectedSHA256')
+                    original=None
+                    for start,pos,size in load_segments(elf):
+                        if start<=offset and offset+len(data)<=start+size:
+                            original=elf[pos+offset-start:pos+offset-start+len(data)];break
+                    if original is None or hashlib.sha256(original).hexdigest()!=expected:
+                        raise ValueError('executable code signature mismatch at '+str(line.get('Address')))
                 ours.append((offset,data))
         except ValueError as error:
             if strict:raise ValueError(f'Cannot apply enabled mod patch {key}: {error}') from error

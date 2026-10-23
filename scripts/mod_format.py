@@ -8,7 +8,7 @@ from mod_components import safe_path,under,sha,regular_tree
 
 MARKER='octr-mod.required'
 MARKER_CONTENT=b'OCTR Mod Package 2\n'
-CAPABILITIES={'archive-assets','game-files','xml-patches','shaders','settings','environment','dependencies','constraints','variants','variant-settings'}
+CAPABILITIES={'archive-assets','game-files','xml-patches','shaders','settings','environment','dependencies','constraints','variants','variant-settings','code-signatures'}
 SETTINGS={'output_res','render_res','widescreen_layout','upscaler','temporal','dlss_quality','dlss_output','fps_limit',
  'patch_60fps','patch_no_motion_blur','patch_pro_1080p','async_pipelines','fullscreen','show_fps','preset','menu_language'}
 ENVIRONMENT={'BB_NEO','BB_FPS','BB_VBLANK_HZ','BB_DMEM_MB','BB_PREUPLOAD'}
@@ -125,8 +125,8 @@ def validate_manifest(m):
         files[r['file']]=r;folded.add(r['file'].casefold())
     if MARKER not in files:error('missing old-loader rejection marker')
     compatibility=m.get('compatibility')
-    if not isinstance(compatibility,dict) or not {'eboot_sha256','online'}<=set(compatibility) or set(compatibility)-{'runtime_versions','runtime_sha256','eboot_sha256','online'}:
-        error('compatibility requires eboot_sha256 and online; legacy runtime declarations are optional')
+    if not isinstance(compatibility,dict) or not {'online'}<=set(compatibility) or set(compatibility)-{'runtime_versions','runtime_sha256','eboot_sha256','online'}:
+        error('compatibility requires online; executable and runtime allowlists are optional legacy metadata')
     for key in ('runtime_versions','runtime_sha256','eboot_sha256'):
         if key not in compatibility:continue
         values=compatibility[key]
@@ -201,6 +201,7 @@ def validate_manifest(m):
     if not isinstance(patches,list):error('patches must be a list')
     for path in patches:payload(path)
     if patches:needed.add('xml-patches')
+    if 'code-signatures' in m.get('requiresCapabilities',[]):needed.add('code-signatures')
     # Whole archives remain native IGA PAKs; the container format is unchanged.
     for path in files:
         if path.startswith('archives/') and (len(Path(path).parts)!=2 or not path.lower().endswith('.pak')):
@@ -227,6 +228,10 @@ def validate_folder(root):
         for meta in xml.iter('Metadata'):
             if meta.get('AppVer')!='01.21' or meta.get('AppElf')!='eboot.bin' or not list(meta.iter('Line')):
                 error('XML metadata must target eboot.bin 01.21 and contain writes')
+            for line in meta.iter('Line'):
+                if line.get('ExpectedSHA256') is not None:hash_string(line.get('ExpectedSHA256'))
+                if 'code-signatures' in m.get('requiresCapabilities',[]) and not (line.get('Signature') or line.get('ExpectedSHA256')):
+                    error('code-signatures requires a Signature or ExpectedSHA256 on every write')
     return m
 
 def inspect_zip(package):
