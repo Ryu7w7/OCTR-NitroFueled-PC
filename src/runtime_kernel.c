@@ -16,7 +16,9 @@
 #include <sys/syscall.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#ifndef __APPLE__
 #include <ucontext.h>
+#endif
 #include <signal.h>
 #include <sys/uio.h>
 #include <sys/random.h>
@@ -481,6 +483,8 @@ typedef struct { _Atomic uint64_t key; uint64_t site, site2, site3; int tid, kin
 static WaitSite wait_sites[512];
 #ifdef _WIN32
 static int host_tid(void) { return (int)compat_thread_id(); }
+#elif defined(__APPLE__)
+static int host_tid(void) { return gettid(); }
 #else
 static int host_tid(void) { return (int)syscall(SYS_gettid); }
 #endif
@@ -493,6 +497,8 @@ static void guest_call_sites(uint64_t out[3]) {
     if (!stack_hi) {
 #ifdef _WIN32
         stack_hi=compat_thread_stack_high();
+#elif defined(__APPLE__)
+        stack_hi=(uintptr_t)pthread_get_stackaddr_np(pthread_self());
 #else
         pthread_attr_t attr; void *base=NULL; size_t size=0;
         if (!pthread_getattr_np(pthread_self(),&attr)) { pthread_attr_getstack(&attr,&base,&size); pthread_attr_destroy(&attr); }
@@ -550,7 +556,7 @@ void runtime_wait_report(double frames) {
     printf("\n");
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 /* bbport BB_SAMPLE_THREAD=<name> (with frame stats): where that thread runs, sampled with SIGPROF
  * every 0.5 ms; reported with the wait profile. A thread that never blocks but waits for the GPU
  * shows up spinning in its polling loop. */

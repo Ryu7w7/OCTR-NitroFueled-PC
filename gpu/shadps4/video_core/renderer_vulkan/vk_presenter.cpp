@@ -571,7 +571,14 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
+#ifdef __APPLE__
+extern "C" void bb_metal_capture_present(); // shim/bbport_metal_capture.cpp
+#endif
+
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+#ifdef __APPLE__
+    bb_metal_capture_present();
+#endif
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {

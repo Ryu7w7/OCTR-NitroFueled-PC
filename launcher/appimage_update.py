@@ -22,7 +22,7 @@ ASSET = re.compile(r"^SacredFire-.+-x86_64\.AppImage$")
 
 
 def parse_version(text):
-    """(major, minor, patch, stage) of "v0.5.4", "v0.5.4-linux" or a git describe
+    """(major, minor, patch, stage) of "v0.5.4", "v0.5.4-linux" (-windows, -macos) or a git describe
     "v0.5.4-3-gabc123-dirty"; stage 0 a pre-release suffix, 1 the release, 2 commits after it.
     None when it is not a version."""
     m = re.match(r"^\s*[vV]?(\d{1,5})\.(\d{1,5})(?:\.(\d{1,5}))?(.*?)\s*$", text or "")
@@ -30,7 +30,7 @@ def parse_version(text):
         return None
     suffix = m.group(4)
     while True:
-        for drop in ("-dirty", "-windows", "-linux"):
+        for drop in ("-dirty", "-windows", "-linux", "-macos"):
             if suffix.endswith(drop):
                 suffix = suffix[:-len(drop)]
                 break

@@ -341,7 +341,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
         ctx.AddExtension("SPV_KHR_shader_draw_parameters");
         ctx.AddCapability(spv::Capability::DrawParameters);
     }
-    if (stage == SwStage::Geometry) {
+    if (stage == SwStage::Geometry && !ctx.GsEmulated()) {
         ctx.AddCapability(spv::Capability::Geometry);
     }
     if (info.hw_stage == HwStage::Fragment) {
@@ -382,7 +382,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     } else if (stage == SwStage::Geometry && info.stores.GetAny(IR::Attribute::ViewportIndex)) {
         ctx.AddCapability(spv::Capability::MultiViewport);
     }
-    if (info.uses_dma || ctx.VertexMotion()) {
+    if (info.uses_dma || ctx.VertexMotion() || ctx.GsEmulated() || ctx.EsEmulated()) {
         ctx.AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         ctx.AddExtension("SPV_KHR_physical_storage_buffer");
     }
@@ -452,6 +452,10 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         }
         break;
     case SwStage::Geometry:
+        if (ctx.GsEmulated()) {
+            execution_model = spv::ExecutionModel::Vertex;
+            break;
+        }
         execution_model = spv::ExecutionModel::Geometry;
         ctx.AddExecutionMode(main, GetInputPrimitiveType(ctx.runtime_info.hw.gs.in_primitive));
         ctx.AddExecutionMode(main, GetOutputPrimitiveType(ctx.runtime_info.hw.gs.out_primitive[0]));

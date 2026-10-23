@@ -98,6 +98,13 @@ void UniqueBuffer::Destroy() {
 void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
                           VmaAllocationInfo* out_alloc_info) {
     const bool with_bda = bool(buffer_ci.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress);
+#ifdef __APPLE__
+    // No sparse binding on Metal: buffer cache arenas are ordinary device-local buffers
+    // (BufferCache::DENSE_ARENAS).
+    if (mem_type == MemoryType::Sparse) {
+        mem_type = MemoryType::DeviceLocal;
+    }
+#endif
     if (mem_type != MemoryType::Sparse) {
         const VmaAllocationCreateFlags bda_flag =
             with_bda ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;

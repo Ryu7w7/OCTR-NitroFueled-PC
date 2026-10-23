@@ -132,6 +132,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
     case HwStage::Export:
         BuildCommon(regs.es_program);
         info.hw.es.vertex_data_size = regs.vgt_esgs_ring_itemsize;
+        info.hw.es.emulate_store = sel.gs_emulation == 1;
         break;
     case HwStage::Geometry: {
         BuildCommon(regs.gs_program);
@@ -166,6 +167,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         const auto params_vc = AmdGpu::GetParams(regs.vs_program);
         info.hw.gs.vs_copy = params_vc.code;
         info.hw.gs.vs_copy_hash = params_vc.hash;
+        info.hw.gs.emulate_as_vertex = sel.gs_emulation == 2;
         DumpShader(info.hw.gs.vs_copy, info.hw.gs.vs_copy_hash, Shader::HwStage::Vertex, 0,
                    "copy.bin");
         break;
@@ -342,6 +344,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    gs_emulation = std::make_unique<GsEmulationBuffers>(instance);
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -519,6 +522,13 @@ void NoteDrawTarget(const AmdGpu::Regs& regs) {
     }
 }
 } // namespace
+
+const GraphicsPipeline* PipelineCache::GetGsExportPipeline(const DrawIndirectParams params) {
+    sel.gs_emulation = 1;
+    const auto* pipeline = GetGraphicsPipeline(params, nullptr, false);
+    sel.gs_emulation = 0;
+    return pipeline;
+}
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared,
@@ -896,6 +906,23 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         }
     }
 
+    // bbport: an emulated geometry shader's export pass draws nothing (rasterizer discard): no
+    // attachments, so its pipeline matches the attachment-less pass it is recorded in
+    // (RecordGsExportPass). With the draw's targets Metal saw a depth format without a depth
+    // texture, and big fur draws lost the device.
+    if (key.gs_emulation == 1) {
+        key.num_color_attachments = 0;
+        key.mrt_mask = 0;
+        key.color_buffers = {};
+        key.blend_controls = {};
+        key.write_masks = {};
+        key.color_samples = {};
+        key.cb_shader_mask = {};
+        key.z_format = AmdGpu::DepthBuffer::ZFormat::Invalid;
+        key.stencil_format = AmdGpu::DepthBuffer::StencilFormat::Invalid;
+        key.num_samples = 1;
+        key.depth_samples = 1;
+    }
     return true;
 }
 
@@ -962,8 +989,43 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     switch (regs.stage_enable.raw) {
     case AmdGpu::ShaderStageEnable::VgtStages::EsGs:
         if (!instance.IsGeometryStageSupported()) {
-            LOG_WARNING(Render_Vulkan, "Geometry shader stage unsupported, skipping");
-            return false;
+            // bbport: emulated in two draws (vk_gs_emulation.cpp). The expansion pass by default
+            // (the draw's own pipeline), the export pass when the selection asks for it.
+            static const bool emulation = [] {
+                const char* env = std::getenv("BB_GS_EMULATION");
+                return !env || env[0] != '0';
+            }();
+            if (!emulation || !gs_emulation->Enabled() || regs.vgt_gs_mode.onchip ||
+                regs.vgt_strmout_config.raw ||
+                regs.primitive_type != AmdGpu::PrimitiveType::TriangleList ||
+                regs.vgt_gs_instance_cnt.IsEnabled()) {
+                LOG_WARNING(Render_Vulkan, "Geometry shader stage unsupported, skipping");
+                return false;
+            }
+            if (GeometryEmitsNothing(regs)) {
+                return false;
+            }
+            const u32 requested = sel.gs_emulation;
+            sel.gs_emulation = requested ? requested : 2u;
+            key.gs_emulation = sel.gs_emulation;
+            bool bound;
+            if (key.gs_emulation == 1) {
+                // No fragment stage: its inputs are the geometry stage's outputs. The export
+                // stage's resources start at binding 0 then (the layout has only them).
+                const u32 fs = static_cast<u32>(SwStage::Fragment);
+                sel.infos[fs] = nullptr;
+                sel.modules[fs] = nullptr;
+                key.stage_hashes[fs] = 0;
+                binding = {};
+                bound = bind_stage(HwStage::Export, SwStage::Vertex);
+            } else {
+                bound = bind_stage(HwStage::Geometry, SwStage::Geometry);
+            }
+            sel.gs_emulation = requested;
+            if (!bound) {
+                return false;
+            }
+            break;
         }
         if (regs.vgt_gs_mode.onchip || regs.vgt_strmout_config.raw) {
             LOG_WARNING(Render_Vulkan, "Geometry shader features unsupported, skipping");
@@ -1056,6 +1118,13 @@ bool PipelineCache::RefreshComputeKey() {
     return true;
 }
 
+// bbport: emulated geometry shader stages embed this session's buffer addresses
+// (Shader::GsEmulation): never saved to the shader cache.
+static bool IsGsEmulationStage(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info) {
+    return (info.hw_stage == Shader::HwStage::Export && runtime_info.hw.es.emulate_store) ||
+           (info.hw_stage == Shader::HwStage::Geometry && runtime_info.hw.gs.emulate_as_vertex);
+}
+
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
                                               Shader::Backend::Bindings& binding) {
@@ -1081,7 +1150,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    if (!IsGsEmulationStage(info, runtime_info)) {
+        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    }
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
@@ -1146,7 +1217,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto spec = Shader::StageSpecialization(new_program->info, runtime_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
 
-        RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        if (!IsGsEmulationStage(new_program->info, runtime_info)) {
+            RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+        }
         new_program->AddPermut(module, std::move(spec));
         new_program->info_template = std::make_unique<Shader::Info>(new_program->info);
         Program* program = new_program.get();
@@ -1187,7 +1260,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        if (!IsGsEmulationStage(new_info, runtime_info)) {
+            RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        }
         std::unique_lock lk{programs_mutex};
         program->AddPermut(module, std::move(spec));
     } else {

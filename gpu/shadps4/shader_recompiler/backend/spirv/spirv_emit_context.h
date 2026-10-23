@@ -265,6 +265,17 @@ public:
     [[nodiscard]] bool FragmentMotion() const {
         return sw_stage == SwStage::Fragment && runtime_info.hw.fs.motion_vectors;
     }
+    // bbport: emulated geometry shader stages (runtime_info.h, GsEmulation;
+    // emit_spirv_gs_emulation.cpp).
+    [[nodiscard]] bool GsEmulated() const {
+        return sw_stage == SwStage::Geometry && runtime_info.hw.gs.emulate_as_vertex;
+    }
+    [[nodiscard]] bool EsEmulated() const {
+        return hw_stage == HwStage::Export && runtime_info.hw.es.emulate_store;
+    }
+    Id gs_emu_counter{}; ///< Private u32: vertices emitted so far
+    Id gs_emu_slot{};    ///< the output vertex slot of this invocation
+    std::array<Id, 3> gs_emu_positions{};
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};

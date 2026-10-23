@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_guest_hooks.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__) // macOS: the same diagnostics stay off
 // SacredFire (Windows): the guest code hooks belong to the PC memory model (BB_GUEST_IN_PLACE),
 // which needs dma-buf guest memory: Linux only.
 namespace BbGuestHooks {

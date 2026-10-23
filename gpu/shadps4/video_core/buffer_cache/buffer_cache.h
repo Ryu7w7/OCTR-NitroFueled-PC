@@ -68,7 +68,15 @@ class BufferCache {
     // bbport: arena pages are 4 GiB unless the driver's buffer size limit is lower (AMD's
     // Windows driver: 2 GiB); an arena spans up to two pages, so they shrink to half the limit.
     static constexpr u64 MAX_ARENA_PAGE_BITS = 32;
+#ifdef __APPLE__
+    // macOS: no Metal driver has sparse binding, so arenas are ordinary buffers backed in full
+    // (DENSE_ARENAS): 128 MiB pages keep the memory of the pages the game touches low.
+    static constexpr u64 MIN_ARENA_PAGE_BITS = 27;
+    static constexpr bool DENSE_ARENAS = true;
+#else
     static constexpr u64 MIN_ARENA_PAGE_BITS = 30;
+    static constexpr bool DENSE_ARENAS = false;
+#endif
     static constexpr u64 MAX_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - MIN_ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
 

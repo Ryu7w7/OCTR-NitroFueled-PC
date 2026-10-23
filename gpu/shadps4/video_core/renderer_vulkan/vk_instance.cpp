@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstddef>
+#include <type_traits>
 #include <cstdio>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -231,6 +233,45 @@ std::string Instance::GetDriverVersionName() {
     return GetReadableVersion(version);
 }
 
+#ifdef __APPLE__
+namespace {
+// SacredFire (macOS): MoltenVK exposes some extensions with only part of their features. A device
+// created with a feature the driver lacks fails (VK_ERROR_FEATURE_NOT_PRESENT), so every feature
+// structure in the device chain is narrowed to what the driver reports, and each feature turned
+// off is logged. Feature structures hold only VkBool32 members after sType and pNext.
+template <typename T>
+void ClampFeatureStruct(vk::PhysicalDevice physical_device, VkBaseOutStructure* node) {
+    T supported{};
+    if constexpr (std::is_same_v<T, vk::PhysicalDeviceFeatures2>) {
+        supported.features = physical_device.getFeatures();
+    } else {
+        supported = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, T>().template get<T>();
+    }
+    constexpr std::size_t header = offsetof(VkBaseOutStructure, pNext) + sizeof(void*);
+    constexpr std::size_t count = (sizeof(T) - header) / sizeof(VkBool32);
+    auto* requested = reinterpret_cast<VkBool32*>(reinterpret_cast<char*>(node) + header);
+    const auto* available =
+        reinterpret_cast<const VkBool32*>(reinterpret_cast<const char*>(&supported) + header);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (requested[i] && !available[i]) {
+            LOG_WARNING(Render_Vulkan, "{} feature #{} is not supported by the driver: disabled",
+                        vk::to_string(T::structureType), i);
+            requested[i] = VK_FALSE;
+        }
+    }
+}
+template <typename... Ts>
+void ClampFeatures(vk::PhysicalDevice physical_device, const void* first) {
+    for (auto* node = static_cast<VkBaseOutStructure*>(const_cast<void*>(first)); node; node = node->pNext) {
+        ((node->sType == static_cast<VkStructureType>(Ts::structureType)
+              ? ClampFeatureStruct<Ts>(physical_device, node)
+              : void()),
+         ...);
+    }
+}
+} // namespace
+#endif
+
 bool Instance::CreateDevice() {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
@@ -280,6 +321,12 @@ bool Instance::CreateDevice() {
         return false;
     };
 
+#ifdef __APPLE__
+    // SacredFire (macOS): a device that exposes VK_KHR_portability_subset (MoltenVK) must have
+    // it enabled. Without geometry shaders (Metal has none) the fur draws are skipped
+    // (vk_pipeline_cache.cpp, docs/sacredfire/06-fur.md).
+    add_extension("VK_KHR_portability_subset");
+#endif
     // Required
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -292,12 +339,28 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+#ifdef __APPLE__
+    // SacredFire (macOS): MoltenVK exposes VK_EXT_robustness2 with robustImageAccess2 only
+    // (no robustBufferAccess2, no nullDescriptor, observed on an M2 Pro). The device enables what
+    // the driver has (CreateDevice below); out-of-bounds buffer reads fall back to the core
+    // robustBufferAccess.
+    if (!robustness2_features.robustBufferAccess2 || !robustness2_features.robustImageAccess2 ||
+        !robustness2_features.nullDescriptor) {
+        LOG_WARNING(Render_Vulkan,
+                    "robustness2 without some features (robustBufferAccess2={}, robustImageAccess2={}, "
+                    "nullDescriptor={}): continuing without them",
+                    bool(robustness2_features.robustBufferAccess2),
+                    bool(robustness2_features.robustImageAccess2),
+                    bool(robustness2_features.nullDescriptor));
+    }
+#else
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
                "Required Vulkan feature unavailable: robustBufferAccess2");
     ASSERT_MSG(robustness2_features.robustImageAccess2,
                "Required Vulkan feature unavailable: robustImageAccess2");
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
+#endif
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
@@ -572,9 +635,16 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
+#ifdef __APPLE__
+            // SacredFire (macOS): only what the driver has (MoltenVK lacks two of the three).
+            .robustBufferAccess2 = robustness2_features.robustBufferAccess2,
+            .robustImageAccess2 = robustness2_features.robustImageAccess2,
+            .nullDescriptor = robustness2_features.nullDescriptor,
+#else
             .robustBufferAccess2 = true,
             .robustImageAccess2 = true,
             .nullDescriptor = true,
+#endif
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
             .vertexInputDynamicState = true,
@@ -720,6 +790,32 @@ bool Instance::CreateDevice() {
     if (!device_fault) {
         device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
+#ifdef __APPLE__
+    ClampFeatures<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
+                  vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
+                  vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT,
+                  vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT,
+                  vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
+                  vk::PhysicalDeviceCooperativeMatrixFeaturesKHR,
+                  vk::PhysicalDeviceCustomBorderColorFeaturesEXT,
+                  vk::PhysicalDeviceDepthClipControlFeaturesEXT,
+                  vk::PhysicalDeviceDepthClipEnableFeaturesEXT,
+                  vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
+                  vk::PhysicalDeviceFaultFeaturesEXT,
+                  vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
+                  vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                  vk::PhysicalDeviceImageViewMinLodFeaturesEXT,
+                  vk::PhysicalDeviceMaintenance5FeaturesKHR, vk::PhysicalDeviceMaintenance8FeaturesKHR,
+                  vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
+                  vk::PhysicalDeviceProvokingVertexFeaturesEXT,
+                  vk::PhysicalDeviceRobustness2FeaturesEXT,
+                  vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
+                  vk::PhysicalDeviceShaderClockFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT,
+                  vk::PhysicalDeviceVertexAttributeDivisorFeatures,
+                  vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT,
+                  vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>(
+        physical_device, device_chain.get().pNext);
+#endif
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));

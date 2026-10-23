@@ -39,6 +39,18 @@ asm(".section .rdata,\"dr\"\n"
     ".global bb_font_ttf_end\n"
     "bb_font_ttf_end:\n"
     ".text\n");
+#elif defined(__APPLE__)
+// Mach-O: read-only data in __TEXT,__const, C symbols with a leading underscore.
+asm(".section __TEXT,__const\n"
+    ".p2align 4\n"
+    ".private_extern _bb_font_ttf\n"
+    ".globl _bb_font_ttf\n"
+    "_bb_font_ttf:\n"
+    ".incbin \"" BB_FONT_PATH "\"\n"
+    ".private_extern _bb_font_ttf_end\n"
+    ".globl _bb_font_ttf_end\n"
+    "_bb_font_ttf_end:\n"
+    ".text\n");
 #else
 asm(".section .rodata\n"
     ".balign 16\n"

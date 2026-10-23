@@ -93,6 +93,18 @@ struct MotionVectors {
     static constexpr u32 FlagLoad = 2;
 };
 
+/// bbport (macOS, no geometry shader stage): a GS draw runs as two draws. The export stage stores
+/// each vertex (position, then its ESGS ring vec4s) into `data_address`; the geometry stage runs as a
+/// vertex shader, one invocation per output vertex slot: it loads its primitive's vertices back and
+/// returns at the EmitVertex of its slot (vk_gs_emulation.cpp). Per-draw parameters (two u32x4, by
+/// the push constant motion_param): data base (vec4s), entry bias of an index value, index size
+/// (0, 2, 4), slots per primitive; index address low, high, vec4s per vertex, entry bias of a
+/// vertex index.
+struct GsEmulation {
+    static inline u64 params_address = 0;
+    static inline u64 data_address = 0;
+};
+
 struct HwLocalRuntimeInfo {
     u32 ls_stride;
 
@@ -101,6 +113,7 @@ struct HwLocalRuntimeInfo {
 
 struct HwExportRuntimeInfo {
     u32 vertex_data_size;
+    bool emulate_store{}; ///< bbport: stores its outputs for an emulated GS (GsEmulation)
 
     bool operator==(const HwExportRuntimeInfo& other) const noexcept = default;
 };
@@ -167,6 +180,7 @@ struct HwGeometryRuntimeInfo {
     AmdGpu::GsScenario mode;
     std::span<const u32> vs_copy;
     u64 vs_copy_hash;
+    bool emulate_as_vertex{}; ///< bbport: runs as a vertex shader (GsEmulation)
 
     // sacredfire: every field the recompiler reads takes part. The ESGS item size
     // (in_vertex_data_size) decides which input vertex a ring slot belongs to
@@ -182,7 +196,7 @@ struct HwGeometryRuntimeInfo {
                out_vertex_data_size == other.out_vertex_data_size &&
                in_primitive == other.in_primitive &&
                std::ranges::equal(out_primitive, other.out_primitive) && mode == other.mode &&
-               vs_copy_hash == other.vs_copy_hash;
+               vs_copy_hash == other.vs_copy_hash && emulate_as_vertex == other.emulate_as_vertex;
     }
 };
 

@@ -13,7 +13,11 @@
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/mman.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h> // <ucontext.h> needs _XOPEN_SOURCE on macOS
+#else
 #include <ucontext.h>
+#endif
 #endif
 #include <unistd.h>
 
@@ -278,8 +282,8 @@ void AskForReport() {
 }
 
 bool ProtectCopies() {
-#ifdef _WIN32
-    return false; // SacredFire (Windows): BB_COPY_PROTECT uses mprotect and SIGSEGV (Linux only)
+#if defined(_WIN32) || defined(__APPLE__)
+    return false; // SacredFire (Windows, macOS): BB_COPY_PROTECT uses mprotect and SIGSEGV (Linux only)
 #endif
     static const bool enabled = [] {
         const char* env = std::getenv("BB_COPY_PROTECT");
@@ -337,7 +341,7 @@ void ProtectCopy(std::uint64_t seq, const void* storage, std::size_t bytes) {
 }
 
 bool OnFault(void* ucontext, std::uint64_t address) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     (void)ucontext;
     (void)address;
     return false;

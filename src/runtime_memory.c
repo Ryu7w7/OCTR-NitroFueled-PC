@@ -40,7 +40,16 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+#ifdef __APPLE__
+/* Under Rosetta 2, 0xfc0000000..0x7000000000 is already reserved (PROT_NONE) before main runs and
+ * MAP_FIXED over it crashed Rosetta; 0x7000000000..USER_MAX is free (tools/macos-smoke, M2 Pro,
+ * macOS 26.2). The guest user range starts there; host-owned low memory ends below the reserve. */
+#define USER_MIN UINT64_C(0x7000000000)
+#define LOW_MAX UINT64_C(0x0fc0000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#define LOW_MAX USER_MIN
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
@@ -307,6 +316,7 @@ static int pool(void) {
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (pool_fd>=0) return 0;
+    runtime_memory_reserve();
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
     if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
@@ -389,6 +399,17 @@ static void *map_phys(uintptr_t address, uint64_t size, int prot, uint64_t phys)
     }
     return (void *)address;
 }
+#ifdef __APPLE__
+/* No fallocate on macOS: released shared memory is cleared through the backing view instead of
+ * punched out (the pages stay resident until the process ends). */
+#define FALLOC_FL_KEEP_SIZE 1
+#define FALLOC_FL_PUNCH_HOLE 2
+static int fallocate(int fd, int mode, off_t offset, off_t length) {
+    (void)fd; (void)mode;
+    memset(backing_base+offset,0,(size_t)length);
+    return 0;
+}
+#endif
 /* Returns released physical memory to zero: hole punching in the memfd, a clear in a chunk. */
 static void zero_phys(uint64_t phys, uint64_t size) {
     for (uint64_t done=0;done<size;) {
@@ -412,14 +433,33 @@ static void zero_phys(uint64_t phys, uint64_t size) {
         done+=n;
     }
 }
+#ifdef __APPLE__
+/* The whole guest user range is claimed once, PROT_NONE, before the GPU driver or the heap can
+ * place anything there (compat_mmap_noreplace fails rather than overwrite). Later MAP_FIXED
+ * mappings land on this claim only, and unmapping puts the placeholder back (host_unmap), so
+ * a released guest range never becomes a hole the host allocator could reuse. */
+void runtime_memory_reserve(void) {
+    static int reserved;
+    if (reserved) return;
+    if (compat_mmap_noreplace((void *)(uintptr_t)USER_MIN,USER_MAX-USER_MIN,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0)==MAP_FAILED) {
+        fprintf(stderr,"STOP: the guest range %#" PRIx64 "..%#" PRIx64 " is not free (%s)\n",USER_MIN,USER_MAX,strerror(errno));
+        exit(21);
+    }
+    reserved=1;
+}
+static int host_unmap(uintptr_t address, uint64_t size) {
+    return mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_FIXED,-1,0)==MAP_FAILED ? -1 : 0;
+}
+#else
 void runtime_memory_reserve(void) {}
+static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     void *mapped = !reserved
         ? map_phys(address,size,prot,phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
-static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) { zero_phys(phys,size); }
 #endif
@@ -853,7 +893,7 @@ uintptr_t runtime_memory_resolve(const char *name) {
     return RUNTIME_LOOKUP(exports,name);
 }
 /* Host-owned memory the guest can see (image, stacks, trampolines) lives in
- * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
+ * [LOW_MIN, LOW_MAX): PS4 code packs pointers into 40-bit fields. */
 #define LOW_MIN UINT64_C(0x0800000000)
 static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map(size_t size, int prot) {
@@ -869,8 +909,12 @@ void *runtime_low_map(size_t size, int prot) {
     return p;
 #else
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
+    while (low_next+size<=LOW_MAX) {
+#ifdef __APPLE__
+        p=compat_mmap_noreplace((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+#else
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+#endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }

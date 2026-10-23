@@ -34,7 +34,7 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 /* Deadlines are on WAIT_CLOCK, so the condition variable must use that clock too. winpthreads
  * condition variables accept only CLOCK_REALTIME (pthread_condattr_setclock(CLOCK_MONOTONIC)
  * fails with EINVAL), as in runtime_sema.c. */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__) /* macOS: no pthread_condattr_setclock */
 #define WAIT_CLOCK CLOCK_REALTIME
 #else
 #define WAIT_CLOCK CLOCK_MONOTONIC

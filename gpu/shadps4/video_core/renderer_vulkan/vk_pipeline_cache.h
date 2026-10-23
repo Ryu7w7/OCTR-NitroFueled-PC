@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
+#include "video_core/renderer_vulkan/vk_gs_emulation.h"
 
 template <>
 struct std::hash<vk::ShaderModule> {
@@ -94,6 +95,8 @@ struct PipelineSelection {
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
+    /// bbport: the pass of an emulated geometry shader draw to select (GraphicsPipelineKey).
+    u32 gs_emulation = 0;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
 };
@@ -131,6 +134,11 @@ public:
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
     /// `indirect`: the draw's arguments are in memory (bbport: never skipped while compiling).
+    GsEmulationBuffers& GetGsEmulation() {
+        return *gs_emulation;
+    }
+    /// bbport: the export pass pipeline of the current emulated geometry shader draw, or null.
+    const GraphicsPipeline* GetGsExportPipeline(const DrawIndirectParams params = {});
     const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
                                                 const PreparedDraw* prepared = nullptr,
                                                 bool indirect = false);
@@ -205,6 +213,9 @@ private:
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     PipelineSelection sel{}; ///< GPU thread selection state
+    /// bbport: buffers of emulated geometry shader draws (made before any shader compiles: the
+    /// shaders embed their addresses).
+    std::unique_ptr<GsEmulationBuffers> gs_emulation;
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
 

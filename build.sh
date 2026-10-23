@@ -34,6 +34,74 @@ MINGW*|MSYS*)
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
     exit 0
     ;;
+Darwin)
+    # macOS on Apple silicon: the game's code is x86-64, so the port is an x86-64 process under
+    # Rosetta 2 (docs/sacredfire/19-macos-apple-silicon.md). Homebrew has no x86-64 packages any
+    # more, so (packaging/macos/README.md):
+    #   build tools (cmake, ninja, pkg-config): the usual arm64 Homebrew, they run natively;
+    #   Vulkan (loader, MoltenVK, glslang): the LunarG Vulkan SDK, universal binaries;
+    #   the x86-64 libraries: vcpkg, triplet x64-osx, from packaging/macos/vcpkg.json.
+    # Like Windows, CMake links the executable; the GPU library is static.
+    for brew in /opt/homebrew/bin/brew /usr/local/bin/brew; do [[ -x $brew ]] && break; done
+    if [[ -x $brew ]]; then
+        eval "$("$brew" shellenv)"
+        missing=()
+        # nasm: vcpkg's FFmpeg for x86-64 assembles its x86 code with it.
+        for tool in cmake ninja pkg-config nasm; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+        if (( ${#missing[@]} )); then echo "Homebrew: installing ${missing[*]}"; "$brew" install "${missing[@]}"; fi
+        # gpu/CMakeLists.txt needs CMake 3.24+; an older Homebrew may still have an older one.
+        if ! printf '3.24\n%s\n' "$(cmake --version | awk 'NR==1{print $3}')" | sort -V -C; then
+            echo "Homebrew: upgrading cmake"; "$brew" upgrade cmake
+        fi
+    fi
+    for tool in cmake ninja pkg-config nasm git; do
+        command -v "$tool" >/dev/null || { echo "Need $tool (packaging/macos/README.md)." >&2; exit 1; }
+    done
+    if [[ -z ${VULKAN_SDK:-} ]]; then
+        for sdk in "$HOME"/VulkanSDK/*/macOS /Applications/VulkanSDK/*/macOS; do
+            [[ -f $sdk/lib/libvulkan.dylib ]] && VULKAN_SDK=$sdk
+        done
+    fi
+    [[ -n ${VULKAN_SDK:-} && -f $VULKAN_SDK/lib/libvulkan.dylib ]] ||
+        { echo 'Need the LunarG Vulkan SDK (packaging/macos/README.md) or VULKAN_SDK=<sdk>/macOS.' >&2; exit 1; }
+    export VULKAN_SDK PATH="$VULKAN_SDK/bin:$PATH"
+    vcpkg=${VCPKG_ROOT:-$PWD/out/vcpkg}
+    if [[ ! -x $vcpkg/vcpkg ]]; then
+        [[ -d $vcpkg/.git ]] || git clone -q --depth 1 https://github.com/microsoft/vcpkg.git "$vcpkg"
+        "$vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+    fi
+    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
+          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
+        git submodule update --init --recursive
+    fi
+    for patch in gpu/patches/fsr-vulkan/*.patch; do
+        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+        fi
+    done
+    # The first configure builds the vcpkg libraries for x86-64 (FFmpeg and SDL3 take a while).
+    echo "Configuring (macOS, x86-64; the first run builds the libraries with vcpkg: out/gpu-configure.log)"
+    if ! cmake -S gpu -B out/gpu-mac -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
+        -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+        -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-osx \
+        -DVCPKG_MANIFEST_DIR="$PWD/packaging/macos" -DVCPKG_INSTALLED_DIR="$PWD/out/vcpkg_installed" \
+        -DCMAKE_BUILD_RPATH="$VULKAN_SDK/lib" > out/gpu-configure.log 2>&1; then
+        tail -60 out/gpu-configure.log >&2
+        echo 'Configure failed (full log: out/gpu-configure.log)' >&2; exit 1
+    fi
+    echo "GPU library and loader (macOS, x86-64): LTO ${BB_LTO:-OFF}"
+    if ! ninja -C out/gpu-mac sacredfire bb-gpu-capabilities > out/gpu-build.log 2>&1; then
+        grep -v '^\[' out/gpu-build.log | tail -60 >&2
+        echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+    cp out/gpu-mac/sacredfire out/gpu-mac/bb-gpu-capabilities out/
+    printf '%s\n' "$VULKAN_SDK" > out/VULKAN_SDK
+    version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
+    printf '%s-macos\n' "$version" > out/VERSION
+    echo "Built $PWD/out/sacredfire ($(cat out/VERSION))"
+    exit 0
+    ;;
 esac
 if [[ -z ${CC:-} ]]; then
     CC=$(command -v cc || command -v gcc || true)

@@ -18,6 +18,7 @@
 #include "video_core/renderdoc.h"
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <chrono>
 #include <thread>
@@ -239,6 +240,34 @@ std::thread g_window_thread;
 std::mutex g_window_mutex;
 std::condition_variable g_window_cv;
 bool g_window_ready;
+
+// Creates the window, publishes it to bbgpu_init and pumps its events until it closes.
+[[noreturn]] void RunWindow(const std::string& title, s32 width, s32 height, const std::string& icon) {
+    auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+    if (!icon.empty()) {
+        window->SetIcon(icon.c_str());
+    }
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_window = window;
+        g_window_ready = true;
+    }
+    g_window_cv.notify_all();
+    while (window->PollEvents()) {
+        SDL_Delay(2);
+    }
+    LOG_INFO(Frontend, "Window closed by user");
+    std::fflush(stdout);
+    std::_Exit(0);
+}
+#ifdef __APPLE__
+struct WindowRequest {
+    std::string title;
+    s32 width, height;
+    std::string icon;
+};
+std::optional<WindowRequest> g_window_request;
+#endif
 } // namespace
 
 #ifdef BB_PGO_GENERATE
@@ -275,26 +304,21 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     const std::string title = config->title ? config->title : "SacredFire";
     const s32 width = config->width, height = config->height;
     const std::string icon = config->icon ? config->icon : "";
+#ifdef __APPLE__
+    // macOS: AppKit windows and their events belong to the main thread, which the loader keeps
+    // for bbgpu_main_thread_loop (probe.c runs the game on another thread). Hand it the request.
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_window_request = WindowRequest{title, width, height, icon};
+    }
+    g_window_cv.notify_all();
+#else
     g_window_thread = std::thread([title, width, height, icon] {
         Common::SetCurrentThreadName("bb:window");
-        auto* window = new Frontend::WindowSDL(width, height, title.c_str());
-        if (!icon.empty()) {
-            window->SetIcon(icon.c_str());
-        }
-        {
-            std::scoped_lock lock{g_window_mutex};
-            g_window = window;
-            g_window_ready = true;
-        }
-        g_window_cv.notify_all();
-        while (window->PollEvents()) {
-            SDL_Delay(2);
-        }
-        LOG_INFO(Frontend, "Window closed by user");
-        std::fflush(stdout);
-        std::_Exit(0);
+        RunWindow(title, width, height, icon);
     });
     g_window_thread.detach();
+#endif
     {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });
@@ -305,6 +329,21 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     Libraries::VideoOut::RegisterLib(&resolver);
     return 0;
 }
+
+#ifdef __APPLE__
+// macOS: the loader's main thread waits here for bbgpu_init's window request, then creates the
+// window and pumps its events (AppKit allows both on the main thread only). Never returns: the
+// process ends when the window closes or when the game thread exits.
+extern "C" void bbgpu_main_thread_loop(void) {
+    std::optional<WindowRequest> request;
+    {
+        std::unique_lock lock{g_window_mutex};
+        g_window_cv.wait(lock, [] { return g_window_request.has_value(); });
+        request = g_window_request;
+    }
+    RunWindow(request->title, request->width, request->height, request->icon);
+}
+#endif
 
 namespace Libraries::Kernel { void StartKernelService(); }
 extern "C" void bbgpu_register_kernel(void) {

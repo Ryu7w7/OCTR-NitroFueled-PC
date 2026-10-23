@@ -72,7 +72,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                          Bindings& binding_)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
       profile{profile_}, hw_stage{info.hw_stage}, sw_stage{info.sw_stage}, binding{binding_} {
-    if (info.uses_dma || VertexMotion()) {
+    if (info.uses_dma || VertexMotion() || GsEmulated() || EsEmulated()) {
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     } else {
         SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -504,6 +504,15 @@ void EmitContext::DefineInputs() {
         }
         break;
     case SwStage::Geometry: {
+        if (GsEmulated()) {
+            // Its inputs are loaded in the prologue (EmitGsEmulationPrologue).
+            vertex_index =
+                DefineVariable(U32[1], spv::BuiltIn::VertexIndex, spv::StorageClass::Input);
+            primitive_id = DefineVariable(U32[1], std::nullopt, spv::StorageClass::Private);
+            gs_emu_counter = DefineVariable(U32[1], std::nullopt, spv::StorageClass::Private,
+                                            u32_zero_value);
+            break;
+        }
         primitive_id = DefineVariable(U32[1], spv::BuiltIn::PrimitiveId, spv::StorageClass::Input);
         const auto gl_per_vertex =
             Name(TypeStruct(F32[4], F32[1], TypeArray(F32[1], ConstU32(1u))), "gl_PerVertex");
