@@ -26,7 +26,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+import trophies  # noqa: E402  (launcher/: the Achievements page's files and key)
 
 PORT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / "scripts"))
@@ -160,6 +162,9 @@ DEFAULTS = {
     "display": "",
     "hide_on_play": False,
     "close_on_play": False,
+    # The PS4 trophy key (32 hex digits, the one shadPS4 uses): the Achievements page decrypts
+    # the trophies' names with it (launcher/trophies.py).
+    "trophy_key": "",
 }
 DISCORD_APP_ID = "1560408801704943708"
 
@@ -405,6 +410,71 @@ def write_patch_config(enabled, disabled):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"enabled": enabled, "disabled": disabled}, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8")
+
+
+# --- mods: the packages in the data folder's mods/ (.pak, .zip with or without mod.json, folders,
+# .xml patches), as the Windows launcher's Mods tab. scripts/mod_library.py checks them into
+# mod-state/ and lists each one in patches/OCTR-Mod-Library.xml as a patch named "Mod: <id>",
+# switched in patches.json like any patch; run.sh (scripts/mod_launch.py) applies the enabled ones.
+
+MOD_PREFIX = "OCTR-Mod-Library.xml/Mod: "
+MOD_EXTENSIONS = (".pak", ".zip", ".xml")
+GAMEBANANA = "https://gamebanana.com/games/26138"  # the game's page, where the community shares mods
+MOD_GUIDE_URL = "https://github.com/Brony666/OCTR-NitroFueled-PC/blob/main/docs/mod-packaging.html"
+
+
+def mods_dir():
+    return Path(os.environ.get("BB_MODS_DIR") or DATA_DIR / "mods")
+
+
+def scan_mods():
+    """The packages in mods/ checked and listed for the game (the Windows launcher's
+    mod_packages.py --scan): {"entries": {id: item}, "messages": [problems]}."""
+    import mod_library
+    from mod_session import launch_lock
+    root = mods_dir()
+    with launch_lock(root.parent / "mod-state"):
+        return mod_library.scan(root, user_patches_dir())
+
+
+def remove_mod(ident, digest):
+    """Moves the mod to mod-state/removed (recoverable); its saves stay. Returns where it went."""
+    import mod_library
+    return mod_library.remove(mods_dir(), user_patches_dir(), ident, digest)
+
+
+def mod_entries(title=None, version=None):
+    """[(key, metadata)] of the scanned packages the game can use (the library's patch file)."""
+    import patches as patch_files
+    found = patch_files.external_patches(user_patches_dir(), version or patch_files.APP_VERSION,
+                                         title or patch_files.TITLE_ID)
+    return [(key, meta) for key, _path, meta in found if key.startswith(MOD_PREFIX)]
+
+
+def import_mods(sources):
+    """Copies files and folders into mods/ (never over one of the same name): (added, problems)."""
+    import shutil
+    root = mods_dir()
+    added, problems = 0, []
+    for source in sources:
+        source = Path(source)
+        if not source.is_dir() and source.suffix.lower() not in MOD_EXTENSIONS:
+            problems.append(tr("{}: add .pak, .zip, .xml files or a folder").format(source.name))
+            continue
+        target = root / source.name
+        if target.exists():
+            problems.append(tr("{}: a mod with that name already exists; it was not overwritten").format(source.name))
+            continue
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target, symlinks=False)
+            else:
+                shutil.copy2(source, target)
+            added += 1
+        except OSError as error:
+            problems.append(f"{source.name}: {error}")
+    return added, problems
 
 
 # --- saves: <user>/savedata/<user id>/CUSA13795/<slot> holds the game's files and <slot>.sce_sys
@@ -669,6 +739,57 @@ def write_announcement(answer):
     return text
 
 
+def png_texture(data):
+    """A PNG (bytes) as a Gdk.Texture; None when it cannot be read."""
+    if not data:
+        return None
+    try:
+        return Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+    except (GLib.Error, AttributeError, TypeError):
+        return None
+
+
+def file_texture(path):
+    try:
+        return Gdk.Texture.new_from_filename(str(path)) if Path(path).is_file() else None
+    except (GLib.Error, AttributeError, TypeError):
+        return None
+
+
+# The launcher's own look, over libadwaita's: a sidebar with the game's icon and a warm "nitro"
+# accent (the Windows launcher has its own, the game menu's blue). Works in light and dark.
+CSS = """
+.sf-sidebar { background-image: linear-gradient(170deg, alpha(#ff6b1a, 0.13), alpha(#ff6b1a, 0.0) 55%); }
+.sf-brand { margin: 6px 14px 10px 14px; padding: 10px; border-radius: 14px; background-color: alpha(currentColor, 0.05); }
+.sf-brand-icon { border-radius: 10px; }
+.sf-brand-title { font-weight: 800; font-size: 1.05em; }
+.sf-brand-sub { font-size: 0.85em; opacity: 0.65; }
+.sf-section { font-size: 0.72em; font-weight: 800; letter-spacing: 0.1em; opacity: 0.5; margin: 14px 12px 4px 12px; }
+.sf-nav { background: none; }
+.sf-nav row { border-radius: 10px; padding: 9px 12px; }
+.sf-nav row:selected { background-color: alpha(#ff6b1a, 0.17); box-shadow: inset 3px 0 #ff7a2e; }
+.sf-nav row:selected image { color: #ff7a2e; }
+.sf-nav row:selected label { font-weight: 700; }
+.sf-play { font-weight: 800; padding-left: 18px; padding-right: 18px; }
+.sf-trophy-card { padding: 14px; }
+.sf-trophy-banner { border-radius: 10px; }
+.sf-trophy-icon { border-radius: 8px; }
+.sf-trophy-locked { opacity: 0.38; }
+.sf-big { font-size: 1.3em; font-weight: 800; }
+"""
+
+
+def install_css():
+    provider = Gtk.CssProvider()
+    try:
+        provider.load_from_string(CSS)
+    except AttributeError:  # GTK before 4.12
+        provider.load_from_data(CSS, -1)
+    display = Gdk.Display.get_default()
+    if display is not None:
+        Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
 def flat_button(icon, tooltip, handler):
     button = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tooltip)
     button.add_css_class("flat")
@@ -781,7 +902,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         super().__init__(application=app, title=f"{TITLE} {port_version()}".rstrip())
         if install_game_icon(self.settings["game_dir"] if hasattr(self, "settings") else load_settings()["game_dir"]):
             self.set_icon_name(APP_ID)
-        self.set_default_size(720, 760)
+        self.set_default_size(980, 760)
+        self.set_size_request(360, 420)
         self.settings = load_settings()
         set_language(self.settings.get("ui_language", ""))
         self.ini, self.ini_lines = load_ini()
@@ -807,12 +929,18 @@ class LauncherWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(1, self.tick)
 
     def build(self):
+        install_css()
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         self.stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
+        # The pages are listed in the sidebar on the left; the header names the one shown.
+        self.page_title = Adw.WindowTitle(title=TITLE)
+        header.set_title_widget(self.page_title)
+        self.sidebar_button = Gtk.ToggleButton(icon_name="sidebar-show-symbolic", tooltip_text=tr("Pages"),
+                                               visible=False)
+        header.pack_start(self.sidebar_button)
         self.launch_button = Gtk.Button()
+        self.launch_button.add_css_class("sf-play")
         self.launch_button.connect("clicked", self.on_launch)
         header.pack_end(self.launch_button)
         toolbar.add_top_bar(header)
@@ -823,23 +951,118 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.toasts = Adw.ToastOverlay()
         self.toasts.set_child(self.stack)
         toolbar.set_content(self.toasts)
-        self.set_content(toolbar)
-        self.stack.add_titled_with_icon(self.build_settings_page(), "settings", tr("Settings"),
-                                        "preferences-system-symbolic")
-        self.stack.add_titled_with_icon(self.build_controls_page(), "controls", tr("Controls"),
-                                        "input-gaming-symbolic")
-        self.stack.add_titled_with_icon(self.build_patches_page(), "patches", tr("Patches"),
-                                        "applications-engineering-symbolic")
-        self.stack.add_titled_with_icon(self.build_saves_page(), "saves", tr("Saves"),
-                                        "document-save-symbolic")
-        self.stack.add_titled_with_icon(self.build_dlc_page(), "dlc", tr("DLC"),
-                                        "package-x-generic-symbolic")
-        self.stack.add_titled_with_icon(self.build_log_page(), "log", tr("Log"),
-                                        "utilities-terminal-symbolic")
+        # (name, title, icon, sidebar section)
+        self.pages = [("settings", tr("Settings"), "preferences-system-symbolic", tr("Game")),
+                      ("controls", tr("Controls"), "input-gaming-symbolic", tr("Game")),
+                      ("patches", tr("Patches"), "applications-engineering-symbolic", tr("Content")),
+                      ("mods", tr("Mods"), "application-x-addon-symbolic", tr("Content")),
+                      ("dlc", tr("DLC"), "package-x-generic-symbolic", tr("Content")),
+                      ("saves", tr("Saves"), "document-save-symbolic", tr("Progress")),
+                      ("trophies", tr("Achievements"), "starred-symbolic", tr("Progress")),
+                      ("log", tr("Log"), "utilities-terminal-symbolic", tr("Progress"))]
+        self.split = Adw.OverlaySplitView(sidebar=self.build_sidebar(), content=toolbar,
+                                          min_sidebar_width=200, max_sidebar_width=250)
+        self.sidebar_button.connect("toggled", lambda b: self.split.set_show_sidebar(b.get_active()))
+        self.split.connect("notify::show-sidebar",
+                           lambda *_: self.sidebar_button.set_active(self.split.get_show_sidebar()))
+        # A narrow window: the sidebar slides over the page, from the header's button.
+        if hasattr(Adw, "Breakpoint"):
+            narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 700sp"))
+            narrow.add_setter(self.split, "collapsed", True)
+            narrow.add_setter(self.sidebar_button, "visible", True)
+            self.add_breakpoint(narrow)
+        self.set_content(self.split)
+        builders = {"settings": self.build_settings_page, "controls": self.build_controls_page,
+                    "patches": self.build_patches_page, "mods": self.build_mods_page, "dlc": self.build_dlc_page,
+                    "saves": self.build_saves_page, "trophies": self.build_trophies_page, "log": self.build_log_page}
+        for name, title, icon, _section in self.pages:
+            self.stack.add_titled_with_icon(builders[name](), name, title, icon)
+        self.stack.connect("notify::visible-child-name", lambda *_: self.on_page_shown())
+        self.on_page_shown()
         self.update_launch_button()
         self.update_game_status()
         self.ask_nick_status()
         self.check_update()
+
+    # --- sidebar -----------------------------------------------------------------------------
+
+    def build_sidebar(self):
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False)
+        header.set_title_widget(Adw.WindowTitle(title=TITLE, subtitle=port_version()))
+        view.add_top_bar(header)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.add_css_class("sf-sidebar")
+        # The game: its own icon (sce_sys/icon0.png) and edition, once a folder is chosen.
+        brand = Gtk.Box(spacing=12)
+        brand.add_css_class("sf-brand")
+        self.brand_icon = Gtk.Image(pixel_size=52, icon_name="applications-games-symbolic")
+        self.brand_icon.add_css_class("sf-brand-icon")
+        brand.append(self.brand_icon)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        title = Gtk.Label(label="Crash Team Racing", xalign=0, wrap=True)
+        title.add_css_class("sf-brand-title")
+        text.append(title)
+        self.brand_sub = Gtk.Label(label="Nitro-Fueled", xalign=0, wrap=True)
+        self.brand_sub.add_css_class("sf-brand-sub")
+        text.append(self.brand_sub)
+        brand.append(text)
+        box.append(brand)
+        self.nav = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, margin_start=8, margin_end=8, margin_bottom=8)
+        self.nav.add_css_class("navigation-sidebar")
+        self.nav.add_css_class("sf-nav")
+        for _name, title_text, icon, _section in self.pages:
+            row_box = Gtk.Box(spacing=12)
+            row_box.append(Gtk.Image(icon_name=icon))
+            row_box.append(Gtk.Label(label=title_text, xalign=0, hexpand=True))
+            self.nav.append(Gtk.ListBoxRow(child=row_box))
+        self.nav.set_header_func(self.nav_header)
+        self.nav.connect("row-selected", self.on_nav_selected)
+        scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=self.nav)
+        box.append(scroller)
+        view.set_content(box)
+        return view
+
+    def nav_header(self, row, before):
+        section = self.pages[row.get_index()][3]
+        if before is not None and self.pages[before.get_index()][3] == section:
+            row.set_header(None)
+            return
+        label = Gtk.Label(label=section.upper(), xalign=0)
+        label.add_css_class("sf-section")
+        row.set_header(label)
+
+    def on_nav_selected(self, _box, row):
+        if row is None:
+            return
+        name = self.pages[row.get_index()][0]
+        if self.stack.get_visible_child_name() != name:
+            self.stack.set_visible_child_name(name)
+        if self.split.get_collapsed():
+            self.split.set_show_sidebar(False)
+
+    def on_page_shown(self):
+        """The sidebar and the header follow the page shown (also when the launcher switches it,
+        as to the log when the game starts)."""
+        name = self.stack.get_visible_child_name()
+        for index, page in enumerate(self.pages):
+            if page[0] == name:
+                self.page_title.set_title(page[1])
+                row = self.nav.get_row_at_index(index)
+                if self.nav.get_selected_row() is not row:
+                    self.nav.select_row(row)
+        if name == "trophies":
+            self.fill_trophies()
+
+    def update_brand(self, path, title):
+        texture = file_texture(Path(path) / "sce_sys" / "icon0.png") if self.settings["game_dir"] else None
+        if texture is not None:
+            self.brand_icon.set_from_paintable(texture)
+        else:
+            self.brand_icon.set_from_icon_name("applications-games-symbolic")
+        region = REGIONS.get(title, "")
+        self.brand_sub.set_label(f"Nitro-Fueled · {region} ({title})" if region and self.settings["game_dir"]
+                                 else "Nitro-Fueled")
 
     def update_launch_button(self):
         running = self.process is not None
@@ -1240,6 +1463,7 @@ class LauncherWindow(Adw.ApplicationWindow):
     def update_game_status(self):
         path = self.game_dir()
         title = set_game_title(path)
+        self.update_brand(path, title)
         if hasattr(self, "language_row") and title != self.language_title:
             # Another edition: its own languages (Spanish follows: Latin American / Spain's).
             current = combo_value(self.language_row)
@@ -1611,7 +1835,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             title=tr("Patches found"),
             description=tr("Your game: {} edition ({}). Its patches are shown.").format(REGIONS.get(title, ""), title))
         try:
-            found = patch_list(title, GAME_VERSION[0])
+            # Mod packages have their own page (Mods), with their own switches.
+            found = [p for p in patch_list(title, GAME_VERSION[0]) if not p[0].startswith(MOD_PREFIX)]
         except Exception as error:  # a broken file must not take the page down
             found = []
             self.patches_group.add(Adw.ActionRow(title=GLib.markup_escape_text(str(error))))
@@ -1711,6 +1936,194 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.fill_patches()
         self.confirm(tr("Remove {} from your patches folder?").format(path.name),
                      tr("Every patch in that file goes away."), tr("Remove"), remove)
+
+    # --- mods page ---------------------------------------------------------------------------
+
+    def build_mods_page(self):
+        page = Adw.PreferencesPage()
+        intro = Adw.PreferencesGroup(
+            title=tr("Mods"),
+            description=tr("Add .pak, .zip or .xml files, or a folder: they are copied into the mods folder and checked. "
+                           "Turn on the ones you want; they apply the next time you press Play, in a separate mod "
+                           "profile with its own saves (your normal saves are not touched)."))
+        intro.set_header_suffix(self.mods_header_buttons())
+        add_files = Adw.ActionRow(title=tr("Add mod files…"), subtitle=str(mods_dir()))
+        add_button = Gtk.Button(label=tr("Add files"), valign=Gtk.Align.CENTER)
+        add_button.add_css_class("suggested-action")
+        add_button.connect("clicked", lambda _b: self.on_add_mods(folder=False))
+        add_files.add_suffix(add_button)
+        folder_button = Gtk.Button(label=tr("Add folder"), valign=Gtk.Align.CENTER)
+        folder_button.connect("clicked", lambda _b: self.on_add_mods(folder=True))
+        add_files.add_suffix(folder_button)
+        intro.add(add_files)
+        self.mods_controls = [add_button, folder_button]
+        for title, url in ((tr("Find mods on GameBanana"), GAMEBANANA), (tr("Read the packaging guide"), None)):
+            row = Adw.ActionRow(title=title, activatable=True)
+            row.add_suffix(Gtk.Image(icon_name="web-browser-symbolic" if url else "help-about-symbolic"))
+            row.connect("activated", lambda _r, url=url: self.open_mod_link(url))
+            intro.add(row)
+        page.add(intro)
+        self.mods_page = page
+        self.mods_groups = []
+        self.mods_scan = None    # the last scan's result
+        self.mods_busy = False
+        self.fill_mods()
+        self.rescan_mods()
+        return page
+
+    def mods_header_buttons(self):
+        box = Gtk.Box(spacing=4)
+        self.mods_reload_button = flat_button("view-refresh-symbolic", tr("Reload mods"), lambda _b: self.rescan_mods())
+        box.append(self.mods_reload_button)
+        box.append(flat_button("folder-symbolic", tr("Open the mods folder"), lambda _b: open_folder(self, mods_dir())))
+        return box
+
+    def open_mod_link(self, url):
+        if url is None:  # the guide: the package's copy, else the repository's
+            local = PORT_DIR / "docs" / "mod-packaging.html"
+            url = local if local.is_file() else MOD_GUIDE_URL
+        open_external(url)
+
+    def rescan_mods(self):
+        """Checks the mods folder in the background (large .zip files take a moment)."""
+        if self.mods_busy or self.process is not None:
+            self.fill_mods()
+            return
+        self.mods_busy = True
+        self.fill_mods()
+
+        def work():
+            try:
+                return scan_mods()
+            except (ValueError, OSError) as error:
+                return {"entries": {}, "messages": [str(error)]}
+
+        def done(result):
+            self.mods_busy = False
+            self.mods_scan = result
+            self.fill_mods()
+            self.fill_patches()  # mods/*.xml are listed with the patches
+        self.in_thread(work, done)
+
+    def fill_mods(self):
+        for group in self.mods_groups:
+            self.mods_page.remove(group)
+        self.mods_groups = []
+        locked = self.process is not None
+        for widget in self.mods_controls + [self.mods_reload_button]:
+            widget.set_sensitive(not locked and not self.mods_busy)
+        title = GAME_TITLE[0]
+        group = Adw.PreferencesGroup(
+            title=tr("Your mods"),
+            description=tr("Close the game to change mods.") if locked else
+            tr("Your game: {} edition ({}).").format(REGIONS.get(title, ""), title))
+        if self.mods_busy:
+            row = Adw.ActionRow(title=tr("Checking the mods folder…"))
+            row.add_prefix(Gtk.Spinner(spinning=True))
+            group.add(row)
+        try:
+            found = mod_entries(title, GAME_VERSION[0])
+        except Exception as error:  # a broken library file must not take the page down
+            found = []
+            group.add(Adw.ActionRow(title=GLib.markup_escape_text(str(error))))
+        if not found and not self.mods_busy:
+            group.add(Adw.ActionRow(title=tr("No mods yet. Add some with the buttons above.")))
+        enabled, disabled = read_patch_config()
+        for key, meta in found:
+            group.add(self.mod_row(key, meta, key in enabled and key not in disabled, locked))
+        self.mods_groups.append(group)
+        messages = (self.mods_scan or {}).get("messages", [])
+        if messages:
+            problems = Adw.PreferencesGroup(title=tr("Mods that cannot be used"),
+                                            description=tr("Fix or remove them and press Reload."))
+            for message in messages:
+                row = Adw.ActionRow(title=GLib.markup_escape_text(message))
+                row.set_title_lines(0)
+                row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+                problems.add(row)
+            self.mods_groups.append(problems)
+        for g in self.mods_groups:
+            self.mods_page.add(g)
+
+    def mod_row(self, key, meta, on, locked):
+        ident = key[len(MOD_PREFIX):]
+        name = meta.get("ModName") or ident
+        details = [meta.get("Author", "")] + ([f"v{meta.get('PatchVer')}"] if meta.get("PatchVer") else [])
+        row = Adw.ExpanderRow(title=GLib.markup_escape_text(name),
+                              subtitle=GLib.markup_escape_text("  ·  ".join(d for d in details if d)))
+        switch = Gtk.Switch(active=on, valign=Gtk.Align.CENTER, sensitive=not locked)
+        switch.set_tooltip_text(tr("Disable mod") if on else tr("Enable mod"))
+        switch.connect("notify::active", lambda s, *_a: self.on_mod_toggled(key, s))
+        (row.add_suffix if hasattr(row, "add_suffix") else row.add_action)(switch)
+        description = Adw.ActionRow(title=GLib.markup_escape_text(meta.get("ModDescription") or
+                                                                  tr("The creator has not provided a description.")))
+        description.set_title_lines(0)
+        row.add_row(description)
+        source = Adw.ActionRow(title=tr("File"), subtitle=GLib.markup_escape_text("mods/" + meta.get("ModSource", "")))
+        if meta.get("ModVersions"):
+            source.set_subtitle(GLib.markup_escape_text(f"mods/{meta.get('ModSource', '')}\n{meta.get('ModVersions')}"))
+        remove = Gtk.Button(label=tr("Remove"), valign=Gtk.Align.CENTER, sensitive=not locked)
+        remove.add_css_class("destructive-action")
+        remove.set_tooltip_text(tr("Remove: keeps a recoverable copy and saves."))
+        remove.connect("clicked", lambda _b: self.confirm_remove_mod(ident, name, meta.get("ModHash", "")))
+        source.add_suffix(remove)
+        row.add_row(source)
+        return row
+
+    def on_mod_toggled(self, key, switch):
+        on = switch.get_active()
+        switch.set_tooltip_text(tr("Disable mod") if on else tr("Enable mod"))
+        self.on_patch_toggled(key, None, False, on)
+
+    def on_add_mods(self, folder):
+        dialog = Gtk.FileDialog(title=tr("Add mod folder") if folder else tr("Add mods or patches"), modal=True)
+        if not folder:
+            files = Gtk.FileFilter(name=tr("Mods (*.pak, *.zip, *.xml)"))
+            for extension in MOD_EXTENSIONS:
+                files.add_pattern("*" + extension)
+                files.add_pattern("*" + extension.upper())
+            filters = Gio.ListStore.new(Gtk.FileFilter)
+            filters.append(files)
+            dialog.set_filters(filters)
+
+        def done(dialog, result):
+            try:
+                if folder:
+                    chosen = [dialog.select_folder_finish(result)]
+                else:
+                    picked = dialog.open_multiple_finish(result)
+                    chosen = [picked.get_item(i) for i in range(picked.get_n_items())]
+            except GLib.Error:
+                return
+            added, problems = import_mods([c.get_path() for c in chosen if c and c.get_path()])
+            self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(
+                tr("Mods added: {}. Turn them on to play with them.").format(added) +
+                (" " + "; ".join(problems) if problems else "")), timeout=8))
+            if added:
+                self.rescan_mods()
+        if folder:
+            dialog.select_folder(self, None, done)
+        else:
+            dialog.open_multiple(self, None, done)
+
+    def confirm_remove_mod(self, ident, name, digest):
+        def remove():
+            def work():
+                try:
+                    return remove_mod(ident, digest), None
+                except (ValueError, OSError) as error:
+                    return None, str(error)
+
+            def done(result):
+                moved, error = result
+                self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(
+                    tr("Mod removed. The mod and saves have been kept.") if moved
+                    else tr("Could not remove the mod: {}").format(error)), timeout=8))
+                self.rescan_mods()
+            self.in_thread(work, done)
+        self.confirm(tr("Remove {}?").format(name),
+                     tr("It is moved to mod-state/removed in the data folder, where it can be recovered; its saves are kept."),
+                     tr("Remove"), remove)
 
     # --- saves page --------------------------------------------------------------------------
 
@@ -1945,6 +2358,248 @@ class LauncherWindow(Adw.ApplicationWindow):
                                             (". " + "; ".join(problems) if problems else ""), timeout=8))
             self.fill_dlc()
         dialog.open_multiple(self, None, done)
+
+    # --- achievements page ---------------------------------------------------------------------
+    # The game's trophies (launcher/trophies.py), as the Windows launcher's Achievements tab. They
+    # are recorded while you play either way; the list is shown once the player's PS4 trophy key
+    # (the one shadPS4 uses) is given or imported, as it decrypts their names.
+
+    GRADE_COLORS = {"P": "#5ec8ff", "G": "#e6b422", "S": "#9aa6b4", "B": "#c97a3f"}
+
+    @staticmethod
+    def grade_mark(grade):
+        """The grade's dot and name, as Pango markup."""
+        name = {"P": tr("Platinum"), "G": tr("Gold"), "S": tr("Silver"), "B": tr("Bronze")}[grade]
+        return f"<span foreground='{LauncherWindow.GRADE_COLORS[grade]}'>●</span> {GLib.markup_escape_text(name)}"
+
+    def build_trophies_page(self):
+        page = Adw.PreferencesPage()
+        self.trophies_page = page
+        self.trophies_groups = []
+        self.trophy_set = None
+        self.trophy_source = None
+        self.trophy_filter = "all"
+        self.trophy_stamp = None
+        return page
+
+    def current_trophy_source(self):
+        return (str(self.game_dir()) if self.settings["game_dir"] else "", str(self.user_dir()), GAME_TITLE[0],
+                combo_value(self.language_row), self.settings.get("trophy_key", ""))
+
+    def unlocked_stamp(self):
+        try:
+            return (self.trophy_set.folder / "unlocked.txt").stat().st_mtime_ns
+        except (OSError, AttributeError):
+            return None
+
+    def poll_trophies(self):
+        """While the page is shown: the game writes unlocked.txt as trophies unlock."""
+        if self.stack.get_visible_child_name() != "trophies" or self.trophy_set is None:
+            return
+        if self.current_trophy_source() != self.trophy_source or self.unlocked_stamp() != self.trophy_stamp:
+            self.fill_trophies()
+
+    def fill_trophies(self, reload=False):
+        source = self.current_trophy_source()
+        if reload or self.trophy_set is None or source != self.trophy_source:
+            self.trophy_source = source
+            self.trophy_set = trophies.load(*source)
+        self.trophy_stamp = self.unlocked_stamp()
+        self.trophy_set.refresh_unlocked()
+        for group in self.trophies_groups:
+            self.trophies_page.remove(group)
+        self.trophies_groups = []
+        t = self.trophy_set
+        if t.problem:
+            group = Adw.PreferencesGroup(title=tr("Achievements"))
+            row = Adw.ActionRow(title=tr("Choose the game folder in Settings first.") if t.problem == "no_game"
+                                else tr("This game has no trophy file (sce_sys/trophy/trophy00.trp)."))
+            row.add_prefix(Gtk.Image(icon_name="dialog-information-symbolic"))
+            group.add(row)
+            self.trophies_groups.append(group)
+        elif not t.names:
+            self.trophies_groups.append(self.trophy_key_group(t))
+        else:
+            self.trophies_groups += [self.trophy_summary_group(t), self.trophy_list_group(t)]
+        for group in self.trophies_groups:
+            self.trophies_page.add(group)
+
+    def trophy_key_group(self, t):
+        group = Adw.PreferencesGroup(
+            title=tr("Trophy key"),
+            description=tr("Trophies are recorded while you play. Their names and descriptions are encrypted in the game "
+                           "with the PS4's trophy key, which is not included: if you have it (the same one shadPS4 uses), "
+                           "paste or import it to see your achievements here."))
+        if t.key_problem:
+            row = Adw.ActionRow(title=tr("The trophy key does not decrypt this game: check it is your PS4's (32 hex digits).")
+                                if t.key_problem == "bad_key" else
+                                tr("The game folder has no NP communication ID (sce_sys/npbind.dat), needed to decrypt."))
+            row.set_title_lines(0)
+            row.add_css_class("error")
+            row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+            group.add(row)
+        entry = Adw.PasswordEntryRow(title=tr("Trophy key (32 hex digits)"))
+        save = Gtk.Button(label=tr("Save"), valign=Gtk.Align.CENTER)
+        save.add_css_class("suggested-action")
+        save.connect("clicked", lambda _b: self.set_trophy_key(entry.get_text(), entry))
+        entry.connect("entry-activated", lambda _e: self.set_trophy_key(entry.get_text(), entry))
+        entry.add_suffix(save)
+        group.add(entry)
+        shadps4 = Adw.ActionRow(title=tr("Import from shadPS4"),
+                                subtitle=tr("Reads the key shadPS4 keeps (keys.json in ~/.local/share/shadPS4 or its Flatpak)."))
+        import_button = Gtk.Button(label=tr("Import"), valign=Gtk.Align.CENTER)
+        import_button.connect("clicked", lambda _b: self.import_shadps4_key())
+        shadps4.add_suffix(import_button)
+        shadps4.add_suffix(flat_button("document-open-symbolic", tr("Choose shadPS4's keys.json or config.toml…"),
+                                       lambda _b: self.choose_key_file()))
+        group.add(shadps4)
+        return group
+
+    def set_trophy_key(self, text, entry=None):
+        if trophies.key_bytes(text) is None:
+            self.toasts.add_toast(Adw.Toast(title=tr("The key must be 32 hex digits.")))
+            return
+        if entry is not None:
+            entry.set_text("")
+        self.settings["trophy_key"] = text.strip()
+        save_settings(self.settings)
+        self.fill_trophies(reload=True)
+        if self.trophy_set.names:
+            self.toasts.add_toast(Adw.Toast(title=tr("Trophy key saved: your achievements are shown.")))
+
+    def import_shadps4_key(self):
+        key, _source = trophies.shadps4_key()
+        if not key:
+            self.toasts.add_toast(Adw.Toast(title=tr("shadPS4 has no trophy key saved (keys.json). Choose its file by hand."),
+                                            timeout=8))
+            return
+        self.set_trophy_key(key)
+
+    def choose_key_file(self):
+        dialog = Gtk.FileDialog(title=tr("shadPS4's keys.json or config.toml"), modal=True)
+        folders = [d for d in trophies.shadps4_dirs() if d.is_dir()]
+        if folders:
+            dialog.set_initial_folder(Gio.File.new_for_path(str(folders[0])))
+
+        def done(dialog, result):
+            try:
+                chosen = dialog.open_finish(result)
+            except GLib.Error:
+                return
+            key = trophies.key_from_file(chosen.get_path()) if chosen else ""
+            if key:
+                self.set_trophy_key(key)
+            else:
+                self.toasts.add_toast(Adw.Toast(title=tr("That file has no trophy key.")))
+        dialog.open(self, None, done)
+
+    def trophy_summary_group(self, t):
+        unlocked = sum(1 for x in t.trophies if x["unlocked"])
+        total = len(t.trophies)
+        points = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies)
+        earned = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies if x["unlocked"])
+        progress = earned / points if points else (unlocked / total if total else 0.0)
+        group = Adw.PreferencesGroup()
+        card = Gtk.Box(spacing=16)
+        card.add_css_class("card")
+        card.add_css_class("sf-trophy-card")
+        texture = png_texture(t.icon)
+        if texture is not None:
+            banner = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True,
+                                 width_request=144, height_request=80, valign=Gtk.Align.CENTER)
+            banner.add_css_class("sf-trophy-banner")
+            banner.set_overflow(Gtk.Overflow.HIDDEN)
+            card.append(banner)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True, valign=Gtk.Align.CENTER)
+        name = Gtk.Label(label=t.title_name or "Crash Team Racing Nitro-Fueled", xalign=0, wrap=True)
+        name.add_css_class("sf-big")
+        text.append(name)
+        text.append(Gtk.Label(label=tr("{} of {} trophies  ·  {} %").format(unlocked, total, round(progress * 100)), xalign=0))
+        text.append(Gtk.ProgressBar(fraction=progress))
+        grades = []
+        for grade in "PGSB":
+            have = [x for x in t.trophies if x["grade"] == grade]
+            if have:
+                grades.append(f"{self.grade_mark(grade)} {sum(1 for x in have if x['unlocked'])}/{len(have)}")
+        if grades:
+            text.append(Gtk.Label(label="    ".join(grades), use_markup=True, xalign=0, wrap=True))
+        card.append(text)
+        group.add(card)
+        return group
+
+    def trophy_list_group(self, t):
+        group = Adw.PreferencesGroup(
+            title=tr("Trophies"),
+            description=tr("They unlock as you play, as on a PS4; the platinum comes once all the others are."))
+        bar = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        filters = Gtk.Box()
+        filters.add_css_class("linked")
+        first = None
+        for value, label in (("all", tr("All")), ("unlocked", tr("Unlocked")), ("locked", tr("Locked"))):
+            button = Gtk.ToggleButton(label=label, active=self.trophy_filter == value)
+            if first is None:
+                first = button
+            else:
+                button.set_group(first)
+            button.connect("toggled", lambda b, v=value: b.get_active() and self.set_trophy_filter(v))
+            filters.append(button)
+        bar.append(filters)
+        bar.append(flat_button("folder-symbolic", tr("Open the trophies folder"), lambda _b: open_folder(self, t.folder)))
+        reset = flat_button("edit-undo-symbolic", tr("Lock every trophy again"), lambda _b: self.confirm_reset_trophies())
+        reset.set_sensitive(self.process is None and any(x["unlocked"] for x in t.trophies))
+        bar.append(reset)
+        group.set_header_suffix(bar)
+        # The latest unlocked first, then the rest in the game's order.
+        order = sorted(t.trophies, key=lambda x: (not x["unlocked"], -x["unlocked"], x["id"]))
+        shown = [x for x in order if self.trophy_filter == "all" or bool(x["unlocked"]) == (self.trophy_filter == "unlocked")]
+        if not shown:
+            group.add(Adw.ActionRow(title=tr("Nothing here yet.")))
+        for x in shown:
+            group.add(self.trophy_row(x))
+        return group
+
+    def trophy_row(self, x):
+        secret = x["hidden"] and not x["unlocked"]
+        name = tr("Hidden trophy") if secret else x["name"] or tr("Trophy #{}").format(x["id"])
+        detail = tr("Keep playing to find it.") if secret else x["detail"]
+        row = Adw.ActionRow(title=GLib.markup_escape_text(name), subtitle=GLib.markup_escape_text(detail))
+        row.set_subtitle_lines(0)
+        texture = None if secret else png_texture(x["icon"])
+        icon = Gtk.Image(pixel_size=56, valign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6)
+        if texture is not None:
+            icon.set_from_paintable(texture)
+        else:
+            icon.set_from_icon_name("dialog-question-symbolic")
+        icon.add_css_class("sf-trophy-icon")
+        if not x["unlocked"]:
+            icon.add_css_class("sf-trophy-locked")
+        row.add_prefix(icon)
+        state = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
+        if x["grade"] in self.GRADE_COLORS:
+            state.append(Gtk.Label(label=self.grade_mark(x["grade"]), use_markup=True, xalign=1))
+        if x["unlocked"] > 1:
+            when = Gtk.Label(label="✓ " + time.strftime("%d/%m/%Y %H:%M", time.localtime(x["unlocked"])), xalign=1)
+        else:
+            when = Gtk.Label(label="✓ " + tr("Unlocked") if x["unlocked"] else tr("Locked"), xalign=1)
+        when.add_css_class("success" if x["unlocked"] else "dim-label")
+        when.add_css_class("caption")
+        state.append(when)
+        row.add_suffix(state)
+        return row
+
+    def set_trophy_filter(self, value):
+        if value != self.trophy_filter:
+            self.trophy_filter = value
+            GLib.idle_add(lambda: self.fill_trophies() and False)  # not while the toggle is being changed
+
+    def confirm_reset_trophies(self):
+        def reset():
+            try:
+                trophies.reset_unlocked(self.trophy_set.folder / "unlocked.txt")
+            except OSError as error:
+                self.toasts.add_toast(Adw.Toast(title=tr("Could not reset: {}").format(error)))
+            self.fill_trophies()
+        self.confirm(tr("Lock every trophy again?"), tr("A copy is kept just in case."), tr("Reset"), reset)
 
     def inform(self, heading, body):
         """A message with a single OK."""
@@ -2253,6 +2908,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.on_discord_join(secret)
         self.poll_party()
         self.poll_announcement()
+        self.poll_trophies()
         status, error = self.presence.status()
         text = {discord_ipc.CONNECTED: tr("Connected to Discord."),
                 discord_ipc.NO_DISCORD: tr("Discord is not running; it connects on its own once you open it."),
@@ -2411,6 +3067,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.update_launch_button()
         self.stack.set_visible_child_name("log")
         self.fill_saves()  # locked while the game runs
+        self.fill_mods()
         if self.settings.get("hide_on_play"):
             self.set_visible(False)  # the application keeps running: the window is still its own
 
@@ -2459,6 +3116,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.update_launch_button()
         self.update_game_status()
         self.fill_saves()
+        self.fill_mods()
+        if self.trophy_set is not None:
+            self.fill_trophies()  # new unlocks, and Reset again
         self.append_log(tr("\n— the game exited (code {}) —\n").format(status))
         if self.settings.get("close_on_play") and status == 0:
             self.close()

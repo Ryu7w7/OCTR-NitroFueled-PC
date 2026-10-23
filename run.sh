@@ -70,6 +70,40 @@ export BB_GAME_PROFILE=${profile:-ctr}
 read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
 title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
+# The game executable (built here in a checkout): mod packages ask it what it supports.
+if [[ -n ${BB_PREBUILT:-} ]]; then
+    probe=${BB_PROBE:-bin/sacredfire}
+    version=$(cat VERSION 2>/dev/null || true)
+else
+    bash build.sh
+    probe=${BB_PROBE:-out/sacredfire}  # BB_PROBE: a wrapper (gdb) around it
+    version=$(cat out/VERSION 2>/dev/null || true)
+fi
+# Mod packages (the launcher's Mods page: .pak, .zip and folders in the data folder's mods/,
+# switched in patches.json), as run.py: scripts/mod_packages.py prepares a separate mod session
+# (its own bbport.ini, saves and patches, the mods' files redirected by the engine, never a game
+# copy) and its saves go back to the mod profile after a normal exit. Its library's patch file
+# goes to the data folder's patches/ (the package's is read-only). An in-game restart runs this
+# script again inside the game's process with the session's environment: it keeps the session,
+# and this first run finishes it.
+export BB_MOD_LIBRARY_DIR=${BB_MOD_LIBRARY_DIR:-$data/patches}
+mod_session_owner=0
+if [[ -z ${BB_MOD_SESSION:-} ]]; then
+    mod_env=$(mktemp "$out/mod-env.XXXXXX")
+    if ! "$PYTHON" scripts/mod_launch.py prepare --data "$data" --game "$game" --config "$BB_CONFIG" --env-file "$mod_env"; then
+        rm -f "$mod_env"
+        exit 1
+    fi
+    while IFS= read -r -d '' setting; do
+        case $setting in
+            @game=*) game=${setting#@game=} ;;
+            -*) unset "${setting#-}" ;;
+            *) export "$setting" ;;
+        esac
+    done < "$mod_env"
+    rm -f "$mod_env"
+    if [[ -n ${BB_MOD_SESSION:-} ]]; then mod_session_owner=1; fi
+fi
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
@@ -123,6 +157,18 @@ while IFS='=' read -r key value; do
     esac
 done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CONFIG" \
              --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
+# A mod session (above): the packages' archive entries over those archive patches, and their
+# executable patches checked against each other and the layout, as run.py.
+strict_overlap=()
+if [[ -n ${BB_MOD_SESSION:-} ]]; then
+    if [[ -n ${BB_MOD_ARCHIVE_PLAN:-} ]]; then
+        archives=$("$PYTHON" scripts/mod_launch.py overlays --game "$game" --out "$out") || exit 1
+        if [[ -n $archives ]]; then export BB_ARCHIVE_PATCHES=$archives; else unset BB_ARCHIVE_PATCHES; fi
+    fi
+    "$PYTHON" scripts/mod_launch.py preflight --game "$game" --config "$BB_CONFIG" --settings "$settings" \
+        --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
+    strict_overlap=(--strict-overlap)
+fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
@@ -130,7 +176,7 @@ done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CO
 # in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
 "$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
-    "${layout_patches[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
+    "${layout_patches[@]}" "${strict_overlap[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
     --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$settings"
 patch_args=(--patches "$out/patches.bin")
 # bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
@@ -255,14 +301,6 @@ export BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-1} BB_GPU_WRITE_TWINS_MAX=${BB_G
 if [[ -z ${BB_VBLANK_HZ:-} ]]; then
     case $fps in uncap) export BB_VBLANK_HZ=480 ;; 90) export BB_VBLANK_HZ=90 ;; *) export BB_VBLANK_HZ=60 ;; esac
 fi
-if [[ -n ${BB_PREBUILT:-} ]]; then
-    probe=${BB_PROBE:-bin/sacredfire}
-    version=$(cat VERSION 2>/dev/null || true)
-else
-    bash build.sh
-    probe=${BB_PROBE:-out/sacredfire}  # BB_PROBE: a wrapper (gdb) around it
-    version=$(cat out/VERSION 2>/dev/null || true)
-fi
 echo "SacredFire ${version:-unknown version}"
 # The user directory (saves, shader cache) must exist and be named to the GPU library before the
 # game starts: its path table is built when the library loads (before the port hands it the
@@ -271,7 +309,7 @@ echo "SacredFire ${version:-unknown version}"
 export BB_GPU_USER_DIR=${BB_USER_DIR:-$data/user}
 mkdir -p "$BB_GPU_USER_DIR"
 probe_args=("$out/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
-if [[ -n ${mod_game:-} ]]; then
+if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     "$probe" "${probe_args[@]}" &
     mod_pid=$!
     trap 'kill -TERM "$mod_pid" 2>/dev/null || true' TERM INT
@@ -279,6 +317,10 @@ if [[ -n ${mod_game:-} ]]; then
     wait "$mod_pid" || mod_status=$?
     # An interrupted wait must finish the child before removing its mounted view.
     if kill -0 "$mod_pid" 2>/dev/null; then wait "$mod_pid" || mod_status=$?; fi
+    if [[ $mod_session_owner == 1 ]]; then
+        "$PYTHON" scripts/mod_launch.py finish --session "$BB_MOD_SESSION" --state "$BB_MOD_STATE" --code "$mod_status" ||
+            echo "Mods: the session's saves could not be copied back; they are kept in $BB_MOD_SESSION" >&2
+    fi
     exit "$mod_status"
 fi
 exec "$probe" "${probe_args[@]}"
