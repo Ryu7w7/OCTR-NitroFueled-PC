@@ -462,6 +462,16 @@ def import_mods(sources):
             problems.append(tr("{}: add .pak, .zip, .xml files or a folder").format(source.name))
             continue
         target = root / source.name
+        # The mods folder itself, or one holding it, would be copied into itself without end
+        # (issue #70); one already inside it is in the library.
+        if source.is_dir():
+            real, mods = source.resolve(), root.resolve()
+            if mods == real or mods.is_relative_to(real):
+                problems.append(tr("{}: this is the mods folder (or holds it); add the mod's own folder").format(source.name))
+                continue
+            if real.is_relative_to(mods):
+                problems.append(tr("{}: already in the mods folder").format(source.name))
+                continue
         if target.exists():
             problems.append(tr("{}: a mod with that name already exists; it was not overwritten").format(source.name))
             continue

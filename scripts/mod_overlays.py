@@ -5,7 +5,7 @@ from pathlib import Path
 import json, struct
 import archive_patch
 from archive_reader import Archive
-from mod_components import payload_bytes, under, sha_bytes
+from mod_components import payload_bytes, under, sha_bytes, plain_path
 
 
 def file_map(game, target, directories, replacements):
@@ -22,8 +22,9 @@ def file_map(game, target, directories, replacements):
         if any(key==p or key.startswith(p+'/') or p.startswith(key+'/') for p in seen):
             raise ValueError('Conflicting file redirections: '+relative)
         seen.append(key)
-        source=Path(source).resolve(strict=True)
-        if source.is_relative_to(Path(game).resolve()):raise ValueError('Replacement must come from mod storage')
+        # The engine opens these with the usual Windows paths, not the library's long_path form.
+        source=plain_path(Path(source).resolve(strict=True))
+        if source.is_relative_to(plain_path(Path(game).resolve())):raise ValueError('Replacement must come from mod storage')
         if not source.is_file():raise ValueError('Mod replacement is not a file: '+relative)
         a=relative.encode('utf-8');b=str(source).encode('utf-8')
         if not 0<len(a)<1024 or not 0<len(b)<4096 or b'\0' in a+b:

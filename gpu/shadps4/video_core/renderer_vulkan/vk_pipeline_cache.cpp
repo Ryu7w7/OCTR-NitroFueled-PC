@@ -899,6 +899,24 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     return true;
 }
 
+// bbport: a geometry stage that may emit no vertex (VGT_GS_MAX_VERT_OUT 0) draws nothing, and
+// Vulkan has no geometry shader for it (OutputVertices must be above 0). Online, a racer's
+// outfit drew with the geometry ring registers empty and the shader translation divided by
+// zero (code 3). Skipping the draw shows the same: nothing.
+static bool GeometryEmitsNothing(const AmdGpu::Regs& regs) {
+    if (regs.vgt_gs_max_vert_out != 0) {
+        return false;
+    }
+    static std::atomic<u32> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+        LOG_WARNING(Render_Vulkan,
+                    "Geometry stage with no output vertices (esgs itemsize {}, gsvs itemsize {}); "
+                    "draw skipped",
+                    u32(regs.vgt_esgs_ring_itemsize), u32(regs.vgt_gs_vert_itemsize[0]));
+    }
+    return true;
+}
+
 bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
@@ -951,6 +969,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
             LOG_WARNING(Render_Vulkan, "Geometry shader features unsupported, skipping");
             return false;
         }
+        if (GeometryEmitsNothing(regs)) {
+            return false;
+        }
         if (!bind_stage(HwStage::Export, SwStage::Vertex)) {
             return false;
         }
@@ -982,6 +1003,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         }
         if (regs.vgt_gs_mode.onchip || regs.vgt_strmout_config.raw) {
             LOG_WARNING(Render_Vulkan, "Geometry shader features unsupported, skipping");
+            return false;
+        }
+        if (GeometryEmitsNothing(regs)) {
             return false;
         }
         if (!bind_stage(HwStage::Hull, SwStage::TessellationControl)) {

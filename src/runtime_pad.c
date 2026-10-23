@@ -758,8 +758,28 @@ static int pad_thread_state;        /* 0 not started, 1 running; -1: no thread, 
 #define PAD_POLL_NS 2000000u
 static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high);
 /* One sample of every port's gamepad, and the rumble asked since the last one. */
+/* Issue #50: what each port plays with, for the in-game Controllers tab (bbgpu_pad_status): the
+ * gamepad's name, "keyboard" or none, and whether a button or a stick is held, so that pressing
+ * a button shows which player each controller is (identical ones included). */
+typedef struct { char name[64]; int pressing; } PortStatus;
+static PortStatus status_sent[PORTS];
+static int status_ready;
+static int pad_pressing(const PadData *d) {
+    const uint8_t sticks[4]={d->left_x,d->left_y,d->right_x,d->right_y};
+    for (int i=0;i<4;++i) if (sticks[i]<88 || sticks[i]>168) return 1;
+    return (d->buttons & ~BTN_TOUCHPAD)!=0 || d->touch_count>0;
+}
+static void report_status(const PortStatus *now) {
+    for (int p=0;p<PORTS;++p) {
+        if (status_ready && !strcmp(now[p].name,status_sent[p].name) && now[p].pressing==status_sent[p].pressing) continue;
+        status_sent[p]=now[p];
+        bbgpu_pad_status(p,now[p].name,now[p].pressing);
+    }
+    status_ready=1;
+}
 static void pad_poll(void) {
     PortSnap fresh[PORTS];
+    PortStatus status[PORTS];
     struct { uint16_t low, high; int pending; } want[PORTS];
     pthread_mutex_lock(&lock);
     if (!bindings_ready) { load_bindings(); bindings_ready=1; }
@@ -772,6 +792,9 @@ static void pad_poll(void) {
         fresh[p].has_pad=pad!=NULL;
         fresh[p].keyboard=keyboard;
         if (pad) read_gamepad(&fresh[p].data,pad,&cals[p]);
+        const char *name=pad ? SDL_GetGamepadName(pad) : keyboard ? "keyboard" : "";
+        snprintf(status[p].name,sizeof status[p].name,"%s",name ? name : "gamepad");
+        status[p].pressing=pad && pad_pressing(&fresh[p].data);
     }
     pthread_mutex_lock(&snap_lock);
     memcpy(want,rumble_want,sizeof want);
@@ -788,6 +811,7 @@ static void pad_poll(void) {
     snap_at=now_us();
     snap_connected_count=count;
     pthread_mutex_unlock(&snap_lock);
+    report_status(status);
 }
 static void *pad_thread(void *unused) {
     (void)unused;

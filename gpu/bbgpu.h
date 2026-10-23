@@ -34,6 +34,11 @@ int bbgpu_overlay_captures_input(void);
 /* SacredFire: 1 once after the in-game menu's "Rescan controllers" button (runtime_pad.c restarts
  * SDL's gamepad subsystem and enumerates devices afresh); cleared by the call. */
 int bbgpu_pad_rescan_take(void);
+/* SacredFire: what controller port 0..3 plays with now, for the in-game Controllers tab (issue
+ * #50: identical controllers were one "x2" entry, and automatic ports showed "(none)"). name is
+ * the gamepad's, "keyboard", or "" for none; pressing: a button or a stick is held. The pad
+ * thread (runtime_pad.c) calls it when something changes. */
+void bbgpu_pad_status(int port, const char *name_utf8, int pressing);
 /* The player's game volume in percent, 0..200 (bbport.ini volume; the in-game menu changes it
  * while the game runs). runtime_audio.c reads it for every buffer. */
 int bbgpu_audio_volume(void);

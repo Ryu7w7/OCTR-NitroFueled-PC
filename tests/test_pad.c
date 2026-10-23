@@ -6,6 +6,13 @@
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 int bbgpu_pad_rescan_take(void) { return 0; }
+static char status_name[4][64];
+static int status_pressing[4];
+void bbgpu_pad_status(int port, const char *name, int pressing) {
+    if (port<0 || port>=4) return;
+    snprintf(status_name[port],sizeof status_name[port],"%s",name);
+    status_pressing[port]=pressing;
+}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -174,7 +181,18 @@ int main(void) {
                 usleep(120000);
                 assert(SDL_GetGamepadID(current_gamepad())==p1); /* player 2 cannot steal player 1 */
                 assert(port_gamepad(1) && SDL_GetGamepadButton(port_gamepad(1),SDL_GAMEPAD_BUTTON_SOUTH));
+                /* Issue #50: the Controllers tab shows what each port plays with, and the press
+                 * marks player 2's identical controller, not player 1's. */
+                const int was_opened=ports[1].opened;
+                ports[1].opened=1;
+                pad_poll();
+                assert(status_name[0][0] && status_name[1][0] && strcmp(status_name[1],"keyboard"));
+                assert(status_pressing[1] && !status_pressing[0]);
                 assert(SDL_SetJoystickVirtualButton(second,SDL_GAMEPAD_BUTTON_SOUTH,false));
+                SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+                pad_poll();
+                assert(!status_pressing[1]);
+                ports[1].opened=was_opened;
                 SDL_CloseJoystick(second);
             }
             if (bound==3) {
@@ -329,5 +347,5 @@ int main(void) {
         assert(clone.have_center && clone.center[0]==16380 && clone.base[0]==16380);
         assert(stick_axis(&clone,0,16380)==128 && stick_axis(&clone,0,32760)==255 && stick_axis(&clone,0,0)==0);
     }
-    puts("PASS: pad ABI, touch, controls, four-player ownership and hotplug, stalled updates, stick calibration");
+    puts("PASS: pad ABI, touch, controls, four-player ownership and hotplug, stalled updates, port status, stick calibration");
 }

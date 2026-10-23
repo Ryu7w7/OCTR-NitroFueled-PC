@@ -67,6 +67,13 @@ std::atomic<bool> menu_open{false};
 std::atomic<bool> ultrawide_prompt{false};
 bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
+// SacredFire: what each controller port plays with now (runtime_pad.c's pad thread, SetPadStatus).
+struct PadStatus {
+    std::string name; // "" none, "keyboard", or the gamepad's name
+    bool pressing = false;
+};
+std::mutex pad_status_mutex;
+PadStatus pad_status[4];
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
 float base_scale = 1.0f;
@@ -1427,10 +1434,29 @@ void Menu() {
                 }
                 ImGui::EndCombo();
             }
+            // What the port plays with right now, automatic ports and identical controllers
+            // included; green while it presses something, to tell the controllers apart.
+            PadStatus now;
+            {
+                std::lock_guard lk{pad_status_mutex};
+                now = pad_status[p];
+            }
+            ImGui::Indent();
+            if (now.name.empty()) {
+                ImGui::TextColored(kMenuGrey, "%s", BbSettings::MenuText("No controller", "Нет контроллера"));
+            } else {
+                const char* with = now.name == "keyboard" ? keyboard : now.name.c_str();
+                ImGui::TextColored(now.pressing ? kFriendGreen : kMenuText, "%s %s%s",
+                                   BbSettings::MenuText("Playing:", "Играет:"), with,
+                                   now.pressing ? BbSettings::MenuText("  (pressing)", "  (нажато)") : "");
+            }
+            ImGui::Unindent();
         }
         if (changed) {
             BbSettings::Save();
         }
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Press a button on a controller: its player's line turns green.",
+                                                       "Нажмите кнопку на контроллере: строка его игрока станет зелёной."));
         ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected "
                                                        "(the keyboard: always; port 1 then has the gamepad only)",
                                                  "Порты 2-4 входят как Player 2-4, пока подключён их геймпад "
@@ -2100,6 +2126,13 @@ bool MenuOpen() {
 
 bool TakePadRescan() {
     return pad_rescan_requested.exchange(false, std::memory_order_relaxed);
+}
+
+void SetPadStatus(int port, const std::string& name, bool pressing) {
+    if (port < 0 || port >= int(std::size(pad_status))) return;
+    std::lock_guard lk{pad_status_mutex};
+    pad_status[port].name = name;
+    pad_status[port].pressing = pressing;
 }
 
 bool CapturesInput() {

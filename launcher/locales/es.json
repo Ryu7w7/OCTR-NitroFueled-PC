@@ -394,5 +394,7 @@
  "Could not reset: {}": "No se pudo reiniciar: {}",
  "Lock every trophy again?": "¿Volver a bloquear todos los logros?",
  "A copy is kept just in case.": "Se guarda una copia por si acaso.",
- "Reset": "Reiniciar"
+ "Reset": "Reiniciar",
+ "{}: this is the mods folder (or holds it); add the mod's own folder": "{}: es la carpeta de mods (o la contiene); añade la carpeta del propio mod",
+ "{}: already in the mods folder": "{}: ya está en la carpeta de mods"
 }

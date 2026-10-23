@@ -415,6 +415,10 @@ extern "C" int bbgpu_pad_rescan_take(void) {
     return BbOverlay::TakePadRescan() ? 1 : 0;
 }
 
+extern "C" void bbgpu_pad_status(int port, const char* name, int pressing) {
+    BbOverlay::SetPadStatus(port, name ? name : "", pressing != 0);
+}
+
 extern "C" int bbgpu_audio_volume(void) {
     return BbSettings::Get().volume.load(std::memory_order_relaxed);
 }

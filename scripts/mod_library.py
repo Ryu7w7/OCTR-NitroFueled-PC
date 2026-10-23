@@ -5,13 +5,13 @@ from pathlib import Path
 import hashlib,json,os,re,shutil,stat,struct,tempfile,uuid,zipfile
 import xml.etree.ElementTree as ET
 import mod_format as fmt
-from mod_components import save_json,sha,under,regular_tree,copy_tree
+from mod_components import save_json,sha,under,regular_tree,copy_tree,long_path,plain_path
 
 FILENAME='OCTR-Mod-Library.xml'
 PREFIX=FILENAME+'/Mod: '
 MAX_EXPANDED=12*1024**3
 
-def storage(root):return Path(root).parent/'mod-state'
+def storage(root):return long_path(Path(root).parent/'mod-state')  # extended form: deep package paths
 def read(root):
     p=storage(root)/'library.json'
     return json.loads(p.read_text(encoding='utf-8')) if p.is_file() else {'entries':{},'messages':[]}
@@ -220,4 +220,4 @@ def remove(root,patchdir,ident,expected_sha256):
         save_json(config,settings)
         try:source.rename(target)
         except OSError:save_json(config,previous);raise
-        scan(root,patchdir);return target
+        scan(root,patchdir);return plain_path(target)

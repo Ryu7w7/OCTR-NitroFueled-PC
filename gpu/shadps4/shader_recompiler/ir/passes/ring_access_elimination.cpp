@@ -164,9 +164,29 @@ void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtim
                 const auto comp_ofs = info.gs_copy_data.output_vertices * sizeof(u32);
                 const auto output_size = gs_info.output_vertices * dwords_per_vertex * sizeof(u32);
 
+                // bbport: a geometry stage whose ring registers are empty (max output vertices
+                // 0, like the export stage's 0 dwords above) divided by zero here: online, a
+                // racer's outfit ended the game with code 3. Its stores have nowhere to go,
+                // so they are dropped, as the export stage's are.
+                if (comp_ofs == 0 || output_size == 0) {
+                    LOG_WARNING(Render_Vulkan,
+                                "RingAccessElimination: geometry store at byte {} with no output "
+                                "ring (max vertices {}, copy vertices {}, {} dwords); dropped",
+                                offset, gs_info.output_vertices, info.gs_copy_data.output_vertices,
+                                dwords_per_vertex);
+                    inst.Invalidate();
+                    break;
+                }
                 const auto vc_read_ofs = (((offset / comp_ofs) * comp_ofs) % output_size) * 16u;
                 const auto& it = info.gs_copy_data.attr_map.find(vc_read_ofs);
-                ASSERT(it != info.gs_copy_data.attr_map.cend());
+                if (it == info.gs_copy_data.attr_map.cend()) {
+                    LOG_WARNING(Render_Vulkan,
+                                "RingAccessElimination: geometry store at byte {} has no copy "
+                                "shader output (read offset {}); dropped",
+                                offset, vc_read_ofs);
+                    inst.Invalidate();
+                    break;
+                }
                 const auto& [attr, comp] = it->second;
 
                 inst.Invalidate();

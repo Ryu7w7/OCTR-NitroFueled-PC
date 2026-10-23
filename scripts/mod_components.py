@@ -17,6 +17,23 @@ def save_json(path, obj):
     temp.write_text(json.dumps(obj, indent=2) + '\n', encoding='utf-8')
     os.replace(temp, path)
 
+def long_path(path):
+    """On Windows, the absolute path in extended-length form (\\\\?\\C:\\...): a package's files
+    (archive/folder/asset names nested in the mod) pass the 259-character limit of a library in
+    a deep folder, which Python only lifts this way unless the system enables long paths."""
+    path = Path(path)
+    if os.name != 'nt' or str(path).startswith('\\\\?\\'):
+        return path
+    text = os.path.abspath(path)
+    return Path('\\\\?\\UNC\\' + text[2:] if text.startswith('\\\\') else '\\\\?\\' + text)
+
+def plain_path(path):
+    """A long_path in the usual form, for what the engine opens and for messages."""
+    text = str(path)
+    if text.startswith('\\\\?\\UNC\\'):
+        return Path('\\\\' + text[8:])
+    return Path(text[4:]) if text.startswith('\\\\?\\') else Path(text)
+
 def safe_path(value):
     if not isinstance(value, str) or not value or '\\' in value or (':' in value):
         raise ValueError('Expected a relative slash-separated path: ' + str(value))

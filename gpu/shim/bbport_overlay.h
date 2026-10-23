@@ -36,6 +36,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 bool CapturesInput();
 /// SacredFire: true once after the menu's "Rescan controllers" button (bbgpu_pad_rescan_take).
 bool TakePadRescan();
+/// SacredFire: what a controller port plays with now ("" none, "keyboard", or the gamepad's name)
+/// and whether it is pressing something, for the Controllers tab (bbgpu_pad_status).
+void SetPadStatus(int port, const std::string& name, bool pressing);
 
 /// The settings menu is open: the window shows the system cursor over it.
 bool MenuOpen();

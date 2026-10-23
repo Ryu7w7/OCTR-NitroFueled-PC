@@ -3684,6 +3684,25 @@ void ImportMods(const std::vector<fs::path>& inputs) {
         }
         const fs::path destination = a.root / L"mods" / source.filename();
         fs::create_directories(a.root / L"mods", ec);
+        if (fs::is_directory(source)) {
+            // The mods folder itself, or one holding it (the port's), would be copied into
+            // itself without end (issue #70); one already inside it is in the library.
+            const auto inside = [](const fs::path& path, const fs::path& folder) {
+                const fs::path relative = path.lexically_relative(folder);
+                return !relative.empty() && *relative.begin() != L"..";
+            };
+            std::error_code e1, e2;
+            const fs::path real = fs::weakly_canonical(source, e1), mods = fs::weakly_canonical(a.root / L"mods", e2);
+            if (!e1 && !e2 && inside(mods, real)) {
+                a.notice = T("Esa es la carpeta de mods (o la contiene): añade la carpeta del propio mod.",
+                             "That is the mods folder (or holds it): add the mod's own folder.");
+                continue;
+            }
+            if (!e1 && !e2 && inside(real, mods)) {
+                a.notice = T("Esa carpeta ya está dentro de la carpeta de mods.", "That folder is already in the mods folder.");
+                continue;
+            }
+        }
         if (fs::exists(destination)) {
             a.notice = T("Ya existe un mod con ese nombre. No se ha sobrescrito.",
                          "A mod with that filename already exists. It was not overwritten.");
