@@ -55,6 +55,7 @@ int main(void) {
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
+    pad_thread_state=-1; /* no bb:pad thread: each read samples first, so the asserts below see it */
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
     PadData data;
     inject(path,"cross l3 touchpad_left");
@@ -290,6 +291,20 @@ int main(void) {
         SDL_CloseGamepad(gamepad); gamepad=NULL;
         for (int i=0;i<4;++i) assert(SDL_DetachVirtualJoystick(same[i]));
     }
+    /* A pad thread stuck in SDL (device detection): the game reads its last sample until that is
+     * PAD_STALE_US old, then idle gamepads, without waiting. */
+    {
+        pad_thread_state=1; /* as if the thread ran: reads only copy `snap` */
+        pad_neutral(&snap[0].data);
+        snap[0].data.buttons=BTN_CROSS; snap[0].has_pad=1; snap[0].keyboard=1;
+        snap_at=now_us();
+        assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS));
+        snap_at=now_us()-PAD_STALE_US-1000;
+        assert(pad_read_state(1,&data)==0 && !(data.buttons & BTN_CROSS) && data.left_x==128 && stale_noted);
+        snap_at=now_us();
+        assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS) && !stale_noted);
+        pad_thread_state=-1;
+    }
     SDL_Quit();
     unlink(path);
     unlink(config);
@@ -314,5 +329,5 @@ int main(void) {
         assert(clone.have_center && clone.center[0]==16380 && clone.base[0]==16380);
         assert(stick_axis(&clone,0,16380)==128 && stick_axis(&clone,0,32760)==255 && stick_axis(&clone,0,0)==0);
     }
-    puts("PASS: pad ABI, touch, controls, four-player ownership and hotplug, stick calibration");
+    puts("PASS: pad ABI, touch, controls, four-player ownership and hotplug, stalled updates, stick calibration");
 }

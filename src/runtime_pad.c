@@ -1,5 +1,6 @@
 /* libScePad on SDL3 gamepads and the keyboard. SDL events are pumped by the window thread
- * (gpu/shim/window.cpp); here state is only sampled.
+ * (gpu/shim/window.cpp); joysticks are updated and sampled by this file's own thread (bb:pad,
+ * see pad_thread below), and the game's threads read the last sample without calling SDL.
  *
  * Keyboard layout (also with a gamepad connected: both drive the game, unless a split-screen port
  * 2..4 is bound to the keyboard, bbport.ini port.N=keyboard: that player plays on it alone):
@@ -194,6 +195,7 @@ typedef struct PadCal {
     int base[4];                       /* 0: normal pad; else |neutral| of a biased axis */
     int max[4][2];                     /* largest push seen per direction on a biased axis */
     uint64_t since;
+    uint64_t sampled;                  /* now_us() of the last cal_sample (read_gamepad) */
 } PadCal;
 static PadCal cals[PORTS];             /* cals[0]: port 1 (`gamepad`), cals[p]: ports[p].pad */
 static void cal_reset(PadCal *c);
@@ -247,6 +249,7 @@ static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,
 #define PAD_CAL_TIMEOUT_US 3000000u    /* after this, an all-zero reading is accepted as the neutral */
 #define PAD_CAL_BIAS 8192              /* |neutral| past this: a biased neutral and a reduced travel */
 #define PAD_CAL_REFINE 90              /* % of the base travel a push must reach to count as the full scale */
+#define PAD_CAL_INTERVAL_US 15000u     /* one calibration sample a frame at most */
 static int cal_enabled=-1, pad_deadzone=-1, pad_deadzone_outer=-1, cal_manual, cal_manual_center[4];
 static void cal_load(void) {
     static int loaded;
@@ -693,16 +696,15 @@ static void apply_keyboard(PadData *d, const bool *k) {
     d->right_y=key_axis(d->right_y,key_down(k,IN_LOOK_UP),key_down(k,IN_LOOK_DOWN));
 }
 
-static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *cal) {
+static void pad_neutral(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
-    d->connected=1; d->connected_count=connected_count ? connected_count : 1;
-    d->timestamp=now_us();
-    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
-    if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
-    const bool *k=keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
-    if (g) {
+    d->connected=1;
+}
+/* The gamepad's part of a sample (d neutral); on the pad thread, under lock. */
+static void read_gamepad(PadData *d, SDL_Gamepad *g, PadCal *cal) {
+    {
         int touch_right=0;
         for (int i=IN_CROSS;i<=IN_RIGHT;++i) {
             const int v=pad_value(g,i);
@@ -716,7 +718,10 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         int16_t raw[4];
         for (int i=0;i<4;++i) raw[i]=(int16_t)SDL_GetGamepadAxis(g,stick_axes[i]);
         cal_load();
-        cal_sample(cal,raw);
+        /* The neutral's quiet window counts samples at the game's rate (one a frame), not the
+         * pad thread's. */
+        const uint64_t now=now_us();
+        if (now-cal->sampled>=PAD_CAL_INTERVAL_US) { cal->sampled=now; cal_sample(cal,raw); }
         uint8_t *axis_out[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
         for (int i=0;i<4;++i) *axis_out[i]=stick_axis(cal,i,raw[i]); /* center 0 until the neutral is known */
         if (SDL_GetNumGamepadTouchpads(g)>0) {
@@ -734,6 +739,97 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
         if (touch_right) touch_click(d,1);
     }
+}
+
+/* SacredFire: SDL's device detection can block for a long time on Windows (DirectInput asking a
+ * slow HID device its name, after any controller connects or turns off) while it holds SDL's
+ * joystick lock; the game, reading the pad through SDL, froze until it was done. The bb:pad thread
+ * now updates SDL and samples every port's gamepad into `snap`; the game's threads copy that
+ * (snap_lock) and never wait on SDL. While an update is stuck, the gamepads read as idle after
+ * PAD_STALE_US, and the keyboard and the game carry on. */
+typedef struct { PadData data; int has_pad, keyboard; } PortSnap;
+static pthread_mutex_t snap_lock=PTHREAD_MUTEX_INITIALIZER; /* snap, snap_at, rumble_want */
+static PortSnap snap[PORTS];
+static uint64_t snap_at;            /* now_us() of the last sample; 0 until the first */
+static uint8_t snap_connected_count;
+static struct { uint16_t low, high; int pending; } rumble_want[PORTS]; /* the game's last request */
+static int pad_thread_state;        /* 0 not started, 1 running; -1: no thread, pad_read_state polls (tests) */
+#define PAD_STALE_US 250000u
+#define PAD_POLL_NS 2000000u
+static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high);
+/* One sample of every port's gamepad, and the rumble asked since the last one. */
+static void pad_poll(void) {
+    PortSnap fresh[PORTS];
+    struct { uint16_t low, high; int pending; } want[PORTS];
+    pthread_mutex_lock(&lock);
+    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
+    SDL_Gamepad *g=current_gamepad();
+    for (int p=0;p<PORTS;++p) {
+        const int keyboard=p ? is_keyboard(ports[p].want) : !keyboard_port();
+        /* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard), once the game opened them. */
+        SDL_Gamepad *pad=!p ? g : keyboard || !ports[p].opened ? NULL : port_gamepad(p);
+        pad_neutral(&fresh[p].data);
+        fresh[p].has_pad=pad!=NULL;
+        fresh[p].keyboard=keyboard;
+        if (pad) read_gamepad(&fresh[p].data,pad,&cals[p]);
+    }
+    pthread_mutex_lock(&snap_lock);
+    memcpy(want,rumble_want,sizeof want);
+    for (int p=0;p<PORTS;++p) rumble_want[p].pending=0;
+    pthread_mutex_unlock(&snap_lock);
+    for (int p=0;p<PORTS;++p) {
+        SDL_Gamepad *pad=p ? ports[p].pad : gamepad;
+        if (want[p].pending && pad) rumble(p,pad,want[p].low,want[p].high);
+    }
+    const uint8_t count=connected_count;
+    pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&snap_lock);
+    memcpy(snap,fresh,sizeof snap);
+    snap_at=now_us();
+    snap_connected_count=count;
+    pthread_mutex_unlock(&snap_lock);
+}
+static void *pad_thread(void *unused) {
+    (void)unused;
+    for (;;) {
+        const uint64_t start=now_us();
+        if (sdl_ready>0) SDL_UpdateJoysticks(); /* the window thread's event pump no longer does */
+        const uint64_t took=now_us()-start;
+        if (took>=PAD_STALE_US) {
+            printf("Runtime: SDL took %.1f s to update the controllers (detecting devices); they read as idle meanwhile\n",
+                   (double)took/1e6);
+            fflush(stdout);
+        }
+        pad_poll();
+        SDL_DelayNS(PAD_POLL_NS);
+    }
+    return NULL;
+}
+/* A port's sample for the game: its gamepad from the pad thread's last sample (idle once that is
+ * PAD_STALE_US old), then the keyboard. Called under read_lock, never under lock. */
+static int stale_noted;
+static void sample_host_from(PadData *d, int p) {
+    if (pad_thread_state<0) pad_poll();
+    PortSnap s;
+    pthread_mutex_lock(&snap_lock);
+    s=snap[p];
+    const uint64_t at=snap_at;
+    const uint8_t count=snap_connected_count;
+    pthread_mutex_unlock(&snap_lock);
+    const uint64_t now=now_us();
+    const int stale=at && now-at>PAD_STALE_US;
+    if (stale && !stale_noted) {
+        printf("Runtime: controller updates stalled (SDL is busy detecting devices): gamepads read as idle\n");
+        fflush(stdout);
+    }
+    stale_noted=stale;
+    if (!at || stale) { pad_neutral(&s.data); s.has_pad=0; }
+    if (!at) s.keyboard=0; /* the controls are loaded with the first sample */
+    *d=s.data;
+    d->connected_count=count ? count : 1;
+    d->timestamp=now;
+    if (bbgpu_overlay_captures_input()) { pad_neutral(d); d->connected_count=count ? count : 1; d->timestamp=now; return; }
+    const bool *k=s.keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (k) {
         /* Mouse buttons count, like keys, only while the game window has the focus. */
         mouse_focus=SDL_GetKeyboardFocus()!=NULL;
@@ -741,16 +837,9 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         apply_keyboard(d,k);
     }
 }
-static void sample_host(PadData *d) {
-    SDL_Gamepad *g=current_gamepad();
-    sample_host_from(d,g,!keyboard_port(),&cals[0]);
-}
+static void sample_host(PadData *d) { sample_host_from(d,0); }
 /* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard); no scripted input. */
-static void sample_port(PadData *d, int p) {
-    current_gamepad(); /* keeps the port table fresh */
-    const int keyboard=is_keyboard(ports[p].want);
-    sample_host_from(d,keyboard ? NULL : port_gamepad(p),keyboard,&cals[p]);
-}
+static void sample_port(PadData *d, int p) { sample_host_from(d,p); }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
@@ -902,7 +991,18 @@ static void sample(PadData *d) {
     touch_ids(d);
 }
 
-static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }
+static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER; /* the game side of sampling (sample) */
+static ABI int32_t pad_init(void) {
+    pthread_mutex_lock(&lock);
+    initialized=1;
+    if (!pad_thread_state) {
+        pthread_t thread;
+        if (pthread_create(&thread,NULL,pad_thread,NULL)==0) { pthread_detach(thread); pad_thread_state=1; }
+        else { pad_thread_state=-1; puts("Runtime: no controller thread: the pads are read on the game's thread"); }
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
 /* Handles are the user ids: 1 is the player's port, 2..4 the split-screen ports while assigned. */
 static int handle_open(int32_t handle) {
     if (handle==PAD_HANDLE) return opened;
@@ -932,10 +1032,10 @@ static ABI int32_t pad_close(int32_t handle) {
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (!handle_open(handle)) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&read_lock);
     if (handle==PAD_HANDLE) sample(data); else sample_port(data,handle-1);
     ++reads; if (!pad_started_us) pad_started_us=now_us();
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&read_lock);
     return 0;
 }
 /* Buffered read: the port samples once per call, so one entry is returned. */
@@ -952,24 +1052,23 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     info->pixel_density=44.86f; info->resolution_x=1920; info->resolution_y=943;
     info->dead_zone_left=info->dead_zone_right=2;
     info->connection_type=0; info->connected=1; info->device_class=0;
-    pthread_mutex_lock(&lock);
-    current_gamepad();
-    info->connected_count=connected_count ? connected_count : 1;
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&snap_lock);
+    info->connected_count=snap_connected_count ? snap_connected_count : 1;
+    pthread_mutex_unlock(&snap_lock);
     return 0;
 }
 /* Rumble: the game sets it every frame, and in a race the strength changes almost every time.
  * Each change is a report sent to the controller; over Bluetooth that many (60+ a second) can
  * make Xbox and 8BitDo pads drop the connection. A new strength goes out at most every
  * RUMBLE_INTERVAL_US; stopping goes out at once, and the same strength again only renews SDL's
- * timer (SDL sends nothing for it). BB_RUMBLE=0 turns rumble off. Called under lock. */
+ * timer (SDL sends nothing for it). BB_RUMBLE=0 turns rumble off. Called under lock, by
+ * pad_poll with the game's last request (pad_vibration). */
 #define RUMBLE_INTERVAL_US 50000u
 typedef struct { SDL_Gamepad *pad; uint16_t low, high; uint64_t at; } RumbleSent;
 static RumbleSent rumble_state[PORTS];
 static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high) {
     static int enabled=-1;
     if (enabled<0) { const char *v=getenv("BB_RUMBLE"); enabled=!(v && *v=='0'); }
-    ++rumble_calls;
     if (!enabled || slot<0 || slot>=PORTS) return;
     RumbleSent *r=&rumble_state[slot];
     const uint64_t now=now_us();
@@ -983,10 +1082,13 @@ static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!handle_open(handle)) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
-    pthread_mutex_lock(&lock);
-    SDL_Gamepad *g=handle==PAD_HANDLE ? current_gamepad() : port_gamepad(handle-1);
-    if (g) rumble(handle==PAD_HANDLE ? 0 : handle-1,g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257));
-    pthread_mutex_unlock(&lock);
+    const int slot=handle==PAD_HANDLE ? 0 : handle-1;
+    pthread_mutex_lock(&snap_lock);
+    ++rumble_calls;
+    rumble_want[slot].low=(uint16_t)(param[0]*257);
+    rumble_want[slot].high=(uint16_t)(param[1]*257);
+    rumble_want[slot].pending=1;
+    pthread_mutex_unlock(&snap_lock);
     return 0;
 }
 static ABI int32_t pad_ok_handle(int32_t handle) { return handle_open(handle) ? 0 : ERR_INVALID_HANDLE; }
