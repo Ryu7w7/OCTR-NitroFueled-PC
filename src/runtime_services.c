@@ -462,6 +462,18 @@ static void get_sessions_dir(char *out, size_t out_len) {
  * players need server-side membership; only users seen joining on this
  * machine are ever recorded here. At most 8 members per session. */
 static pthread_mutex_t s_members_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The WebAPI invitation session can remain after leaving a private room. It
+ * identifies the room, while recent game traffic with a peer distinguishes a
+ * multiplayer race from Arcade/Adventure. */
+static int s_private_room;
+extern int runtime_net_private_lobby_active(void); /* runtime_net.c */
+int runtime_private_room_active(void) {
+    return __atomic_load_n(&s_private_room, __ATOMIC_ACQUIRE) &&
+           runtime_net_private_lobby_active();
+}
+static void private_room_active(int active) {
+    __atomic_store_n(&s_private_room, active, __ATOMIC_RELEASE);
+}
 
 static int session_members_path(const char *sid, char *out, size_t out_size) {
     if (!sid || !*sid) return 0;
@@ -572,6 +584,7 @@ static void write_active_session(const char *session_id) {
 }
 
 static void remove_active_session(void) {
+    private_room_active(0);
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
     const char *my_name = runtime_np_get_online_name();
@@ -1192,7 +1205,10 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
     if (req->method == 1 && strstr(req->path, "/v1/sessions/") && strstr(req->path, "/members")) {
         char sid[96];
         path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
-        if (sid[0]) record_session_member(sid);
+        if (sid[0]) {
+            record_session_member(sid);
+            private_room_active(1);
+        }
         invite_session_joined(req->path);
         char resp[160];
         snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid[0] ? sid : "cusa13795-session");
@@ -1230,6 +1246,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         char sid[128];
         snprintf(sid, sizeof(sid), "cusa13795-session-%s", (my_name && *my_name) ? my_name : "host");
         write_active_session(sid);
+        private_room_active(1);
         char resp[256];
         snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid);
         runtime_net_trace("webapi: created session -> %s", resp);
@@ -1244,7 +1261,10 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
     if (strstr(req->path, "/v1/sessions/") && strstr(req->path, "/members")) {
         char sid[96];
         path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
-        if (sid[0]) record_session_member(sid);
+        if (sid[0]) {
+            record_session_member(sid);
+            private_room_active(1);
+        }
         invite_session_joined(req->path);
         return strdup("{\"sessionId\":\"cusa13795-session\"}");
     }
