@@ -109,7 +109,7 @@ struct Values {
     std::atomic<bool> show_fps{false};
     /// show_ping: the round trip to the players in the online room, under the FPS counter.
     std::atomic<bool> show_ping{false};
-    /// Archive overlays for private Speed races. Prepared at launch; restart to apply.
+    /// Archive overlays for private Speed races. Prepared at launch; toggle applies to the next race.
     std::atomic<bool> speed_mode{false};
     /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
     /// friends (the server hides it); no friend notices at all.
@@ -179,7 +179,6 @@ struct Values {
     int startup_preset = NativeAA;
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
-    bool startup_speed_mode = false;
     bool startup_effects[EffectCount]{};
     bool startup_game_patches[GamePatchCount]{};
     int startup_model_lod = 0;

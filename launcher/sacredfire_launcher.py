@@ -1113,8 +1113,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.online_row = Adw.SwitchRow(title=tr("Play online"), active=self.ini.get("online") == "1")
         online.add(self.online_row)
         self.speed_mode_row = Adw.SwitchRow(
-            title=tr("Speed test (private rooms)"),
-            subtitle=tr("No item or fruit boxes on 40 tracks; seasonal ghosts off. Every player needs this build and the switch on."),
+            title=tr("Speed Mode (Experimental)"),
+            subtitle=tr("Only private room races lose item and Wumpa boxes. Adventure and Arcade keep their item and Wumpa boxes. Every player needs this build and the switch on."),
             active=self.ini.get("speed_mode", "1" if self.settings.get("speed_mode", False) else "0") == "1")
         online.add(self.speed_mode_row)
         self.nick_row = Adw.EntryRow(title=tr("Nickname (3-16 letters, digits, _ or -)"),

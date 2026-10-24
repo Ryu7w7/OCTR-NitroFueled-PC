@@ -1,8 +1,4 @@
-"""Build disposable Speed test archive views from the player's own CTR files.
-
-This deliberately blocks the normal public-match buttons while the test profile
-is active. It does not change the game archives on disk.
-"""
+"""Build disposable normal and private Speed archive views from the player's CTR files."""
 import argparse
 import lzma
 import re
@@ -52,7 +48,7 @@ def move_crates(blob, kind, tiger_gate=False, spawner=False):
     types = dict(igz.objects())
     if refs + count * 8 > len(igz.data):
         raise ValueError('Power Up asset has an invalid root list')
-    if kind == 'fruit' and not any('WumpaFruitCrate' in name for name in igz.strings):
+    if kind == 'wumpa' and not any('WumpaFruitCrate' in name for name in igz.strings):
         return None
     crates = 0
     gates = 0
@@ -147,7 +143,7 @@ def nested_track_ranges(outer, workdir):
                     if not (power or design):
                         continue
                     before = nested.extract(item)
-                    after = move_crates(before, 'item' if power else 'fruit')
+                    after = move_crates(before, 'item' if power else 'wumpa')
                     if after is None:
                         continue
                     if len(after) != len(before):
@@ -199,7 +195,11 @@ def nested_track_ranges(outer, workdir):
 
 
 def prepare(game, output, base_patches):
-    """Return archive patch paths with Speed's track assets composed last."""
+    """Return matching normal/private archive views and the race track count.
+
+    Their directories and appended asset offsets match, so the runtime can serve
+    normal bytes in Arcade/Adventure and Speed bytes in a private room.
+    """
     game, output = Path(game), Path(output)
     output.mkdir(parents=True, exist_ok=True)
     current = {read(path)[1]: Path(path) for path in base_patches}
@@ -224,7 +224,7 @@ def prepare(game, output, base_patches):
             continue
         archive = Archive(pak)
         try:
-            selected = {}
+            selected, normal = {}, {}
             for item in archive.files:
                 path = item['path']
                 power = POWER_UP.fullmatch(path)
@@ -237,21 +237,31 @@ def prepare(game, output, base_patches):
                     if pak.name not in ('update.pak', 'update2.pak') and \
                             path.lower() in updated_assets | earlier_assets:
                         continue
-                    changed = move_crates(archive.extract(item), 'item' if power or extra else 'fruit',
+                    original = archive.extract(item)
+                    changed = move_crates(original, 'item' if power or extra else 'wumpa',
                                           tiger_gate=bool(power and power.group(1).lower() == 't132_tiger_temple'),
                                           spawner=path == CRATE_SPAWNER)
                     if changed is not None:
                         selected[item['index']] = changed
+                        normal[item['index']] = original
                         if power or design:
                             tracks.add((power or design).group(1).lower())
                 elif path == WUMPA_HUD and pak.name in HUD_ARCHIVES:
-                    selected[item['index']] = hide_wumpa_hud(archive.extract(item))
+                    original = archive.extract(item)
+                    selected[item['index']] = hide_wumpa_hud(original)
+                    normal[item['index']] = original
                 elif path == ITEM_HUD and pak.name in HUD_ARCHIVES:
-                    selected[item['index']] = hide_hud(archive.extract(item), 'Octane_PowerUp_asset_root')
+                    original = archive.extract(item)
+                    selected[item['index']] = hide_hud(original, 'Octane_PowerUp_asset_root')
+                    normal[item['index']] = original
                 elif path in PUBLIC_BUTTONS:
-                    selected[item['index']] = block_public_button(archive.extract(item))
+                    original = archive.extract(item)
+                    selected[item['index']] = block_public_button(original)
+                    normal[item['index']] = original
             if selected:
-                entries[pak.name] = selected
+                if selected.keys() != normal.keys() or any(len(selected[i]) != len(normal[i]) for i in selected):
+                    raise ValueError(f'Speed and normal asset layouts differ: {pak.name}')
+                entries[pak.name] = (normal, selected)
         finally:
             archive.data.close()
             archive._file.close()
@@ -260,23 +270,36 @@ def prepare(game, output, base_patches):
     if len(tracks | nested_tracks) != 40 or 'juicedomain_onlinemenus.pak' not in entries:
         raise ValueError(f'Speed test resources incomplete: {len(tracks | nested_tracks)}/40 tracks, '
                          f'{sorted(entries)}')
-    for name, replacements in entries.items():
+    normal_view, speed_view = current.copy(), current.copy()
+    for name, (normal_entries, speed_entries) in entries.items():
         guest = '/app0/archives/' + name
-        target = output / (name + '.bbpatch')
-        write_entries_patch(target, game / 'archives' / name, guest, replacements, current.get(guest))
-        current[guest] = target
+        normal_target = output / (name + '.normal.bbpatch')
+        speed_target = output / (name + '.speed.bbpatch')
+        write_entries_patch(normal_target, game / 'archives' / name, guest,
+                            normal_entries, current.get(guest))
+        write_entries_patch(speed_target, game / 'archives' / name, guest,
+                            speed_entries, current.get(guest))
+        normal_view[guest], speed_view[guest] = normal_target, speed_target
     if nested_ranges:
         guest = '/app0/archives/update2.pak'
-        target = current[guest]
+        target = speed_view[guest]
         size, _, ranges = read(target)
         if any(a < b + len(data) and b < a + len(chunk)
                for a, chunk in nested_ranges for b, data in ranges if b < size):
             raise ValueError('Nested track ranges overlap another update2 overlay')
         write(target, game / 'archives' / 'update2.pak', guest, ranges + nested_ranges)
-    if len(current) > 32:
-        raise ValueError(f'Speed test exceeds the engine limit of 32 archive overlays: {len(current)}')
+    if len(normal_view) > 32 or len(speed_view) > 32:
+        raise ValueError(f'Speed test exceeds the engine limit of 32 archive overlays: '
+                         f'{len(normal_view)}/{len(speed_view)}')
+    for guest in normal_view:
+        normal_size, _, normal_ranges = read(normal_view[guest])
+        speed_size, _, speed_ranges = read(speed_view[guest])
+        normal_end = max([normal_size] + [o + len(d) for o, d in normal_ranges])
+        speed_end = max([speed_size] + [o + len(d) for o, d in speed_ranges])
+        if normal_size != speed_size or normal_end != speed_end:
+            raise ValueError(f'Speed and normal archive sizes differ: {guest}')
     tracks.update(nested_tracks)
-    return list(current.values()), len(tracks)
+    return list(normal_view.values()), list(speed_view.values()), len(tracks)
 
 
 def main():
@@ -285,9 +308,10 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--base', action='append', default=[], type=Path)
     args = parser.parse_args()
-    patches, count = prepare(args.game, args.out, args.base)
-    print('Speed test: item and fruit boxes moved off', count, 'tracks')
-    print('archive_patches=' + '|'.join(map(str, patches)))
+    normal, speed, count = prepare(args.game, args.out, args.base)
+    print('Speed Mode (Experimental): private overlays prepared for', count, 'tracks')
+    print('archive_patches=' + '|'.join(map(str, normal)))
+    print('private_archive_patches=' + '|'.join(map(str, speed)))
 
 
 if __name__ == '__main__':

@@ -55,6 +55,7 @@ extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
+extern "C" void runtime_speed_mode_set(int enabled); // runtime_file.c
 
 namespace BbOverlay {
 
@@ -1201,10 +1202,15 @@ void Menu() {
     if (ImGui::BeginTabItem(BbSettings::MenuText("Room", "Комната"))) {
         RoomTab();
         ImGui::SeparatorText(BbSettings::MenuText("Private race", "Приватная гонка"));
-        Checkbox(BbSettings::MenuText("Speed mode (all players need this build)",
-                                      "Режим скорости (всем игрокам нужна эта сборка)"), s.speed_mode);
-        Hint(BbSettings::MenuText("Removes item and fruit boxes, hides item HUD, disables season collectibles, and opens the Tiger Temple gate. Use only in private rooms. Restart applies the change.",
-                                  "Убирает ящики предметов и фруктов, скрывает интерфейс предметов и отключает сезонные предметы. Открывает проход в Tiger Temple. Только для приватных комнат. Требуется перезапуск."));
+        bool speed_mode = s.speed_mode;
+        if (ImGui::Checkbox(BbSettings::MenuText("Speed Mode (Experimental)",
+                                              "Режим скорости (экспериментальный)"), &speed_mode)) {
+            s.speed_mode = speed_mode;
+            runtime_speed_mode_set(speed_mode);
+            BbSettings::Save();
+        }
+        Hint(BbSettings::MenuText("Applies to the next private room race without a restart: no item or Wumpa boxes, and the Tiger Temple gate is open. Adventure and Arcade keep their items. Every player needs this build.",
+                                  "Применяется к следующей приватной гонке без перезапуска: без ящиков предметов и Вумпа, проход в Tiger Temple открыт. В приключении и Arcade предметы остаются. Всем игрокам нужна эта сборка."));
         ImGui::EndTabItem();
     }
     {
@@ -1527,7 +1533,7 @@ void Menu() {
 
     bool restart =
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution || s.speed_mode != s.startup_speed_mode ||
+        s.live_resolution != s.startup_live_resolution ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= s.effects[e] != s.startup_effects[e];

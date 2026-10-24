@@ -48,9 +48,10 @@ Win32 + Direct3D 11, linked statically, no DLLs) is what players open:
 - **Settings**: FPS limit, background shader compiles, fullscreen, FPS counter (`bbport.ini`, the
   in-game menu's keys); monitor, present mode, controller, game language, PS4 Pro mode
   (`launcher.ini`, passed as `BB_*` variables).
-- **Online**: Speed mode for private race testing, stored in `bbport.ini`. Every player in the
-  room needs the same build with Speed enabled. The in-game menu has the same switch under
-  Room; its Apply and restart button rebuilds the archive overlays for the new choice.
+- **Online**: Speed Mode (Experimental), stored in `bbport.ini`. Every player in the private
+  room needs the same build with Speed enabled. Adventure and Arcade keep their normal item
+  and Wumpa boxes. The in-game menu has the same switch under Room; it applies to the next
+  private race without restarting because both archive views are prepared at launch.
 - **Patches**: every patch for CUSA13795 01.21 in `patches\*.xml`; the three community patches
   keep their `bbport.ini` keys, others go through `patches.json`.
 - **Saves**: backups to `backups\`, restore, export, import of another PC's saves or a decrypted

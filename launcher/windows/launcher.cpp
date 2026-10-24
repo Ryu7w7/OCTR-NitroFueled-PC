@@ -3479,9 +3479,9 @@ void OnlineTab() {
                  T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
                    "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
 
-        GameFlag("speed_mode", T("Modo Speed (salas privadas)", "Speed mode (private rooms)"), false,
-                 T("Sin cajas de objetos ni frutas; evento de fantasmas desactivado. Todos necesitan esta version. Reinicia para aplicar cambios del menu del juego.",
-                   "No item or fruit boxes; seasonal ghosts disabled. Everyone needs this build. Restart to apply changes made in the in-game menu."));
+        GameFlag("speed_mode", T("Speed Mode (Experimental)", "Speed Mode (Experimental)"), false,
+                 T("Solo las carreras de salas privadas quitan cajas de objetos y Wumpa. Aventura y Arcade conservan las cajas de objetos y Wumpa. Todos necesitan esta version.",
+                   "Only private room races remove item and Wumpa boxes. Adventure and Arcade keep their item and Wumpa boxes. Everyone needs this build."));
 
         const bool online_on = a.game.Flag("online", true);
         ImGui::BeginDisabled(!online_on);

@@ -696,16 +696,18 @@ def main():
                 builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}
                 composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
                 archives = '|'.join(str(p) for p in composed.values())
-            if env.get('BB_SPEED_MODE') == '1':
-                if env.get('BB_ONLINE') != '1' and env.get('BB_SPEED_SOLO_TEST') != '1':
-                    say('Speed mode inactive offline (private online rooms only)')
-                else:
-                    if title_id != 'CUSA13795':
-                        raise ValueError('Speed test needs USA CUSA13795 1.21.')
+            env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
+            if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
+                if title_id == 'CUSA13795':
                     base = [Path(p) for p in archives.split('|') if p]
-                    speed_patches, track_count = speed_mode.prepare(game, out / 'speed-mode', base)
-                    archives = '|'.join(map(str, speed_patches))
-                    say(f'Speed test: item and fruit boxes moved off {track_count} tracks; public matchmaking buttons disabled')
+                    normal_patches, speed_patches, track_count = speed_mode.prepare(game, out / 'speed-mode', base)
+                    archives = '|'.join(map(str, normal_patches))
+                    env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
+                    say(f'Speed Mode (Experimental): {track_count} tracks prepared for private rooms')
+                elif env.get('BB_SPEED_MODE') == '1':
+                    raise ValueError('Speed test needs USA CUSA13795 1.21.')
+            elif env.get('BB_SPEED_MODE') == '1':
+                say('Speed mode inactive offline (private online rooms only)')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:
