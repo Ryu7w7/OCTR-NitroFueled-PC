@@ -148,6 +148,7 @@ DEFAULTS = {
     "save_log": False,
     "mangohud": False,
     "vk_validation": False,
+    "speed_mode": False,
     "extra_env": "",
     # DLC in the data folder's dlc/ (run.py BB_DLC_DIR): all on, some turned off by label.
     "dlc": True,
@@ -1111,6 +1112,11 @@ class LauncherWindow(Adw.ApplicationWindow):
                                                      "link it to Discord to recover it after a reinstall or on another PC."))
         self.online_row = Adw.SwitchRow(title=tr("Play online"), active=self.ini.get("online") == "1")
         online.add(self.online_row)
+        self.speed_mode_row = Adw.SwitchRow(
+            title=tr("Speed test (private rooms)"),
+            subtitle=tr("No item or fruit boxes on 40 tracks; seasonal ghosts off. Every player needs this build and the switch on."),
+            active=self.ini.get("speed_mode", "1" if self.settings.get("speed_mode", False) else "0") == "1")
+        online.add(self.speed_mode_row)
         self.nick_row = Adw.EntryRow(title=tr("Nickname (3-16 letters, digits, _ or -)"),
                                      text=self.ini.get("online_name", ""))
         self.nick_row.connect("changed", lambda _row: self.nick_changed())
@@ -1549,6 +1555,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["save_log"] = self.save_log_row.get_active()
         s["clear_shader_cache"] = self.cache_row.get_active()
         s["vk_validation"] = self.validation_row.get_active()
+        s["speed_mode"] = self.speed_mode_row.get_active()
         s["extra_env"] = self.env_row.get_text()
         s["ui_language"] = combo_value(self.ui_language_row)
         s["discord_rpc"] = self.discord_rpc_row.get_active()
@@ -1577,6 +1584,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.ini["widescreen_output"] = combo_value(self.layout_output_row)
             self.ini["ultrawide"] = "0"  # the layout sets the size (the in-game ultrawide would not correct the menus)
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
+        self.ini["speed_mode"] = "1" if self.speed_mode_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
         self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
         self.ini["online_inventory"] = combo_value(self.inventory_row)
@@ -1587,6 +1595,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         """bbport.ini as the in-game menu left it: the switches show what the game will use."""
         self.ini, self.ini_lines = load_ini()
         self.fill_patches()
+        self.speed_mode_row.set_active(self.ini.get("speed_mode") == "1")
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
         self.ping_row.set_active(self.ini.get("show_ping") == "1")
         self.split_auto_row.set_active(self.ini.get("split_auto") != "0")

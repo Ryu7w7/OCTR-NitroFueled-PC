@@ -38,6 +38,7 @@ UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3: GPU, driver or loader (gpu/.../vk_pl
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
+import speed_mode  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
@@ -397,6 +398,10 @@ def setup_online(env, config, data):
     except OSError:
         pass
 
+    # The in-game menu writes this key. A restart must pick up its new value even when
+    # the previous launch left BB_SPEED_MODE in the child environment.
+    env['BB_SPEED_MODE'] = '1' if ini_values.get('speed_mode') == '1' else '0'
+
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
     if online == '1' and not nick_ok(name):
@@ -672,6 +677,7 @@ def main():
         layout_saved = {}
 
         def apply_layout():
+            env['BB_SPEED_MODE'] = '1' if ini_has(config, 'speed_mode=1') else '0'
             for key, value in layout_saved.items():
                 if value is None:
                     env.pop(key, None)
@@ -690,6 +696,16 @@ def main():
                 builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}
                 composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
                 archives = '|'.join(str(p) for p in composed.values())
+            if env.get('BB_SPEED_MODE') == '1':
+                if env.get('BB_ONLINE') != '1' and env.get('BB_SPEED_SOLO_TEST') != '1':
+                    say('Speed mode inactive offline (private online rooms only)')
+                else:
+                    if title_id != 'CUSA13795':
+                        raise ValueError('Speed test needs USA CUSA13795 1.21.')
+                    base = [Path(p) for p in archives.split('|') if p]
+                    speed_patches, track_count = speed_mode.prepare(game, out / 'speed-mode', base)
+                    archives = '|'.join(map(str, speed_patches))
+                    say(f'Speed test: item and fruit boxes moved off {track_count} tracks; public matchmaking buttons disabled')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:

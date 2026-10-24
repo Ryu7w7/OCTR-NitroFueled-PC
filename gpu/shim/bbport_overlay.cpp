@@ -1200,6 +1200,11 @@ void Menu() {
     }
     if (ImGui::BeginTabItem(BbSettings::MenuText("Room", "Комната"))) {
         RoomTab();
+        ImGui::SeparatorText(BbSettings::MenuText("Private race", "Приватная гонка"));
+        Checkbox(BbSettings::MenuText("Speed mode (all players need this build)",
+                                      "Режим скорости (всем игрокам нужна эта сборка)"), s.speed_mode);
+        Hint(BbSettings::MenuText("Removes item and fruit boxes, hides item HUD, disables season collectibles, and opens the Tiger Temple gate. Use only in private rooms. Restart applies the change.",
+                                  "Убирает ящики предметов и фруктов, скрывает интерфейс предметов и отключает сезонные предметы. Открывает проход в Tiger Temple. Только для приватных комнат. Требуется перезапуск."));
         ImGui::EndTabItem();
     }
     {
@@ -1522,7 +1527,8 @@ void Menu() {
 
     bool restart =
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
+        s.live_resolution != s.startup_live_resolution || s.speed_mode != s.startup_speed_mode ||
+        BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= s.effects[e] != s.startup_effects[e];
     }

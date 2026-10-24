@@ -3479,6 +3479,10 @@ void OnlineTab() {
                  T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
                    "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
 
+        GameFlag("speed_mode", T("Modo Speed (salas privadas)", "Speed mode (private rooms)"), false,
+                 T("Sin cajas de objetos ni frutas; evento de fantasmas desactivado. Todos necesitan esta version. Reinicia para aplicar cambios del menu del juego.",
+                   "No item or fruit boxes; seasonal ghosts disabled. Everyone needs this build. Restart to apply changes made in the in-game menu."));
+
         const bool online_on = a.game.Flag("online", true);
         ImGui::BeginDisabled(!online_on);
 

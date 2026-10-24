@@ -169,6 +169,21 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
         --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
     strict_overlap=(--strict-overlap)
 fi
+if [[ ${BB_SPEED_MODE:-0} == 1 ]]; then
+    if [[ ${BB_ONLINE:-0} != 1 && ${BB_SPEED_SOLO_TEST:-0} != 1 ]]; then
+        echo 'Speed mode inactive offline (private online rooms only)'
+    else
+        if [[ $title_id != CUSA13795 ]]; then echo 'Speed test needs USA CUSA13795 1.21.' >&2; exit 1; fi
+        speed_bases=()
+        IFS='|' read -r -a speed_existing <<< "${BB_ARCHIVE_PATCHES:-}"
+        for speed_patch in "${speed_existing[@]}"; do
+            if [[ -n $speed_patch ]]; then speed_bases+=(--base "$speed_patch"); fi
+        done
+        speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}") || exit 1
+        echo "$speed_result" | head -n 1
+        export BB_ARCHIVE_PATCHES=${speed_result#*archive_patches=}
+    fi
+fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
