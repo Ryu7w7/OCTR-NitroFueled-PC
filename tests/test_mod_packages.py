@@ -61,6 +61,12 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(self.scan()['entries']['sample']['description'],text)
         meta=ET.parse(self.port/'patches'/library.FILENAME).find('Metadata')
         self.assertEqual(meta.get('ModDescription'),text)
+    def test_library_toggles_listed_for_both_editions(self):
+        from patches import external_patches
+        self.package();self.scan()
+        for title in ('CUSA13795','CUSA14876'):
+            keys=[key for key,_,_ in external_patches(self.port/'patches',title_id=title)]
+            self.assertIn(library.PREFIX+'sample',keys,title)
     def test_profile_publication_retries_transient_windows_lock(self):
         source=self.root/'building';source.mkdir();(source/'ready').write_text('complete')
         destination=self.root/'prepared';real_replace=os.replace

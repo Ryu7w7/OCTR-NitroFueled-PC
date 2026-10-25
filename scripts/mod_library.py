@@ -190,7 +190,9 @@ def scan(root,patchdir):
             item['version_notice']='Using '+item['version']+'. Other copies retained: '+', '.join(i['source']+' ('+i['version']+')' for i in items if i is not item)
         found[ident]=item
     result={'entries':found,'messages':messages};save_json(storage(root)/'library.json',result)
-    xml=ET.Element('Patch');ids=ET.SubElement(xml,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795'
+    # No <TitleID>: the toggles apply to both editions (USA CUSA13795 and EU CUSA14876). The
+    # launchers hide a file naming another edition, so a fixed ID hid every mod from EU players.
+    xml=ET.Element('Patch')
     for ident,item in sorted(found.items()):
         meta=ET.SubElement(xml,'Metadata',Title='Crash Team Racing Nitro-Fueled',Name='Mod: '+ident,
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',
