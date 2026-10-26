@@ -301,6 +301,7 @@ void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s
 
 // ------------------------------------------------------------------ uploads
 struct Job {
+    std::atomic<bool>* ready; // the texture's flag, set once the batch is submitted
     VkImage image;
     u32 levels, slices;
     std::vector<u8> data;                   // untiled levels, each region 16-byte aligned
@@ -386,6 +387,9 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
         sr = instance->GetGraphicsQueue().submit(submit, fence);
     }
     if (sr == vk::Result::eSuccess) {
+        for (const Job& j : jobs) {
+            j.ready->store(true, std::memory_order_release);
+        }
         (void)dev.waitForFences(fence, VK_TRUE, ~0ull);
         uploads_done.fetch_add(jobs.size(), std::memory_order_relaxed);
         upload_batches.fetch_add(1, std::memory_order_relaxed);
@@ -469,6 +473,12 @@ void Init(const Vulkan::Instance& vulkan) {
 
 std::uint64_t TSharpBase(const std::uint32_t* tsharp) {
     return Decode(tsharp).base;
+}
+
+Info Describe(const std::uint32_t* tsharp) {
+    const TSharp t = Decode(tsharp);
+    return Info{t.base,    t.width,      t.height,     t.dfmt, t.nfmt,
+                t.dst_sel, t.last_level, TextureFormat(t.dfmt, t.nfmt)};
 }
 
 const Texture* Get(const std::uint32_t* tsharp) {
@@ -562,7 +572,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 
     // untile every slice and level (slice-major) into the upload job
-    Job job{image, l.levels, l.slices, {}, {}};
+    Job job{&tex.ready, image, l.levels, l.slices, {}, {}};
     u64 size = 0;
     for (u32 s = 0; s < l.slices; ++s) {
         for (u32 m = 0; m < l.levels; ++m) {

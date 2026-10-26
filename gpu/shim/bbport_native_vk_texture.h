@@ -8,6 +8,7 @@
 // the CPU writes later (videos, runtime atlases) is not refreshed yet.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -24,6 +25,16 @@ struct Texture {
     std::uint32_t width = 0, height = 0, levels = 0, slices = 0;
     vk::Format format = vk::Format::eUndefined;
     std::uint64_t bytes = 0;
+    /// Set once its upload is submitted: a draw submitted later sees the data (same queue, and
+    /// the upload ends in a barrier). Draws recorded before that bind no image instead.
+    std::atomic<bool> ready{false};
+};
+
+/// The fields of a T# the renderer needs besides the image.
+struct Info {
+    std::uint64_t base;
+    std::uint32_t width, height, dfmt, nfmt, dst_sel, last_level;
+    vk::Format format; // Undefined: not a format this renderer makes
 };
 
 struct Stats {
@@ -36,6 +47,9 @@ void Init(const Vulkan::Instance& instance);
 
 /// Base address of the image a T# (8 dwords) describes.
 std::uint64_t TSharpBase(const std::uint32_t* tsharp);
+
+/// A T#'s address, size, data / number format, channel selects and its Vulkan format.
+Info Describe(const std::uint32_t* tsharp);
 
 /// The texture for a T#, built (and queued for upload) the first time. nullptr: not supported
 /// (format, tiling), not readable, over the memory budget, or not created; each logged once.

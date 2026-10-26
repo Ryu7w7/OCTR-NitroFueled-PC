@@ -143,6 +143,62 @@ that exist, and failures are logged with the record's address and size. Also cou
 layouts, no fans or quads, no unknown formats. About a third of VS inputs have no matching vertex
 element (the port feeds zeros), and many attributes are integer formats feeding float inputs.
 
-The device already enables `VK_EXT_vertex_input_dynamic_state` where supported, so vertex layouts can
-stay out of the pipeline key at the draw stage. Next: the draw itself (pipelines, descriptor sets,
-constant buffers, the b13 swizzle/conversion constants, clears and copies).
+The device already enables `VK_EXT_vertex_input_dynamic_state` where supported, so vertex layouts
+stay out of the pipeline key at the draw stage.
+
+Second run, with windows clipped to the committed region: 4.2M lookups, all in place; 153 windows
+(1.1 GiB), none failed, nothing to copy.
+
+## Stage 5: drawing
+
+Every draw is now recorded into the renderer's own command buffers, into its own target images.
+shadPS4 still renders the frame too. `BB_VK_SHOW=1` makes the presenter show the native picture
+instead, and `BB_VK_DRAW=0` goes back to stage 4 (counting only). The launchers in the portable
+folder are `Run native vulkan.bat`, `... - show its picture.bat` and `... - validation.bat`. The
+last one adds the SDK's validation layer, whose messages land in the log.
+
+- **Shaders** (`bbport_native_vk_spirv.cpp`): at load, each module's descriptors move to its
+  stage's set (VS 0, PS 1, GS 2), and its bindings are read back for the set layout. Vertex inputs
+  fed integer formats are retyped to `uint4`/`int4`, with every load bitcast back to `float4`. The
+  translated shaders read such inputs with `asuint()` (D3D11 passes raw bits), and Vulkan requires
+  the input type to match the format. One module variant is made per integer-input mask. Checked
+  offline: all 3203 modules read; all 500 vertex shaders patch (16 read inputs through access
+  chains, handled too) and pass `spirv-val`.
+- **Recording** (`bbport_native_vk_gpu.cpp`):
+  - Command buffers are submitted when the game submits (`sceGnmSubmit*`), on the graphics queue
+    under shadPS4's submit lock, with up to 6 in flight.
+  - Constants and generated indices come from a 64 MiB upload ring, split per submission. A full
+    ring submits early.
+  - Descriptor pools are per submission.
+  - Image layouts are tracked per target. Each layout change, and the start of each rendering pass
+    (dynamic rendering), goes with one full memory barrier: simple and safe, with finer barriers
+    for later.
+- **Per draw** (`bbport_native_vk.cpp`):
+  - **Constant buffers:** copied from the shader header's vectors (`+0x48` data, `+0x60` sizes,
+    `+0x78` slots) into the ring, as the port.
+  - **b13 InfoCB:** `ctr_swz` per texture slot (the port's SwizzleCode, using the target's
+    COMP_SWAP) and `ctr_vin` per input (1 uscaled, 2 sscaled). Scales are 1 until render scaling.
+  - **Descriptor sets:** one per stage, written from the module's bindings. Missing buffers and
+    images are null descriptors (`nullDescriptor` is on), which read zeros.
+  - **Pipelines:** cached by shaders (and the integer-input variant), attachment formats,
+    blend/mask, depth-stencil, cull/face/offset registers and topology. Viewport, scissor, depth
+    bias, stencil reference and the vertex layout are dynamic.
+  - **Viewport and scissor:** counted bottom-up as in the port, with a negative-height viewport for
+    D3D's Y. The scissor is clamped to the rendering area.
+  - **Feedback:** a sampled target that is also a color attachment is unbound. A sampled depth
+    target is bound read-only, or dropped when the draw writes depth (as the port).
+  - **Fans and quads:** indices are generated into the ring.
+  - **Not drawn yet:** draws with a geometry shader (2 ES/GS pairs; the ES-to-GS ring comes later).
+- **Clears and copies:** `kClearRenderTarget` and `kCopyTexture` are hooked as pass-through stubs
+  (`bbport_hook.cpp`, shared with the engine probe). Clears clear our images. Copies between
+  same-size formats at mip 0 copy our images, and the destination becomes one of our targets, so
+  later draws sample it (the 24 GPU-written textures stage 3 could not convert). Others are logged
+  and counted.
+- **Display:** the presenter's display-override path (`vk_presenter.cpp`) takes our image of the
+  display buffer. It is moved to General layout at each submit, viewed as R8G8B8A8 with the
+  presenter's sRGB-ness (our images hold the shader's logical channels, so no swap), and handed
+  back in General after the presenter's passes.
+
+Not done yet: geometry-shader draws, render scaling, CPU-written texture refresh, 2D tiling, 3D
+and cube textures, depth or format-changing copies, texture-sourced copies, and the image a
+presented buffer keeps if its target is remade.

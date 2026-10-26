@@ -2475,6 +2475,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
+    BbNativeVk::OnSubmit(); // bbport: the native renderer's work recorded for these
     std::scoped_lock lk{m_submit_lock};
     if (!SubmitLockOnDecode()) {
         WaitGpuIdle();
@@ -2524,6 +2525,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
+    BbNativeVk::OnSubmit(); // bbport: the native renderer's work recorded for these
     std::scoped_lock lk{m_submit_lock};
     if (!SubmitLockOnDecode()) {
         WaitGpuIdle();
