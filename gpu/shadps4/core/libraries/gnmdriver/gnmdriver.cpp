@@ -25,6 +25,7 @@
 #include "bbport_timeline.h"
 #include "bbport_heap_sites.h"
 #include "bbport_gnm_hooks.h"
+#include "bbport_engine_probe.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -608,6 +609,7 @@ u32 PS4_SYSV_ABI sceGnmDispatchInitDefaultHardwareState(u32* cmdbuf, u32 size) {
 s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr_t index_addr,
                                  u32 flags, u32 type) {
     LOG_TRACE(Lib_GnmDriver, "called");
+    BbEngineProbe::NoteDraw(true);
 
     if (cmdbuf && (size == 10) && (index_addr != 0) && (index_addr & 1) == 0 &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -628,6 +630,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr
 
 s32 PS4_SYSV_ABI sceGnmDrawIndexAuto(u32* cmdbuf, u32 size, u32 index_count, u32 flags) {
     LOG_TRACE(Lib_GnmDriver, "called");
+    BbEngineProbe::NoteDraw(false);
 
     if (cmdbuf && (size == 7) &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
