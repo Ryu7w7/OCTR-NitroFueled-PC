@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <iterator>
+#include <map>
 #include <cstdio>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +39,7 @@ u64 alignment = 4096;
 std::vector<Window*> windows_list;
 std::unordered_map<u64, std::vector<Window*>> buckets; // 16 MiB index -> windows touching it
 u64 imported_bytes = 0, failed_windows = 0, lookups = 0, hits = 0;
+std::map<u64, u64> readable; // readable regions seen: start -> end
 
 /// Whether a page run can be read: committed and not no-access or guard.
 #ifdef _WIN32
@@ -207,6 +210,25 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
     }
     ++hits;
     return {w->buffer, address - w->start};
+}
+
+bool Readable(std::uint64_t address, std::uint64_t size) {
+    u64 a = address;
+    const u64 e = address + size;
+    while (a < e) {
+        auto it = readable.upper_bound(a);
+        if (it != readable.begin() && std::prev(it)->second > a) {
+            a = std::prev(it)->second;
+            continue;
+        }
+        u64 rs = 0, re = 0;
+        if (!Region(a, &rs, &re)) {
+            return false;
+        }
+        readable[rs] = re;
+        a = re;
+    }
+    return true;
 }
 
 Stats GetStats() {

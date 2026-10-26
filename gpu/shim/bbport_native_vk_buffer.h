@@ -33,5 +33,9 @@ void Init(const Vulkan::Instance& instance);
 /// Guest bytes [address, address + size) as a slice of an imported window, made the first time.
 Slice Import(std::uint64_t address, std::uint64_t size);
 
+/// Whether guest bytes [address, address + size) are readable, from regions looked up once
+/// (one VirtualQuery per region the first time). Not thread safe.
+bool Readable(std::uint64_t address, std::uint64_t size);
+
 Stats GetStats();
 } // namespace BbNativeVk::Buf

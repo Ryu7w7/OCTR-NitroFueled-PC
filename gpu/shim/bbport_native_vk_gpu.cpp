@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <string>
 #include <tuple>
 #include <mutex>
 #include <vector>
@@ -21,7 +23,19 @@ namespace {
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 
-constexpr u64 RingSize = 64ull << 20;
+constexpr u64 RingSize = 256ull << 20; // vertex data is copied into it every draw
+constexpr u32 MaxMarks = 1024;         // timestamps per command buffer
+
+/// One timed piece of a command buffer: from its timestamp to the next one.
+struct Label {
+    Work kind = Work::Other;
+    u32 width = 0, height = 0;
+    vk::Format format = vk::Format::eUndefined;
+    u32 draws = 0;
+};
+struct WorkAcc {
+    u64 ns = 0, count = 0, draws = 0;
+};
 constexpr u32 SetsPerPool = 1024;
 constexpr std::size_t FrameCount = 6; // command buffers in flight at most
 
@@ -31,6 +45,7 @@ struct Frame {
     vk::CommandBuffer cmd;
     vk::Fence fence;
     vk::QueryPool timestamps; // GPU start and end of the command buffer (null: not measured)
+    std::vector<Label> labels; // label i runs from timestamp i to timestamp i + 1
     bool in_flight = false;
     bool recorded = false;    // anything recorded since it was begun
     u64 ring_begin = 0, ring_end = 0; // its part of the ring, [begin, end) circularly
@@ -58,6 +73,18 @@ std::vector<vk::ImageMemoryBarrier2> pending;
 
 Stats stats{};
 double tick_ns = 0; // nanoseconds per timestamp tick; 0: no timestamps
+std::map<std::string, WorkAcc> work_times;
+
+std::string WorkName(const Label& l) {
+    static constexpr const char* names[] = {"other", "pass", "clear", "depth clear", "copy",
+                                            "depth copy"};
+    std::string s = names[int(l.kind)];
+    if (l.width) {
+        s += " " + std::to_string(l.width) + "x" + std::to_string(l.height) + " " +
+             vk::to_string(l.format);
+    }
+    return s;
+}
 
 Frame& Cur() {
     return frames[current];
@@ -74,9 +101,10 @@ vk::ImageAspectFlags Aspects(const Image& image) {
 void Begin(Frame& f) {
     (void)f.cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
     if (f.timestamps) {
-        f.cmd.resetQueryPool(f.timestamps, 0, 2);
+        f.cmd.resetQueryPool(f.timestamps, 0, MaxMarks + 1);
         f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, f.timestamps, 0);
     }
+    f.labels.assign(1, Label{});
     f.recorded = false;
     f.ring_begin = f.ring_end = ring_head;
 }
@@ -91,13 +119,23 @@ void Retire(Frame& f) {
         (void)device.waitForFences(f.fence, VK_TRUE, ~0ull);
     }
     (void)device.resetFences(f.fence);
-    if (f.timestamps) {
-        u64 t[2]{};
+    if (f.timestamps && !f.labels.empty()) {
+        const std::size_t n = f.labels.size() + 1; // the last one ends the command buffer
+        std::vector<u64> t(n);
         if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueryPoolResults(
-                device, f.timestamps, 0, 2, sizeof(t), t, sizeof(u64), VK_QUERY_RESULT_64_BIT) ==
-                VK_SUCCESS &&
-            t[1] > t[0]) {
-            stats.gpu_ns += u64(double(t[1] - t[0]) * tick_ns);
+                device, f.timestamps, 0, u32(n), n * sizeof(u64), t.data(), sizeof(u64),
+                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+            t[n - 1] > t[0]) {
+            stats.gpu_ns += u64(double(t[n - 1] - t[0]) * tick_ns);
+            for (std::size_t i = 0; i + 1 < n; ++i) {
+                if (t[i + 1] < t[i]) {
+                    continue;
+                }
+                WorkAcc& a = work_times[WorkName(f.labels[i])];
+                a.ns += u64(double(t[i + 1] - t[i]) * tick_ns);
+                ++a.count;
+                a.draws += f.labels[i].draws;
+            }
         }
     }
     for (auto& d : f.deferred) {
@@ -140,7 +178,8 @@ void SubmitFrame(bool early) {
         return;
     }
     if (f.timestamps) {
-        f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, f.timestamps, 1);
+        f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, f.timestamps,
+                              u32(f.labels.size()));
     }
     (void)f.cmd.end();
     f.ring_end = ring_head;
@@ -190,7 +229,7 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
         f.cmd = cmds[0];
         if (tick_ns > 0) {
             auto [qr, qp] = device.createQueryPool(
-                {.queryType = vk::QueryType::eTimestamp, .queryCount = 2});
+                {.queryType = vk::QueryType::eTimestamp, .queryCount = MaxMarks + 1});
             f.timestamps = qr == vk::Result::eSuccess ? qp : vk::QueryPool{};
         }
     }
@@ -355,6 +394,16 @@ void Render(const Pass& pass) {
     if (w == ~0u) {
         return;
     }
+    {
+        const Image* first = pass.depth;
+        for (const Image* c : pass.color) {
+            if (c) {
+                first = c;
+                break;
+            }
+        }
+        Mark(Work::Pass, first->width, first->height, first->format);
+    }
     Barrier();
     Cmd().beginRendering(vk::RenderingInfo{
         .renderArea = {{0, 0}, {w, h}},
@@ -383,6 +432,7 @@ bool Rendering() {
 void ClearColor(Image& image, const float color[4]) {
     Use(image, vk::ImageLayout::eTransferDstOptimal);
     EndRendering();
+    Mark(Work::ClearColor, image.width, image.height, image.format);
     Barrier();
     vk::ClearColorValue value{};
     std::copy(color, color + 4, value.float32.begin());
@@ -397,6 +447,7 @@ void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, u32 s) {
     }
     Use(image, vk::ImageLayout::eTransferDstOptimal);
     EndRendering();
+    Mark(Work::ClearDepth, image.width, image.height, image.format);
     Barrier();
     vk::ImageAspectFlags aspects{};
     if (depth) {
@@ -454,6 +505,33 @@ vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout) {
         }
         return {}; // not even an empty pool holds it
     }
+}
+
+void Mark(Work kind, u32 width, u32 height, vk::Format format) {
+    Frame& f = Cur();
+    if (!f.timestamps || f.labels.size() >= MaxMarks) {
+        return;
+    }
+    // after everything before it: the pieces are serial anyway (full barriers)
+    Cmd().writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, f.timestamps,
+                          u32(f.labels.size()));
+    f.labels.push_back({kind, width, height, format, 0});
+}
+
+void NoteDraw() {
+    if (!Cur().labels.empty()) {
+        ++Cur().labels.back().draws;
+    }
+}
+
+std::vector<WorkTime> TakeWorkTimes() {
+    std::vector<WorkTime> out;
+    for (const auto& [what, a] : work_times) {
+        out.push_back({what, a.ns, a.count, a.draws});
+    }
+    work_times.clear();
+    std::sort(out.begin(), out.end(), [](const WorkTime& a, const WorkTime& b) { return a.ns > b.ns; });
+    return out;
 }
 
 void SaveCache() {

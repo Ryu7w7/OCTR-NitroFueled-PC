@@ -142,7 +142,10 @@ u64 image_base = 0;
 bool enabled = false;
 bool drawing = false; // stage 5 on (BB_VK_DRAW != 0) and the recorder is up
 bool show = false;    // BB_VK_SHOW=1
-bool force_copy = false; // BB_VK_VERTEX_COPY=1: vertex streams copied, never read in place
+// Vertex streams are copied at each draw (default): the game rewrites its vertex memory before
+// our recorded frame runs on the GPU, so reading in place shows later data. BB_VK_VERTEX_COPY=0
+// reads in place (imported) instead.
+bool force_copy = true;
 bool dynamic_vertex_input = false;
 u64 ubo_align = 256;
 fs::path shader_root;
@@ -915,12 +918,12 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             // the part the draw reads, through the upload ring (only memory that is readable)
             const u64 bytes = std::min<u64>(size, u64(first) + u64(vertex_end()) * stride);
             const Gpu::Span span = bytes > first ? Gpu::Upload(bytes - first, 16) : Gpu::Span{};
-            if (!span.data || // Read fails cleanly on memory that is not readable
-                !Read(base + first, span.data, bytes - first)) {
+            if (!span.data || !Buf::Readable(base + first, bytes - first)) {
                 bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
                 vi.ok = false;
                 continue;
             }
+            std::memcpy(span.data, reinterpret_cast<const void*>(base + first), bytes - first);
             vb_copy_bytes.fetch_add(bytes - first, std::memory_order_relaxed);
             vi.buffers[slot] = span.buffer;
             vi.offsets[slot] = span.offset;
@@ -1376,24 +1379,20 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
             return vertex_end;
         }
         vertex_end = count;
-        if (indexed && index_addr) {
-            std::vector<u8> idx(u64(count) * isize_);
+        if (indexed && index_addr && Buf::Readable(index_addr, u64(count) * isize_)) {
             u32 top = 0;
-            if (Read(index_addr, idx.data(), idx.size())) {
+            if (isize_ == 2) {
+                const auto* p = reinterpret_cast<const std::uint16_t*>(index_addr);
                 for (u32 i = 0; i < count; ++i) {
-                    u32 v;
-                    if (isize_ == 2) {
-                        std::uint16_t h;
-                        std::memcpy(&h, &idx[i * 2], 2);
-                        v = h == 0xffff ? 0 : h;
-                    } else {
-                        std::memcpy(&v, &idx[i * 4], 4);
-                        v = v == 0xffffffffu ? 0 : v;
-                    }
-                    top = std::max(top, v);
+                    top = p[i] != 0xffff ? std::max<u32>(top, p[i]) : top;
                 }
-                vertex_end = top + 1;
+            } else {
+                const auto* p = reinterpret_cast<const u32*>(index_addr);
+                for (u32 i = 0; i < count; ++i) {
+                    top = p[i] != 0xffffffffu ? std::max(top, p[i]) : top;
+                }
             }
+            vertex_end = top + 1;
         }
         return vertex_end;
     });
@@ -1650,6 +1649,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
     } else {
         cmd.draw(count, 1, 0, 0);
     }
+    Gpu::NoteDraw();
     drawn.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1763,6 +1763,7 @@ __attribute__((sysv_abi)) void OnCopy(u64 ctx, const u32* src, const u32* dst, c
     Gpu::Use(st.img, vk::ImageLayout::eTransferSrcOptimal);
     Gpu::Use(dt->img, vk::ImageLayout::eTransferDstOptimal);
     Gpu::EndRendering();
+    Gpu::Mark(from_depth ? Gpu::Work::DepthCopy : Gpu::Work::Copy, w, h, dt->img.format);
     Gpu::Barrier();
     if (from_depth) {
         const vk::BufferImageCopy out{.bufferOffset = span.offset,
@@ -1829,11 +1830,10 @@ void StartTextures() {
             const char* sh = std::getenv("BB_VK_SHOW");
             show = drawing && sh && sh[0] == '1';
             const char* fc = std::getenv("BB_VK_VERTEX_COPY");
-            force_copy = drawing && fc && fc[0] == '1';
-            if (force_copy) {
-                std::printf("Native Vulkan: BB_VK_VERTEX_COPY=1: vertex streams are copied, not read "
-                            "in place\n");
-            }
+            force_copy = !(fc && fc[0] == '0');
+            std::printf("Native Vulkan: vertex streams %s\n",
+                        force_copy ? "copied at each draw (BB_VK_VERTEX_COPY=0 reads them in place)"
+                                   : "read in place (BB_VK_VERTEX_COPY=0)");
             std::printf("Native Vulkan: drawing %s (dynamic vertex input %s, constant alignment "
                         "%llu)%s\n",
                         drawing ? "on" : "NOT available", dynamic_vertex_input ? "yes" : "no",
@@ -1965,6 +1965,20 @@ void Report() {
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
                         (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
                         (unsigned long long)depth_copies.load(), reasons.c_str());
+            std::vector<Gpu::WorkTime> work;
+            {
+                std::lock_guard lk(mutex);
+                work = Gpu::TakeWorkTimes();
+            }
+            std::string top;
+            for (std::size_t i = 0; i < work.size() && i < 10; ++i) {
+                char b[192];
+                std::snprintf(b, sizeof(b), "%s%s %.1f ms (%.0f/s, %llu draws)", i ? "; " : "",
+                              work[i].what.c_str(), work[i].ns / 5e6, work[i].count / 5.0,
+                              (unsigned long long)work[i].draws);
+                top += b;
+            }
+            std::printf("Native Vulkan: GPU per second, most first: %s\n", top.c_str());
             last_draw_ns = dn;
             last_clear_ns = cn;
             last_copy_ns = pn;

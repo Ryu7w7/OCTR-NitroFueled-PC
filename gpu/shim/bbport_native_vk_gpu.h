@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -47,6 +48,13 @@ struct Span {
     void* data = nullptr;
 };
 
+/// What GPU time is spent on (timestamps around each pass, clear and copy).
+enum class Work : std::uint8_t { Other, Pass, ClearColor, ClearDepth, Copy, DepthCopy };
+struct WorkTime {
+    std::string what;
+    std::uint64_t ns, count, draws;
+};
+
 struct Stats {
     std::uint64_t submits, early_submits, waits, passes, barriers, ring_bytes, sets, pools;
     std::uint64_t gpu_ns; // GPU time of the finished command buffers (timestamps)
@@ -54,6 +62,12 @@ struct Stats {
 
 /// `cache_path`: where the pipeline cache is loaded from and saved to (empty: not kept).
 bool Init(const Vulkan::Instance& instance, const std::string& cache_path);
+/// Starts timing `kind` on the GPU (until the next mark), for an image of this size and format.
+void Mark(Work kind, std::uint32_t width, std::uint32_t height, vk::Format format);
+/// One more draw in the work being timed.
+void NoteDraw();
+/// GPU time by work since the last call, most first.
+std::vector<WorkTime> TakeWorkTimes();
 /// Writes the pipeline cache to its file.
 void SaveCache();
 
