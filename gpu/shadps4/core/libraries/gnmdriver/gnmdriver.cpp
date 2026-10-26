@@ -3132,7 +3132,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
     presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
-    BbNativeVk::Attach(static_cast<VkDevice>(presenter->GetInstance().GetDevice()));
+    BbNativeVk::Attach(presenter->GetInstance());
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {

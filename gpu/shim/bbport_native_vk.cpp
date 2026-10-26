@@ -17,7 +17,9 @@
 #include <utility>
 #include <vector>
 
-#include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_instance.h" // first: sets up the Vulkan headers
+
+#include <vk_mem_alloc.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -58,18 +60,34 @@ struct ShaderInfo {
     bool load_tried = false;
 };
 
+/// A Vulkan image standing in for an engine render or depth target, keyed by its GPU address.
+/// Same size as the engine's for now (render scaling comes with presentation).
+struct Target {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkImageView view = VK_NULL_HANDLE;
+    u32 width = 0, height = 0;
+    vk::Format format = vk::Format::eUndefined;
+    bool depth = false;
+    u32 comp_swap = 0; // CB_COLOR_INFO.COMP_SWAP: channel order the engine writes in
+    u64 bytes = 0;
+};
+
 u64 image_base = 0;
 bool enabled = false;
 fs::path shader_root;
-std::atomic<VkDevice> device{VK_NULL_HANDLE};
+std::atomic<const Vulkan::Instance*> instance{nullptr};
 
 std::mutex mutex; // draws can come from more than one game thread
 std::unordered_map<u64, ShaderInfo> shaders;          // FNV-1a 64 of the GCN program
 std::unordered_map<u64, ShaderInfo*> shader_by_code;  // program address -> entry (nullptr: unknown)
 std::unordered_set<u64> pipeline_keys;
+std::unordered_map<u64, Target> targets; // GPU base address -> image
 
 std::atomic<u64> draws{0}, resolved{0}, missing_shader{0}, no_target{0}, no_context{0};
 std::atomic<u64> modules_made{0}, modules_failed{0}, unknown_programs{0};
+std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable_targets{0};
+std::atomic<u64> target_bytes{0};
 
 /// Reads guest memory without faulting on a bad pointer (only for things not seen before).
 bool Read(u64 address, void* out, std::size_t size) {
@@ -157,8 +175,8 @@ bool LoadIndex() {
 
 /// spirv/<name>.spv as a VkShaderModule on the presenter's device (once per shader).
 void LoadModule(ShaderInfo& s) {
-    const VkDevice dev = device.load();
-    if (s.load_tried || dev == VK_NULL_HANDLE) {
+    const Vulkan::Instance* inst = instance.load();
+    if (s.load_tried || !inst) {
         return;
     }
     s.load_tried = true;
@@ -171,7 +189,7 @@ void LoadModule(ShaderInfo& s) {
     }
     const vk::ShaderModuleCreateInfo info{.codeSize = code.size(),
                                           .pCode = reinterpret_cast<const u32*>(code.data())};
-    auto [result, module] = vk::Device(dev).createShaderModule(info);
+    auto [result, module] = inst->GetDevice().createShaderModule(info);
     if (result != vk::Result::eSuccess) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
         std::printf("Native Vulkan: %s: vkCreateShaderModule failed (%s)\n", s.name.c_str(),
@@ -218,6 +236,208 @@ ShaderInfo* Resolve(u64 handle, const char* stage) {
     return info;
 }
 
+/// CB_COLOR_INFO FORMAT (GCN data format) and NUMBER_TYPE (0 unorm, 1 snorm, 4 uint, 5 sint,
+/// 6 srgb, 7 float) -> Vulkan, as the D3D11 port's ColorTargetFormat (port/src/gfx/formats.cpp).
+vk::Format ColorFormat(u32 info) {
+    using F = vk::Format;
+    const u32 fmt = (info >> 2) & 0x1f, num = (info >> 8) & 7;
+    const bool sn = num == 1, ui = num == 4, si = num == 5, fl = num == 7;
+    switch (fmt) {
+    case 1: // 8
+        return sn ? F::eR8Snorm : ui ? F::eR8Uint : si ? F::eR8Sint : F::eR8Unorm;
+    case 2: // 16
+        return fl ? F::eR16Sfloat : sn ? F::eR16Snorm : ui ? F::eR16Uint : si ? F::eR16Sint
+                                                                          : F::eR16Unorm;
+    case 3: // 8_8
+        return sn ? F::eR8G8Snorm : ui ? F::eR8G8Uint : F::eR8G8Unorm;
+    case 4: // 32
+        return fl ? F::eR32Sfloat : si ? F::eR32Sint : F::eR32Uint;
+    case 5: // 16_16
+        return fl ? F::eR16G16Sfloat : sn ? F::eR16G16Snorm : ui ? F::eR16G16Uint : F::eR16G16Unorm;
+    case 6: // 10_11_11
+    case 7: // 11_11_10
+        return F::eB10G11R11UfloatPack32;
+    case 8: // 10_10_10_2
+    case 9: // 2_10_10_10
+        return ui ? F::eA2B10G10R10UintPack32 : F::eA2B10G10R10UnormPack32;
+    case 10: // 8_8_8_8
+        return num == 6 ? F::eR8G8B8A8Srgb : sn ? F::eR8G8B8A8Snorm : ui ? F::eR8G8B8A8Uint
+                                                                    : F::eR8G8B8A8Unorm;
+    case 11: // 32_32
+        return fl ? F::eR32G32Sfloat : F::eR32G32Uint;
+    case 12: // 16_16_16_16
+        return fl ? F::eR16G16B16A16Sfloat : sn ? F::eR16G16B16A16Snorm
+               : ui ? F::eR16G16B16A16Uint : F::eR16G16B16A16Unorm;
+    case 14: // 32_32_32_32
+        return fl ? F::eR32G32B32A32Sfloat : F::eR32G32B32A32Uint;
+    case 16: // 5_6_5
+        return F::eR5G6B5UnormPack16;
+    default:
+        return F::eUndefined;
+    }
+}
+
+u32 FormatBytes(vk::Format f) {
+    using F = vk::Format;
+    switch (f) {
+    case F::eR8Unorm:
+    case F::eR8Snorm:
+    case F::eR8Uint:
+    case F::eR8Sint:
+        return 1;
+    case F::eR16Sfloat:
+    case F::eR16Snorm:
+    case F::eR16Uint:
+    case F::eR16Sint:
+    case F::eR16Unorm:
+    case F::eR8G8Snorm:
+    case F::eR8G8Uint:
+    case F::eR8G8Unorm:
+    case F::eR5G6B5UnormPack16:
+    case F::eD16Unorm:
+        return 2;
+    case F::eR32G32Sfloat:
+    case F::eR32G32Uint:
+    case F::eR16G16B16A16Sfloat:
+    case F::eR16G16B16A16Snorm:
+    case F::eR16G16B16A16Uint:
+    case F::eR16G16B16A16Unorm:
+    case F::eD32SfloatS8Uint:
+        return 8;
+    case F::eR32G32B32A32Sfloat:
+    case F::eR32G32B32A32Uint:
+        return 16;
+    default:
+        return 4;
+    }
+}
+
+void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
+    // safe while nothing records with these images; once draws are issued this must wait for the GPU
+    if (t.view) {
+        inst.GetDevice().destroyImageView(t.view);
+    }
+    if (t.image) {
+        vmaDestroyImage(inst.GetAllocator(), t.image, t.allocation);
+    }
+    target_bytes.fetch_sub(t.bytes, std::memory_order_relaxed);
+    t = Target{};
+}
+
+/// The image for the target at `base`, made again when its size or format changes.
+Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 comp_swap) {
+    const Vulkan::Instance* inst = instance.load();
+    if (!inst) {
+        return nullptr;
+    }
+    Target& t = targets[base];
+    if (t.image && t.width == w && t.height == h && t.format == format) {
+        return &t;
+    }
+    if (t.image) {
+        DestroyTarget(*inst, t);
+        targets_remade.fetch_add(1, std::memory_order_relaxed);
+    }
+    using U = vk::ImageUsageFlagBits;
+    const vk::ImageCreateInfo ici{
+        .flags = depth ? vk::ImageCreateFlags{} : vk::ImageCreateFlags{vk::ImageCreateFlagBits::eMutableFormat},
+        .imageType = vk::ImageType::e2D,
+        .format = format,
+        .extent = {w, h, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = U::eSampled | U::eTransferDst |
+                 (depth ? vk::ImageUsageFlags{U::eDepthStencilAttachment}
+                        : vk::ImageUsageFlags{U::eColorAttachment | U::eTransferSrc}),
+        .sharingMode = vk::SharingMode::eExclusive,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    aci.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    const VkImageCreateInfo& raw = ici;
+    const VkResult r =
+        vmaCreateImage(inst->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
+    if (r != VK_SUCCESS) {
+        targets_failed.fetch_add(1, std::memory_order_relaxed);
+        std::printf("Native Vulkan: target %llx %ux%u %s: image not created (%s)\n",
+                    (unsigned long long)base, w, h, vk::to_string(format).c_str(),
+                    vk::to_string(vk::Result(r)).c_str());
+        targets.erase(base);
+        return nullptr;
+    }
+    const vk::ImageViewCreateInfo vci{
+        .image = image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = format,
+        .subresourceRange = {.aspectMask = depth ? vk::ImageAspectFlagBits::eDepth
+                                                 : vk::ImageAspectFlagBits::eColor,
+                             .baseMipLevel = 0,
+                             .levelCount = 1,
+                             .baseArrayLayer = 0,
+                             .layerCount = 1},
+    };
+    auto [vr, view] = inst->GetDevice().createImageView(vci);
+    t.image = image;
+    t.allocation = allocation;
+    t.view = vr == vk::Result::eSuccess ? VkImageView(view) : VK_NULL_HANDLE;
+    t.width = w;
+    t.height = h;
+    t.format = format;
+    t.depth = depth;
+    t.comp_swap = comp_swap;
+    t.bytes = u64(w) * h * FormatBytes(format);
+    target_bytes.fetch_add(t.bytes, std::memory_order_relaxed);
+    targets_made.fetch_add(1, std::memory_order_relaxed);
+    std::printf("Native Vulkan: %s target %llx %ux%u %s swap %u%s\n", depth ? "depth" : "color",
+                (unsigned long long)base, w, h, vk::to_string(format).c_str(), comp_swap,
+                t.view ? "" : " (no view)");
+    return &t;
+}
+
+/// Gnm::RenderTarget: registers from +0x10 (CB_COLOR_BASE, PITCH, SLICE, VIEW, INFO, ATTRIB),
+/// width | height << 16 at +0x4c.
+Target* ColorTarget(u64 handle) {
+    const u64 base = u64(R<u32>(handle + 0x10)) << 8;
+    const u32 info = R<u32>(handle + 0x20), wh = R<u32>(handle + 0x4c);
+    const u32 w = wh & 0xffff, h = wh >> 16;
+    const vk::Format format = ColorFormat(info);
+    if (!base || !w || !h || format == vk::Format::eUndefined) {
+        if (unusable_targets.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::printf("Native Vulkan: unusable color target %llx: base %llx info %x size %ux%u\n",
+                        (unsigned long long)handle, (unsigned long long)base, info, w, h);
+        }
+        return nullptr;
+    }
+    return MakeTarget(base, w, h, format, false, (info >> 11) & 3);
+}
+
+/// Gnm::DepthRenderTarget: +0x50 DB_Z_INFO, +0x54 DB_STENCIL_INFO, +0x58 DB_Z_READ_BASE,
+/// width | height << 16 at +0x80. Z_16 without stencil is a shadow map (its depth bias is in
+/// 16-bit units, so it stays 16-bit); everything else is 32-bit float depth with 8-bit stencil.
+Target* DepthTarget(u64 handle) {
+    const u64 base = u64(R<u32>(handle + 0x58)) << 8;
+    const u32 wh = R<u32>(handle + 0x80);
+    const u32 w = wh & 0xffff, h = wh >> 16;
+    if (!base || !w || !h) {
+        unusable_targets.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    const bool z16 = (R<u32>(handle + 0x50) & 3) == 1 && (R<u32>(handle + 0x54) & 1) == 0;
+    vk::Format format = vk::Format::eD16Unorm;
+    if (!z16) {
+        const Vulkan::Instance* inst = instance.load();
+        format = inst ? inst->GetSupportedFormat(vk::Format::eD32SfloatS8Uint,
+                                                 vk::FormatFeatureFlagBits2::eDepthStencilAttachment)
+                      : vk::Format::eD32SfloatS8Uint;
+    }
+    return MakeTarget(base, w, h, format, true, 0);
+}
+
 void Report() {
     u64 last = 0;
     for (;;) {
@@ -226,10 +446,11 @@ void Report() {
         if (d == last) {
             continue;
         }
-        std::size_t keys = 0;
+        std::size_t keys = 0, live_targets = 0;
         {
             std::lock_guard lk(mutex);
             keys = pipeline_keys.size();
+            live_targets = targets.size();
         }
         std::printf("Native Vulkan: %.0f draws/s; in all %llu draws, %llu resolved, %llu with a "
                     "shader missing, %llu without a target, %llu without a context; %zu pipeline "
@@ -240,6 +461,12 @@ void Report() {
                     (unsigned long long)no_context.load(), keys,
                     (unsigned long long)modules_made.load(), (unsigned long long)modules_failed.load(),
                     (unsigned long long)unknown_programs.load());
+        std::printf("Native Vulkan: %zu target images (%.0f MiB); %llu made, %llu made again at a "
+                    "new size or format, %llu failed, %llu unusable target handles\n",
+                    live_targets, target_bytes.load() / 1048576.0,
+                    (unsigned long long)targets_made.load(), (unsigned long long)targets_remade.load(),
+                    (unsigned long long)targets_failed.load(),
+                    (unsigned long long)unusable_targets.load());
         std::fflush(stdout);
         last = d;
     }
@@ -265,16 +492,16 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::fflush(stdout);
         return;
     }
-    std::printf("Native Vulkan: on (front end only: shadPS4 still draws); %zu translated shaders "
-                "from %s\n",
+    std::printf("Native Vulkan: on (shaders and targets only: shadPS4 still draws); %zu translated "
+                "shaders from %s\n",
                 shaders.size(), shader_root.string().c_str());
     std::fflush(stdout);
     enabled = true;
     std::thread(Report).detach();
 }
 
-void Attach(void* dev) {
-    device.store(static_cast<VkDevice>(dev));
+void Attach(const Vulkan::Instance& vulkan) {
+    instance.store(&vulkan);
 }
 
 void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
@@ -299,22 +526,30 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         missing_shader.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    u32 targets = 0;
+    vk::Format formats[8]{};
+    bool any_color = false;
     for (int i = 0; i < 8; ++i) {
-        targets |= Q(ctx + CtxColorTargets + i * 8) ? 1u << i : 0;
+        if (const u64 h = Q(ctx + CtxColorTargets + i * 8)) {
+            if (const Target* t = ColorTarget(h)) {
+                formats[i] = t->format;
+                any_color = true;
+            }
+        }
     }
-    const bool depth = Q(ctx + CtxDepthTarget) != 0;
-    if (!targets && !depth) {
+    const u64 dh = Q(ctx + CtxDepthTarget);
+    const Target* depth_target = dh ? DepthTarget(dh) : nullptr;
+    const vk::Format depth = depth_target ? depth_target->format : vk::Format::eUndefined;
+    if (!any_color && !depth_target) {
         no_target.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     resolved.fetch_add(1, std::memory_order_relaxed);
-    // what a VkPipeline would be keyed on (target formats join once targets are mapped)
+    // what a VkPipeline is keyed on
     u64 key = 0xcbf29ce484222325ull;
     Mix(key, vs);
     Mix(key, ps);
     Mix(key, gs);
-    Mix(key, targets);
+    Mix(key, formats);
     Mix(key, depth);
     Mix(key, indexed);
     for (const u64 off : {CtxAlphaToMask, CtxBlendControl, CtxClipControl, CtxPrimSetup,
