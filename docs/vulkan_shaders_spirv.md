@@ -56,3 +56,18 @@ hashes) moved; the script finds them through their `OrbShdr` footer:
   (`VK_KHR_maintenance1`, core in 1.1) rather than `-fvk-invert-y`, so the same SPIR-V serves all passes.
 - **ES/GS**: two of each. The port emulates the ES→GS ring in HLSL, so a Vulkan geometry stage is needed.
   If a device lacks `geometryShader`, those draws need a fallback.
+
+## Native renderer, stage 1: front end (`BB_NATIVE_VK=1`)
+
+`gpu/shim/bbport_native_vk.cpp`, enabled with `BB_NATIVE_VK=1` and `BB_VK_SHADERS=<out/shaders>`.
+It is called from `sceGnmDrawIndex` and `sceGnmDrawIndexAuto`. At each draw it:
+
+- reads the engine context through the device global,
+- resolves the bound VS/PS (and GS behind an ES) by hashing the GCN program, as the D3D11 port does,
+- loads each matched shader's SPIR-V as a `VkShaderModule` on the presenter's device,
+- counts the distinct pipeline states (shaders, target layout, blend/depth/stencil/raster registers,
+  primitive and index type).
+
+Programs without a translation are logged once each. A summary is logged every 5 s.
+Nothing is drawn by it yet: shadPS4 still renders. Next: render targets and depth (engine target →
+VkImage), then textures and samplers, vertex/index fetch, and the draw itself.

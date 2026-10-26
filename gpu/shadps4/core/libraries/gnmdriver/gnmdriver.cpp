@@ -26,6 +26,7 @@
 #include "bbport_heap_sites.h"
 #include "bbport_gnm_hooks.h"
 #include "bbport_engine_probe.h"
+#include "bbport_native_vk.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -610,6 +611,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr
                                  u32 flags, u32 type) {
     LOG_TRACE(Lib_GnmDriver, "called");
     BbEngineProbe::NoteDraw(true);
+    BbNativeVk::OnDraw(true, index_count, index_addr);
 
     if (cmdbuf && (size == 10) && (index_addr != 0) && (index_addr & 1) == 0 &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -631,6 +633,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr
 s32 PS4_SYSV_ABI sceGnmDrawIndexAuto(u32* cmdbuf, u32 size, u32 index_count, u32 flags) {
     LOG_TRACE(Lib_GnmDriver, "called");
     BbEngineProbe::NoteDraw(false);
+    BbNativeVk::OnDraw(false, index_count, 0);
 
     if (cmdbuf && (size == 7) &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -3129,6 +3132,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
     presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    BbNativeVk::Attach(static_cast<VkDevice>(presenter->GetInstance().GetDevice()));
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {
