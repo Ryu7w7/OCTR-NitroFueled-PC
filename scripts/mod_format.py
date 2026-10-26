@@ -224,7 +224,8 @@ def validate_folder(root):
         data=under(root,name).read_bytes()
         if len(data)>8*1024**2 or b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():error('unsupported XML declarations/size')
         xml=ET.fromstring(data);ids=[n.text for n in xml.findall('./TitleID/ID')]
-        if ids!=['CUSA13795'] or not list(xml.iter('Metadata')):error('XML must target CUSA13795 and contain Metadata')
+        if ids not in (['CUSA13795'],['CUSA14876']) or not list(xml.iter('Metadata')):
+            error('XML must target exactly one supported CTR edition (CUSA13795 or CUSA14876) and contain Metadata')
         for meta in xml.iter('Metadata'):
             if meta.get('AppVer')!='01.21' or meta.get('AppElf')!='eboot.bin' or not list(meta.iter('Line')):
                 error('XML metadata must target eboot.bin 01.21 and contain writes')

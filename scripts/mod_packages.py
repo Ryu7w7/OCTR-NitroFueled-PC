@@ -78,6 +78,11 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     root=Path(environment.get('BB_MODS_DIR',Path(data)/'mods'))
     # Preserve the zero-package path, including custom patches/settings/data locations.
     if environment.get('BB_MODS_ENABLED','1')=='0' or not root.is_dir():return Path(game),str(config)
+    from prepare import sfo
+    game_info=sfo((Path(game)/'sce_sys/param.sfo').read_bytes())
+    title_id,app_version=game_info.get('TITLE_ID'),game_info.get('APP_VER')
+    if title_id not in ('CUSA13795','CUSA14876') or app_version!='01.21':
+        raise ValueError('Mod packages require a supported CTR edition at 01.21')
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
     try:
@@ -88,9 +93,9 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         for message in catalog['messages']:log('OCTR mods: '+message)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
         patchdir=Path(environment.get('BB_PATCHES_DIR',Path(port)/'patches'))
-        found=external_patches(patchdir)
+        found=external_patches(patchdir,app_version,title_id)
         if library.resolve()!=patchdir.resolve():
-            found+=[p for p in external_patches(library) if p[0].startswith(PREFIX)]
+            found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
         original=json.loads(selection.read_text()) if selection.exists() else {'enabled':[],'disabled':[]}
@@ -118,7 +123,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             (user/'cache').rename(session/'cache-before-reset')
         ini=session/'bbport.ini';ini.write_text(''.join(k+'='+v+'\n' for k,v in plan['settings'].items()),encoding='utf-8')
         snapshot=session/'patches.json';save_json(snapshot,original)
-        writes=preflight(plan['profile'],ini,snapshot,game=plan['game'])
+        writes=preflight(plan['profile'],ini,snapshot,title_id=title_id,app_version=app_version,game=plan['game'])
         if plan['has_shaders'] and not prepare_only:
             from mod_shaders import ensure_shaders
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))

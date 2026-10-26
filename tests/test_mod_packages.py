@@ -25,6 +25,9 @@ class PackageTests(unittest.TestCase):
         (self.port/'scripts/patches.py').write_text('# synthetic compiler')
         self.game=self.root/'game';self.game.mkdir();(self.game/'eboot.bin').write_bytes(b'synthetic executable')
         (self.game/'data.txt').write_bytes(b'original')
+        from test_game_check import param_sfo
+        (self.game/'sce_sys').mkdir()
+        (self.game/'sce_sys/param.sfo').write_bytes(param_sfo({'TITLE_ID':'CUSA13795','APP_VER':'01.21'}))
         self.ini=self.port/'bbport.ini';self.ini.write_text('output_res=1920x1080\nrender_res=1080\nonline=0\n')
         self.prefs=self.port/'patches.json';save_json(self.prefs,{'enabled':[],'disabled':[]})
         adapter.ACTIVE=None;self.count=0
@@ -134,12 +137,12 @@ class PackageTests(unittest.TestCase):
         def guarded(source,target,*args,**kwargs):
             self.assertFalse(Path(source).resolve().is_relative_to(self.game))
             return real_copy(source,target,*args,**kwargs)
-        before={p.name:p.read_bytes() for p in self.game.iterdir()}
+        before={p.relative_to(self.game).as_posix():p.read_bytes() for p in self.game.rglob('*') if p.is_file()}
         with patch.object(shutil,'copy2',side_effect=guarded),patch('os.link',side_effect=AssertionError('No game links')):
             game,_=self.prepare();game2,_=self.prepare()
         self.assertEqual((game,game2),(self.game,self.game))
         self.assertFalse((self.port/'mod-state/extensions/profiles').exists())
-        self.assertEqual(before,{p.name:p.read_bytes() for p in self.game.iterdir()})
+        self.assertEqual(before,{p.relative_to(self.game).as_posix():p.read_bytes() for p in self.game.rglob('*') if p.is_file()})
     def test_catalog_provides_native_mod_name_and_zip_identity(self):
         package=self.package(manifest=self.manifest()|{'name':'Readable mod name'})
         self.scan()

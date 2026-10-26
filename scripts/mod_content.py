@@ -104,6 +104,11 @@ def has_extended(root,config):return any((n in zip_entries(root) or extended(pac
 
 def prepare(root,state,game,mod_root,selection,base_config,environment,log=print):
     root=Path(root).resolve();state=Path(state).resolve();game=Path(game).resolve();mod_root=Path(mod_root)
+    from prepare import sfo
+    game_info=sfo((game/'sce_sys/param.sfo').read_bytes())
+    title_id,app_version=game_info.get('TITLE_ID'),game_info.get('APP_VER')
+    if title_id not in ('CUSA13795','CUSA14876') or app_version!='01.21':
+        raise ValueError('Mod packages require a supported CTR edition at 01.21')
     base=read_ini(base_config)
     base.setdefault('widescreen_layout','off')
     problems=conflicts(mod_root,selection)
@@ -133,7 +138,13 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     if key in target and target[key]!=value:raise ValueError('Conflicting '+field+': '+key)
                     target[key]=value
             operations.extend((op,folder) for op in m.get('operations',[]))
-            patches.extend((under(folder,p),name) for p in m.get('patches',[]))
+            for patch_name in m.get('patches',[]):
+                patch_path=under(folder,patch_name)
+                patch_xml=ET.parse(patch_path).getroot()
+                patch_ids=[node.text for node in patch_xml.findall('./TitleID/ID')]
+                if patch_ids!=[title_id] or any(meta.get('AppVer')!=app_version for meta in patch_xml.iter('Metadata')):
+                    raise ValueError(name+': executable patch targets a different game edition/version')
+                patches.append((patch_path,name))
             whole.extend((under(folder,r['file']),r['file']) for r in m['files'] if r['file'].startswith('archives/'))
             packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant})
         else:
@@ -145,7 +156,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
         m=fmt.resolve(raw,base)[1] if 'schemaVersion' in raw else raw
         for key,values in m.get('constraints',{}).items():
             if effective.get(key) not in values:raise ValueError(name+': '+key+' must be one of '+', '.join(values))
-    identity={'game':str(game),'source_files':source_state,'packages':packages,'settings':effective,
+    identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
@@ -182,7 +193,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             (staging/'patches').mkdir()
             for p in (root/'patches').glob('*.xml'):shutil.copy2(p,staging/'patches'/p.name)
             if (staging/'patches/OCTR-Mod-Content.xml').exists():raise ValueError('Reserved generated patch filename is already used')
-            xml=ET.Element('Patch');ids=ET.SubElement(xml,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795'
+            xml=ET.Element('Patch');ids=ET.SubElement(xml,'TitleID');ET.SubElement(ids,'ID').text=title_id
             for path,name in patches:
                 for meta in ET.parse(path).getroot().iter('Metadata'):
                     meta.set('Name',name+': '+meta.get('Name',''));meta.set('isEnabled','true');xml.append(meta)
