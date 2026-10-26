@@ -5,16 +5,20 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -76,6 +80,7 @@ struct ViewportI {
 };
 
 struct ShaderInfo {
+    u64 hash = 0; // FNV-1a 64 of the GCN program (the key in `shaders`)
     std::string name;
     std::string kind; // vs, ps, es (a VS feeding a GS), gs
     std::vector<std::pair<int, int>> textures; // slot, dims
@@ -267,6 +272,7 @@ bool LoadIndex() {
                 continue;
             }
             cur = &shaders[key];
+            cur->hash = key;
             cur->name = name;
             cur->kind = kind;
         } else if (cur && tag == 'T') {
@@ -1207,6 +1213,272 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
     return pipeline;
 }
 
+// ------------------------------------------------------------------ pipeline compiles
+// Pipelines compile on their own threads (a compile takes ~100 ms on the AMD Windows driver,
+// whose VkPipelineCache stays empty); a draw whose pipeline is still compiling is left out.
+// Every pipeline's description goes to pipelines.bin, and the next run compiles all of them
+// while the game starts, so a pipeline seen once is ready before its first draw.
+// BB_VK_SYNC_PIPELINES=1 compiles at the draw instead (nothing left out).
+
+/// What a pipeline is made from, by value (one record of pipelines.bin).
+struct PipelineDesc {
+    u64 vs = 0, ps = 0; // program hashes; ps 0: none
+    u64 vertex_key = 0;
+    u32 uint_mask = 0, sint_mask = 0;
+    vk::Format colors[8]{};
+    u32 color_count = 0;
+    vk::Format depth = vk::Format::eUndefined;
+    u32 stencil = 0, depth_read_only = 0, bias = 0;
+    u32 blend = 0, mask = 0, dctl = 0, refmask = 0, sops = 0, setup = 0;
+    vk::PrimitiveTopology topology = vk::PrimitiveTopology::eTriangleList;
+    u32 binding_count = 0, attribute_count = 0;
+    u32 bindings[16][4]{};   // binding, stride, input rate, divisor
+    u32 attributes[32][4]{}; // location, binding, format, offset
+};
+static_assert(std::is_trivially_copyable_v<PipelineDesc>);
+constexpr u32 PipelineFileMagic = 0x44504242; // "BBPD"
+
+struct CompileJob {
+    u64 key = 0;
+    PipelineState st;
+    VertexInput vi; // st.vertices
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+};
+
+bool async_pipelines = true;
+std::mutex compile_mutex;
+std::condition_variable compile_cv;
+std::deque<std::unique_ptr<CompileJob>> compile_queue;
+std::vector<std::pair<u64, VkPipeline>> compiled; // done, not yet in `pipelines`
+std::unordered_set<u64> compiling;                // queued or compiling (under `mutex`)
+std::vector<PipelineDesc> known;                  // every description this run (under `mutex`)
+std::unordered_set<u64> known_keys;
+bool known_dirty = false;
+std::atomic<u64> compiles_done{0}, compile_ns{0}, preloaded{0}, skipped_compiling{0};
+
+void CompileThread() {
+    for (;;) {
+        std::unique_ptr<CompileJob> job;
+        {
+            std::unique_lock lk(compile_mutex);
+            compile_cv.wait(lk, [] { return !compile_queue.empty(); });
+            job = std::move(compile_queue.front());
+            compile_queue.pop_front();
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const VkPipeline pipeline = MakePipeline(job->st, job->layout);
+        compile_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - t0)
+                                     .count()),
+                             std::memory_order_relaxed);
+        compiles_done.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lk(compile_mutex);
+        compiled.emplace_back(job->key, pipeline);
+    }
+}
+
+/// Starts the compile threads: a few, leaving cores to the game.
+void StartCompileThreads() {
+    const unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+    for (unsigned i = 0; i < n; ++i) {
+        std::thread(CompileThread).detach();
+    }
+    std::printf("Native Vulkan: %u pipeline compile threads\n", n);
+}
+
+/// Moves finished compiles into `pipelines` (holding `mutex`).
+void TakeCompiled() {
+    std::lock_guard lk(compile_mutex);
+    for (const auto& [key, pipeline] : compiled) {
+        pipelines[key] = pipeline;
+        compiling.erase(key);
+    }
+    compiled.clear();
+}
+
+/// Queues `st` for a compile thread (holding `mutex`).
+void Enqueue(u64 key, const PipelineState& st, VkPipelineLayout layout) {
+    auto job = std::make_unique<CompileJob>();
+    job->key = key;
+    job->st = st;
+    job->vi.bindings = st.vertices->bindings;
+    job->vi.attributes = st.vertices->attributes;
+    job->vi.key = st.vertices->key;
+    job->st.vertices = &job->vi;
+    job->layout = layout;
+    compiling.insert(key);
+    {
+        std::lock_guard lk(compile_mutex);
+        compile_queue.push_back(std::move(job));
+    }
+    compile_cv.notify_one();
+}
+
+/// Moves a queued compile a draw is waiting for to the front, once (holding `mutex`).
+void Hurry(u64 key) {
+    static std::unordered_set<u64> hurried;
+    if (!hurried.insert(key).second) {
+        return;
+    }
+    std::lock_guard lk(compile_mutex);
+    const auto it = std::find_if(compile_queue.begin(), compile_queue.end(),
+                                 [key](const auto& job) { return job->key == key; });
+    if (it != compile_queue.end() && it != compile_queue.begin()) {
+        auto job = std::move(*it);
+        compile_queue.erase(it);
+        compile_queue.push_front(std::move(job));
+    }
+}
+
+/// Records the description of a pipeline seen for the first time (holding `mutex`).
+void Remember(u64 key, const PipelineState& st, const VertexInput& vi) {
+    if (!known_keys.insert(key).second || vi.bindings.size() > 16 || vi.attributes.size() > 32) {
+        return;
+    }
+    PipelineDesc d{};
+    d.vs = st.vs->hash;
+    d.ps = st.ps ? st.ps->hash : 0;
+    d.vertex_key = vi.key;
+    d.uint_mask = vi.uint_mask;
+    d.sint_mask = vi.sint_mask;
+    std::copy(std::begin(st.colors), std::end(st.colors), d.colors);
+    d.color_count = st.color_count;
+    d.depth = st.depth;
+    d.stencil = st.stencil;
+    d.depth_read_only = st.depth_read_only;
+    d.bias = st.bias;
+    d.blend = st.blend;
+    d.mask = st.mask;
+    d.dctl = st.dctl;
+    d.refmask = st.refmask;
+    d.sops = st.sops;
+    d.setup = st.setup;
+    d.topology = st.topology;
+    d.binding_count = u32(vi.bindings.size());
+    for (u32 i = 0; i < d.binding_count; ++i) {
+        const auto& b = vi.bindings[i];
+        d.bindings[i][0] = b.binding;
+        d.bindings[i][1] = b.stride;
+        d.bindings[i][2] = u32(b.inputRate);
+        d.bindings[i][3] = b.divisor;
+    }
+    d.attribute_count = u32(vi.attributes.size());
+    for (u32 i = 0; i < d.attribute_count; ++i) {
+        const auto& a = vi.attributes[i];
+        d.attributes[i][0] = a.location;
+        d.attributes[i][1] = a.binding;
+        d.attributes[i][2] = u32(a.format);
+        d.attributes[i][3] = a.offset;
+    }
+    known.push_back(d);
+    known_dirty = true;
+}
+
+fs::path PipelineFile() {
+    return shader_root / "pipelines.bin";
+}
+
+/// Writes every description to pipelines.bin (holding `mutex`).
+void SaveKnown() {
+    if (!known_dirty || shader_root.empty()) {
+        return;
+    }
+    known_dirty = false;
+    const fs::path tmp = PipelineFile().string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        const u32 head[2] = {PipelineFileMagic, u32(sizeof(PipelineDesc))};
+        out.write(reinterpret_cast<const char*>(head), sizeof(head));
+        out.write(reinterpret_cast<const char*>(known.data()),
+                  std::streamsize(known.size() * sizeof(PipelineDesc)));
+        if (!out) {
+            return;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, PipelineFile(), ec);
+}
+
+/// Queues every pipeline of pipelines.bin (holding `mutex`, at start).
+void PreloadKnown() {
+    std::ifstream in(PipelineFile(), std::ios::binary);
+    u32 head[2]{};
+    if (!in.read(reinterpret_cast<char*>(head), sizeof(head)) || head[0] != PipelineFileMagic ||
+        head[1] != sizeof(PipelineDesc)) {
+        return; // none yet, or an older layout: made again from the draws
+    }
+    PipelineDesc d{};
+    u64 missing = 0;
+    while (in.read(reinterpret_cast<char*>(&d), sizeof(d))) {
+        const auto vs_it = shaders.find(d.vs);
+        const auto ps_it = d.ps ? shaders.find(d.ps) : shaders.end();
+        if (vs_it == shaders.end() || (d.ps && ps_it == shaders.end()) ||
+            d.binding_count > 16 || d.attribute_count > 32) {
+            ++missing;
+            continue;
+        }
+        ShaderInfo& vs = vs_it->second;
+        ShaderInfo* ps = d.ps ? &ps_it->second : nullptr;
+        LoadModule(vs);
+        if (ps) {
+            LoadModule(*ps);
+        }
+        if (!vs.module || !vs.set_layout || (ps && (!ps->module || !ps->set_layout))) {
+            ++missing;
+            continue;
+        }
+        VertexInput vi;
+        vi.key = d.vertex_key;
+        vi.uint_mask = d.uint_mask;
+        vi.sint_mask = d.sint_mask;
+        for (u32 i = 0; i < d.binding_count; ++i) {
+            vi.bindings.push_back({.binding = d.bindings[i][0],
+                                   .stride = d.bindings[i][1],
+                                   .inputRate = vk::VertexInputRate(d.bindings[i][2]),
+                                   .divisor = d.bindings[i][3]});
+        }
+        for (u32 i = 0; i < d.attribute_count; ++i) {
+            vi.attributes.push_back({.location = d.attributes[i][0],
+                                     .binding = d.attributes[i][1],
+                                     .format = vk::Format(d.attributes[i][2]),
+                                     .offset = d.attributes[i][3]});
+        }
+        PipelineState st;
+        st.vs = &vs;
+        st.vs_module = Variant(vs, d.uint_mask, d.sint_mask);
+        st.ps = ps;
+        std::copy(std::begin(d.colors), std::end(d.colors), st.colors);
+        st.color_count = d.color_count;
+        st.depth = d.depth;
+        st.stencil = d.stencil;
+        st.depth_read_only = d.depth_read_only;
+        st.bias = d.bias;
+        st.blend = d.blend;
+        st.mask = d.mask;
+        st.dctl = d.dctl;
+        st.refmask = d.refmask;
+        st.sops = d.sops;
+        st.setup = d.setup;
+        st.topology = d.topology;
+        st.vertices = &vi;
+        const VkPipelineLayout layout = st.vs_module ? PipelineLayout(vs, ps) : VK_NULL_HANDLE;
+        if (!layout) {
+            ++missing;
+            continue;
+        }
+        const u64 key = st.Key();
+        if (!known_keys.insert(key).second) {
+            continue;
+        }
+        known.push_back(d);
+        Enqueue(key, st, layout);
+        preloaded.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::printf("Native Vulkan: %llu pipelines from %s compiling (%llu no longer made)\n",
+                (unsigned long long)preloaded.load(), PipelineFile().string().c_str(),
+                (unsigned long long)missing);
+}
+
 // ------------------------------------------------------------------ constants
 /// Copies a stage's constant buffers (the shader header's vectors) into the upload ring; the
 /// spans go to `cbs` by slot. False: the ring could not take them.
@@ -1501,11 +1773,30 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
     const u64 key = st.Key();
     pipeline_keys.insert(key);
     const VkPipelineLayout layout = PipelineLayout(vs, ps);
+    auto found = pipelines.find(key);
+    if (found == pipelines.end() && compiling.count(key)) {
+        TakeCompiled();
+        found = pipelines.find(key);
+    }
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (const auto it = pipelines.find(key); it != pipelines.end()) {
-        pipeline = it->second;
-    } else {
-        pipeline = pipelines[key] = layout ? MakePipeline(st, layout) : VK_NULL_HANDLE;
+    if (found != pipelines.end()) {
+        pipeline = found->second;
+    } else if (!compiling.count(key)) {
+        if (!layout) {
+            pipelines[key] = VK_NULL_HANDLE;
+        } else {
+            Remember(key, st, vi);
+            if (async_pipelines) {
+                Enqueue(key, st, layout);
+            } else {
+                pipeline = pipelines[key] = MakePipeline(st, layout);
+            }
+        }
+    }
+    if (!pipeline && compiling.count(key)) {
+        Hurry(key);
+        skipped_compiling.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
     if (!pipeline) {
         skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
@@ -1876,6 +2167,12 @@ void StartTextures() {
             show = drawing && sh && sh[0] == '1';
             const char* fc = std::getenv("BB_VK_VERTEX_COPY");
             force_copy = !(fc && fc[0] == '0');
+            const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
+            async_pipelines = !(sp && sp[0] == '1');
+            if (drawing) {
+                StartCompileThreads();
+                PreloadKnown();
+            }
             std::printf("Native Vulkan: vertex streams %s\n",
                         force_copy ? "copied at each draw (BB_VK_VERTEX_COPY=0 reads them in place)"
                                    : "read in place (BB_VK_VERTEX_COPY=0)");
@@ -1910,6 +2207,9 @@ void Report() {
             if (drawing && made_pipelines != saved_pipelines) {
                 Gpu::SaveCache(); // new pipelines compile from the file next run
                 saved_pipelines = made_pipelines;
+            }
+            if (drawing) {
+                SaveKnown();
             }
             live_targets = targets.size();
             tx = Tex::GetStats();
@@ -2013,6 +2313,19 @@ void Report() {
                         (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
                         (unsigned long long)depth_copies.load(),
                         (unsigned long long)draw_copies.load(), reasons.c_str());
+            {
+                std::size_t queued = 0;
+                {
+                    std::lock_guard cl(compile_mutex);
+                    queued = compile_queue.size();
+                }
+                const u64 done = compiles_done.load();
+                std::printf("Native Vulkan: pipelines: %llu compiled (%.0f ms each, %llu from the "
+                            "last run), %zu waiting; %llu draws left out while compiling\n",
+                            (unsigned long long)done, done ? compile_ns.load() / 1e6 / done : 0.0,
+                            (unsigned long long)preloaded.load(), queued,
+                            (unsigned long long)skipped_compiling.load());
+            }
             std::vector<Gpu::WorkTime> work;
             {
                 std::lock_guard lk(mutex);
