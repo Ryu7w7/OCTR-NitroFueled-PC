@@ -30,6 +30,19 @@ def fake_archive(path, entries):
     Path(path).write_bytes(data)
 
 
+def framebuffer_size(path):
+    """Width and height the ultrawide executable patch writes into the display setup."""
+    width = height = None
+    for line in ET.parse(path).iter('Line'):
+        raw = bytes.fromhex(line.get('Value'))
+        address = int(line.get('Address'), 0)
+        if address == 0x17a9d61:
+            width = struct.unpack_from('<I', raw, 7)[0]
+        elif address == 0x17a9d76:
+            height = struct.unpack_from('<I', raw, 7)[0]
+    return width, height
+
+
 def entry(archive, patch, index):
     """Entry index as the game reads it through the patch."""
     count, = struct.unpack_from('<I', archive_patch.view(archive, patch, 0, 0x38), 0xc)
@@ -108,6 +121,9 @@ class WidescreenTests(unittest.TestCase):
                     plan = widescreen.prepare(game, root / 'out', ini, {}, title, '01.21', base)
                 self.assertIsNotNone(plan)
                 self.assertEqual(plan['archive_patches'], made)
+                written = plan['config'].read_text()
+                self.assertIn('layout_internal=1620', written)
+                self.assertIn('render_res=1080', written)
                 self.assertEqual(assets.call_args.args[4], base)
                 lines = list(ET.parse(plan['patches_dir'] / 'Widescreen.xml').iter('Line'))
                 self.assertEqual(len(lines), 15 if title == 'CUSA14876' else 16)
@@ -164,7 +180,8 @@ class WidescreenTests(unittest.TestCase):
 
     def test_every_output_and_internal_resolution_has_one_variant(self):
         for layout, outputs in widescreen.OUTPUTS.items():
-            manifest = fmt.validate_folder(widescreen.DATA / ('ultrawide-' + layout))
+            folder = widescreen.DATA / ('ultrawide-' + layout)
+            manifest = fmt.validate_folder(folder)
             for output in outputs:
                 for internal in widescreen.INTERNAL:
                     with self.subTest(layout=layout, output=output, internal=internal):
@@ -174,9 +191,29 @@ class WidescreenTests(unittest.TestCase):
                         self.assertEqual(len(flat['patches']), 1)
                         self.assertEqual(widescreen.hud_scale(
                             [o for o in flat['operations'] if o['kind'].startswith('shader_')]).count(':'), 4)
-                        # The variant sets the render size: the built-in render patches stay out.
-                        effective = dict(flat['settings'], ultrawide='0')
-                        self.assertEqual(render_patches(effective), [])
+                        # The variant sets the display size; the built-in patches only scale the
+                        # scene, at sites none of the layout's lines write.
+                        effective = dict(flat['settings'], ultrawide='0', layout_internal=internal)
+                        span = lambda line: (int(line.get('Address'), 16),
+                                             int(line.get('Address'), 16) + len(line.get('Value')) // 2)
+                        built_in = [span(line) for _, _, meta in render_patches(effective)
+                                    for line in meta.iter('Line')]
+                        self.assertEqual(bool(built_in), internal != '1080')
+                        layout_sites = [span(line) for line in
+                                        ET.parse(folder / flat['patches'][0]).getroot().iter('Line')]
+                        self.assertFalse(any(a < d and c < b for a, b in built_in for c, d in layout_sites))
+                        # Internal resolution is the display height; the width follows the aspect.
+                        width, height = framebuffer_size(folder / flat['patches'][0])
+                        self.assertEqual(height, int(internal))
+                        aspect = 32 / 9 if layout == '32x9' else int(output.split('x')[0]) / int(output.split('x')[1])
+                        self.assertEqual(width, int(round(height * aspect / 2.0)) * 2)
+                        # Horizontal inset past 16:9. 480p rounds that inset; the others are exact.
+                        if height * 16 % 9 == 0:
+                            half = (width - height * 16 / 9) / 2
+                            blob = next(bytes.fromhex(line.get('Value'))
+                                        for line in ET.parse(folder / flat['patches'][0]).iter('Line')
+                                        if int(line.get('Address'), 0) == 0x658df9)
+                            self.assertIn(b'\xba' + struct.pack('<f', half), blob)
 
     def test_hud_scale(self):
         ops = [{'kind': 'shader_position_scale', 'target': 'cache/CUSA13795/0x00000000d4aaf527_0.spv', 'factor': 0.5}]
