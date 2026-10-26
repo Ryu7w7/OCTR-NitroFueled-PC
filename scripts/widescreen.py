@@ -14,8 +14,9 @@ What a layout changes, the game's files staying as they are:
 - the two HUD vertex shaders: their x scaled when they are loaded (BB_HUD_SCALE, the GPU
   library's bb_hud_scale.h), so the shader cache stays as it is;
 - the render settings the layouts were made for (scripts/patches.py reads a copy of bbport.ini
-  with them, out/widescreen/bbport.ini): the base PS4 path at 1080 (the variant sets the size),
-  no temporal upscaler, and the ultrawide of bbport.ini off, since the layout sets the size.
+  with them, out/widescreen/bbport.ini): render_res 1080 with layout_internal, the variant's
+  height (the variant sets the display size; above or below 1080 the scene is scaled to it on
+  the Pro path), no temporal upscaler, and the ultrawide of bbport.ini off.
 
 For the verified USA and EU 1.21 executables, in online and offline mode. When an asset
 is not the expected one (a mod), the game starts as it would without a layout, and the
@@ -259,7 +260,10 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
     ET.ElementTree(xml).write(patches_dir / 'Widescreen.xml', encoding='utf-8', xml_declaration=True)
 
     # The settings the layout was made for, over the player's: they stay in bbport.ini.
-    effective = dict(flat.get('settings', {}), ultrawide='0', ultrawide_frontend='0', ultrawide_cinematics='0')
+    # render_res stays 1080; layout_internal is the height of the variant's display size, and
+    # scripts/patches.py render_plan scales the 3D scene to it (the Pro path without doubling).
+    effective = dict(flat.get('settings', {}), ultrawide='0', ultrawide_frontend='0',
+                     ultrawide_cinematics='0', layout_internal=internal)
     lines = [line for line in Path(config).read_text(encoding='utf-8').splitlines()
              if line.partition('=')[0].strip() not in effective] if Path(config).is_file() else []
     effective_config = root / 'bbport.ini'
