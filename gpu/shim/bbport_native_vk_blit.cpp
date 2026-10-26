@@ -145,6 +145,7 @@ bool Copy(Gpu::Image& src, VkImageView src_view, vk::Offset2D from, Gpu::Image& 
                                 {});
     Gpu::Mark(src.depth ? Gpu::Work::DepthCopy : Gpu::Work::Copy, rect.extent.width, rect.extent.height, dst.format);
     const vk::CommandBuffer cmd = Gpu::Cmd();
+    Gpu::Invalidate(); // its pipeline, viewport and scissor replace the draws'
     const std::int32_t shift[2] = {from.x - rect.offset.x, from.y - rect.offset.y};
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 0, set, {});

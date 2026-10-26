@@ -88,6 +88,11 @@ vk::CommandBuffer Prelude();
 /// The open command buffer's number (submissions so far).
 std::uint64_t Serial();
 
+/// Changes whenever the bound pipeline and dynamic state can no longer be assumed: a new command
+/// buffer, or a recording of its own (Invalidate). Draws skip state that is already set.
+std::uint64_t StateEpoch();
+void Invalidate();
+
 /// Ends the open command buffer and submits it. Nothing happens when nothing was recorded.
 void Submit();
 

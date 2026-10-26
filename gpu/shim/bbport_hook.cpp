@@ -50,8 +50,9 @@ void EmitJump(u8*& at, u64 target) {
 
 /// Stub: saves the argument registers, calls the handler with the function's own arguments,
 /// restores them, runs the moved prologue and jumps back past it. At entry rsp is 8 mod 16;
-/// 6 pushes and 0x88 bytes make the call 16-aligned.
-u8* EmitStub(u8* at, u64 function, const u8* prologue, u64 handler) {
+/// 6 pushes and 0x88 bytes make the call 16-aligned. `replace`: when the handler returns true
+/// (al), the function returns 0 instead of running.
+u8* EmitStub(u8* at, u64 function, const u8* prologue, u64 handler, bool replace) {
     Emit(at, {0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51});
     Emit(at, {0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00}); // sub rsp, 0x88
     for (u8 n = 0; n < 8; ++n) {
@@ -60,11 +61,19 @@ u8* EmitStub(u8* at, u64 function, const u8* prologue, u64 handler) {
     Emit(at, {0x48, 0xb8}); // mov rax, handler
     Emit64(at, handler);
     Emit(at, {0xff, 0xd0}); // call rax
+    if (replace) {
+        Emit(at, {0x49, 0x89, 0xc3}); // mov r11, rax (scratch, not an argument register)
+    }
     for (u8 n = 0; n < 8; ++n) {
         Emit(at, {0xf3, 0x0f, 0x6f, u8(0x44 | n << 3), 0x24, u8(n * 0x10)}); // movdqu xmmN, [rsp+n*16]
     }
     Emit(at, {0x48, 0x81, 0xc4, 0x88, 0x00, 0x00, 0x00}); // add rsp, 0x88
     Emit(at, {0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f});
+    if (replace) {
+        Emit(at, {0x45, 0x84, 0xdb}); // test r11b, r11b
+        Emit(at, {0x74, 0x03});       // jz: run the function
+        Emit(at, {0x31, 0xc0, 0xc3}); // xor eax, eax; ret
+    }
     std::memcpy(at, prologue, PrologueSize);
     at += PrologueSize;
     EmitJump(at, function + PrologueSize);
@@ -72,9 +81,10 @@ u8* EmitStub(u8* at, u64 function, const u8* prologue, u64 handler) {
 }
 } // namespace
 
-bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
-                 const std::uint8_t* prologue, std::uint64_t handler, const char* who,
-                 const char* name) {
+namespace {
+bool Install(unsigned char* image, std::uint64_t size, std::uint64_t offset,
+             const std::uint8_t* prologue, std::uint64_t handler, const char* who, const char* name,
+             bool replace) {
     static std::mutex mutex;
     static u8* area = nullptr;
     static std::size_t used = 0;
@@ -98,7 +108,7 @@ bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
     }
     const u64 function = reinterpret_cast<u64>(image) + offset;
     u8* entry = area + used;
-    u8* end = EmitStub(entry, function, prologue, handler);
+    u8* end = EmitStub(entry, function, prologue, handler, replace);
     used = end - area;
     u8* at = image + offset;
     EmitJump(at, reinterpret_cast<u64>(entry));
@@ -107,7 +117,21 @@ bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
     FlushInstructionCache(GetCurrentProcess(), entry, end - entry);
     FlushInstructionCache(GetCurrentProcess(), image + offset, PrologueSize);
 #endif
-    std::printf("%s: %s hooked at +%#llx\n", who, name, (unsigned long long)offset);
+    std::printf("%s: %s hooked at +%#llx%s\n", who, name, (unsigned long long)offset,
+                replace ? " (replaced when handled)" : "");
     return true;
+}
+} // namespace
+
+bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
+                 const std::uint8_t* prologue, std::uint64_t handler, const char* who,
+                 const char* name) {
+    return Install(image, size, offset, prologue, handler, who, name, false);
+}
+
+bool Replace(unsigned char* image, std::uint64_t size, std::uint64_t offset,
+             const std::uint8_t* prologue, std::uint64_t handler, const char* who,
+             const char* name) {
+    return Install(image, size, offset, prologue, handler, who, name, true);
 }
 } // namespace BbHook

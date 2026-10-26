@@ -28,4 +28,10 @@ constexpr std::uint8_t CopyPrologue[PrologueSize] = {0x55, 0x48, 0x89, 0xe5, 0x4
 bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
                  const std::uint8_t* prologue, std::uint64_t handler, const char* who,
                  const char* name);
+
+/// As PassThrough, but `handler` returns bool: true means it did the function's work, and the
+/// function returns 0 without running (the D3D11 port replaces kCopyTexture the same way).
+bool Replace(unsigned char* image, std::uint64_t size, std::uint64_t offset,
+             const std::uint8_t* prologue, std::uint64_t handler, const char* who,
+             const char* name);
 } // namespace BbHook

@@ -75,6 +75,7 @@ Pass open_pass{};
 vk::Extent2D open_area{};
 std::vector<vk::ImageMemoryBarrier2> pending;
 bool full_barriers = false; // BB_VK_FULL_BARRIERS=1
+u64 state_epoch = 1;        // StateEpoch
 
 Stats stats{};
 double tick_ns = 0; // nanoseconds per timestamp tick; 0: no timestamps
@@ -212,6 +213,7 @@ void Begin(Frame& f) {
     }
     f.labels.assign(1, Label{});
     f.recorded = false;
+    ++state_epoch;
     f.prelude_open = false;
     f.ring_begin = f.ring_end = ring_head;
 }
@@ -417,6 +419,14 @@ vk::CommandBuffer Prelude() {
 
 u64 Serial() {
     return stats.submits;
+}
+
+u64 StateEpoch() {
+    return state_epoch;
+}
+
+void Invalidate() {
+    ++state_epoch;
 }
 
 void Submit() {
