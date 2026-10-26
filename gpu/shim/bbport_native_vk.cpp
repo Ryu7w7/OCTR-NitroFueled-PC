@@ -958,13 +958,21 @@ Target* DepthTarget(u64 handle) {
         unusable_targets.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
-    const bool z16 = (R<u32>(handle + 0x50) & 3) == 1 && (R<u32>(handle + 0x54) & 1) == 0;
+    const bool no_stencil = (R<u32>(handle + 0x54) & 1) == 0;
+    const bool z16 = (R<u32>(handle + 0x50) & 3) == 1 && no_stencil;
     vk::Format format = vk::Format::eD16Unorm;
     if (!z16) {
+        // depth alone where the game declares no stencil (no stencil plane to clear, keep or
+        // copy); a target already made with stencil keeps it rather than being remade
+        const auto it = targets.find(base);
+        const bool had_stencil = it != targets.end() && it->second && it->second->img.stencil &&
+                                 it->second->img.width == w && it->second->img.height == h;
+        const vk::Format want =
+            no_stencil && !had_stencil ? vk::Format::eD32Sfloat : vk::Format::eD32SfloatS8Uint;
         const Vulkan::Instance* inst = instance.load();
-        format = inst ? inst->GetSupportedFormat(vk::Format::eD32SfloatS8Uint,
+        format = inst ? inst->GetSupportedFormat(want,
                                                  vk::FormatFeatureFlagBits2::eDepthStencilAttachment)
-                      : vk::Format::eD32SfloatS8Uint;
+                      : want;
     }
     return MakeTarget(base, w, h, format, true, 0, "depth target");
 }

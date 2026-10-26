@@ -365,40 +365,51 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
     }
     const vk::CommandBuffer cmd = cmds[0];
     (void)cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-    u64 at = 0;
-    for (Job& j : jobs) {
-        std::memcpy(static_cast<u8*>(info.pMappedData) + at, j.data.data(), j.data.size());
+    // one barrier into transfer layout for every image, the copies, one barrier to shader reads
+    std::vector<vk::ImageMemoryBarrier2> to_dst, to_read;
+    to_dst.reserve(jobs.size());
+    to_read.reserve(jobs.size());
+    for (const Job& j : jobs) {
         const vk::ImageSubresourceRange all{.aspectMask = vk::ImageAspectFlagBits::eColor,
                                             .baseMipLevel = 0,
                                             .levelCount = j.levels,
                                             .baseArrayLayer = 0,
                                             .layerCount = j.slices};
-        const vk::ImageMemoryBarrier to_dst{.srcAccessMask = {},
-                                            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-                                            .oldLayout = vk::ImageLayout::eUndefined,
-                                            .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                                            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                            .image = j.image,
-                                            .subresourceRange = all};
-        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                            vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, to_dst);
+        to_dst.push_back({.srcStageMask = vk::PipelineStageFlagBits2::eNone,
+                          .srcAccessMask = {},
+                          .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+                          .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                          .oldLayout = vk::ImageLayout::eUndefined,
+                          .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                          .image = j.image,
+                          .subresourceRange = all});
+        to_read.push_back({.srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+                           .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                           .dstStageMask = vk::PipelineStageFlagBits2::eVertexShader |
+                                           vk::PipelineStageFlagBits2::eFragmentShader,
+                           .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead,
+                           .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                           .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                           .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                           .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                           .image = j.image,
+                           .subresourceRange = all});
+    }
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_dst.size()),
+                          .pImageMemoryBarriers = to_dst.data()});
+    u64 at = 0;
+    for (Job& j : jobs) {
+        std::memcpy(static_cast<u8*>(info.pMappedData) + at, j.data.data(), j.data.size());
         for (vk::BufferImageCopy& r : j.regions) {
             r.bufferOffset += at;
         }
         cmd.copyBufferToImage(staging, j.image, vk::ImageLayout::eTransferDstOptimal, j.regions);
-        const vk::ImageMemoryBarrier to_read{.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-                                             .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-                                             .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-                                             .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-                                             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                             .image = j.image,
-                                             .subresourceRange = all};
-        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                            vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, to_read);
         at += (j.data.size() + 15) & ~u64(15);
     }
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_read.size()),
+                          .pImageMemoryBarriers = to_read.data()});
     (void)cmd.end();
     const vk::SubmitInfo submit{.commandBufferCount = 1, .pCommandBuffers = &cmd};
     vk::Result sr;
