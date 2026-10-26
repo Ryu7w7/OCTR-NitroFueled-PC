@@ -8,12 +8,12 @@ from mod_components import safe_path,under,sha,regular_tree
 
 MARKER='octr-mod.required'
 MARKER_CONTENT=b'OCTR Mod Package 2\n'
-CAPABILITIES={'archive-assets','game-files','xml-patches','shaders','settings','environment','dependencies','constraints','variants','variant-settings','code-signatures'}
+CAPABILITIES={'archive-assets','game-files','xml-patches','shaders','settings','environment','dependencies','constraints','variants','variant-settings','code-signatures','localized-strings'}
 SETTINGS={'output_res','render_res','widescreen_layout','upscaler','temporal','dlss_quality','dlss_output','fps_limit',
  'patch_60fps','patch_no_motion_blur','patch_pro_1080p','async_pipelines','fullscreen','show_fps','preset','menu_language'}
 ENVIRONMENT={'BB_NEO','BB_FPS','BB_VBLANK_HZ','BB_DMEM_MB','BB_PREUPLOAD'}
 KINDS={'archive_asset':'archive-assets','game_file':'game-files','shader_file':'shaders',
- 'shader_bytes':'shaders','shader_position_scale':'shaders'}
+ 'shader_bytes':'shaders','shader_position_scale':'shaders','localized_strings':'localized-strings'}
 HEX=re.compile('[0-9a-f]{64}')
 
 def error(message):raise ValueError('OCTR mod format 2: '+message)
@@ -157,9 +157,27 @@ def validate_manifest(m):
     def payload(name):
         safe_path(name)
         if name not in files:error('undeclared payload '+name)
+    def archive_entry(op):
+        safe_path(op['archive']);safe_path(op['asset'])
+        if '/' in op['archive'] or not op['archive'].lower().endswith('.pak'):error('archive must be a flat PAK name')
+        if type(op.get('index')) is not int or op['index']<0:error('invalid archive index')
     for op in operations:
         if not isinstance(op,dict) or op.get('kind') not in KINDS:error('unsupported operation')
         kind=op['kind'];needed.add(KINDS[kind])
+        if kind=='localized_strings':
+            # Texts of one entry's igLocalizedStringData objects; packages changing different
+            # texts of the same entry compose, so there is no patched checksum.
+            if set(op)!={'kind','archive','asset','index','original_sha256','strings'}:
+                error('localized_strings needs exactly archive, asset, index, original_sha256 and strings')
+            archive_entry(op);hash_string(op['original_sha256'])
+            strings=op['strings']
+            if not isinstance(strings,dict) or not strings:error('strings must be a nonempty object')
+            for name,fields in strings.items():
+                if not isinstance(name,str) or not name or not isinstance(fields,dict) or not fields:error('invalid localized string object')
+                for field,text in fields.items():
+                    if not isinstance(field,str) or not field or not isinstance(text,str) or '\0' in text or len(text)>4000:
+                        error('invalid localized string '+name)
+            continue
         required={'kind','original_sha256','patched_sha256'}|({'archive','asset','index'} if kind=='archive_asset' else {'target'})
         if kind=='shader_position_scale':required.add('factor')
         if not required<=set(op):error('missing operation fields: '+', '.join(sorted(required-set(op))))
@@ -168,10 +186,7 @@ def validate_manifest(m):
         if kind=='shader_position_scale':permitted={'kind','target','original_sha256','patched_sha256','factor'}
         if set(op)-permitted:error('unknown operation fields')
         hash_string(op.get('patched_sha256'))
-        if kind=='archive_asset':
-            safe_path(op['archive']);safe_path(op['asset'])
-            if '/' in op['archive'] or not op['archive'].lower().endswith('.pak'):error('archive must be a flat PAK name')
-            if type(op.get('index')) is not int or op['index']<0:error('invalid archive index')
+        if kind=='archive_asset':archive_entry(op)
         else:
             safe_path(op['target'])
             if kind=='game_file' and (op['target'].casefold()=='eboot.bin' or op['target'].casefold().startswith(('sce_sys/','sce_module/'))):

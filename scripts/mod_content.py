@@ -66,10 +66,14 @@ def claims(folder,settings=None):
     alternatives=[fmt.resolve(m,settings)[1]] if settings is not None else [flat for _,flat in fmt.expanded_variants(m)]
     operations=[op for flat in alternatives for op in flat.get('operations',[])]
     for op in operations:
-        if op['kind']=='archive_asset':key='archives/'+op['archive']+'::'+op['asset']
-        elif op['kind'].startswith('shader_'):key='@shader/'+op['target']
-        else:key=op['target']
-        items.append((key.casefold(),folder/'mod.json'))
+        # Texts claim object::field under their entry: packages changing different texts of one
+        # entry compose, and a whole-entry edit of it still conflicts with them.
+        if op['kind']=='localized_strings':
+            keys=['archives/'+op['archive']+'::'+op['asset']+'::'+name+'::'+field for name,fields in op['strings'].items() for field in fields]
+        elif op['kind']=='archive_asset':keys=['archives/'+op['archive']+'::'+op['asset']]
+        elif op['kind'].startswith('shader_'):keys=['@shader/'+op['target']]
+        else:keys=[op['target']]
+        items.extend((key.casefold(),folder/'mod.json') for key in keys)
     return list(dict(items).items()) if settings is None else items
 def mod_files(folder):return [(Path(key),source) for key,source in claims(folder)]
 def conflicts(root,config,settings=None):
@@ -186,7 +190,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                         if sha_bytes(data)!=op['patched_sha256']:raise ValueError('Replacement checksum mismatch')
                     # Only the mod's replacement content, never an unchanged game file.
                     dest=under(staging/'files',op['target']);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
-            records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind']=='archive_asset']
+            records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind'] in ('archive_asset','localized_strings')]
             save_json(staging/'archive-plan.json',records)
             from mod_overlays import compose
             compose(game,staging/'archives',[(r['operation'],r['folder']) for r in records],{})
