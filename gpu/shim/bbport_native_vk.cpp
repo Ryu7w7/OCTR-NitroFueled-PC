@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -70,6 +71,11 @@ constexpr u64 CtxViewport = 0x0c, CtxScissorEnabled = 0x29, CtxScissor = 0x2c,
               CtxPrimType = 0x5c0, CtxIndexSize = 0x5c4, CtxVertexBuffers = 0x4a0,
               CtxVertexFormats = 0x520, CtxIndexBuffer = 0x5a0, CtxVbOffsets = 0x5d0,
               CtxVbStrides = 0x610;
+constexpr std::size_t CtxBytes = CtxVbStrides + 16 * 4; // every field read above
+// the parts of the engine objects the context points to that a draw reads: Gnm::RenderTarget up
+// to its size at +0x4c, Gnm::DepthRenderTarget up to its size at +0x80, buffer resources
+// {u32 size; u64 address at +8}
+constexpr std::size_t ColorTargetBytes = 0x50, DepthTargetBytes = 0x84, BufferBytes = 16;
 // shader resource (pool object): igPS4ShaderHeader at +0x18, Gnm shader struct at +0x30 (common
 // word, then PGM_LO/PGM_HI at +8)
 constexpr u64 ShHeader = 0x18, ShGnm = 0x30;
@@ -212,6 +218,8 @@ constexpr const char* CopySkipNames[SkipCount] = {"mip level", "source not ours"
                                                   "unknown destination", "format size"};
 // CPU time in the hooks (ns), frames the presenter asked for
 std::atomic<u64> draw_ns{0}, clear_ns{0}, copy_ns{0}, submit_ns{0}, frames_asked{0};
+// the capture thread's time, and the game's waits for it (submissions, copies, a full queue)
+std::atomic<u64> capture_ns{0}, capture_wait_ns{0};
 std::atomic<u64> copies_replaced{0}; // engine copies not run (BB_VK_ALONE=1)
 
 /// Adds the time since construction to a counter.
@@ -252,7 +260,7 @@ Bound bound;
 std::atomic<u64> state_skips{0}; // dynamic state and bindings left as they were
 
 /// CPU time of a draw by section: each call adds the time since the previous one to section i.
-// game's thread: resolve .. packet; recorder: ring .. record
+// capture thread: resolve .. packet; recorder: ring .. record
 enum DrawSection { SecResolve, SecTextures, SecVertices, SecPipeline, SecConstants, SecIndices,
                    SecPacket, SecRing, SecPass, SecSets, SecRecord, SecCount };
 constexpr const char* DrawSectionNames[SecCount] = {
@@ -614,11 +622,14 @@ bool IntegerFormat(vk::Format f) {
 }
 
 // ------------------------------------------------------------------ the recording thread
-// The game's thread only captures its draws, clears, copies and submits (engine state, and the
-// guest data that can change after the call: constants, vertices, indices) into batches; the
-// recorder thread records them in order: ring uploads, layouts, passes, descriptor sets,
-// commands, submits. Gpu is only used there (and before it starts). BB_VK_RECORD_THREAD=0 records
-// on the game's thread instead, as before.
+// Three threads in a row. The game's thread keeps only what the engine may change as soon as the
+// call returns: its context, the render target and buffer objects the context points to, and
+// the shaders' constants (Capture). The capture thread turns those, in order, into batches
+// (shaders, targets, textures, vertex layout, pipeline, and the vertex and index data, which
+// stay put until the GPU has run the submission: each submission waits for it). The recorder
+// thread records the batches: ring uploads, layouts, passes, descriptor sets, commands, submits.
+// Gpu is only used there (and before it starts). BB_VK_CAPTURE_THREAD=0 captures on the game's
+// thread, BB_VK_RECORD_THREAD=0 records there too.
 
 /// Bump memory for the bytes a batch captures; its pointers stay valid until the batch is reset.
 struct Arena {
@@ -758,6 +769,43 @@ void OpenBatch(Batch* b) {
     open_batch = b;
     b->seq = ++batch_seq;
 }
+
+/// A draw, clear or submission as the game's thread hands it to the capture thread: the engine
+/// context, with its pointers to the objects copied here pointing at the copies.
+struct Capture {
+    enum class Kind : u8 { Draw, Clear, Submit };
+    Kind kind = Kind::Draw;
+    u64 dev = 0;
+    bool indexed = false;
+    u32 count = 0;
+    u64 index_addr = 0;
+    u32 flags = 0, stencil = 0; // a clear's
+    float color[4]{}, depth = 0.0f;
+    bool has_color = false;
+    alignas(16) u8 ctx[CtxBytes];
+    alignas(16) u8 color_targets[8][ColorTargetBytes];
+    alignas(16) u8 depth_target[DepthTargetBytes];
+    alignas(16) u8 buffers[16][BufferBytes]; // vertex buffer resources, by stream slot
+    alignas(16) u8 index_buffer[BufferBytes];
+    // the vertex, pixel and geometry shaders' constants
+    struct Cb {
+        u32 slot, size, offset;
+    };
+    Cb cbs[3][16];
+    u32 cb_count[3]{};
+    std::vector<u8> bytes;
+    u32 used = 0;
+};
+
+constexpr std::size_t CaptureCount = 512; // handed over at most: the game waits beyond
+std::array<Capture, CaptureCount> capture_pool;
+std::atomic<bool> capture_thread{false}; // BB_VK_CAPTURE_THREAD=0: captured on the game's thread
+std::mutex capture_mutex;
+std::condition_variable capture_cv, capture_free_cv;
+std::deque<Capture*> capture_queue, capture_free;
+u64 captures_handed = 0;                  // under capture_mutex
+std::atomic<u64> captures_done{0};        // the capture thread's count, in order
+const Capture* capturing = nullptr;       // the capture being turned into a batch (under `mutex`)
 
 void Flush();
 // deferred copies (RunCopy)
@@ -1829,6 +1877,14 @@ Ref Constants(u32 stage, u32 slot, const void* src, u32 size) {
 }
 
 bool StageConstants(u32 stage, u64 shader, Ref cbs[14]) {
+    if (capturing) { // copied on the game's thread (CaptureConstants)
+        const Capture& c = *capturing;
+        for (u32 k = 0; k < c.cb_count[stage]; ++k) {
+            const Capture::Cb& cb = c.cbs[stage][k];
+            cbs[cb.slot] = Constants(stage, cb.slot, c.bytes.data() + cb.offset, cb.size);
+        }
+        return true;
+    }
     const u64 hdr = Q(shader + ShHeader);
     if (!hdr) {
         return true;
@@ -2628,16 +2684,147 @@ void RecordDraw(DrawPacket& d) {
     lap(SecRecord);
 }
 
+// ------------------------------------------------------------------ the game's side of a capture
+/// A free capture (the game's thread): waits while the capture thread is a whole pool behind.
+Capture& TakeCapture() {
+    std::unique_lock lk(capture_mutex);
+    if (capture_free.empty()) {
+        Timer waited(capture_wait_ns);
+        capture_free_cv.wait(lk, [] { return !capture_free.empty(); });
+    }
+    Capture* c = capture_free.back(); // the one freed last: likeliest still in the caches
+    capture_free.pop_back();
+    c->used = 0;
+    c->cb_count[0] = c->cb_count[1] = c->cb_count[2] = 0;
+    return *c;
+}
+
+/// Hands `c` to the capture thread; its number in the order.
+u64 Hand(Capture& c) {
+    u64 n;
+    {
+        std::lock_guard lk(capture_mutex);
+        capture_queue.push_back(&c);
+        n = ++captures_handed;
+    }
+    capture_cv.notify_one();
+    return n;
+}
+
+/// Waits until the capture thread has taken capture `n` (all of them: the last handed over).
+void WaitCaptured(u64 n = 0) {
+    if (!n) {
+        std::lock_guard lk(capture_mutex);
+        n = captures_handed;
+    }
+    if (captures_done.load(std::memory_order_acquire) >= n) {
+        return;
+    }
+    Timer waited(capture_wait_ns);
+    for (u64 v; (v = captures_done.load(std::memory_order_acquire)) < n;) {
+        captures_done.wait(v, std::memory_order_acquire);
+    }
+}
+
+/// Copies `size` bytes of the engine object at the context's pointer at `field` into `to`, and
+/// points the copied context at the copy.
+void Keep(Capture& c, u64 field, u8* to, std::size_t size) {
+    const u64 p = Q(u64(c.ctx) + field);
+    if (!p) {
+        return;
+    }
+    std::memcpy(to, reinterpret_cast<const void*>(p), size);
+    const u64 copy = u64(to);
+    std::memcpy(c.ctx + field, &copy, 8);
+}
+
+/// The context and the render targets it binds (the color ones, the depth one).
+void KeepContext(Capture& c, u64 ctx, bool colors, bool depth) {
+    std::memcpy(c.ctx, reinterpret_cast<const void*>(ctx), CtxBytes);
+    for (int i = 0; colors && i < 8; ++i) {
+        Keep(c, CtxColorTargets + i * 8, c.color_targets[i], ColorTargetBytes);
+    }
+    if (depth) {
+        Keep(c, CtxDepthTarget, c.depth_target, DepthTargetBytes);
+    }
+}
+
+/// A stage's constant buffers, as StageConstants reads them.
+void CaptureConstants(Capture& c, u32 stage, u64 shader) {
+    const u64 hdr = shader ? Q(shader + ShHeader) : 0;
+    if (!hdr) {
+        return;
+    }
+    const s32 n = R<s32>(hdr + HdrCbMemory);
+    const u64 mem = Q(hdr + HdrCbMemory + 0x10), size_of = Q(hdr + HdrCbSize + 0x10),
+              idx = Q(hdr + HdrCbIndex + 0x10);
+    for (s32 k = 0; k < n && k < 16; ++k) {
+        const u64 data = Q(mem + k * 8);
+        const u32 size = u32(R<u64>(size_of + k * 8));
+        const u32 slot = R<u32>(idx + k * 4);
+        if (slot >= 13 || !data || !size || size > 65536) {
+            continue;
+        }
+        if (c.bytes.size() < c.used + size) {
+            c.bytes.resize(std::max<std::size_t>(c.used + size, c.bytes.size() * 2));
+        }
+        std::memcpy(c.bytes.data() + c.used, reinterpret_cast<const void*>(data), size);
+        c.cbs[stage][c.cb_count[stage]++] = Capture::Cb{slot, size, c.used};
+        c.used += size;
+    }
+}
+
+/// The stream slots a vertex shader's inputs come from (FetchVertices' matching, for every input
+/// element of its header), kept per shader and vertex formats: the engine's vertex formats and
+/// shader headers do not change.
+u32 StreamSlots(u64 ctx, u64 vsh) {
+    struct Known {
+        u64 vsh = 0;
+        u64 vf[15]{};
+        u32 slots = 0;
+    };
+    thread_local std::array<Known, 64> known;
+    u64 vf[15];
+    u64 h = vsh;
+    for (int slot = 0; slot < 15; ++slot) {
+        vf[slot] = Q(ctx + CtxVertexFormats + slot * 8);
+        h = (h ^ vf[slot]) * 0x100000001b3ull;
+    }
+    Known& k = known[(h ^ h >> 29) & 63];
+    if (k.vsh == vsh && std::equal(vf, vf + 15, k.vf)) {
+        return k.slots;
+    }
+    const u64 hdr = Q(vsh + ShHeader);
+    const s32 nin = hdr ? R<s32>(hdr + HdrInputElements) : 0;
+    const u64 ins = hdr ? Q(hdr + HdrInputElements + 0x10) : 0;
+    u32 slots = 0;
+    for (s32 i = 0; ins && i < nin && i < 64; ++i) {
+        const u32 usage = R<u32>(ins + i * 12), uidx = R<u32>(ins + i * 12 + 4);
+        for (int slot = 0; slot < 15; ++slot) {
+            const u64 el = vf[slot] ? Q(vf[slot] + 0x18) : 0, fm = vf[slot] ? Q(vf[slot] + 0x28) : 0;
+            bool found = false;
+            for (int e = 0; el && fm && e < 32 && R<u8>(el + e * 12) != ','; ++e) {
+                if (R<u8>(el + e * 12 + 4) == usage && R<u8>(el + e * 12 + 5) == uidx) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                slots |= 1u << slot;
+                break;
+            }
+        }
+    }
+    k.vsh = vsh;
+    std::copy(vf, vf + 15, k.vf);
+    k.slots = slots;
+    return slots;
+}
+
 // ------------------------------------------------------------------ clears and copies
 /// kClearRenderTarget(ctx, flags, float4* color, stencil, float depth): flags 1 color (every
 /// bound target), 2 depth, 4 stencil. Runs before the engine's own clear.
-__attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u32 stencil,
-                                       float depth) {
-    if (!drawing || !ctx) {
-        return;
-    }
-    Timer timer(clear_ns);
-    std::lock_guard lk(mutex);
+void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth) {
     clears.fetch_add(1, std::memory_order_relaxed);
     if (flags & 6) {
         if (const u64 dh = Q(ctx + CtxDepthTarget)) {
@@ -2666,6 +2853,30 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
     EndOp();
 }
 
+__attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u32 stencil,
+                                       float depth) {
+    if (!drawing || !ctx) {
+        return;
+    }
+    Timer timer(clear_ns);
+    if (!capture_thread) {
+        std::lock_guard lk(mutex);
+        ClearFrom(ctx, flags, color, stencil, depth);
+        return;
+    }
+    Capture& c = TakeCapture();
+    c.kind = Capture::Kind::Clear;
+    c.flags = flags;
+    c.stencil = stencil;
+    c.depth = depth;
+    c.has_color = color != nullptr;
+    if (color) {
+        std::memcpy(c.color, color, sizeof(c.color));
+    }
+    KeepContext(c, ctx, (flags & 1) && color, flags & 6);
+    Hand(c);
+}
+
 void RunClear(const ClearPacket& c) {
     BeforeWrite(&c.target->img);
     if (c.color) {
@@ -2692,6 +2903,9 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         return false;
     }
     Timer timer(copy_ns);
+    if (capture_thread) {
+        WaitCaptured(); // the answer depends on the targets made by the draws before it
+    }
     std::lock_guard lk(mutex);
     const Tex::Info s = Tex::Describe(src), d = Tex::Describe(dst);
     const auto it = targets.find(s.base);
@@ -3122,15 +3336,19 @@ void Report() {
             }
             // per second over the last 5 s: CPU time in the hooks, GPU time of our command buffers
             const u64 dn = draw_ns.load(), cn = clear_ns.load(), pn = copy_ns.load(),
-                      sn = submit_ns.load(), fr = frames_asked.load();
+                      sn = submit_ns.load(), fr = frames_asked.load(), tn = capture_ns.load(),
+                      wn = capture_wait_ns.load();
+            static u64 last_capture_ns = 0, last_wait_ns = 0;
             const u64 nd = d - last;
-            std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; CPU %.0f ms in "
-                        "draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms submits; GPU "
+            std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; game's thread "
+                        "%.0f ms in draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms "
+                        "submits, of it %.0f ms waiting for the capture thread (%.0f ms busy); GPU "
                         "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed; not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
-                        (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
+                        (sn - last_submit_ns) / 5e6, (wn - last_wait_ns) / 5e6,
+                        (tn - last_capture_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
                         (unsigned long long)depth_copies.load(),
                         (unsigned long long)draw_copies.load(),
                         (unsigned long long)copies_replaced.load(),
@@ -3177,6 +3395,8 @@ void Report() {
                 std::printf("Native Vulkan: CPU per draw (us): %s\n", secs.c_str());
             }
             last_draw_ns = dn;
+            last_capture_ns = tn;
+            last_wait_ns = wn;
             last_clear_ns = cn;
             last_copy_ns = pn;
             last_submit_ns = sn;
@@ -3226,19 +3446,9 @@ void Attach(const Vulkan::Instance& vulkan) {
     StartTextures();
 }
 
-void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
-    if (!enabled) {
-        return;
-    }
-    draws.fetch_add(1, std::memory_order_relaxed);
-    const u64 dev = Q(image_base + DeviceGlobal);
-    const u64 ctx = dev ? Q(dev + DevContext) : 0;
-    if (!ctx) {
-        no_context.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    Timer timer(draw_ns);
-    std::lock_guard lk(mutex);
+namespace {
+/// A draw from the engine context at `ctx` (the capture thread's copy, or the engine's own).
+void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
     lap.Start();
     const u64 vsh = Q(ctx + CtxVs);
     ShaderInfo* vs = Resolve(vsh, "vertex");
@@ -3287,12 +3497,7 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
     FetchVertices(ctx, vsh, *vs, vi, [] { return 0u; });
 }
 
-void OnSubmit() {
-    if (!drawing) {
-        return;
-    }
-    Timer timer(submit_ns);
-    std::lock_guard lk(mutex);
+void SubmitNow() {
     submits_seen.fetch_add(1, std::memory_order_relaxed);
     Geo::Collect();
     SubmitPacket& sp = Push(Op::Submit, open_batch->submits);
@@ -3309,6 +3514,110 @@ void OnSubmit() {
     }
     submits_queued.fetch_add(1, std::memory_order_release);
     Flush();
+}
+
+/// Turns the game's captures into batches, in order.
+void CaptureThread() {
+#ifdef _WIN32
+    SetThreadDescription(GetCurrentThread(), L"bb:VkCapture");
+#endif
+    for (;;) {
+        Capture* c = nullptr;
+        {
+            std::unique_lock lk(capture_mutex);
+            capture_cv.wait(lk, [] { return !capture_queue.empty(); });
+            c = capture_queue.front();
+            capture_queue.pop_front();
+        }
+        {
+            Timer timer(capture_ns);
+            std::lock_guard lk(mutex);
+            capturing = c;
+            const u64 ctx = u64(c->ctx);
+            switch (c->kind) {
+            case Capture::Kind::Draw:
+                DrawFrom(ctx, c->dev, c->indexed, c->count, c->index_addr);
+                break;
+            case Capture::Kind::Clear:
+                ClearFrom(ctx, c->flags, c->has_color ? c->color : nullptr, c->stencil, c->depth);
+                break;
+            case Capture::Kind::Submit:
+                SubmitNow();
+                break;
+            }
+            capturing = nullptr;
+        }
+        {
+            std::lock_guard lk(capture_mutex);
+            capture_free.push_back(c);
+        }
+        capture_free_cv.notify_one();
+        captures_done.fetch_add(1, std::memory_order_release);
+        captures_done.notify_all();
+    }
+}
+} // namespace
+
+void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
+    if (!enabled) {
+        return;
+    }
+    draws.fetch_add(1, std::memory_order_relaxed);
+    const u64 dev = Q(image_base + DeviceGlobal);
+    const u64 ctx = dev ? Q(dev + DevContext) : 0;
+    if (!ctx) {
+        no_context.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    Timer timer(draw_ns);
+    if (!capture_thread) {
+        std::lock_guard lk(mutex);
+        DrawFrom(ctx, dev, indexed, count, index_addr);
+        return;
+    }
+    Capture& c = TakeCapture();
+    c.kind = Capture::Kind::Draw;
+    c.dev = dev;
+    c.indexed = indexed;
+    c.count = count;
+    c.index_addr = index_addr;
+    KeepContext(c, ctx, true, true);
+    const u64 cctx = u64(c.ctx);
+    const u64 vsh = Q(cctx + CtxVs);
+    // the buffer resources of the streams the vertex shader reads (the others may be stale)
+    if (vsh) {
+        for (u32 slots = StreamSlots(cctx, vsh); slots; slots &= slots - 1) {
+            const int slot = std::countr_zero(slots);
+            Keep(c, CtxVertexBuffers + slot * 8, c.buffers[slot], BufferBytes);
+        }
+    }
+    const u32 prim = R<u32>(cctx + CtxPrimType);
+    if (indexed && prim != 5 && prim != 6) { // fans and quads read the indices themselves
+        Keep(c, CtxIndexBuffer, c.index_buffer, BufferBytes);
+    }
+    CaptureConstants(c, 0, vsh);
+    CaptureConstants(c, 1, Q(cctx + CtxPs));
+    // only used when the vertex shader is an export shader (Crash's fur shells), which the
+    // capture thread finds out: the engine's shader objects stay, so a stale one reads safely
+    CaptureConstants(c, 2, Q(cctx + CtxGs));
+    Hand(c);
+}
+
+void OnSubmit() {
+    if (!drawing) {
+        return;
+    }
+    Timer timer(submit_ns);
+    if (!capture_thread) {
+        std::lock_guard lk(mutex);
+        SubmitNow();
+        return;
+    }
+    // done before the submission goes on: the engine reuses the memory of its draws (vertices,
+    // indices, textures) once the GPU has run the submission
+    Capture& c = TakeCapture();
+    c.kind = Capture::Kind::Submit;
+    WaitCaptured(Hand(c));
 }
 
 namespace {
@@ -3382,7 +3691,7 @@ void RunBatch(Batch& b) {
     }
 }
 
-/// Hands the open batch to the recorder (the game's thread, under `mutex`): waits when the
+/// Hands the open batch to the recorder (the capture thread, under `mutex`): waits when the
 /// recorder is a whole queue behind.
 void Flush() {
     if (open_batch->ops.empty()) {
@@ -3458,6 +3767,18 @@ void StartRecorder() {
     if (record_thread) {
         std::thread(RecorderThread).detach();
     }
+    for (Capture& c : capture_pool) {
+        capture_free.push_back(&c);
+    }
+    const char* ct = std::getenv("BB_VK_CAPTURE_THREAD");
+    if (!(ct && ct[0] == '0')) {
+        std::thread(CaptureThread).detach();
+        capture_thread = true; // under `mutex`: no draw is being captured
+    }
+    std::printf("Native Vulkan: draws %s\n",
+                capture_thread ? "are taken on their own thread from what the game's thread keeps "
+                                 "of them (BB_VK_CAPTURE_THREAD=0: on the game's thread)"
+                               : "are taken on the game's thread (BB_VK_CAPTURE_THREAD=0)");
     std::printf("Native Vulkan: %s\n",
                 record_thread ? "draws are captured on the game's thread and recorded on their own "
                                 "thread (BB_VK_RECORD_THREAD=0: on the game's thread)"
