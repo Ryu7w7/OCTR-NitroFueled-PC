@@ -91,6 +91,7 @@ struct ShaderInfo {
     // the SPIR-V with its descriptors in the stage's set, and what it declares
     std::vector<u32> code;
     std::vector<Spirv::Binding> bindings;
+    std::vector<u32> ubo_slots; // b# of its uniform buffers, ascending (dynamic offset order)
     u32 input_locations = 0;
     VkShaderModule module = VK_NULL_HANDLE;
     std::unordered_map<u64, VkShaderModule> variants; // integer inputs: uint mask | sint mask << 32
@@ -164,6 +165,7 @@ std::atomic<bool> alone{false}; // BB_VK_ALONE=1: shadPS4 draws nothing
 bool force_copy = true;
 bool dynamic_vertex_input = false;
 u64 ubo_align = 256;
+u32 max_dynamic_ubos = 8; // maxDescriptorSetUniformBuffersDynamic
 fs::path shader_root;
 std::atomic<const Vulkan::Instance*> instance{nullptr};
 
@@ -370,7 +372,7 @@ vk::ShaderStageFlagBits StageBit(const ShaderInfo& s) {
 vk::DescriptorType DescriptorType(Spirv::Kind k) {
     switch (k) {
     case Spirv::Kind::UniformBuffer:
-        return vk::DescriptorType::eUniformBuffer;
+        return vk::DescriptorType::eUniformBufferDynamic; // offsets given when bound (StageSet)
     case Spirv::Kind::StorageBuffer:
         return vk::DescriptorType::eStorageBuffer;
     case Spirv::Kind::SampledImage:
@@ -418,11 +420,17 @@ void LoadModule(ShaderInfo& s) {
     }
     std::vector<vk::DescriptorSetLayoutBinding> lb;
     for (const Spirv::Binding& b : s.bindings) {
+        if (b.kind == Spirv::Kind::UniformBuffer) {
+            for (u32 i = 0; i < b.count; ++i) {
+                s.ubo_slots.push_back(b.binding + i);
+            }
+        }
         lb.push_back({.binding = b.binding,
                       .descriptorType = DescriptorType(b.kind),
                       .descriptorCount = b.count,
                       .stageFlags = StageBit(s)});
     }
+    std::sort(s.ubo_slots.begin(), s.ubo_slots.end());
     auto [lr, layout] = inst->GetDevice().createDescriptorSetLayout(
         {.bindingCount = u32(lb.size()), .pBindings = lb.data()});
     s.set_layout = lr == vk::Result::eSuccess ? VkDescriptorSetLayout(layout) : VK_NULL_HANDLE;
@@ -634,7 +642,6 @@ struct DrawPacket {
     const ShaderInfo* gs = nullptr;
     StageRes res[3]; // vs, ps, gs
     Ref cb[3][14];
-    u32 cb_size[3][14]{};
     Gpu::Pass pass;
     const Target* depth_ro = nullptr;
     vk::Viewport viewport{};
@@ -751,11 +758,14 @@ void EndOp() {
     }
 }
 
+std::atomic<u64> set_generation{0}; // bumped when a view a cached set may hold is destroyed
+
 void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     const vk::Device dev = inst.GetDevice();
     const VmaAllocator vma = inst.GetAllocator();
     const VkImage image = t.img.image;
     const VmaAllocation allocation = t.allocation;
+    set_generation.fetch_add(1, std::memory_order_release); // cached sets may hold its views
     std::vector<VkImageView> views{t.view};
     if (t.view_array) {
         views.push_back(t.view_array);
@@ -1316,6 +1326,13 @@ VkPipelineLayout PipelineLayout(const ShaderInfo& vs, const ShaderInfo* ps,
     if (const auto it = pipeline_layouts.find(key); it != pipeline_layouts.end()) {
         return it->second;
     }
+    const std::size_t dynamic = vs.ubo_slots.size() + (ps ? ps->ubo_slots.size() : 0) +
+                                (gs ? gs->ubo_slots.size() : 0);
+    if (dynamic > max_dynamic_ubos) {
+        std::printf("Native Vulkan: %s: %zu uniform buffers, over the device's %u\n", vs.name.c_str(),
+                    dynamic, max_dynamic_ubos);
+        return pipeline_layouts[key] = VK_NULL_HANDLE;
+    }
     const vk::DescriptorSetLayout vk_sets[3] = {sets[0], sets[1], sets[2]};
     auto [r, layout] = instance.load()->GetDevice().createPipelineLayout(
         {.setLayoutCount = gs ? 3u : 2u, .pSetLayouts = vk_sets});
@@ -1672,6 +1689,10 @@ void PreloadKnown() {
         ShaderInfo& vs = vs_it->second;
         ShaderInfo* ps = d.ps ? &ps_it->second : nullptr;
         ShaderInfo* gs = d.gs ? &gs_it->second : nullptr;
+        if ((vs.kind != "vs" && vs.kind != "es") || (ps && ps->kind != "ps") || (gs && gs->kind != "gs")) {
+            ++missing; // a program in the wrong stage (recorded before draws were checked)
+            continue;
+        }
         LoadModule(vs);
         if (ps) {
             LoadModule(*ps);
@@ -1740,7 +1761,7 @@ void PreloadKnown() {
 // ------------------------------------------------------------------ constants
 /// Copies a stage's constant buffers (the shader header's vectors) into the upload ring; the
 /// spans go to `cbs` by slot. False: the ring could not take them.
-bool StageConstants(u64 shader, Ref cbs[14], u32 sizes[14]) {
+bool StageConstants(u64 shader, Ref cbs[14]) {
     const u64 hdr = Q(shader + ShHeader);
     if (!hdr) {
         return true;
@@ -1758,7 +1779,6 @@ bool StageConstants(u64 shader, Ref cbs[14], u32 sizes[14]) {
         const Ref span = Stage((size + 15) & ~15u, ubo_align);
         std::memcpy(span.data, reinterpret_cast<const void*>(data), size);
         cbs[slot] = span;
-        sizes[slot] = (size + 15) & ~15u;
     }
     return true;
 }
@@ -1776,40 +1796,89 @@ bool InfoConstants(const StageRes& res, const u32* vin, Ref* span) {
     return true;
 }
 
-/// Writes a stage's descriptor set from what it declares (bindings b# 0.., t# 64.., s# 128..).
-vk::DescriptorSet WriteStageSet(const ShaderInfo& s, const StageRes& res, const Ref cbs[14],
-                           const u32 sizes[14], const Target* depth_ro) {
-    const vk::DescriptorSet set = Gpu::AllocateSet(s.set_layout);
-    if (!set) {
-        return set;
+// ------------------------------------------------------------------ descriptor sets
+// A stage's set holds its textures and samplers, and its constant buffers as dynamic uniform
+// buffers over the upload ring (each draw gives its offsets when it binds the set), so a set
+// depends only on what the stage samples: sets are made once and kept across command buffers.
+// Destroying a target view drops them all, their pools going once the GPU is done with them.
+// All of it on the recording side (under gpu_mutex).
+
+struct CachedSet {
+    std::vector<u64> key;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+};
+std::unordered_map<u64, CachedSet> set_cache;
+std::vector<VkDescriptorPool> set_pools; // set_cache's; the last one takes new sets
+u64 set_cache_generation = 0;           // set_generation when set_cache was last valid
+std::atomic<u64> sets_made{0}, sets_reused{0}, sets_dropped{0};
+constexpr std::size_t MaxCachedSets = 16384;
+constexpr u32 SetsPerCachePool = 1024;
+
+/// Forgets every cached set; their pools go once the GPU has finished what uses them.
+void DropSets() {
+    sets_dropped.fetch_add(set_cache.size(), std::memory_order_relaxed);
+    set_cache.clear();
+    if (!set_pools.empty()) {
+        const vk::Device dev = instance.load()->GetDevice();
+        Gpu::Defer([dev, pools = std::move(set_pools)] {
+            for (const VkDescriptorPool pool : pools) {
+                dev.destroyDescriptorPool(pool);
+            }
+        });
+        set_pools.clear();
+    }
+}
+
+/// A set of `layout` from the cache's pools (a new pool when the last one is full).
+VkDescriptorSet AllocateKept(VkDescriptorSetLayout layout) {
+    const vk::Device dev = instance.load()->GetDevice();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!set_pools.empty()) {
+            const vk::DescriptorSetLayout l{layout};
+            vk::DescriptorSet set;
+            const vk::DescriptorSetAllocateInfo ai{.descriptorPool = set_pools.back(),
+                                                   .descriptorSetCount = 1,
+                                                   .pSetLayouts = &l};
+            if (dev.allocateDescriptorSets(&ai, &set) == vk::Result::eSuccess) {
+                return set;
+            }
+        }
+        static constexpr std::array<vk::DescriptorPoolSize, 7> sizes{{
+            {vk::DescriptorType::eUniformBufferDynamic, SetsPerCachePool * 4},
+            {vk::DescriptorType::eSampledImage, SetsPerCachePool * 16},
+            {vk::DescriptorType::eSampler, SetsPerCachePool * 16},
+            {vk::DescriptorType::eStorageBuffer, 256},
+            {vk::DescriptorType::eStorageImage, 256},
+            {vk::DescriptorType::eUniformTexelBuffer, 256},
+            {vk::DescriptorType::eStorageTexelBuffer, 256},
+        }};
+        auto [r, pool] = dev.createDescriptorPool(
+            {.maxSets = SetsPerCachePool, .poolSizeCount = u32(sizes.size()), .pPoolSizes = sizes.data()});
+        if (r != vk::Result::eSuccess) {
+            return VK_NULL_HANDLE;
+        }
+        set_pools.push_back(pool);
+    }
+    return VK_NULL_HANDLE;
+}
+
+/// A stage's descriptor set for what it samples (bindings b# 0.., t# 64.., s# 128..): the
+/// cached one, else written now and kept.
+vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Target* depth_ro) {
+    if (const u64 g = set_generation.load(std::memory_order_acquire); g != set_cache_generation) {
+        DropSets();
+        set_cache_generation = g;
     }
     static const u32 default_ss[4] = {0, 0xfff000, 0x5000000, 0};
-    std::vector<vk::DescriptorBufferInfo> buffers;
-    std::vector<vk::DescriptorImageInfo> images;
-    buffers.reserve(s.bindings.size() * 4);
-    images.reserve(s.bindings.size() * 4);
-    std::vector<vk::WriteDescriptorSet> writes;
+    // the image and sampler descriptors, in binding order: with the layout, the cache key
+    static std::vector<vk::DescriptorImageInfo> images;
+    static std::vector<u64> key;
+    images.clear();
+    key.clear();
+    key.push_back(u64(s.set_layout));
     for (const Spirv::Binding& b : s.bindings) {
-        vk::WriteDescriptorSet w{.dstSet = set,
-                                 .dstBinding = b.binding,
-                                 .descriptorCount = b.count,
-                                 .descriptorType = DescriptorType(b.kind)};
         switch (b.kind) {
-        case Spirv::Kind::UniformBuffer: {
-            const std::size_t first = buffers.size();
-            for (u32 i = 0; i < b.count; ++i) {
-                const u32 slot = b.binding + i;
-                if (slot < 14 && cbs[slot].buffer) {
-                    buffers.push_back({cbs[slot].buffer, cbs[slot].offset, sizes[slot]});
-                } else {
-                    buffers.push_back({VK_NULL_HANDLE, 0, VK_WHOLE_SIZE}); // reads zeros
-                }
-            }
-            w.pBufferInfo = &buffers[first];
-            break;
-        }
-        case Spirv::Kind::SampledImage: {
-            const std::size_t first = images.size();
+        case Spirv::Kind::SampledImage:
             for (u32 i = 0; i < b.count; ++i) {
                 const u32 slot = b.binding + i - 64;
                 vk::DescriptorImageInfo ii{.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
@@ -1826,12 +1895,11 @@ vk::DescriptorSet WriteStageSet(const ShaderInfo& s, const StageRes& res, const 
                     }
                 }
                 images.push_back(ii); // no image: a null descriptor, which reads zeros
+                key.push_back(u64(VkImageView(ii.imageView)));
+                key.push_back(u64(ii.imageLayout));
             }
-            w.pImageInfo = &images[first];
             break;
-        }
-        case Spirv::Kind::Sampler: {
-            const std::size_t first = images.size();
+        case Spirv::Kind::Sampler:
             for (u32 i = 0; i < b.count; ++i) {
                 const u32 slot = b.binding + i - 128;
                 VkSampler smp = slot < 16 ? res.samplers[slot] : VK_NULL_HANDLE;
@@ -1839,32 +1907,80 @@ vk::DescriptorSet WriteStageSet(const ShaderInfo& s, const StageRes& res, const 
                     smp = Tex::Sampler(default_ss, false); // samplers cannot be null
                 }
                 images.push_back({.sampler = smp});
+                key.push_back(u64(smp));
             }
-            w.pImageInfo = &images[first];
             break;
-        }
-        case Spirv::Kind::StorageBuffer: {
-            const std::size_t first = buffers.size();
-            for (u32 i = 0; i < b.count; ++i) {
-                buffers.push_back({VK_NULL_HANDLE, 0, VK_WHOLE_SIZE});
-            }
-            w.pBufferInfo = &buffers[first];
-            break;
-        }
-        case Spirv::Kind::StorageImage: {
-            const std::size_t first = images.size();
+        case Spirv::Kind::StorageImage:
             for (u32 i = 0; i < b.count; ++i) {
                 images.push_back({.imageLayout = vk::ImageLayout::eGeneral});
             }
-            w.pImageInfo = &images[first];
+            break;
+        default:
             break;
         }
+    }
+    u64 h = 0xcbf29ce484222325ull;
+    for (const u64 w : key) {
+        h = (h ^ w) * 0x100000001b3ull;
+        h ^= h >> 29;
+    }
+    const auto it = set_cache.find(h);
+    if (it != set_cache.end() && it->second.key == key) {
+        sets_reused.fetch_add(1, std::memory_order_relaxed);
+        return it->second.set;
+    }
+    // kept unless another key has this hash (that set is written for this command buffer only)
+    const bool keep = it == set_cache.end();
+    if (keep && set_cache.size() >= MaxCachedSets) {
+        DropSets();
+    }
+    const vk::DescriptorSet set = keep ? vk::DescriptorSet{AllocateKept(s.set_layout)}
+                                       : Gpu::AllocateSet(s.set_layout);
+    if (!set) {
+        return set;
+    }
+    static std::vector<vk::DescriptorBufferInfo> buffers;
+    static std::vector<vk::WriteDescriptorSet> writes;
+    buffers.clear();
+    writes.clear();
+    for (const Spirv::Binding& b : s.bindings) {
+        if (b.kind == Spirv::Kind::UniformBuffer || b.kind == Spirv::Kind::StorageBuffer) {
+            for (u32 i = 0; i < b.count; ++i) {
+                // uniform buffers: the ring, moved by the draw's offset; storage: none bound
+                buffers.push_back(b.kind == Spirv::Kind::UniformBuffer
+                                      ? vk::DescriptorBufferInfo{Gpu::UniformBuffer(), 0, Gpu::UniformRange()}
+                                      : vk::DescriptorBufferInfo{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE});
+            }
+        }
+    }
+    std::size_t next_image = 0, next_buffer = 0;
+    for (const Spirv::Binding& b : s.bindings) {
+        vk::WriteDescriptorSet w{.dstSet = set,
+                                 .dstBinding = b.binding,
+                                 .descriptorCount = b.count,
+                                 .descriptorType = DescriptorType(b.kind)};
+        switch (b.kind) {
+        case Spirv::Kind::UniformBuffer:
+        case Spirv::Kind::StorageBuffer:
+            w.pBufferInfo = &buffers[next_buffer];
+            next_buffer += b.count;
+            break;
+        case Spirv::Kind::SampledImage:
+        case Spirv::Kind::Sampler:
+        case Spirv::Kind::StorageImage:
+            w.pImageInfo = &images[next_image];
+            next_image += b.count;
+            break;
         default: // texel buffers: none bound
             continue;
         }
         writes.push_back(w);
     }
     instance.load()->GetDevice().updateDescriptorSets(writes, {});
+    sets_made.fetch_add(1, std::memory_order_relaxed);
+    if (keep) {
+        set_cache.emplace(h, CachedSet{key, set});
+    }
     return set;
 }
 
@@ -2066,25 +2182,20 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
 
     lap(SecPipeline);
-    DrawPacket& d = Push(Op::Draw, open_batch->draws);
-    d = DrawPacket{};
+    DrawPacket& d = Push(Op::Draw, open_batch->draws); // value-initialized
     Ref* const vcb = d.cb[0];
     Ref* const pcb = d.cb[1];
     Ref* const gcb = d.cb[2];
-    u32* const vsz = d.cb_size[0];
-    u32* const psz = d.cb_size[1];
-    u32* const gsz = d.cb_size[2];
     const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
     // a draw given up from here is left in the batch as nothing to record
     auto drop = [&] { d.pipeline = VK_NULL_HANDLE; };
-    if (!StageConstants(vsh, vcb, vsz) || !InfoConstants(vres, vi.vin, &vcb[13]) ||
-        (ps && (!StageConstants(psh, pcb, psz) || !InfoConstants(pres, nullptr, &pcb[13]))) ||
-        (gs && (!StageConstants(gsh, gcb, gsz) || !InfoConstants(gres, nullptr, &gcb[13])))) {
+    if (!StageConstants(vsh, vcb) || !InfoConstants(vres, vi.vin, &vcb[13]) ||
+        (ps && (!StageConstants(psh, pcb) || !InfoConstants(pres, nullptr, &pcb[13]))) ||
+        (gs && (!StageConstants(gsh, gcb) || !InfoConstants(gres, nullptr, &gcb[13])))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         drop();
         return;
     }
-    vsz[13] = psz[13] = gsz[13] = sizeof(InfoCB);
     Ref index_ref{};
     vk::IndexType index_type = vk::IndexType::eUint32;
     u32 index_count = count;
@@ -2279,16 +2390,36 @@ void RecordDraw(DrawPacket& d) {
     lap(SecPass);
     const ShaderInfo* ps = d.ps;
     const ShaderInfo* gs = d.gs;
-    const vk::DescriptorSet vset = WriteStageSet(*d.vs, d.res[0], d.cb[0], d.cb_size[0], d.depth_ro);
+    const vk::DescriptorSet vset = StageSet(*d.vs, d.res[0], d.depth_ro);
     // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
-    const vk::DescriptorSet pset = ps   ? WriteStageSet(*ps, d.res[1], d.cb[1], d.cb_size[1], d.depth_ro)
+    const vk::DescriptorSet pset = ps   ? StageSet(*ps, d.res[1], d.depth_ro)
                                    : gs ? Gpu::AllocateSet(empty_set_layout)
                                         : vk::DescriptorSet{};
-    const vk::DescriptorSet gset =
-        gs ? WriteStageSet(*gs, d.res[2], d.cb[2], d.cb_size[2], nullptr) : vk::DescriptorSet{};
+    const vk::DescriptorSet gset = gs ? StageSet(*gs, d.res[2], nullptr) : vk::DescriptorSet{};
     if (!vset || ((ps || gs) && !pset) || (gs && !gset)) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+    // the constant buffers' ring offsets, by set and then binding (PipelineLayout keeps the
+    // count within the device's limit)
+    u32 offsets[64];
+    u32 offset_count = 0;
+    const VkBuffer ubo = Gpu::UniformBuffer();
+    const u32 zero = u32(Gpu::ZeroUniform());
+    auto add_offsets = [&](const ShaderInfo& s, const Ref* cbs) {
+        for (const u32 slot : s.ubo_slots) {
+            if (offset_count < 64) {
+                offsets[offset_count++] =
+                    slot < 14 && cbs[slot].buffer == ubo ? u32(cbs[slot].offset) : zero;
+            }
+        }
+    };
+    add_offsets(*d.vs, d.cb[0]);
+    if (ps) {
+        add_offsets(*ps, d.cb[1]);
+    }
+    if (gs) {
+        add_offsets(*gs, d.cb[2]);
     }
 
     lap(SecSets);
@@ -2301,8 +2432,8 @@ void RecordDraw(DrawPacket& d) {
         state_skips.fetch_add(1, std::memory_order_relaxed);
     }
     const vk::DescriptorSet sets[3] = {vset, pset, gset};
-    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, d.layout, 0, gs ? 3 : ps ? 2 : 1, sets, 0,
-                           nullptr);
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, d.layout, 0, gs ? 3 : ps ? 2 : 1, sets,
+                           offset_count, offsets);
     if (std::memcmp(&bound.viewport, &d.viewport, sizeof(d.viewport)) != 0) {
         cmd.setViewport(0, d.viewport);
         bound.viewport = d.viewport;
@@ -2577,6 +2708,8 @@ void StartTextures() {
             empty_set_layout = er == vk::Result::eSuccess ? VkDescriptorSetLayout(empty) : VK_NULL_HANDLE;
             ubo_align = std::max<u64>(
                 inst->GetPhysicalDevice().getProperties().limits.minUniformBufferOffsetAlignment, 16);
+            max_dynamic_ubos =
+                inst->GetPhysicalDevice().getProperties().limits.maxDescriptorSetUniformBuffersDynamic;
             dynamic_vertex_input = inst->IsVertexInputDynamicState();
             std::lock_guard lk(mutex);
             drawing = empty_set_layout &&
@@ -2723,7 +2856,8 @@ void Report() {
                         "load ops, %llu in the open pass, %llu recorded), "
                         "%llu copies (%llu not done). GPU: %llu submits (%llu early), %llu waits, "
                         "%llu passes, %llu barriers, %.0f MiB constants, %llu descriptor sets in "
-                        "%llu pools. Display buffers shown: %zu\n",
+                        "%llu pools; stage sets: %llu made, %llu reused, %llu dropped. Display "
+                        "buffers shown: %zu\n",
                         (unsigned long long)drawn.load(), (unsigned long long)skipped_gs.load(),
                         (unsigned long long)skipped_vertices.load(),
                         (unsigned long long)skipped_pipeline.load(),
@@ -2739,7 +2873,9 @@ void Report() {
                         (unsigned long long)gp.submits, (unsigned long long)gp.early_submits,
                         (unsigned long long)gp.waits, (unsigned long long)gp.passes,
                         (unsigned long long)gp.barriers, gp.ring_bytes / 1048576.0,
-                        (unsigned long long)gp.sets, (unsigned long long)gp.pools, displayed);
+                        (unsigned long long)gp.sets, (unsigned long long)gp.pools,
+                        (unsigned long long)sets_made.load(), (unsigned long long)sets_reused.load(),
+                        (unsigned long long)sets_dropped.load(), displayed);
             std::string reasons;
             for (int r = 0; r < SkipCount; ++r) {
                 char b[64];

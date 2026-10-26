@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -62,7 +63,8 @@ vk::Device device;
 std::array<Frame, FrameCount> frames;
 std::size_t current = 0;
 
-VkBuffer ring = VK_NULL_HANDLE;
+VkBuffer ring = VK_NULL_HANDLE; // RingSize, then uniform_range of zeros (UniformBuffer)
+u64 uniform_range = 65536;
 VmaAllocation ring_allocation = nullptr;
 std::uint8_t* ring_data = nullptr;
 u64 ring_head = 0;
@@ -360,9 +362,10 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
             f.timestamps = qr == vk::Result::eSuccess ? qp : vk::QueryPool{};
         }
     }
+    uniform_range = std::min<u64>(65536, vulkan.GetPhysicalDevice().getProperties().limits.maxUniformBufferRange);
     const VkBufferCreateInfo bci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = RingSize,
+        .size = RingSize + uniform_range,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -377,6 +380,7 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
         return false;
     }
     ring_data = static_cast<std::uint8_t*>(info.pMappedData);
+    std::memset(ring_data + RingSize, 0, uniform_range);
     // a cache from an earlier run (the driver ignores data from another driver or GPU)
     cache_file = cache_path;
     std::vector<char> data;
@@ -415,6 +419,18 @@ vk::CommandBuffer Prelude() {
         f.prelude_open = true;
     }
     return f.prelude;
+}
+
+VkBuffer UniformBuffer() {
+    return ring;
+}
+
+u64 UniformRange() {
+    return uniform_range;
+}
+
+u64 ZeroUniform() {
+    return RingSize;
 }
 
 u64 Serial() {
@@ -659,8 +675,9 @@ vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout) {
             continue;
         }
         if (f.pools_used == f.pools.size()) {
-            static constexpr std::array<vk::DescriptorPoolSize, 7> sizes{{
+            static constexpr std::array<vk::DescriptorPoolSize, 8> sizes{{
                 {vk::DescriptorType::eUniformBuffer, SetsPerPool * 6},
+                {vk::DescriptorType::eUniformBufferDynamic, SetsPerPool * 4},
                 {vk::DescriptorType::eSampledImage, SetsPerPool * 8},
                 {vk::DescriptorType::eSampler, SetsPerPool * 8},
                 {vk::DescriptorType::eStorageBuffer, 64},

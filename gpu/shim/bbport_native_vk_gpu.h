@@ -99,6 +99,14 @@ void Submit();
 /// Runs `f` once the GPU has finished everything recorded so far.
 void Defer(std::function<void()> f);
 
+/// The upload ring for dynamic uniform buffers: a descriptor covers [0, UniformRange()) of
+/// UniformBuffer() and a draw's offset moves it. Past the ring's end there is UniformRange()
+/// of zeros that is never written (at ZeroUniform()): a window from any ring offset stays in
+/// the buffer, and a constant buffer a draw does not have reads zeros there.
+VkBuffer UniformBuffer();
+std::uint64_t UniformRange();
+std::uint64_t ZeroUniform();
+
 /// `size` bytes of the upload ring for the open command buffer (submits early when the ring is
 /// full of this command buffer's own data). data == nullptr: larger than the ring.
 Span Upload(std::uint64_t size, std::uint64_t align);
