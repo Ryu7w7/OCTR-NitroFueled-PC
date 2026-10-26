@@ -84,4 +84,26 @@ the ones the D3D11 port uses:
 
 Pipeline keys now use the target formats. Images are the engine's size; render scaling comes with
 presentation. Nothing is drawn into them yet, so they hold no data and cost VRAM beside shadPS4's own.
-Next: textures and samplers, vertex/index fetch, then the draw itself.
+First in-game run: 90 target images (396 MiB), none failed or remade, 402 pipeline states.
+
+## Stage 3: textures and samplers
+
+`gpu/shim/bbport_native_vk_texture.cpp`. For each texture slot a bound VS/PS samples (from
+shaders.idx), the engine's T# pointer is read at `ctx+0x320` (VS) or `ctx+0x220` (PS). An unset slot
+uses the device's own missing-texture T# at `device+0x580`.
+
+- **Render targets**: a T# whose base is a render or depth target uses that target's image.
+- **Other textures**: decoded and laid out as the D3D11 port's `texture.cpp` does (linear aligned
+  and 1D thin micro tiling, the GCN mip and pitch rules), read from guest memory and untiled on the CPU
+  the first time they are seen. An upload thread copies them into `VkImage`s in batches of up to
+  64 MiB, on the graphics queue under `Vulkan::Scheduler::submit_mutex` (which every shadPS4 submit
+  and present holds), and leaves them in `SHADER_READ_ONLY_OPTIMAL`.
+- **Samplers**: the engine keeps packed sampler keys at `ctx+0x2a0` (VS) and `ctx+0x1a0` (PS). They
+  are expanded into an S# as the port does, then into a `VkSampler`: filters, address modes, LOD range
+  and bias, border color, comparison, and 16x anisotropy for filtered mipmapped samplers.
+- **Budget**: textures stop being made past `BB_VK_TEXTURE_MB` (default 1024), since they sit beside
+  shadPS4's own copies until the native path draws.
+
+Not done yet: refreshing textures the CPU rewrites (videos, runtime atlases), 2D-tiled modes,
+3D textures beyond the first slice, and the per-slot swizzle constants (`ctr_swz`, b13) the shaders
+expect. Next: vertex/index fetch, then the draw itself.

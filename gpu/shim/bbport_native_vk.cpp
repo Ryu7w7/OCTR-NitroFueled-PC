@@ -21,6 +21,8 @@
 
 #include <vk_mem_alloc.h>
 
+#include "bbport_native_vk_texture.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -39,13 +41,16 @@ namespace fs = std::filesystem;
 /// port/src/gfx/engine.h: unchanged between 1.00 and 1.21).
 constexpr u64 DeviceGlobal = 0x2aebce0; // igPS4GraphicsDevice*
 constexpr u64 DevContext = 0x5b0;       // igPS4GraphicsDevice -> igPS4GraphicsDeviceContext
+constexpr u64 DevMissingTexture = 0x580; // the device's own T# for unset texture slots
 
 // igPS4GraphicsDeviceContext
 constexpr u64 CtxAlphaToMask = 0x100, CtxBlendControl = 0x104,
               CtxClipControl = 0x108, CtxPrimSetup = 0x10c, CtxDepthStencilControl = 0x110,
               CtxStencilControl = 0x114, CtxStencilOpControl = 0x118, CtxColorTargets = 0x130,
-              CtxDepthTarget = 0x170, CtxRasterState = 0x190, CtxRtMask = 0x198, CtxVs = 0x5a8,
-              CtxGs = 0x5b0, CtxPs = 0x5b8, CtxPrimType = 0x5c0, CtxIndexSize = 0x5c4;
+              CtxDepthTarget = 0x170, CtxRasterState = 0x190, CtxRtMask = 0x198,
+              CtxPsSamplers = 0x1a0, CtxPsTextures = 0x220, CtxVsSamplers = 0x2a0,
+              CtxVsTextures = 0x320, CtxVs = 0x5a8, CtxGs = 0x5b0, CtxPs = 0x5b8,
+              CtxPrimType = 0x5c0, CtxIndexSize = 0x5c4;
 // shader resource (pool object) -> Gnm shader struct: common word, then PGM_LO/PGM_HI at +8
 constexpr u64 ShGnm = 0x30;
 
@@ -88,6 +93,9 @@ std::atomic<u64> draws{0}, resolved{0}, missing_shader{0}, no_target{0}, no_cont
 std::atomic<u64> modules_made{0}, modules_failed{0}, unknown_programs{0};
 std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable_targets{0};
 std::atomic<u64> target_bytes{0};
+std::atomic<u64> texture_binds{0}, target_binds{0}, unset_textures{0}, texture_misses{0},
+    bad_tsharps{0}, sampler_binds{0}, sampler_misses{0};
+std::unordered_set<u64> good_tsharps; // T# addresses checked readable once
 
 /// Reads guest memory without faulting on a bad pointer (only for things not seen before).
 bool Read(u64 address, void* out, std::size_t size) {
@@ -438,6 +446,69 @@ Target* DepthTarget(u64 handle) {
     return MakeTarget(base, w, h, format, true, 0);
 }
 
+/// The textures and samplers a shader stage samples. Texture slots hold T# pointers (unset: the
+/// device's missing texture); a T# whose image is a render target uses that target's image.
+/// Sampler slots hold packed keys, expanded into an S# the way the engine's commit code does
+/// (the D3D11 port's BindTextures).
+void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev) {
+    const u64 tex_slots = ctx + (vertex ? CtxVsTextures : CtxPsTextures);
+    for (const auto& [slot, dims] : s.textures) {
+        if (slot >= 16) {
+            continue;
+        }
+        u64 t = Q(tex_slots + slot * 8);
+        if (!t) {
+            t = dev + DevMissingTexture;
+            unset_textures.fetch_add(1, std::memory_order_relaxed);
+        }
+        u32 tsharp[8];
+        if (!good_tsharps.count(t)) {
+            if (!Read(t, tsharp, sizeof(tsharp))) {
+                bad_tsharps.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            good_tsharps.insert(t);
+        } else {
+            std::memcpy(tsharp, reinterpret_cast<const void*>(t), sizeof(tsharp));
+        }
+        texture_binds.fetch_add(1, std::memory_order_relaxed);
+        if (targets.count(Tex::TSharpBase(tsharp))) {
+            target_binds.fetch_add(1, std::memory_order_relaxed);
+        } else if (!Tex::Get(tsharp)) {
+            texture_misses.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    const u64 sampler_slots = ctx + (vertex ? CtxVsSamplers : CtxPsSamplers);
+    for (const auto& [slot, compare] : s.samplers) {
+        if (slot >= 16) {
+            continue;
+        }
+        const u32 k = u32(Q(sampler_slots + slot * 8));
+        u32 ss[4] = {0, 0xfff000, 0x5000000, 0};
+        if (k && vertex) {
+            ss[0] = (k >> 8) & 0xfff;
+            ss[2] = (k & 0xf) << 20 | 0x4000000 | (k & 0xc0) << 18;
+        } else if (k) {
+            ss[0] = (k >> 8) & 0x7fff;
+            ss[2] = (k & 0x30) << 22 | (k & 0xc0) << 18 | (k & 0xf) << 20;
+        }
+        sampler_binds.fetch_add(1, std::memory_order_relaxed);
+        if (!Tex::Sampler(ss, compare)) {
+            sampler_misses.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+/// Starts the texture side once both the switch is on and the presenter's instance exists (the
+/// loader and the GnmDriver registration can come in either order).
+void StartTextures() {
+    static std::once_flag once;
+    const Vulkan::Instance* inst = instance.load();
+    if (enabled && inst) {
+        std::call_once(once, [inst] { Tex::Init(*inst); });
+    }
+}
+
 void Report() {
     u64 last = 0;
     for (;;) {
@@ -447,10 +518,12 @@ void Report() {
             continue;
         }
         std::size_t keys = 0, live_targets = 0;
+        Tex::Stats tx{};
         {
             std::lock_guard lk(mutex);
             keys = pipeline_keys.size();
             live_targets = targets.size();
+            tx = Tex::GetStats();
         }
         std::printf("Native Vulkan: %.0f draws/s; in all %llu draws, %llu resolved, %llu with a "
                     "shader missing, %llu without a target, %llu without a context; %zu pipeline "
@@ -467,6 +540,20 @@ void Report() {
                     (unsigned long long)targets_made.load(), (unsigned long long)targets_remade.load(),
                     (unsigned long long)targets_failed.load(),
                     (unsigned long long)unusable_targets.load());
+        std::printf("Native Vulkan: %llu textures (%.0f MiB), %llu uploaded in %llu batches, %llu "
+                    "waiting; not made: %llu unsupported, %llu unreadable, %llu over budget, %llu "
+                    "failed; %llu samplers. Binds: %llu textures (%llu render targets, %llu unset "
+                    "slots, %llu without an image, %llu unreadable T#), %llu samplers (%llu "
+                    "failed)\n",
+                    (unsigned long long)tx.textures, tx.bytes / 1048576.0,
+                    (unsigned long long)tx.uploads_done, (unsigned long long)tx.upload_batches,
+                    (unsigned long long)tx.uploads_pending, (unsigned long long)tx.unsupported,
+                    (unsigned long long)tx.unreadable, (unsigned long long)tx.over_budget,
+                    (unsigned long long)tx.failed, (unsigned long long)tx.samplers,
+                    (unsigned long long)texture_binds.load(), (unsigned long long)target_binds.load(),
+                    (unsigned long long)unset_textures.load(), (unsigned long long)texture_misses.load(),
+                    (unsigned long long)bad_tsharps.load(), (unsigned long long)sampler_binds.load(),
+                    (unsigned long long)sampler_misses.load());
         std::fflush(stdout);
         last = d;
     }
@@ -498,10 +585,12 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
     std::fflush(stdout);
     enabled = true;
     std::thread(Report).detach();
+    StartTextures();
 }
 
 void Attach(const Vulkan::Instance& vulkan) {
     instance.store(&vulkan);
+    StartTextures();
 }
 
 void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
@@ -544,6 +633,10 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         return;
     }
     resolved.fetch_add(1, std::memory_order_relaxed);
+    BindStage(true, *vs, ctx, dev);
+    if (ps) {
+        BindStage(false, *ps, ctx, dev);
+    }
     // what a VkPipeline is keyed on
     u64 key = 0xcbf29ce484222325ull;
     Mix(key, vs);
