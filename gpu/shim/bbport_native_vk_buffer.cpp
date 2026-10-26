@@ -47,9 +47,8 @@ bool Readable(const MEMORY_BASIC_INFORMATION& m) {
 
 /// The committed, readable host memory around `address`: [start, end). Windows splits one
 /// allocation into regions wherever the page protection changes (shadPS4 write-protects pages it
-/// watches). `join`: neighbouring readable regions of the same allocation are joined (for reads;
-/// an import window across such a boundary fails, so imports take one region only).
-bool Region(u64 address, u64* start, u64* end, u32* protect = nullptr, bool join = false) {
+/// watches), and an import window across such a boundary fails, so a window stays in one region.
+bool Region(u64 address, u64* start, u64* end, u32* protect = nullptr) {
 #ifdef _WIN32
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi)) || !Readable(mbi)) {
@@ -58,25 +57,8 @@ bool Region(u64 address, u64* start, u64* end, u32* protect = nullptr, bool join
     if (protect) {
         *protect = mbi.Protect;
     }
-    const void* base = mbi.AllocationBase;
     *start = reinterpret_cast<u64>(mbi.BaseAddress);
     *end = *start + mbi.RegionSize;
-    for (int i = 0; join && i < 4096; ++i) { // forward
-        MEMORY_BASIC_INFORMATION n{};
-        if (!VirtualQuery(reinterpret_cast<const void*>(*end), &n, sizeof(n)) ||
-            n.AllocationBase != base || !Readable(n)) {
-            break;
-        }
-        *end += n.RegionSize;
-    }
-    for (int i = 0; join && i < 4096 && *start > reinterpret_cast<u64>(base); ++i) { // backward
-        MEMORY_BASIC_INFORMATION n{};
-        if (!VirtualQuery(reinterpret_cast<const void*>(*start - 1), &n, sizeof(n)) ||
-            n.AllocationBase != base || !Readable(n)) {
-            break;
-        }
-        *start = reinterpret_cast<u64>(n.BaseAddress);
-    }
     return true;
 #else
     std::ifstream maps("/proc/self/maps");
@@ -225,11 +207,6 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
     }
     ++hits;
     return {w->buffer, address - w->start};
-}
-
-bool Readable(std::uint64_t address, std::uint64_t size) {
-    u64 rs = 0, re = 0;
-    return size && Region(address, &rs, &re, nullptr, true) && address + size <= re;
 }
 
 Stats GetStats() {

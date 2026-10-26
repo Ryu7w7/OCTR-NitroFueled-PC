@@ -915,7 +915,7 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             // the part the draw reads, through the upload ring (only memory that is readable)
             const u64 bytes = std::min<u64>(size, u64(first) + u64(vertex_end()) * stride);
             const Gpu::Span span = bytes > first ? Gpu::Upload(bytes - first, 16) : Gpu::Span{};
-            if (!span.data || !Buf::Readable(base + first, bytes - first) ||
+            if (!span.data || // Read fails cleanly on memory that is not readable
                 !Read(base + first, span.data, bytes - first)) {
                 bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
                 vi.ok = false;
