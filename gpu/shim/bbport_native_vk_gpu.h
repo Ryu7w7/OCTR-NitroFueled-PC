@@ -32,6 +32,10 @@ struct Image {
     std::uint32_t width = 0, height = 0;
     bool depth = false, stencil = false;
     vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+    // a clear not recorded yet: the next pass does it as its load op, any other use before it
+    vk::ImageAspectFlags clear{};
+    vk::ClearValue clear_value{};
+    bool discard = false; // the next layout change may drop the contents (all of them are cleared)
 };
 
 /// Attachments of a rendering pass. `depth_read_only`: the depth image is also sampled.
@@ -57,6 +61,8 @@ struct WorkTime {
 
 struct Stats {
     std::uint64_t submits, early_submits, waits, passes, barriers, ring_bytes, sets, pools;
+    // clears: done as a pass's load op, inside the open pass, recorded as a transfer command
+    std::uint64_t load_clears, pass_clears, recorded_clears;
     std::uint64_t gpu_ns; // GPU time of the finished command buffers (timestamps)
 };
 
@@ -92,10 +98,14 @@ void Render(const Pass& pass);
 void EndRendering();
 bool Rendering();
 
+/// Clears are kept until the image is next used: a pass covering the whole image clears it as
+/// its load op (a fast clear), any other use records the clear first. An image of the open pass
+/// is cleared there (vkCmdClearAttachments).
 void ClearColor(Image& image, const float color[4]);
 void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, std::uint32_t s);
 
-/// Emits the pending layout changes (and a full memory barrier) outside rendering.
+/// Emits the pending layout changes outside rendering (each waits only on the stages its old
+/// layout is used by; BB_VK_FULL_BARRIERS=1 adds a full memory barrier, for comparison).
 void Barrier();
 
 /// A descriptor set of `layout`, valid for the open command buffer only.

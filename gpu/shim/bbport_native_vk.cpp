@@ -1927,7 +1927,8 @@ void Report() {
             std::printf("Native Vulkan: drawn %llu; not drawn: %llu geometry shader, %llu vertex "
                         "data, %llu pipeline, %llu ring/descriptors, %llu indices. %zu pipelines "
                         "(%llu failed), %llu integer-input variants failed. Feedback: %llu color "
-                        "slots unbound, %llu depth targets dropped, %llu read-only. %llu clears, "
+                        "slots unbound, %llu depth targets dropped, %llu read-only. %llu clears (%llu as "
+                        "load ops, %llu in the open pass, %llu recorded), "
                         "%llu copies (%llu not done). GPU: %llu submits (%llu early), %llu waits, "
                         "%llu passes, %llu barriers, %.0f MiB constants, %llu descriptor sets in "
                         "%llu pools. Display buffers shown: %zu\n",
@@ -1941,7 +1942,8 @@ void Report() {
                         (unsigned long long)color_feedback.load(),
                         (unsigned long long)depth_dropped.load(),
                         (unsigned long long)depth_read_only.load(), (unsigned long long)clears.load(),
-                        (unsigned long long)copies.load(), (unsigned long long)copies_skipped.load(),
+                        (unsigned long long)gp.load_clears, (unsigned long long)gp.pass_clears,
+                        (unsigned long long)gp.recorded_clears, (unsigned long long)copies.load(), (unsigned long long)copies_skipped.load(),
                         (unsigned long long)gp.submits, (unsigned long long)gp.early_submits,
                         (unsigned long long)gp.waits, (unsigned long long)gp.passes,
                         (unsigned long long)gp.barriers, gp.ring_bytes / 1048576.0,

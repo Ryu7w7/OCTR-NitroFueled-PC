@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -69,7 +70,9 @@ std::string cache_file;
 
 bool rendering = false;
 Pass open_pass{};
+vk::Extent2D open_area{};
 std::vector<vk::ImageMemoryBarrier2> pending;
+bool full_barriers = false; // BB_VK_FULL_BARRIERS=1
 
 Stats stats{};
 double tick_ns = 0; // nanoseconds per timestamp tick; 0: no timestamps
@@ -96,6 +99,107 @@ vk::ImageAspectFlags Aspects(const Image& image) {
     }
     return image.stencil ? vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil
                          : vk::ImageAspectFlags{vk::ImageAspectFlagBits::eDepth};
+}
+
+/// The stages an image in `layout` is used by, and the accesses there.
+struct LayoutUse {
+    vk::PipelineStageFlags2 stages;
+    vk::AccessFlags2 read, write;
+};
+LayoutUse UseOf(vk::ImageLayout layout) {
+    using S = vk::PipelineStageFlagBits2;
+    using A = vk::AccessFlagBits2;
+    constexpr vk::PipelineStageFlags2 tests = S::eEarlyFragmentTests | S::eLateFragmentTests;
+    constexpr vk::PipelineStageFlags2 shaders = S::eVertexShader | S::eFragmentShader;
+    switch (layout) {
+    case vk::ImageLayout::eUndefined:
+        return {S::eNone, {}, {}};
+    case vk::ImageLayout::eColorAttachmentOptimal:
+        return {S::eColorAttachmentOutput, A::eColorAttachmentRead, A::eColorAttachmentWrite};
+    case vk::ImageLayout::eDepthStencilAttachmentOptimal:
+        return {tests, A::eDepthStencilAttachmentRead, A::eDepthStencilAttachmentWrite};
+    case vk::ImageLayout::eDepthStencilReadOnlyOptimal:
+        return {tests | shaders, A::eDepthStencilAttachmentRead | A::eShaderSampledRead, {}};
+    case vk::ImageLayout::eShaderReadOnlyOptimal:
+        return {shaders, A::eShaderSampledRead, {}};
+    case vk::ImageLayout::eTransferSrcOptimal:
+        return {S::eAllTransfer, A::eTransferRead, {}};
+    case vk::ImageLayout::eTransferDstOptimal:
+        return {S::eAllTransfer, {}, A::eTransferWrite};
+    default: // General: the presenter's, read outside this command buffer
+        return {S::eAllCommands, A::eMemoryRead, A::eMemoryWrite};
+    }
+}
+
+/// The image in `layout` for what follows. A layout that can be written gets a barrier even when
+/// it does not change (a second pass or copy into it waits for the first).
+void Transition(Image& image, vk::ImageLayout layout) {
+    const LayoutUse from = UseOf(image.layout), to = UseOf(layout);
+    if (image.layout == layout && !from.write && !image.discard) {
+        return;
+    }
+    EndRendering();
+    pending.push_back(vk::ImageMemoryBarrier2{
+        .srcStageMask = from.stages,
+        .srcAccessMask = from.write,
+        .dstStageMask = to.stages,
+        .dstAccessMask = to.read | to.write,
+        .oldLayout = image.discard ? vk::ImageLayout::eUndefined : image.layout,
+        .newLayout = layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image.image,
+        .subresourceRange = {.aspectMask = Aspects(image),
+                             .baseMipLevel = 0,
+                             .levelCount = 1,
+                             .baseArrayLayer = 0,
+                             .layerCount = 1},
+    });
+    image.layout = layout;
+    image.discard = false;
+}
+
+/// Records the image's pending clear with a transfer command.
+void FlushClear(Image& image) {
+    const vk::ImageAspectFlags aspects = image.clear;
+    image.clear = {};
+    image.discard = aspects == Aspects(image);
+    Transition(image, vk::ImageLayout::eTransferDstOptimal);
+    Mark(image.depth ? Work::ClearDepth : Work::ClearColor, image.width, image.height, image.format);
+    Barrier();
+    ++stats.recorded_clears;
+    const vk::ImageSubresourceRange range{aspects, 0, 1, 0, 1};
+    if (image.depth) {
+        Cmd().clearDepthStencilImage(image.image, vk::ImageLayout::eTransferDstOptimal,
+                                     image.clear_value.depthStencil, range);
+    } else {
+        Cmd().clearColorImage(image.image, vk::ImageLayout::eTransferDstOptimal,
+                              image.clear_value.color, range);
+    }
+}
+
+/// Whether the open pass renders to `image` (writably) over all of it.
+bool InOpenPass(const Image& image) {
+    if (!rendering) {
+        return false;
+    }
+    if (&image == open_pass.depth) {
+        return !open_pass.depth_read_only;
+    }
+    return std::find(std::begin(open_pass.color), std::end(open_pass.color), &image) !=
+           std::end(open_pass.color);
+}
+
+/// Clears `aspects` of an image of the open pass inside it, over the whole render area.
+void ClearInPass(const Image& image, vk::ImageAspectFlags aspects, const vk::ClearValue& value) {
+    u32 slot = 0;
+    if (!image.depth) {
+        slot = u32(std::find(std::begin(open_pass.color), std::end(open_pass.color), &image) -
+                   std::begin(open_pass.color));
+    }
+    const vk::ClearAttachment at{.aspectMask = aspects, .colorAttachment = slot, .clearValue = value};
+    const vk::ClearRect rect{.rect = {{0, 0}, open_area}, .baseArrayLayer = 0, .layerCount = 1};
+    Cmd().clearAttachments(at, rect);
 }
 
 void Begin(Frame& f) {
@@ -206,6 +310,8 @@ void SubmitFrame(bool early) {
 bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     instance = &vulkan;
     device = vulkan.GetDevice();
+    const char* fb = std::getenv("BB_VK_FULL_BARRIERS");
+    full_barriers = fb && fb[0] == '1';
     const auto families = vulkan.GetPhysicalDevice().getQueueFamilyProperties();
     const u32 family = vulkan.GetGraphicsQueueFamilyIndex();
     if (family < families.size() && families[family].timestampValidBits) {
@@ -316,27 +422,10 @@ Span Upload(u64 size, u64 align) {
 }
 
 void Use(Image& image, vk::ImageLayout layout) {
-    if (image.layout == layout) {
-        return;
+    if (image.clear) {
+        FlushClear(image);
     }
-    EndRendering();
-    pending.push_back(vk::ImageMemoryBarrier2{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        .oldLayout = image.layout,
-        .newLayout = layout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = image.image,
-        .subresourceRange = {.aspectMask = Aspects(image),
-                             .baseMipLevel = 0,
-                             .levelCount = 1,
-                             .baseArrayLayer = 0,
-                             .layerCount = 1},
-    });
-    image.layout = layout;
+    Transition(image, layout);
 }
 
 void Barrier() {
@@ -346,7 +435,10 @@ void Barrier() {
         .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
     };
-    Cmd().pipelineBarrier2({.memoryBarrierCount = 1,
+    if (pending.empty() && !full_barriers) {
+        return;
+    }
+    Cmd().pipelineBarrier2({.memoryBarrierCount = full_barriers ? 1u : 0u,
                             .pMemoryBarriers = &all,
                             .imageMemoryBarrierCount = u32(pending.size()),
                             .pImageMemoryBarriers = pending.data()});
@@ -362,16 +454,40 @@ void Render(const Pass& pass) {
     }
     EndRendering();
     u32 w = ~0u, h = ~0u, count = 0;
+    for (const Image* c : pass.color) {
+        if (c) {
+            w = std::min(w, c->width);
+            h = std::min(h, c->height);
+        }
+    }
+    if (pass.depth) {
+        w = std::min(w, pass.depth->width);
+        h = std::min(h, pass.depth->height);
+    }
+    if (w == ~0u) {
+        return;
+    }
+    // pending clears: the load op when the pass covers the image, else recorded first
+    auto load_clear = [&](Image& image, bool writable) {
+        if (image.clear && (!writable || image.width != w || image.height != h)) {
+            FlushClear(image);
+        }
+        const vk::ImageAspectFlags cleared = image.clear;
+        image.clear = {};
+        image.discard = cleared && cleared == Aspects(image);
+        stats.load_clears += bool(cleared);
+        return cleared;
+    };
     std::array<vk::RenderingAttachmentInfo, 8> colors{};
     for (u32 i = 0; i < 8; ++i) {
         if (Image* c = pass.color[i]) {
-            Use(*c, vk::ImageLayout::eColorAttachmentOptimal);
+            const bool clear = bool(load_clear(*c, true));
+            Transition(*c, vk::ImageLayout::eColorAttachmentOptimal);
             colors[i] = {.imageView = c->attach,
                          .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                         .loadOp = vk::AttachmentLoadOp::eLoad,
-                         .storeOp = vk::AttachmentStoreOp::eStore};
-            w = std::min(w, c->width);
-            h = std::min(h, c->height);
+                         .loadOp = clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+                         .storeOp = vk::AttachmentStoreOp::eStore,
+                         .clearValue = c->clear_value};
             count = i + 1;
         }
     }
@@ -379,20 +495,21 @@ void Render(const Pass& pass) {
     if (Image* d = pass.depth) {
         const vk::ImageLayout l = pass.depth_read_only ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                                        : vk::ImageLayout::eDepthStencilAttachmentOptimal;
-        Use(*d, l);
+        const vk::ImageAspectFlags cleared = load_clear(*d, !pass.depth_read_only);
+        Transition(*d, l);
+        const auto op = [&](vk::ImageAspectFlagBits aspect) {
+            return cleared & aspect ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
+        };
         depth = {.imageView = d->attach,
                  .imageLayout = l,
-                 .loadOp = vk::AttachmentLoadOp::eLoad,
+                 .loadOp = op(vk::ImageAspectFlagBits::eDepth),
                  .storeOp = pass.depth_read_only ? vk::AttachmentStoreOp::eNone
-                                                 : vk::AttachmentStoreOp::eStore};
+                                                 : vk::AttachmentStoreOp::eStore,
+                 .clearValue = d->clear_value};
         if (d->stencil) {
             stencil = depth;
+            stencil.loadOp = op(vk::ImageAspectFlagBits::eStencil);
         }
-        w = std::min(w, d->width);
-        h = std::min(h, d->height);
-    }
-    if (w == ~0u) {
-        return;
     }
     {
         const Image* first = pass.depth;
@@ -415,6 +532,7 @@ void Render(const Pass& pass) {
     });
     rendering = true;
     open_pass = pass;
+    open_area = {w, h};
     ++stats.passes;
 }
 
@@ -430,14 +548,18 @@ bool Rendering() {
 }
 
 void ClearColor(Image& image, const float color[4]) {
-    Use(image, vk::ImageLayout::eTransferDstOptimal);
-    EndRendering();
-    Mark(Work::ClearColor, image.width, image.height, image.format);
-    Barrier();
     vk::ClearColorValue value{};
     std::copy(color, color + 4, value.float32.begin());
-    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-    Cmd().clearColorImage(image.image, vk::ImageLayout::eTransferDstOptimal, value, range);
+    if (InOpenPass(image) && image.width == open_area.width && image.height == open_area.height) {
+        ClearInPass(image, vk::ImageAspectFlagBits::eColor, vk::ClearValue{.color = value});
+        ++stats.pass_clears;
+        return;
+    }
+    if (InOpenPass(image)) {
+        EndRendering(); // a pass over part of it: the clear waits for the next use
+    }
+    image.clear = vk::ImageAspectFlagBits::eColor;
+    image.clear_value.color = value;
 }
 
 void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, u32 s) {
@@ -445,10 +567,6 @@ void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, u32 s) {
     if (!depth && !stencil) {
         return;
     }
-    Use(image, vk::ImageLayout::eTransferDstOptimal);
-    EndRendering();
-    Mark(Work::ClearDepth, image.width, image.height, image.format);
-    Barrier();
     vk::ImageAspectFlags aspects{};
     if (depth) {
         aspects |= vk::ImageAspectFlagBits::eDepth;
@@ -456,9 +574,23 @@ void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, u32 s) {
     if (stencil) {
         aspects |= vk::ImageAspectFlagBits::eStencil;
     }
-    const vk::ImageSubresourceRange range{aspects, 0, 1, 0, 1};
-    Cmd().clearDepthStencilImage(image.image, vk::ImageLayout::eTransferDstOptimal,
-                                 vk::ClearDepthStencilValue{z, s}, range);
+    if (InOpenPass(image) && image.width == open_area.width && image.height == open_area.height) {
+        ClearInPass(image, aspects, vk::ClearValue{.depthStencil = {z, s}});
+        ++stats.pass_clears;
+        return;
+    }
+    if (rendering && &image == open_pass.depth) {
+        EndRendering();
+    }
+    // a second clear before the image is used adds its aspects to the first
+    vk::ClearDepthStencilValue& v = image.clear_value.depthStencil;
+    if (!(image.clear & vk::ImageAspectFlagBits::eDepth) || depth) {
+        v.depth = depth ? z : v.depth;
+    }
+    if (stencil) {
+        v.stencil = s;
+    }
+    image.clear |= aspects;
 }
 
 vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout) {
