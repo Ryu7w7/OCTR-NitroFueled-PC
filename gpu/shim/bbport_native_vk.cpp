@@ -122,12 +122,20 @@ struct StageRes {
     u32 swz[32]{};
 };
 
+/// Buffer data of a draw: a fixed buffer (resident, imported), or bytes captured on the game's
+/// thread (`data`, in the batch's arena) that go into the upload ring when the draw is recorded.
+struct Ref {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    u64 offset = 0;
+    u8* data = nullptr;
+    u64 size = 0, align = 16;
+};
+
 /// The vertex streams and attributes of a draw.
 struct VertexInput {
     std::vector<vk::VertexInputBindingDescription2EXT> bindings;
     std::vector<vk::VertexInputAttributeDescription2EXT> attributes;
-    VkBuffer buffers[16]{};
-    u64 offsets[16]{};
+    Ref buffers[16]{}; // by stream slot
     u32 uint_mask = 0, sint_mask = 0;
     u32 vin[32]{}; // ctr_vin: per semantic, 1 = uscaled, 2 = sscaled (the shader converts)
     u64 key = 0;
@@ -166,7 +174,7 @@ std::unordered_set<u64> pipeline_keys;
 std::unordered_map<u64, VkPipeline> pipelines;        // key -> pipeline (null: failed)
 std::unordered_map<u64, VkPipelineLayout> pipeline_layouts;
 VkDescriptorSetLayout empty_set_layout = VK_NULL_HANDLE;
-std::unordered_map<u64, Target> targets; // GPU base address -> image
+std::unordered_map<u64, std::unique_ptr<Target>> targets; // GPU base address -> image
 
 /// Display buffers the presenter asked for (BB_VK_SHOW): address -> our image, once submitted.
 struct Shown {
@@ -178,6 +186,7 @@ std::mutex display_mutex;
 std::unordered_map<u64, Shown> shown;
 
 std::atomic<u64> draws{0}, resolved{0}, missing_shader{0}, no_target{0}, no_context{0};
+std::atomic<u64> wrong_stage{0}; // a program bound in a stage it is not for (stale context state)
 std::atomic<u64> modules_made{0}, modules_failed{0}, unknown_programs{0};
 std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable_targets{0};
 std::atomic<u64> target_bytes{0};
@@ -238,10 +247,12 @@ Bound bound;
 std::atomic<u64> state_skips{0}; // dynamic state and bindings left as they were
 
 /// CPU time of a draw by section: each call adds the time since the previous one to section i.
-enum DrawSection { SecResolve, SecTextures, SecVertices, SecPipeline, SecConstants, SecPass,
-                   SecSets, SecRecord, SecCount };
-constexpr const char* DrawSectionNames[SecCount] = {"resolve", "textures", "vertices", "pipeline",
-                                                    "constants+indices", "pass", "sets", "record"};
+// game's thread: resolve .. constants+indices; recorder: ring .. record
+enum DrawSection { SecResolve, SecTextures, SecVertices, SecPipeline, SecConstants, SecRing,
+                   SecPass, SecSets, SecRecord, SecCount };
+constexpr const char* DrawSectionNames[SecCount] = {
+    "resolve", "textures", "vertices", "pipeline", "constants+indices", "| ring copies", "pass",
+    "sets", "record"};
 std::atomic<u64> section_ns[SecCount]{};
 struct Lap {
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
@@ -577,6 +588,169 @@ bool IntegerFormat(vk::Format f) {
     }
 }
 
+// ------------------------------------------------------------------ the recording thread
+// The game's thread only captures its draws, clears, copies and submits (engine state, and the
+// guest data that can change after the call: constants, vertices, indices) into batches; the
+// recorder thread records them in order: ring uploads, layouts, passes, descriptor sets,
+// commands, submits. Gpu is only used there (and before it starts). BB_VK_RECORD_THREAD=0 records
+// on the game's thread instead, as before.
+
+/// Bump memory for the bytes a batch captures; its pointers stay valid until the batch is reset.
+struct Arena {
+    static constexpr std::size_t ChunkSize = 1 << 20;
+    std::vector<std::pair<std::unique_ptr<u8[]>, std::size_t>> chunks; // memory, size
+    std::size_t chunk = 0, used = 0;
+    u8* Take(std::size_t n) {
+        n = (n + 15) & ~std::size_t(15);
+        while (chunk < chunks.size() && used + n > chunks[chunk].second) {
+            ++chunk;
+            used = 0;
+        }
+        if (chunk == chunks.size()) {
+            const std::size_t size = std::max(n, ChunkSize);
+            chunks.emplace_back(std::unique_ptr<u8[]>(new u8[size]), size);
+            used = 0;
+        }
+        u8* p = chunks[chunk].first.get() + used;
+        used += n;
+        return p;
+    }
+    void Reset() {
+        // large one-off chunks (a resident buffer's first upload) are not kept
+        std::erase_if(chunks, [](const auto& c) { return c.second > ChunkSize; });
+        if (chunks.size() > 4) {
+            chunks.resize(4);
+        }
+        chunk = used = 0;
+    }
+};
+
+/// A draw as captured: everything its recording needs, by value.
+struct DrawPacket {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    const ShaderInfo* vs = nullptr;
+    const ShaderInfo* ps = nullptr;
+    const ShaderInfo* gs = nullptr;
+    StageRes res[3]; // vs, ps, gs
+    Ref cb[3][14];
+    u32 cb_size[3][14]{};
+    Gpu::Pass pass;
+    const Target* depth_ro = nullptr;
+    vk::Viewport viewport{};
+    vk::Rect2D scissor{};
+    float bias_units = 0.0f, bias_slope = 0.0f;
+    u32 stencil_ref = 0;
+    u64 vertex_key = 0;
+    u32 binding_count = 0, attribute_count = 0;
+    vk::VertexInputBindingDescription2EXT bindings[17];
+    vk::VertexInputAttributeDescription2EXT attributes[32];
+    Ref vb[16];
+    bool indexed = false;
+    Ref ib;
+    vk::IndexType ib_type = vk::IndexType::eUint32;
+    u32 count = 0;
+};
+
+struct ClearPacket {
+    Target* target = nullptr;
+    bool color = false, depth = false, stencil = false;
+    float c[4]{};
+    float z = 0.0f;
+    u32 s = 0;
+};
+
+/// A texture copy between our images, in logical texels counted from the top.
+struct CopyPacket {
+    Target* src = nullptr;
+    Target* dst = nullptr;
+    bool from_depth = false, same_format = false;
+    u32 sx = 0, dx = 0, w = 0, h = 0, src_bytes = 0;
+    s32 s_top = 0, d_top = 0;
+};
+
+struct GeoUploadPacket {
+    Ref data;
+    VkBuffer dst = VK_NULL_HANDLE;
+    u64 dst_offset = 0;
+};
+
+struct GeoFreePacket {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+};
+
+/// A submission: the display buffers the presenter asked for go to General layout first.
+struct SubmitPacket {
+    std::vector<std::pair<u64, Target*>> shown;
+};
+
+enum class Op : u8 { Draw, Clear, Copy, GeoUpload, GeoFree, Retire, Submit };
+
+struct Batch {
+    std::vector<std::pair<Op, u32>> ops; // in order; the index into the op's own list
+    std::vector<DrawPacket> draws;
+    std::vector<ClearPacket> clears;
+    std::vector<CopyPacket> copies;
+    std::vector<GeoUploadPacket> geo_uploads;
+    std::vector<GeoFreePacket> geo_frees;
+    std::vector<std::unique_ptr<Target>> retired;
+    std::vector<SubmitPacket> submits;
+    Arena arena;
+    void Clear() {
+        ops.clear();
+        draws.clear();
+        clears.clear();
+        copies.clear();
+        geo_uploads.clear();
+        geo_frees.clear();
+        retired.clear();
+        submits.clear();
+        arena.Reset();
+    }
+};
+
+constexpr std::size_t BatchCount = 16; // queued at most: the game waits beyond (~1000 draws)
+constexpr std::size_t BatchOps = 64;   // operations a batch takes before it is handed over
+std::array<Batch, BatchCount> batch_pool;
+Batch* open_batch = nullptr; // the game's side, under `mutex`
+bool record_thread = true;   // BB_VK_RECORD_THREAD=0: recorded on the game's thread
+std::mutex queue_mutex;
+std::condition_variable queue_cv, free_cv;
+std::deque<Batch*> queued_batches, free_batches;
+std::mutex gpu_mutex; // held while recording (Gpu is not thread safe; Report reads its times)
+std::atomic<u64> submits_queued{0}, submits_recorded{0}, batch_waits{0};
+std::mutex recorded_mutex;
+std::condition_variable recorded_cv;
+
+void Flush();
+void StartRecorder();
+u64 GeoSerial();
+void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset);
+void GeoFree(VkBuffer buffer, VmaAllocation allocation);
+
+/// Captured bytes for the ring.
+Ref Stage(u64 size, u64 align) {
+    Ref r;
+    r.data = open_batch->arena.Take(size);
+    r.size = size;
+    r.align = align;
+    return r;
+}
+
+template <class T>
+T& Push(Op op, std::vector<T>& list) {
+    open_batch->ops.push_back({op, u32(list.size())});
+    return list.emplace_back();
+}
+
+/// After each whole operation (never between a draw's captured bytes and the draw).
+void EndOp() {
+    if (!record_thread || open_batch->ops.size() >= BatchOps) {
+        Flush();
+    }
+}
+
 void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     const vk::Device dev = inst.GetDevice();
     const VmaAllocator vma = inst.GetAllocator();
@@ -615,14 +789,21 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     if (!inst) {
         return nullptr;
     }
-    Target& t = targets[base];
-    if (t.img.image && t.img.width == w && t.img.height == h && t.img.format == format) {
-        return &t;
+    std::unique_ptr<Target>& slot = targets[base];
+    if (slot && slot->img.width == w && slot->img.height == h && slot->img.format == format) {
+        return slot.get();
     }
-    if (t.img.image) {
-        DestroyTarget(*inst, t);
+    if (slot) {
         targets_remade.fetch_add(1, std::memory_order_relaxed);
+        if (drawing) {
+            // work queued before still draws to the old image: it goes after that work
+            Push(Op::Retire, open_batch->retired) = std::move(slot);
+        } else {
+            DestroyTarget(*inst, *slot);
+        }
     }
+    slot = std::make_unique<Target>();
+    Target& t = *slot;
     using U = vk::ImageUsageFlagBits;
     // only RGBA8 targets are viewed in another format (the presenter's sRGB-ness of the display
     // buffer); naming both formats keeps them compressible (AMD drops DCC on an image whose views
@@ -792,7 +973,7 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
         Slot& out = res.slots[slot];
         if (const auto it = targets.find(Tex::TSharpBase(tsharp)); it != targets.end()) {
             target_binds.fetch_add(1, std::memory_order_relaxed);
-            out.target = &it->second;
+            out.target = it->second.get();
         } else if (const Tex::Texture* tex = Tex::Get(tsharp)) {
             if (tex->ready.load(std::memory_order_acquire)) {
                 out.texture = tex;
@@ -974,19 +1155,17 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
         } else if (const Geo::Binding g = vi.copy ? Geo::Use(base, size) : Geo::Binding{};
                    g.buffer) {
             vb_resident.fetch_add(1, std::memory_order_relaxed);
-            vi.buffers[slot] = g.buffer;
-            vi.offsets[slot] = g.offset + first;
+            vi.buffers[slot] = Ref{.buffer = g.buffer, .offset = g.offset + first};
         } else if (const Buf::Slice s = force_copy ? Buf::Slice{} : Buf::Import(base, size);
                    s.buffer) {
             vb_in_place.fetch_add(1, std::memory_order_relaxed);
-            vi.buffers[slot] = s.buffer;
-            vi.offsets[slot] = s.offset + first;
+            vi.buffers[slot] = Ref{.buffer = s.buffer, .offset = s.offset + first};
         } else if (!vi.copy) {
             vi.ok = false; // stage 4 counting only
         } else {
             // the part the draw reads, through the upload ring (only memory that is readable)
             const u64 bytes = std::min<u64>(size, u64(first) + u64(vertex_end()) * stride);
-            const Gpu::Span span = bytes > first ? Gpu::Upload(bytes - first, 16) : Gpu::Span{};
+            const Ref span = bytes > first ? Stage(bytes - first, 16) : Ref{};
             if (!span.data || !Buf::Readable(base + first, bytes - first)) {
                 bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
                 vi.ok = false;
@@ -994,8 +1173,7 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             }
             std::memcpy(span.data, reinterpret_cast<const void*>(base + first), bytes - first);
             vb_copy_bytes.fetch_add(bytes - first, std::memory_order_relaxed);
-            vi.buffers[slot] = span.buffer;
-            vi.offsets[slot] = span.offset;
+            vi.buffers[slot] = span;
         }
     }
     if (zero_binding) {
@@ -1562,7 +1740,7 @@ void PreloadKnown() {
 // ------------------------------------------------------------------ constants
 /// Copies a stage's constant buffers (the shader header's vectors) into the upload ring; the
 /// spans go to `cbs` by slot. False: the ring could not take them.
-bool StageConstants(u64 shader, Gpu::Span cbs[14], u32 sizes[14]) {
+bool StageConstants(u64 shader, Ref cbs[14], u32 sizes[14]) {
     const u64 hdr = Q(shader + ShHeader);
     if (!hdr) {
         return true;
@@ -1577,10 +1755,7 @@ bool StageConstants(u64 shader, Gpu::Span cbs[14], u32 sizes[14]) {
         if (slot >= 13 || !data || !size || size > 65536) {
             continue;
         }
-        const Gpu::Span span = Gpu::Upload((size + 15) & ~15u, ubo_align);
-        if (!span.data) {
-            return false;
-        }
+        const Ref span = Stage((size + 15) & ~15u, ubo_align);
         std::memcpy(span.data, reinterpret_cast<const void*>(data), size);
         cbs[slot] = span;
         sizes[slot] = (size + 15) & ~15u;
@@ -1588,11 +1763,8 @@ bool StageConstants(u64 shader, Gpu::Span cbs[14], u32 sizes[14]) {
     return true;
 }
 
-bool InfoConstants(const StageRes& res, const u32* vin, Gpu::Span* span) {
-    *span = Gpu::Upload(sizeof(InfoCB), ubo_align);
-    if (!span->data) {
-        return false;
-    }
+bool InfoConstants(const StageRes& res, const u32* vin, Ref* span) {
+    *span = Stage(sizeof(InfoCB), ubo_align);
     InfoCB info{};
     std::memcpy(info.swz, res.swz, sizeof(info.swz));
     if (vin) {
@@ -1605,7 +1777,7 @@ bool InfoConstants(const StageRes& res, const u32* vin, Gpu::Span* span) {
 }
 
 /// Writes a stage's descriptor set from what it declares (bindings b# 0.., t# 64.., s# 128..).
-vk::DescriptorSet WriteStageSet(const ShaderInfo& s, const StageRes& res, const Gpu::Span cbs[14],
+vk::DescriptorSet WriteStageSet(const ShaderInfo& s, const StageRes& res, const Ref cbs[14],
                            const u32 sizes[14], const Target* depth_ro) {
     const vk::DescriptorSet set = Gpu::AllocateSet(s.set_layout);
     if (!set) {
@@ -1712,6 +1884,7 @@ vk::PrimitiveTopology Topology(u32 prim) {
     }
 }
 
+/// Captures a draw (the game's thread): its state, constants and data, into the open batch.
 void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u64 gsh,
           ShaderInfo* gs, Target* colors[8], Target* depth_target, bool indexed, u32 count,
           u64 index_addr) {
@@ -1736,7 +1909,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     const u32 isize_ = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
     // the draw's indices, copied with its vertices: the engine rewrites index memory (rings)
     // before the GPU runs the frame, so they are read now, and the copy gives the vertex range
-    Gpu::Span index_copy{};
+    Ref index_copy{};
     bool index_unreadable = false;
     FetchVertices(ctx, vsh, vs, vi, [&]() -> u32 {
         if (vertex_end) {
@@ -1745,7 +1918,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         vertex_end = count;
         if (indexed && index_addr) {
             const u64 bytes = u64(count) * isize_;
-            index_copy = Gpu::Upload(bytes, 4);
+            index_copy = Stage(bytes, 4);
             // scanned in cached memory: the ring is write-combined, slow to read back. Guest
             // memory is read directly when it is readable, else through a scratch copy
             static thread_local std::vector<std::uint8_t> scratch;
@@ -1757,7 +1930,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
                     from = nullptr;
                 }
             }
-            if (!index_copy.data || !from) {
+            if (!from) {
                 index_copy = {};
                 index_unreadable = true;
                 return vertex_end;
@@ -1893,20 +2066,26 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
 
     lap(SecPipeline);
-    // everything taken from the upload ring first: a full ring submits early, which ends the
-    // command buffer, so nothing may be bound before
-    Gpu::Span vcb[14]{}, pcb[14]{}, gcb[14]{};
-    u32 vsz[14]{}, psz[14]{}, gsz[14]{};
+    DrawPacket& d = Push(Op::Draw, open_batch->draws);
+    d = DrawPacket{};
+    Ref* const vcb = d.cb[0];
+    Ref* const pcb = d.cb[1];
+    Ref* const gcb = d.cb[2];
+    u32* const vsz = d.cb_size[0];
+    u32* const psz = d.cb_size[1];
+    u32* const gsz = d.cb_size[2];
     const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
+    // a draw given up from here is left in the batch as nothing to record
+    auto drop = [&] { d.pipeline = VK_NULL_HANDLE; };
     if (!StageConstants(vsh, vcb, vsz) || !InfoConstants(vres, vi.vin, &vcb[13]) ||
         (ps && (!StageConstants(psh, pcb, psz) || !InfoConstants(pres, nullptr, &pcb[13]))) ||
         (gs && (!StageConstants(gsh, gcb, gsz) || !InfoConstants(gres, nullptr, &gcb[13])))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
+        drop();
         return;
     }
     vsz[13] = psz[13] = gsz[13] = sizeof(InfoCB);
-    VkBuffer index_buffer = VK_NULL_HANDLE;
-    u64 index_offset = 0;
+    Ref index_ref{};
     vk::IndexType index_type = vk::IndexType::eUint32;
     u32 index_count = count;
     const u32 isize = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
@@ -1929,17 +2108,13 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
             }
         }
         if (gen.empty()) {
+            drop();
             return;
         }
-        const Gpu::Span span = Gpu::Upload(gen.size() * 4, 4);
-        if (!span.data) {
-            skipped_memory.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
+        const Ref span = Stage(gen.size() * 4, 4);
         std::memcpy(span.data, gen.data(), gen.size() * 4);
         ib_copy_bytes.fetch_add(gen.size() * 4, std::memory_order_relaxed);
-        index_buffer = span.buffer;
-        index_offset = span.offset;
+        index_ref = span;
         index_count = u32(gen.size());
         indexed = true;
     } else if (indexed) {
@@ -1958,67 +2133,26 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         const Geo::Binding g = inside ? Geo::Use(ib_base, ib_size) : Geo::Binding{};
         if (g.buffer && (index_addr - ib_base) % isize == 0) {
             ib_resident.fetch_add(1, std::memory_order_relaxed);
-            index_buffer = g.buffer;
-            index_offset = g.offset + (index_addr - ib_base);
+            index_ref = Ref{.buffer = g.buffer, .offset = g.offset + (index_addr - ib_base)};
         } else if (index_copy.data) {
             ib_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
-            index_buffer = index_copy.buffer;
-            index_offset = index_copy.offset;
+            index_ref = index_copy;
         } else if (s.buffer && offset % isize == 0) {
             ib_in_place.fetch_add(1, std::memory_order_relaxed);
-            index_buffer = s.buffer;
-            index_offset = offset;
+            index_ref = Ref{.buffer = s.buffer, .offset = offset};
         } else {
-            const Gpu::Span span = Gpu::Upload(bytes, 4);
-            if (!span.data || !Read(index_addr, span.data, bytes)) {
+            const Ref span = Stage(bytes, 4);
+            if (!Read(index_addr, span.data, bytes)) {
                 skipped_indices.fetch_add(1, std::memory_order_relaxed);
+                drop();
                 return;
             }
             ib_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
-            index_buffer = span.buffer;
-            index_offset = span.offset;
+            index_ref = span;
         }
         index_type = isize == 2 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     }
 
-    lap(SecConstants);
-    // layouts of the sampled targets, then the pass
-    for (const StageRes* res : {&vres, &pres}) {
-        for (const Slot& slot : res->slots) {
-            if (slot.target && slot.target != depth_ro) {
-                Gpu::Use(slot.target->img, vk::ImageLayout::eShaderReadOnlyOptimal);
-            }
-        }
-    }
-    Gpu::Render(pass);
-    if (!Gpu::Rendering()) {
-        skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    lap(SecPass);
-    const vk::DescriptorSet vset = WriteStageSet(vs, vres, vcb, vsz, depth_ro);
-    // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
-    const vk::DescriptorSet pset = ps   ? WriteStageSet(*ps, pres, pcb, psz, depth_ro)
-                                   : gs ? Gpu::AllocateSet(empty_set_layout)
-                                        : vk::DescriptorSet{};
-    const vk::DescriptorSet gset = gs ? WriteStageSet(*gs, gres, gcb, gsz, nullptr) : vk::DescriptorSet{};
-    if (!vset || ((ps || gs) && !pset) || (gs && !gset)) {
-        skipped_memory.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    lap(SecSets);
-    const vk::CommandBuffer cmd = Gpu::Cmd();
-    bound.Sync();
-    if (bound.pipeline != pipeline) {
-        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
-        bound.pipeline = pipeline;
-    } else {
-        state_skips.fetch_add(1, std::memory_order_relaxed);
-    }
-    const vk::DescriptorSet sets[3] = {vset, pset, gset};
-    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 0, gs ? 3 : ps ? 2 : 1, sets, 0,
-                           nullptr);
     // viewport and scissor: the engine counts y from the bottom of the target (the shadow
     // cascades of the 2048x8192 atlas are at y 6144, 4096, 2048); a negative height flips y as
     // in D3D
@@ -2039,12 +2173,8 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         area_h = std::min(area_h, pass.depth->height);
     }
     const s32 top = target_h && vp.y + vp.h <= s32(target_h) ? s32(target_h) - vp.y - vp.h : vp.y;
-    const vk::Viewport viewport{float(vp.x), float(top + vp.h), float(vp.w), -float(vp.h),
-                                std::clamp(vp.zmin, 0.0f, 1.0f), std::clamp(vp.zmax, 0.0f, 1.0f)};
-    if (std::memcmp(&bound.viewport, &viewport, sizeof(viewport)) != 0) {
-        cmd.setViewport(0, viewport);
-        bound.viewport = viewport;
-    }
+    d.viewport = vk::Viewport{float(vp.x), float(top + vp.h), float(vp.w), -float(vp.h),
+                              std::clamp(vp.zmin, 0.0f, 1.0f), std::clamp(vp.zmax, 0.0f, 1.0f)};
     // drawing outside the rendering area is undefined in Vulkan: the scissor stays inside it
     s32 x0 = 0, y0 = 0, x1 = s32(area_w), y1 = s32(area_h);
     if (R<u8>(ctx + CtxScissorEnabled)) {
@@ -2056,64 +2186,171 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         x1 = std::clamp(sc.x + sc.w, x0, x1);
         y1 = std::clamp(sy + sc.h, y0, y1);
     }
-    const vk::Rect2D scissor{{x0, y0}, {u32(x1 - x0), u32(y1 - y0)}};
-    if (bound.scissor != scissor) {
-        cmd.setScissor(0, scissor);
-        bound.scissor = scissor;
-    }
+    d.scissor = vk::Rect2D{{x0, y0}, {u32(x1 - x0), u32(y1 - y0)}};
     // the engine's packed rasterizer state (ctx+0x190): bit 4 sign + bits 5-30 polygon offset
     // scale (1/16 units), bits 31-62 the offset (float bits)
-    float bias_units = 0.0f, bias_slope = 0.0f;
     if (st.bias) {
         const u64 rkey = Q(ctx + CtxRasterState);
-        bias_slope = float((rkey >> 5) & 0x3ffffff) * ((rkey & 0x10) ? -1.0f : 1.0f) / 16.0f;
+        d.bias_slope = float((rkey >> 5) & 0x3ffffff) * ((rkey & 0x10) ? -1.0f : 1.0f) / 16.0f;
         const u32 obits = u32(rkey >> 31);
         float units;
         std::memcpy(&units, &obits, 4);
-        bias_units = float(s32(units));
-    }
-    if (bound.bias[0] != bias_units || bound.bias[1] != bias_slope) {
-        cmd.setDepthBias(bias_units, 0.0f, bias_slope);
-        bound.bias[0] = bias_units;
-        bound.bias[1] = bias_slope;
+        d.bias_units = float(s32(units));
     }
     const bool uses_opval = (st.sops & 0xf) == 4 || ((st.sops >> 4) & 0xf) == 4 ||
                             ((st.sops >> 8) & 0xf) == 4;
-    const u32 stencil_ref = uses_opval ? st.refmask >> 24 : st.refmask & 0xff;
-    if (bound.stencil_ref != stencil_ref) {
-        cmd.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack, stencil_ref);
-        bound.stencil_ref = stencil_ref;
+    d.stencil_ref = uses_opval ? st.refmask >> 24 : st.refmask & 0xff;
+    d.vertex_key = vi.key;
+    d.binding_count = u32(std::min<std::size_t>(vi.bindings.size(), 17));
+    d.attribute_count = u32(std::min<std::size_t>(vi.attributes.size(), 32));
+    std::copy_n(vi.bindings.begin(), d.binding_count, d.bindings);
+    std::copy_n(vi.attributes.begin(), d.attribute_count, d.attributes);
+    std::copy(std::begin(vi.buffers), std::end(vi.buffers), d.vb);
+    d.indexed = indexed;
+    d.ib = index_ref;
+    d.ib_type = index_type;
+    d.count = indexed ? index_count : count;
+    d.vs = &vs;
+    d.ps = ps;
+    d.gs = gs;
+    d.res[0] = vres;
+    d.res[1] = pres;
+    d.pass = pass;
+    d.depth_ro = depth_ro;
+    d.layout = layout;
+    d.pipeline = pipeline;
+    lap(SecConstants);
+}
+
+/// Ring bytes of a captured Ref (the recorder). False: the ring could not take them.
+bool ToRing(Ref& r) {
+    if (!r.data) {
+        return true;
+    }
+    const Gpu::Span span = Gpu::Upload(r.size, r.align);
+    if (!span.data) {
+        return false;
+    }
+    std::memcpy(span.data, r.data, r.size);
+    r.buffer = span.buffer;
+    r.offset = span.offset;
+    r.data = nullptr;
+    return true;
+}
+
+/// Records a captured draw (the recorder thread).
+void RecordDraw(DrawPacket& d) {
+    if (!d.pipeline) {
+        return; // given up while it was captured
+    }
+    lap.Start();
+    // everything taken from the upload ring first: a full ring submits early, which ends the
+    // command buffer, so nothing may be bound before
+    bool ok = true;
+    for (auto& stage : d.cb) {
+        for (Ref& r : stage) {
+            ok = ok && ToRing(r);
+        }
+    }
+    for (Ref& r : d.vb) {
+        ok = ok && ToRing(r);
+    }
+    if (d.indexed) {
+        ok = ok && ToRing(d.ib);
+    }
+    if (!ok) {
+        skipped_memory.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    lap(SecRing);
+    // layouts of the sampled targets, then the pass
+    for (const StageRes* res : {&d.res[0], &d.res[1]}) {
+        for (const Slot& slot : res->slots) {
+            if (slot.target && slot.target != d.depth_ro) {
+                Gpu::Use(const_cast<Target*>(slot.target)->img, vk::ImageLayout::eShaderReadOnlyOptimal);
+            }
+        }
+    }
+    Gpu::Render(d.pass);
+    if (!Gpu::Rendering()) {
+        skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    lap(SecPass);
+    const ShaderInfo* ps = d.ps;
+    const ShaderInfo* gs = d.gs;
+    const vk::DescriptorSet vset = WriteStageSet(*d.vs, d.res[0], d.cb[0], d.cb_size[0], d.depth_ro);
+    // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
+    const vk::DescriptorSet pset = ps   ? WriteStageSet(*ps, d.res[1], d.cb[1], d.cb_size[1], d.depth_ro)
+                                   : gs ? Gpu::AllocateSet(empty_set_layout)
+                                        : vk::DescriptorSet{};
+    const vk::DescriptorSet gset =
+        gs ? WriteStageSet(*gs, d.res[2], d.cb[2], d.cb_size[2], nullptr) : vk::DescriptorSet{};
+    if (!vset || ((ps || gs) && !pset) || (gs && !gset)) {
+        skipped_memory.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    lap(SecSets);
+    const vk::CommandBuffer cmd = Gpu::Cmd();
+    bound.Sync();
+    if (bound.pipeline != d.pipeline) {
+        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, d.pipeline);
+        bound.pipeline = d.pipeline;
+    } else {
+        state_skips.fetch_add(1, std::memory_order_relaxed);
+    }
+    const vk::DescriptorSet sets[3] = {vset, pset, gset};
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, d.layout, 0, gs ? 3 : ps ? 2 : 1, sets, 0,
+                           nullptr);
+    if (std::memcmp(&bound.viewport, &d.viewport, sizeof(d.viewport)) != 0) {
+        cmd.setViewport(0, d.viewport);
+        bound.viewport = d.viewport;
+    }
+    if (bound.scissor != d.scissor) {
+        cmd.setScissor(0, d.scissor);
+        bound.scissor = d.scissor;
+    }
+    if (bound.bias[0] != d.bias_units || bound.bias[1] != d.bias_slope) {
+        cmd.setDepthBias(d.bias_units, 0.0f, d.bias_slope);
+        bound.bias[0] = d.bias_units;
+        bound.bias[1] = d.bias_slope;
+    }
+    if (bound.stencil_ref != d.stencil_ref) {
+        cmd.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack, d.stencil_ref);
+        bound.stencil_ref = d.stencil_ref;
     }
     // the vertex layout key covers the bindings and attributes (+1: never 0, the unset value)
-    if (dynamic_vertex_input && bound.vertex_key != vi.key + 1) {
-        cmd.setVertexInputEXT(vi.bindings, vi.attributes);
-        bound.vertex_key = vi.key + 1;
+    if (dynamic_vertex_input && bound.vertex_key != d.vertex_key + 1) {
+        cmd.setVertexInputEXT(vk::ArrayProxy<const vk::VertexInputBindingDescription2EXT>(d.binding_count, d.bindings),
+                              vk::ArrayProxy<const vk::VertexInputAttributeDescription2EXT>(d.attribute_count, d.attributes));
+        bound.vertex_key = d.vertex_key + 1;
     }
-    for (const auto& b : vi.bindings) {
-        const VkBuffer buffer = b.binding == ZeroBinding ? VK_NULL_HANDLE : vi.buffers[b.binding];
-        const u64 offset = b.binding == ZeroBinding ? 0 : vi.offsets[b.binding];
-        if (b.binding < 16 && bound.vb[b.binding] == buffer && bound.vb_offset[b.binding] == offset &&
-            buffer) {
+    for (u32 k = 0; k < d.binding_count; ++k) {
+        const u32 binding = d.bindings[k].binding;
+        const VkBuffer buffer = binding == ZeroBinding || binding >= 16 ? VK_NULL_HANDLE : d.vb[binding].buffer;
+        const u64 offset = binding == ZeroBinding || binding >= 16 ? 0 : d.vb[binding].offset;
+        if (binding < 16 && bound.vb[binding] == buffer && bound.vb_offset[binding] == offset && buffer) {
             continue;
         }
         const vk::Buffer vb{buffer};
         const vk::DeviceSize vo = offset;
-        cmd.bindVertexBuffers(b.binding, 1, &vb, &vo);
-        if (b.binding < 16) {
-            bound.vb[b.binding] = buffer;
-            bound.vb_offset[b.binding] = offset;
+        cmd.bindVertexBuffers(binding, 1, &vb, &vo);
+        if (binding < 16) {
+            bound.vb[binding] = buffer;
+            bound.vb_offset[binding] = offset;
         }
     }
-    if (indexed) {
-        if (bound.ib != index_buffer || bound.ib_offset != index_offset || bound.ib_type != index_type) {
-            cmd.bindIndexBuffer(index_buffer, index_offset, index_type);
-            bound.ib = index_buffer;
-            bound.ib_offset = index_offset;
-            bound.ib_type = index_type;
+    if (d.indexed) {
+        if (bound.ib != d.ib.buffer || bound.ib_offset != d.ib.offset || bound.ib_type != d.ib_type) {
+            cmd.bindIndexBuffer(d.ib.buffer, d.ib.offset, d.ib_type);
+            bound.ib = d.ib.buffer;
+            bound.ib_offset = d.ib.offset;
+            bound.ib_type = d.ib_type;
         }
-        cmd.drawIndexed(index_count, 1, 0, 0, 0);
+        cmd.drawIndexed(d.count, 1, 0, 0, 0);
     } else {
-        cmd.draw(count, 1, 0, 0);
+        cmd.draw(d.count, 1, 0, 0);
     }
     Gpu::NoteDraw();
     drawn.fetch_add(1, std::memory_order_relaxed);
@@ -2134,20 +2371,35 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
     if (flags & 6) {
         if (const u64 dh = Q(ctx + CtxDepthTarget)) {
             if (Target* d = DepthTarget(dh)) {
-                Gpu::ClearDepthStencil(d->img, flags & 2, depth, flags & 4, stencil & 0xff);
+                ClearPacket& c = Push(Op::Clear, open_batch->clears);
+                c.target = d;
+                c.depth = flags & 2;
+                c.z = depth;
+                c.stencil = flags & 4;
+                c.s = stencil & 0xff;
             }
         }
     }
     if ((flags & 1) && color) {
-        float c[4];
-        std::memcpy(c, color, sizeof(c));
         for (int i = 0; i < 8; ++i) {
             if (const u64 h = Q(ctx + CtxColorTargets + i * 8)) {
                 if (Target* t = ColorTarget(h)) {
-                    Gpu::ClearColor(t->img, c);
+                    ClearPacket& c = Push(Op::Clear, open_batch->clears);
+                    c.target = t;
+                    c.color = true;
+                    std::memcpy(c.c, color, sizeof(c.c));
                 }
             }
         }
+    }
+    EndOp();
+}
+
+void RunClear(const ClearPacket& c) {
+    if (c.color) {
+        Gpu::ClearColor(c.target->img, c.c);
+    } else {
+        Gpu::ClearDepthStencil(c.target->img, c.depth, c.z, c.stencil, c.s);
     }
 }
 
@@ -2171,10 +2423,10 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     std::lock_guard lk(mutex);
     const Tex::Info s = Tex::Describe(src), d = Tex::Describe(dst);
     const auto it = targets.find(s.base);
-    const bool from_depth = it != targets.end() && it->second.img.depth;
+    const bool from_depth = it != targets.end() && it->second->img.depth;
     const u32 src_bytes = it == targets.end() ? 0
-                          : from_depth ? (it->second.img.format == vk::Format::eD16Unorm ? 2 : 4)
-                                       : FormatBytes(it->second.img.format);
+                          : from_depth ? (it->second->img.format == vk::Format::eD16Unorm ? 2 : 4)
+                                       : FormatBytes(it->second->img.format);
     int why = SkipCount;
     if (a[6] || a[7]) {
         why = SkipMip;
@@ -2201,7 +2453,7 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         skip(why);
         return false;
     }
-    Target& st = it->second;
+    Target& st = *it->second;
     Target* dt = MakeTarget(d.base, d.width, d.height, d.format, false,
                             from_depth ? 0 : st.comp_swap, "copy target");
     if (!dt || dt == &st) {
@@ -2220,6 +2472,20 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         return false;
     }
     const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - h);
+    CopyPacket& c = Push(Op::Copy, open_batch->copies);
+    c = CopyPacket{.src = &st, .dst = dt, .from_depth = from_depth, .sx = sx, .dx = dx, .w = w,
+                   .h = h, .src_bytes = src_bytes, .s_top = s_top, .d_top = d_top};
+    EndOp();
+    return true;
+}
+
+/// Records a captured texture copy (the recorder thread).
+void RunCopy(const CopyPacket& c) {
+    Target& st = *c.src;
+    Target* const dt = c.dst;
+    const bool from_depth = c.from_depth;
+    const u32 sx = c.sx, dx = c.dx, w = c.w, h = c.h, src_bytes = c.src_bytes;
+    const s32 s_top = c.s_top, d_top = c.d_top;
     // a draw sampling the source into the destination (both stay compressed), else transfers:
     // depth through the upload ring
     const bool same_format = st.img.format == dt->img.format && !IntegerFormat(dt->img.format);
@@ -2228,14 +2494,14 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         depth_copies.fetch_add(from_depth, std::memory_order_relaxed);
         draw_copies.fetch_add(1, std::memory_order_relaxed);
         copies.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        return;
     }
     Gpu::Span span{};
     if (from_depth) { // the ring first: a full ring submits early
         span = Gpu::Upload(u64(w) * h * src_bytes, 16);
         if (!span.data) {
-            skip(SkipFormat);
-            return false;
+            copies_skipped.fetch_add(1, std::memory_order_relaxed);
+            return;
         }
     }
     Gpu::Use(st.img, vk::ImageLayout::eTransferSrcOptimal);
@@ -2278,7 +2544,6 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
                              vk::ImageLayout::eTransferDstOptimal, region);
     }
     copies.fetch_add(1, std::memory_order_relaxed);
-    return true;
 }
 
 /// kCopyTexture's hook: with BB_VK_ALONE=1 a copy done here replaces the engine's (its compute
@@ -2332,7 +2597,8 @@ void StartTextures() {
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
             if (drawing) {
-                Geo::Init(*inst);
+                StartRecorder();
+                Geo::Init(*inst, Geo::Host{GeoSerial, GeoUpload, GeoFree});
                 StartCompileThreads();
                 PreloadKnown();
             }
@@ -2377,7 +2643,10 @@ void Report() {
             live_targets = targets.size();
             tx = Tex::GetStats();
             bf = Buf::GetStats();
-            gp = drawing ? Gpu::GetStats() : Gpu::Stats{};
+            if (drawing) {
+                std::lock_guard g(gpu_mutex);
+                gp = Gpu::GetStats();
+            }
             layouts = vertex_layouts.size();
         }
         {
@@ -2387,11 +2656,12 @@ void Report() {
             }
         }
         std::printf("Native Vulkan: %.0f draws/s; in all %llu draws, %llu resolved, %llu with a "
-                    "shader missing, %llu without a target, %llu without a context; %zu pipeline "
+                    "shader missing, %llu with a program in the wrong stage, %llu without a target, %llu without a context; %zu pipeline "
                     "states; %llu shader modules (%llu failed), %llu programs without a "
                     "translation\n",
                     (d - last) / 5.0, (unsigned long long)d, (unsigned long long)resolved.load(),
-                    (unsigned long long)missing_shader.load(), (unsigned long long)no_target.load(),
+                    (unsigned long long)missing_shader.load(), (unsigned long long)wrong_stage.load(),
+                    (unsigned long long)no_target.load(),
                     (unsigned long long)no_context.load(), keys,
                     (unsigned long long)modules_made.load(), (unsigned long long)modules_failed.load(),
                     (unsigned long long)unknown_programs.load());
@@ -2506,7 +2776,7 @@ void Report() {
             }
             std::vector<Gpu::WorkTime> work;
             {
-                std::lock_guard lk(mutex);
+                std::lock_guard g(gpu_mutex);
                 work = Gpu::TakeWorkTimes();
             }
             std::string top;
@@ -2607,6 +2877,10 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         missing_shader.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    if ((vs->kind != "vs" && vs->kind != "es") || (ps && ps->kind != "ps") || (gs && gs->kind != "gs")) {
+        wrong_stage.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     Target* colors[8]{};
     bool any_color = false;
     for (int i = 0; i < 8; ++i) {
@@ -2626,6 +2900,7 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         // with a GS, the ES runs as the vertex stage and its outputs feed the GS directly (the
         // ES -> GS ring of the PS4 becomes the pipeline's own interface, as in the D3D11 port)
         Draw(ctx, dev, vsh, *vs, psh, ps, gsh, gs, colors, depth_target, indexed, count, index_addr);
+        EndOp();
         return;
     }
     // stage 4: count only
@@ -2645,22 +2920,160 @@ void OnSubmit() {
     Timer timer(submit_ns);
     std::lock_guard lk(mutex);
     submits_seen.fetch_add(1, std::memory_order_relaxed);
+    Geo::Collect();
+    SubmitPacket& sp = Push(Op::Submit, open_batch->submits);
+    sp.shown.clear();
     if (show) {
         // the display buffers the presenter asked for go to General layout for it
         std::lock_guard dl(display_mutex);
-        for (auto& [address, s] : shown) {
+        for (const auto& [address, s] : shown) {
             const auto it = targets.find(address);
-            if (it == targets.end() || it->second.img.depth) {
-                continue;
+            if (it != targets.end() && !it->second->img.depth) {
+                sp.shown.push_back({address, it->second.get()});
             }
-            Gpu::Use(it->second.img, vk::ImageLayout::eGeneral);
-            s = Shown{it->second.img.image, it->second.img.format, it->second.img.width,
-                      it->second.img.height};
         }
     }
-    Geo::Collect();
-    Gpu::Submit();
+    submits_queued.fetch_add(1, std::memory_order_release);
+    Flush();
 }
+
+namespace {
+void RunSubmit(const SubmitPacket& sp) {
+    for (const auto& [address, t] : sp.shown) {
+        Gpu::Use(t->img, vk::ImageLayout::eGeneral);
+        std::lock_guard dl(display_mutex);
+        shown[address] = Shown{t->img.image, t->img.format, t->img.width, t->img.height};
+    }
+    Gpu::Submit();
+    {
+        std::lock_guard rl(recorded_mutex);
+        submits_recorded.fetch_add(1, std::memory_order_release);
+    }
+    recorded_cv.notify_all();
+}
+
+void RunRetire(std::unique_ptr<Target>& t) {
+    Gpu::EndRendering(); // the open pass may be drawing to it
+    DestroyTarget(*instance.load(), *t); // its image goes once the GPU is done with it
+    t.reset();
+}
+
+/// Records a batch in order (the recorder thread, or the game's with BB_VK_RECORD_THREAD=0).
+void RunBatch(Batch& b) {
+    std::lock_guard g(gpu_mutex);
+    for (const auto [op, i] : b.ops) {
+        switch (op) {
+        case Op::Draw:
+            RecordDraw(b.draws[i]);
+            break;
+        case Op::Clear:
+            RunClear(b.clears[i]);
+            break;
+        case Op::Copy:
+            RunCopy(b.copies[i]);
+            break;
+        case Op::GeoUpload: {
+            GeoUploadPacket& u = b.geo_uploads[i];
+            if (ToRing(u.data)) {
+                const vk::BufferCopy region{.srcOffset = u.data.offset, .dstOffset = u.dst_offset,
+                                            .size = u.data.size};
+                Gpu::Prelude().copyBuffer(u.data.buffer, u.dst, region);
+            }
+            break;
+        }
+        case Op::GeoFree: {
+            const GeoFreePacket f = b.geo_frees[i];
+            const VmaAllocator vma = instance.load()->GetAllocator();
+            Gpu::Defer([vma, f] { vmaDestroyBuffer(vma, f.buffer, f.allocation); });
+            break;
+        }
+        case Op::Retire:
+            RunRetire(b.retired[i]);
+            break;
+        case Op::Submit:
+            RunSubmit(b.submits[i]);
+            break;
+        }
+    }
+}
+
+/// Hands the open batch to the recorder (the game's thread, under `mutex`): waits when the
+/// recorder is a whole queue behind.
+void Flush() {
+    if (open_batch->ops.empty()) {
+        return;
+    }
+    if (!record_thread) {
+        RunBatch(*open_batch);
+        open_batch->Clear();
+        return;
+    }
+    std::unique_lock lk(queue_mutex);
+    queued_batches.push_back(open_batch);
+    queue_cv.notify_one();
+    if (free_batches.empty()) {
+        batch_waits.fetch_add(1, std::memory_order_relaxed);
+        free_cv.wait(lk, [] { return !free_batches.empty(); });
+    }
+    open_batch = free_batches.front();
+    free_batches.pop_front();
+}
+
+void RecorderThread() {
+#ifdef _WIN32
+    SetThreadDescription(GetCurrentThread(), L"bb:VkRecorder");
+#endif
+    for (;;) {
+        Batch* b = nullptr;
+        {
+            std::unique_lock lk(queue_mutex);
+            queue_cv.wait(lk, [] { return !queued_batches.empty(); });
+            b = queued_batches.front();
+            queued_batches.pop_front();
+        }
+        RunBatch(*b);
+        b->Clear();
+        {
+            std::lock_guard lk(queue_mutex);
+            free_batches.push_back(b);
+        }
+        free_cv.notify_one();
+    }
+}
+
+// resident geometry's uploads and frees go through the queue too (Geo::Host)
+u64 GeoSerial() {
+    return submits_queued.load(std::memory_order_relaxed);
+}
+void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset) {
+    GeoUploadPacket& u = Push(Op::GeoUpload, open_batch->geo_uploads);
+    u.data = Stage(n, 16);
+    std::memcpy(u.data.data, src, n);
+    u.dst = dst;
+    u.dst_offset = dst_offset;
+}
+void GeoFree(VkBuffer buffer, VmaAllocation allocation) {
+    Push(Op::GeoFree, open_batch->geo_frees) = GeoFreePacket{buffer, allocation};
+}
+
+/// The batches and, unless BB_VK_RECORD_THREAD=0, the recorder thread (once Gpu is up).
+void StartRecorder() {
+    for (Batch& b : batch_pool) {
+        free_batches.push_back(&b);
+    }
+    open_batch = free_batches.front();
+    free_batches.pop_front();
+    const char* rt = std::getenv("BB_VK_RECORD_THREAD");
+    record_thread = !(rt && rt[0] == '0');
+    if (record_thread) {
+        std::thread(RecorderThread).detach();
+    }
+    std::printf("Native Vulkan: %s\n",
+                record_thread ? "draws are captured on the game's thread and recorded on their own "
+                                "thread (BB_VK_RECORD_THREAD=0: on the game's thread)"
+                              : "draws are recorded on the game's thread (BB_VK_RECORD_THREAD=0)");
+}
+} // namespace
 
 bool DrawsAlone() {
     return alone.load(std::memory_order_relaxed);
@@ -2671,6 +3084,13 @@ bool Display(std::uint64_t address, std::uint32_t wanted, std::uint64_t* image,
     frames_asked.fetch_add(1, std::memory_order_relaxed);
     if (!show) {
         return false;
+    }
+    if (record_thread) {
+        // the submissions so far (this frame's among them) are recorded and on the queue first
+        const u64 want = submits_queued.load(std::memory_order_acquire);
+        std::unique_lock rl(recorded_mutex);
+        recorded_cv.wait_for(rl, std::chrono::milliseconds(200),
+                             [want] { return submits_recorded.load(std::memory_order_acquire) >= want; });
     }
     std::lock_guard lk(display_mutex);
     const Shown& s = shown[address]; // asks OnSubmit to hand this buffer over from now on

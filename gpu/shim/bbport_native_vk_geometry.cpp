@@ -18,7 +18,6 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #include "bbport_native_vk_buffer.h"
-#include "bbport_native_vk_gpu.h"
 
 namespace BbNativeVk::Geo {
 namespace {
@@ -86,6 +85,7 @@ struct Page {
 
 bool on = false;
 VmaAllocator allocator = nullptr;
+Host host{};
 Vulkan::Rasterizer* rasterizer = nullptr;
 
 // the write hook comes from the faulting thread while a draw may be uploading; recursive: a
@@ -227,9 +227,7 @@ void FreeBuffer(Entry* e) {
     resident_bytes -= e->size;
     n_buffers.fetch_sub(1, std::memory_order_relaxed);
     n_bytes.store(resident_bytes, std::memory_order_relaxed);
-    Gpu::Defer([buffer = e->buffer, allocation = e->allocation] {
-        vmaDestroyBuffer(allocator, buffer, allocation);
-    });
+    host.free(e->buffer, e->allocation);
     e->buffer = VK_NULL_HANDLE;
     e->allocation = nullptr;
 }
@@ -256,16 +254,7 @@ bool UploadPages(Entry* e, u64 i, u64 j) {
     const u64 to = std::min(e->base + e->size, (e->FirstPage() + j) << PageBits);
     for (u64 at = from; at < to;) {
         const u64 n = std::min<u64>(to - at, 32ull << 20);
-        const Gpu::Span span = Gpu::Upload(n, 16);
-        if (!span.data) {
-            for (u64 k = i; k < j; ++k) {
-                e->SetDirty(k); // tried again at the next use
-            }
-            return false;
-        }
-        std::memcpy(span.data, reinterpret_cast<const void*>(at), n);
-        const vk::BufferCopy region{.srcOffset = span.offset, .dstOffset = at - e->base, .size = n};
-        Gpu::Prelude().copyBuffer(span.buffer, e->buffer, region);
+        host.upload(reinterpret_cast<const void*>(at), n, e->buffer, at - e->base);
         n_uploaded.fetch_add(n, std::memory_order_relaxed);
         at += n;
     }
@@ -365,7 +354,8 @@ void Begin(Entry* e, u64 now) {
 }
 } // namespace
 
-void Init(const Vulkan::Instance& instance) {
+void Init(const Vulkan::Instance& instance, const Host& h) {
+    host = h;
     const char* env = std::getenv("BB_VK_RESIDENT");
     on = !(env && env[0] == '0');
     allocator = instance.GetAllocator();
@@ -391,7 +381,7 @@ Binding Use(std::uint64_t base, std::uint64_t size) {
         }
     }
     std::scoped_lock lk{lock};
-    const u64 now = Gpu::Serial();
+    const u64 now = host.serial();
     Entry*& slot = entries[Key(base, size)];
     if (slot && slot->gone) {
         Drop(slot);
@@ -464,7 +454,7 @@ void Collect() {
     if (!on) {
         return;
     }
-    const u64 now = Gpu::Serial();
+    const u64 now = host.serial();
     if (now - last_collect < CollectEvery) {
         return;
     }

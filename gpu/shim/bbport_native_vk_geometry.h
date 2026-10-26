@@ -5,8 +5,8 @@
 // a device-local copy, made once and kept current from write tracking: the pages a copy was made
 // from are watched (write faults, through shadPS4's page manager, beside its own caches), and a
 // write marks them dirty, so only those pages are uploaded again, at the next draw that uses the
-// buffer. Uploads go through the upload ring into the prelude command buffer, run before the
-// submission's draws.
+// buffer. Uploads are captured with the draws and go through the upload ring into the prelude
+// command buffer, run before the submission's draws.
 //
 // A buffer is copied only once it has stayed unwritten from one submission to a later one: data
 // the game writes every frame (rings, particles) stays on the per-draw copy path, as does a
@@ -21,6 +21,8 @@
 #include <cstdint>
 
 #include "video_core/renderer_vulkan/vk_common.h"
+
+#include <vk_mem_alloc.h>
 
 namespace Vulkan {
 class Instance;
@@ -39,7 +41,15 @@ struct Stats {
     std::uint64_t uploaded_bytes, reuploads, resident_uses, busy_uses, writes_heard, evicted;
 };
 
-void Init(const Vulkan::Instance& instance);
+/// What Geo needs from the renderer: the game-side submission number, and uploads and frees
+/// queued in order with the draws (recorded later on the recorder thread).
+struct Host {
+    std::uint64_t (*serial)();
+    void (*upload)(const void* src, std::uint64_t size, VkBuffer dst, std::uint64_t dst_offset);
+    void (*free)(VkBuffer buffer, VmaAllocation allocation);
+};
+
+void Init(const Vulkan::Instance& instance, const Host& host);
 
 /// The engine buffer [base, base + size) on the GPU, uploads of it recorded first.
 Binding Use(std::uint64_t base, std::uint64_t size);
