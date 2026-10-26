@@ -53,7 +53,7 @@ struct Span {
 };
 
 /// What GPU time is spent on (timestamps around each pass, clear and copy).
-enum class Work : std::uint8_t { Other, Pass, ClearColor, ClearDepth, Copy, DepthCopy };
+enum class Work : std::uint8_t { Other, Pass, ClearColor, ClearDepth, Copy, DepthCopy, Draw };
 struct WorkTime {
     std::string what;
     std::uint64_t ns, count, draws;
@@ -69,7 +69,9 @@ struct Stats {
 /// `cache_path`: where the pipeline cache is loaded from and saved to (empty: not kept).
 bool Init(const Vulkan::Instance& instance, const std::string& cache_path);
 /// Starts timing `kind` on the GPU (until the next mark), for an image of this size and format.
-void Mark(Work kind, std::uint32_t width, std::uint32_t height, vk::Format format);
+/// `note` (Draw: the draw's shader; kept by the caller) names it in the pass trace.
+void Mark(Work kind, std::uint32_t width, std::uint32_t height, vk::Format format,
+          const char* note = nullptr);
 /// One more draw in the work being timed.
 void NoteDraw();
 /// GPU time by work since the last call, most first.
@@ -133,6 +135,11 @@ void Barrier();
 vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout);
 
 vk::PipelineCache PipelineCache();
+
+/// BB_VK_PASS_TRACE=1: whether the open command buffer is traced, and an image as the trace
+/// names it (size, format, short id).
+bool Tracing();
+std::string Describe(const Image* image);
 
 Stats GetStats();
 } // namespace BbNativeVk::Gpu

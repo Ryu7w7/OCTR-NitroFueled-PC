@@ -34,6 +34,7 @@ struct Label {
     u32 width = 0, height = 0;
     vk::Format format = vk::Format::eUndefined;
     u32 draws = 0;
+    const char* note = nullptr;
 };
 struct WorkAcc {
     u64 ns = 0, count = 0, draws = 0;
@@ -52,6 +53,7 @@ struct Frame {
     std::vector<Label> labels; // label i runs from timestamp i to timestamp i + 1
     bool in_flight = false;
     bool recorded = false;    // anything recorded since it was begun
+    bool traced = false;      // BB_VK_PASS_TRACE: its GPU times are logged when it retires
     u64 ring_begin = 0, ring_end = 0; // its part of the ring, [begin, end) circularly
     std::vector<vk::DescriptorPool> pools;
     std::size_t pools_used = 0;
@@ -77,6 +79,33 @@ Pass open_pass{};
 vk::Extent2D open_area{};
 std::vector<vk::ImageMemoryBarrier2> pending;
 bool full_barriers = false; // BB_VK_FULL_BARRIERS=1
+
+// BB_VK_PASS_TRACE=1: every 1000th command buffer logs its passes, their draws and what ended
+// each (the image changing layout and to which, the next pass, a clear, the submit)
+bool trace_passes = false;
+bool tracing = false; // the open command buffer is traced
+u32 trace_draws = 0;
+const char* end_kind = "renderer"; // what ends the open pass, for the trace
+const Image* end_image = nullptr;
+vk::ImageLayout end_layout{};
+
+} // namespace
+
+std::string Describe(const Image* i) {
+    if (!i) {
+        return "-";
+    }
+    char b[96];
+    std::snprintf(b, sizeof(b), "%ux%u %s #%04x", i->width, i->height, vk::to_string(i->format).c_str(),
+                  unsigned((reinterpret_cast<std::uintptr_t>(i) >> 4) & 0xffff));
+    return b;
+}
+
+bool Tracing() {
+    return tracing;
+}
+
+namespace {
 u64 state_epoch = 1;        // StateEpoch
 
 Stats stats{};
@@ -85,8 +114,11 @@ std::map<std::string, WorkAcc> work_times;
 
 std::string WorkName(const Label& l) {
     static constexpr const char* names[] = {"other", "pass", "clear", "depth clear", "copy",
-                                            "depth copy"};
+                                            "depth copy", "  draw"};
     std::string s = names[int(l.kind)];
+    if (l.note) {
+        s += std::string(" ") + l.note;
+    }
     if (l.width) {
         s += " " + std::to_string(l.width) + "x" + std::to_string(l.height) + " " +
              vk::to_string(l.format);
@@ -143,6 +175,9 @@ void Transition(Image& image, vk::ImageLayout layout) {
     if (image.layout == layout && !from.write && !image.discard) {
         return;
     }
+    end_kind = "layout";
+    end_image = &image;
+    end_layout = layout;
     EndRendering();
     pending.push_back(vk::ImageMemoryBarrier2{
         .srcStageMask = from.stages,
@@ -216,6 +251,11 @@ void Begin(Frame& f) {
     f.labels.assign(1, Label{});
     f.recorded = false;
     ++state_epoch;
+    tracing = trace_passes && stats.submits % 1000 == 500;
+    f.traced = tracing;
+    if (tracing) {
+        std::printf("Pass trace: submission %llu\n", (unsigned long long)stats.submits);
+    }
     f.prelude_open = false;
     f.ring_begin = f.ring_end = ring_head;
 }
@@ -238,9 +278,16 @@ void Retire(Frame& f) {
                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
             t[n - 1] > t[0]) {
             stats.gpu_ns += u64(double(t[n - 1] - t[0]) * tick_ns);
+            if (f.traced) {
+                std::printf("Pass trace GPU times (%.3f ms in all):\n", double(t[n - 1] - t[0]) * tick_ns / 1e6);
+                for (std::size_t i = 0; i + 1 < n; ++i) {
+                    std::printf("  %7.3f ms  %s, %u draws\n", double(t[i + 1] - t[i]) * tick_ns / 1e6,
+                                WorkName(f.labels[i]).c_str(), f.labels[i].draws);
+                }
+            }
             for (std::size_t i = 0; i + 1 < n; ++i) {
-                if (t[i + 1] < t[i]) {
-                    continue;
+                if (t[i + 1] < t[i] || f.labels[i].kind == Work::Draw) {
+                    continue; // single draws are for the pass trace only
                 }
                 WorkAcc& a = work_times[WorkName(f.labels[i])];
                 a.ns += u64(double(t[i + 1] - t[i]) * tick_ns);
@@ -281,6 +328,7 @@ bool Overlaps(u64 a, u64 n, u64 b, u64 e) {
 
 void SubmitFrame(bool early) {
     Frame& f = Cur();
+    end_kind = "submit";
     EndRendering();
     if (!pending.empty()) {
         Barrier(); // leftover layout changes (records, so the frame is submitted)
@@ -332,6 +380,8 @@ void SubmitFrame(bool early) {
 bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     instance = &vulkan;
     device = vulkan.GetDevice();
+    const char* pt = std::getenv("BB_VK_PASS_TRACE");
+    trace_passes = pt && pt[0] == '1';
     const char* fb = std::getenv("BB_VK_FULL_BARRIERS");
     full_barriers = fb && fb[0] == '1';
     const auto families = vulkan.GetPhysicalDevice().getQueueFamilyProperties();
@@ -516,6 +566,7 @@ void Render(const Pass& pass) {
         pass.depth == open_pass.depth && pass.depth_read_only == open_pass.depth_read_only) {
         return;
     }
+    end_kind = "next pass";
     EndRendering();
     u32 w = ~0u, h = ~0u, count = 0;
     for (const Image* c : pass.color) {
@@ -598,13 +649,33 @@ void Render(const Pass& pass) {
     open_pass = pass;
     open_area = {w, h};
     ++stats.passes;
+    if (tracing) {
+        std::string a;
+        for (u32 i = 0; i < count; ++i) {
+            a += " c" + std::to_string(i) + "=" + Describe(pass.color[i]) +
+                 (colors[i].loadOp == vk::AttachmentLoadOp::eClear ? " (clear)" : "");
+        }
+        if (pass.depth) {
+            a += " d=" + Describe(pass.depth) + (pass.depth_read_only ? " (read-only)" : "") +
+                 (depth.loadOp == vk::AttachmentLoadOp::eClear ? " (clear)" : "");
+        }
+        std::printf("  pass%s\n", a.c_str());
+        trace_draws = 0;
+    }
 }
 
 void EndRendering() {
     if (rendering) {
         Cur().cmd.endRendering();
         rendering = false;
+        if (tracing) {
+            std::printf("    %u draws; ended by %s%s%s%s\n", trace_draws, end_kind,
+                        end_image ? ": " : "", end_image ? Describe(end_image).c_str() : "",
+                        end_image ? (" -> " + vk::to_string(end_layout)).c_str() : "");
+        }
     }
+    end_kind = "renderer";
+    end_image = nullptr;
 }
 
 bool Rendering() {
@@ -620,6 +691,7 @@ void ClearColor(Image& image, const float color[4]) {
         return;
     }
     if (InOpenPass(image)) {
+        end_kind = "partial color clear";
         EndRendering(); // a pass over part of it: the clear waits for the next use
     }
     image.clear = vk::ImageAspectFlagBits::eColor;
@@ -644,6 +716,7 @@ void ClearDepthStencil(Image& image, bool depth, float z, bool stencil, u32 s) {
         return;
     }
     if (rendering && &image == open_pass.depth) {
+        end_kind = "partial depth clear";
         EndRendering();
     }
     // a second clear before the image is used adds its aspects to the first
@@ -704,7 +777,7 @@ vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout) {
     }
 }
 
-void Mark(Work kind, u32 width, u32 height, vk::Format format) {
+void Mark(Work kind, u32 width, u32 height, vk::Format format, const char* note) {
     Frame& f = Cur();
     if (!f.timestamps || f.labels.size() >= MaxMarks) {
         return;
@@ -712,10 +785,11 @@ void Mark(Work kind, u32 width, u32 height, vk::Format format) {
     // after everything before it: the pieces are serial anyway (full barriers)
     Cmd().writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, f.timestamps,
                           u32(f.labels.size()));
-    f.labels.push_back({kind, width, height, format, 0});
+    f.labels.push_back({kind, width, height, format, 0, note});
 }
 
 void NoteDraw() {
+    ++trace_draws;
     if (!Cur().labels.empty()) {
         ++Cur().labels.back().draws;
     }

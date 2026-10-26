@@ -656,6 +656,7 @@ struct DrawPacket {
     vk::VertexInputAttributeDescription2EXT attributes[32];
     Ref vb[16];
     bool indexed = false;
+    bool writes_depth = false; // depth or stencil written (else the attachment is only read)
     Ref ib;
     vk::IndexType ib_type = vk::IndexType::eUint32;
     u32 count = 0;
@@ -744,6 +745,12 @@ void OpenBatch(Batch* b) {
 }
 
 void Flush();
+// deferred copies (RunCopy)
+bool defer_copies = true;
+std::vector<CopyPacket> pending_copies; // recorder side; at most one per destination
+std::atomic<u64> copies_dropped{0};
+void BeforeRead(const Gpu::Image* img);
+void BeforeWrite(const Gpu::Image* img);
 void StartRecorder();
 u64 GeoSerial();
 void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset);
@@ -2370,6 +2377,11 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     d.res[1] = pres;
     d.pass = pass;
     d.depth_ro = depth_ro;
+    // depth writes need the depth test on (DB_DEPTH_CONTROL Z_ENABLE, Z_WRITE_ENABLE), stencil
+    // writes the stencil test and a write mask
+    d.writes_depth = pass.depth && !pass.depth_read_only &&
+                     ((((dctl >> 1) & 1) && ((dctl >> 2) & 1)) ||
+                      (st.stencil && (dctl & 1) && ((st.refmask >> 16) & 0xff)));
     d.layout = layout;
     d.pipeline = pipeline;
     lap(SecPacket);
@@ -2416,6 +2428,29 @@ void RecordDraw(DrawPacket& d) {
         return; // given up while it was captured
     }
     lap.Start();
+    // pending copies this draw reads or writes over are made first (before the ring is used)
+    if (!pending_copies.empty()) {
+        for (const StageRes* res : {&d.res[0], &d.res[1]}) {
+            for (const Slot& slot : res->slots) {
+                if (slot.target) {
+                    BeforeRead(&slot.target->img);
+                }
+            }
+        }
+        for (const Gpu::Image* c : d.pass.color) {
+            if (c) {
+                BeforeWrite(c);
+            }
+        }
+        if (d.pass.depth) {
+            // a depth attachment only tested against is read
+            if (d.writes_depth) {
+                BeforeWrite(d.pass.depth);
+            } else {
+                BeforeRead(d.pass.depth);
+            }
+        }
+    }
     // everything taken from the upload ring first: a full ring submits early, which ends the
     // command buffer, so nothing may be bound before
     bool ok = true;
@@ -2444,6 +2479,19 @@ void RecordDraw(DrawPacket& d) {
         }
     }
     Gpu::Render(d.pass);
+    if (Gpu::Tracing()) {
+        std::string sampled;
+        for (const StageRes* res : {&d.res[0], &d.res[1]}) {
+            for (const Slot& slot : res->slots) {
+                if (slot.target) {
+                    sampled += " " + Gpu::Describe(&slot.target->img);
+                }
+            }
+        }
+        if (!sampled.empty()) {
+            std::printf("    draw samples%s\n", sampled.c_str());
+        }
+    }
     if (!Gpu::Rendering()) {
         skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -2533,6 +2581,9 @@ void RecordDraw(DrawPacket& d) {
             bound.vb_offset[binding] = offset;
         }
     }
+    if (Gpu::Tracing()) { // each draw timed on its own
+        Gpu::Mark(Gpu::Work::Draw, 0, 0, {}, (d.ps ? d.ps : d.vs)->name.c_str());
+    }
     if (d.indexed) {
         if (bound.ib != d.ib.buffer || bound.ib_offset != d.ib.offset || bound.ib_type != d.ib_type) {
             cmd.bindIndexBuffer(d.ib.buffer, d.ib.offset, d.ib_type);
@@ -2588,6 +2639,7 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
 }
 
 void RunClear(const ClearPacket& c) {
+    BeforeWrite(&c.target->img);
     if (c.color) {
         Gpu::ClearColor(c.target->img, c.c);
     } else {
@@ -2671,10 +2723,14 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     return true;
 }
 
-/// Records a captured texture copy (the recorder thread).
-void RunCopy(const CopyPacket& c) {
+/// Records a texture copy (the recorder thread).
+void DoCopy(const CopyPacket& c) {
     Target& st = *c.src;
     Target* const dt = c.dst;
+    if (Gpu::Tracing()) {
+        std::printf("  copy %s -> %s (%ux%u)\n", Gpu::Describe(&st.img).c_str(),
+                    Gpu::Describe(&dt->img).c_str(), c.w, c.h);
+    }
     const bool from_depth = c.from_depth;
     const u32 sx = c.sx, dx = c.dx, w = c.w, h = c.h, src_bytes = c.src_bytes;
     const s32 s_top = c.s_top, d_top = c.d_top;
@@ -2738,6 +2794,81 @@ void RunCopy(const CopyPacket& c) {
     copies.fetch_add(1, std::memory_order_relaxed);
 }
 
+// ------------------------------------------------------------------ deferred copies
+// A copy between our images is recorded when its destination is first read (sampled, copied
+// from, shown), or just before its source or destination is written: copies nothing reads are
+// never made (the engine copies targets for its compute and for states that never read them),
+// a copy repeated before its destination is read is made once, and one whose destination is
+// wholly overwritten first is dropped. A pending copy's source has no pending copy into it (that
+// one is made when the source is read). BB_VK_DEFER_COPIES=0 records every copy where it is.
+
+/// Makes the pending copies into `img` (it is about to be read, or partly written).
+void FlushCopiesInto(const Gpu::Image* img) {
+    for (std::size_t i = 0; i < pending_copies.size(); ++i) {
+        if (&pending_copies[i].dst->img == img) {
+            const CopyPacket c = pending_copies[i];
+            pending_copies.erase(pending_copies.begin() + i);
+            DoCopy(c);
+            return;
+        }
+    }
+}
+
+/// Makes the pending copies from `img` (it is about to be written).
+void FlushCopiesFrom(const Gpu::Image* img) {
+    for (std::size_t i = 0; i < pending_copies.size();) {
+        if (&pending_copies[i].src->img == img) {
+            const CopyPacket c = pending_copies[i];
+            pending_copies.erase(pending_copies.begin() + i);
+            DoCopy(c);
+        } else {
+            ++i;
+        }
+    }
+}
+
+/// `img` is about to be written (partly, or loaded first).
+void BeforeWrite(const Gpu::Image* img) {
+    if (!pending_copies.empty()) {
+        FlushCopiesFrom(img);
+        FlushCopiesInto(img);
+    }
+}
+
+/// `img` is about to be read.
+void BeforeRead(const Gpu::Image* img) {
+    if (!pending_copies.empty()) {
+        FlushCopiesInto(img);
+    }
+}
+
+/// Forgets the pending copy into `img` (wholly overwritten, or gone); true when there was one.
+bool DropCopyInto(const Gpu::Image* img) {
+    for (std::size_t i = 0; i < pending_copies.size(); ++i) {
+        if (&pending_copies[i].dst->img == img) {
+            pending_copies.erase(pending_copies.begin() + i);
+            copies_dropped.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Records a captured texture copy, or keeps it until it is needed (the recorder thread).
+void RunCopy(const CopyPacket& c) {
+    BeforeRead(&c.src->img);
+    FlushCopiesFrom(&c.dst->img); // copies reading the destination's present contents go first
+    const bool whole = c.dx == 0 && c.d_top == 0 && c.w >= c.dst->img.width && c.h >= c.dst->img.height;
+    if (!whole || !DropCopyInto(&c.dst->img)) {
+        FlushCopiesInto(&c.dst->img);
+    }
+    if (!defer_copies || &c.src->img == &c.dst->img) {
+        DoCopy(c);
+        return;
+    }
+    pending_copies.push_back(c);
+}
+
 /// kCopyTexture's hook: with BB_VK_ALONE=1 a copy done here replaces the engine's (its compute
 /// copy would only run in shadPS4's images, which nothing shows), else the engine's runs too.
 __attribute__((sysv_abi)) bool OnCopy(u64 ctx, const u32* src, const u32* dst, const s32* p) {
@@ -2788,6 +2919,8 @@ void StartTextures() {
             }
             const char* fc = std::getenv("BB_VK_VERTEX_COPY");
             force_copy = !(fc && fc[0] == '0');
+            const char* dc = std::getenv("BB_VK_DEFER_COPIES");
+            defer_copies = !(dc && dc[0] == '0');
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
             if (drawing) {
@@ -2965,14 +3098,15 @@ void Report() {
             const u64 nd = d - last;
             std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; CPU %.0f ms in "
                         "draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms submits; GPU "
-                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's; not done: %s\n",
+                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed; not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
                         (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
                         (unsigned long long)depth_copies.load(),
                         (unsigned long long)draw_copies.load(),
-                        (unsigned long long)copies_replaced.load(), reasons.c_str());
+                        (unsigned long long)copies_replaced.load(),
+                        (unsigned long long)copies_dropped.load(), reasons.c_str());
             {
                 std::size_t queued = 0;
                 {
@@ -3152,6 +3286,7 @@ void OnSubmit() {
 namespace {
 void RunSubmit(const SubmitPacket& sp) {
     for (const auto& [address, t] : sp.shown) {
+        BeforeRead(&t->img); // the presenter reads it
         Gpu::Use(t->img, vk::ImageLayout::eGeneral);
         std::lock_guard dl(display_mutex);
         shown[address] = Shown{t->img.image, t->img.format, t->img.width, t->img.height};
@@ -3165,6 +3300,8 @@ void RunSubmit(const SubmitPacket& sp) {
 }
 
 void RunRetire(std::unique_ptr<Target>& t) {
+    FlushCopiesFrom(&t->img);
+    DropCopyInto(&t->img);
     Gpu::EndRendering(); // the open pass may be drawing to it
     DestroyTarget(*instance.load(), *t); // its image goes once the GPU is done with it
     t.reset();
