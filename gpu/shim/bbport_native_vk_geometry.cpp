@@ -354,15 +354,23 @@ void Begin(Entry* e, u64 now) {
 }
 } // namespace
 
+void Written(std::uint64_t addr, std::uint64_t size) {
+    if (on) {
+        OnWritten(addr, size);
+    }
+}
+
+void Unmapped(std::uint64_t addr, std::uint64_t size) {
+    if (on) {
+        OnUnmapped(addr, size);
+    }
+}
+
 void Init(const Vulkan::Instance& instance, const Host& h) {
     host = h;
     const char* env = std::getenv("BB_VK_RESIDENT");
     on = !(env && env[0] == '0');
     allocator = instance.GetAllocator();
-    if (on) {
-        Vulkan::Rasterizer::native_written = OnWritten;
-        Vulkan::Rasterizer::native_unmapped = OnUnmapped;
-    }
     std::printf("Native Vulkan: vertex and index buffers of %llu KiB and more %s\n",
                 (unsigned long long)(MinSize >> 10),
                 on ? "stay on the GPU, uploaded again where the game writes them "

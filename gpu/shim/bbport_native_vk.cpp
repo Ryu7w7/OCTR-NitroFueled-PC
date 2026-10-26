@@ -36,6 +36,8 @@
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
 
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -692,7 +694,7 @@ struct SubmitPacket {
     std::vector<std::pair<u64, Target*>> shown;
 };
 
-enum class Op : u8 { Draw, Clear, Copy, GeoUpload, GeoFree, Retire, Submit };
+enum class Op : u8 { Draw, Clear, Copy, GeoUpload, GeoFree, Retire, TexRetire, Submit };
 
 struct Batch {
     std::vector<std::pair<Op, u32>> ops; // in order; the index into the op's own list
@@ -701,6 +703,7 @@ struct Batch {
     std::vector<CopyPacket> copies;
     std::vector<GeoUploadPacket> geo_uploads;
     std::vector<GeoFreePacket> geo_frees;
+    std::vector<Tex::Texture*> tex_retired;
     std::vector<std::unique_ptr<Target>> retired;
     std::vector<SubmitPacket> submits;
     Arena arena;
@@ -712,6 +715,7 @@ struct Batch {
         copies.clear();
         geo_uploads.clear();
         geo_frees.clear();
+        tex_retired.clear();
         retired.clear();
         submits.clear();
         arena.Reset();
@@ -744,6 +748,7 @@ void StartRecorder();
 u64 GeoSerial();
 void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset);
 void GeoFree(VkBuffer buffer, VmaAllocation allocation);
+void TexRetire(Tex::Texture* texture);
 
 /// Captured bytes for the ring.
 Ref Stage(u64 size, u64 align) {
@@ -2788,6 +2793,16 @@ void StartTextures() {
             if (drawing) {
                 StartRecorder();
                 Geo::Init(*inst, Geo::Host{GeoSerial, GeoUpload, GeoFree});
+                Tex::SetHost(Tex::Host{GeoSerial, TexRetire});
+                // guest writes to watched pages reach resident geometry and textures
+                Vulkan::Rasterizer::native_written = [](VAddr addr, u64 size) {
+                    Geo::Written(addr, size);
+                    Tex::Written(addr, size);
+                };
+                Vulkan::Rasterizer::native_unmapped = [](VAddr addr, u64 size) {
+                    Geo::Unmapped(addr, size);
+                    Tex::Written(addr, size);
+                };
                 StartCompileThreads();
                 PreloadKnown();
             }
@@ -2861,15 +2876,18 @@ void Report() {
                     (unsigned long long)targets_failed.load(),
                     (unsigned long long)unusable_targets.load());
         std::printf("Native Vulkan: %llu textures (%.0f MiB), %llu uploaded in %llu batches, %llu "
-                    "waiting; not made: %llu unsupported, %llu unreadable, %llu over budget, %llu "
-                    "failed; %llu samplers. Binds: %llu textures (%llu render targets, %llu unset "
+                    "waiting; not made: %llu unsupported, %llu unreadable, %llu failed; %llu made over "
+                    "budget, %llu evicted, %llu made again after the game wrote them, %llu pages "
+                    "watched; %llu samplers. Binds: %llu textures (%llu render targets, %llu unset "
                     "slots, %llu without an image, %llu not uploaded yet, %llu unreadable T#), %llu "
                     "samplers (%llu failed)\n",
                     (unsigned long long)tx.textures, tx.bytes / 1048576.0,
                     (unsigned long long)tx.uploads_done, (unsigned long long)tx.upload_batches,
                     (unsigned long long)tx.uploads_pending, (unsigned long long)tx.unsupported,
-                    (unsigned long long)tx.unreadable, (unsigned long long)tx.over_budget,
-                    (unsigned long long)tx.failed, (unsigned long long)tx.samplers,
+                    (unsigned long long)tx.unreadable, (unsigned long long)tx.failed,
+                    (unsigned long long)tx.over_budget, (unsigned long long)tx.evicted,
+                    (unsigned long long)tx.remade, (unsigned long long)tx.watched_pages,
+                    (unsigned long long)tx.samplers,
                     (unsigned long long)texture_binds.load(), (unsigned long long)target_binds.load(),
                     (unsigned long long)unset_textures.load(), (unsigned long long)texture_misses.load(),
                     (unsigned long long)textures_not_ready.load(),
@@ -3176,6 +3194,13 @@ void RunBatch(Batch& b) {
             }
             break;
         }
+        case Op::TexRetire: {
+            // after the draws captured before it; cached sets may hold its views
+            Tex::Texture* t = b.tex_retired[i];
+            set_generation.fetch_add(1, std::memory_order_release);
+            Gpu::Defer([t] { Tex::Destroy(t); });
+            break;
+        }
         case Op::GeoFree: {
             const GeoFreePacket f = b.geo_frees[i];
             const VmaAllocator vma = instance.load()->GetAllocator();
@@ -3251,6 +3276,9 @@ void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset) {
 }
 void GeoFree(VkBuffer buffer, VmaAllocation allocation) {
     Push(Op::GeoFree, open_batch->geo_frees) = GeoFreePacket{buffer, allocation};
+}
+void TexRetire(Tex::Texture* texture) {
+    Push(Op::TexRetire, open_batch->tex_retired) = texture;
 }
 
 /// The batches and, unless BB_VK_RECORD_THREAD=0, the recorder thread (once Gpu is up).

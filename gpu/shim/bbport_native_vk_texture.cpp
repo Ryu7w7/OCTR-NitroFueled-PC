@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -18,6 +20,9 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 #include <vk_mem_alloc.h>
+
+#include "core/memory.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -32,24 +37,40 @@ using u8 = std::uint8_t;
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 
-/// Textures stop being made past this much memory (BB_VK_TEXTURE_MB, default 1024): they sit
-/// beside shadPS4's own copies until the native path draws.
+/// Past this much texture memory (BB_VK_TEXTURE_MB, default 1024) the textures unused longest
+/// are evicted before one is made; with none old enough it is made anyway.
 const u64 budget = [] {
     const char* env = std::getenv("BB_VK_TEXTURE_MB");
     const long mb = env ? std::strtol(env, nullptr, 10) : 1024;
     return u64(mb > 0 ? mb : 1024) << 20;
 }();
 constexpr u64 MaxTextureBytes = 256ull << 20; // a single guest image larger than this is skipped
+constexpr u64 EvictAfter = 300;                // submissions unused before a texture may go
+constexpr u64 PageBits = 12;                   // the page manager's pages
 
 const Vulkan::Instance* instance = nullptr;
 bool anisotropy = false, mirror_clamp = false;
 
-std::unordered_map<u64, Texture> textures; // FNV-1a of the T#'s first 6 dwords
+std::unordered_map<u64, std::unique_ptr<Texture>> textures; // FNV-1a of the T#'s first 6 dwords
+Host host{}; // none: textures are kept as first made
+
+// Watched textures by guest base, and the page manager's watch on each of their pages (one for
+// all the textures on a page). The write hook comes from any thread.
+struct PageWatch {
+    u32 textures = 0;    // watched textures on the page
+    bool watched = false; // our watch is on (a write takes it off; the textures there go stale)
+};
+std::mutex watch_mutex;
+std::multimap<u64, Texture*> by_base;
+std::unordered_map<u64, PageWatch> page_watches;
+u64 largest = 0; // the largest watched texture (how far below a write to look)
+std::atomic<bool> any_watched{false};
+Vulkan::Rasterizer* rasterizer = nullptr;
 std::unordered_map<u64, VkSampler> samplers;
 std::unordered_set<u64> warned;             // T# keys logged as not converted
 
 std::atomic<u64> total_bytes{0}, uploads_done{0}, uploads_pending{0}, upload_batches{0};
-std::atomic<u64> unsupported{0}, unreadable{0}, over_budget{0}, failed{0};
+std::atomic<u64> unsupported{0}, unreadable{0}, over_budget{0}, failed{0}, evicted{0}, remade{0};
 
 bool Read(u64 address, void* out, std::size_t size) {
     if (address < 0x10000) {
@@ -460,7 +481,184 @@ vk::SamplerAddressMode AddressMode(u32 c) {
                             : vk::SamplerAddressMode::eClampToEdge;
     }
 }
+
+/// Watches `t`'s pages (under watch_mutex): a write from now on makes it stale.
+void Watch(Texture* t) {
+    const u64 first = t->base >> PageBits, last = (t->base + t->size - 1) >> PageBits;
+    u64 run = 0, run_start = 0;
+    auto flush = [&] {
+        if (run) {
+            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, true);
+            run = 0;
+        }
+    };
+    for (u64 p = first; p <= last; ++p) {
+        PageWatch& w = page_watches[p];
+        ++w.textures;
+        if (w.watched) {
+            flush();
+            continue;
+        }
+        w.watched = true;
+        if (!run) {
+            run_start = p;
+        }
+        ++run;
+    }
+    flush();
+    by_base.emplace(t->base, t);
+    largest = std::max(largest, t->size);
+    t->watched = true;
+    any_watched.store(true, std::memory_order_release);
+}
+
+/// Stops watching `t`'s pages (under watch_mutex); pages no texture is on any more lose our watch.
+void Unwatch(Texture* t) {
+    if (!t->watched) {
+        return;
+    }
+    t->watched = false;
+    for (auto [it, end] = by_base.equal_range(t->base); it != end; ++it) {
+        if (it->second == t) {
+            by_base.erase(it);
+            break;
+        }
+    }
+    const u64 first = t->base >> PageBits, last = (t->base + t->size - 1) >> PageBits;
+    for (u64 p = first; p <= last; ++p) {
+        const auto it = page_watches.find(p);
+        if (it == page_watches.end() || --it->second.textures) {
+            continue;
+        }
+        if (it->second.watched) {
+            rasterizer->WatchWrites(p << PageBits, u64(1) << PageBits, false);
+        }
+        page_watches.erase(it);
+    }
+    any_watched.store(!by_base.empty(), std::memory_order_release);
+}
+
+/// Takes the texture out of `textures` and retires it (its memory goes once the GPU is done).
+void Retire(std::unordered_map<u64, std::unique_ptr<Texture>>::iterator it) {
+    Texture* t = it->second.release();
+    textures.erase(it);
+    {
+        std::lock_guard lk(watch_mutex);
+        Unwatch(t);
+    }
+    if (!t->image) {
+        delete t;
+        return;
+    }
+    total_bytes.fetch_sub(t->bytes, std::memory_order_relaxed);
+    host.retire(t);
+}
+
+/// Evicts the textures unused longest until `need` more bytes fit the budget (those unused for
+/// EvictAfter submissions and uploaded only).
+void Evict(u64 need, u64 now) {
+    std::vector<std::pair<u64, u64>> old; // last use, key
+    for (const auto& [key, t] : textures) {
+        if (t->image && t->ready.load(std::memory_order_acquire) && t->last_used + EvictAfter < now) {
+            old.emplace_back(t->last_used, key);
+        }
+    }
+    std::sort(old.begin(), old.end());
+    for (const auto& [used, key] : old) {
+        if (total_bytes.load() + need <= budget) {
+            break;
+        }
+        Retire(textures.find(key));
+        evicted.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 } // namespace
+
+void SetHost(const Host& h) {
+    rasterizer = Core::Memory::Instance()->GetRasterizer();
+    if (rasterizer) {
+        host = h;
+    }
+}
+
+void Written(std::uint64_t addr, std::uint64_t size) {
+    if (!size || !any_watched.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::lock_guard lk(watch_mutex);
+    const u64 first = addr >> PageBits, last = (addr + size - 1) >> PageBits;
+    // our watch comes off the written pages (the write goes ahead), in runs
+    bool hit = false;
+    u64 run = 0, run_start = 0;
+    auto flush = [&] {
+        if (run) {
+            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, false);
+            run = 0;
+        }
+    };
+    auto take = [&](u64 p, PageWatch& w) {
+        if (!w.watched) {
+            flush();
+            return;
+        }
+        w.watched = false;
+        hit = true;
+        if (run && run_start + run != p) {
+            flush();
+        }
+        if (!run) {
+            run_start = p;
+        }
+        ++run;
+    };
+    if (last - first + 1 > page_watches.size()) { // a large range (an unmap): fewer pages here
+        std::vector<u64> found;
+        for (const auto& [p, w] : page_watches) {
+            if (p >= first && p <= last && w.watched) {
+                found.push_back(p);
+            }
+        }
+        std::sort(found.begin(), found.end());
+        for (const u64 p : found) {
+            take(p, page_watches[p]);
+        }
+    } else {
+        for (u64 p = first; p <= last; ++p) {
+            if (const auto it = page_watches.find(p); it != page_watches.end()) {
+                take(p, it->second);
+            } else {
+                flush();
+            }
+        }
+    }
+    flush();
+    if (!hit) {
+        return;
+    }
+    // every texture on a written page is stale
+    const u64 lo = first << PageBits, hi = (last + 1) << PageBits;
+    for (auto it = by_base.lower_bound(lo > largest ? lo - largest : 0); it != by_base.end() && it->first < hi;
+         ++it) {
+        Texture* t = it->second;
+        if (t->base + t->size > lo) {
+            t->stale.store(true, std::memory_order_release);
+        }
+    }
+}
+
+void Destroy(Texture* t) {
+    const vk::Device dev = instance->GetDevice();
+    if (t->view && t->view != t->view_array) {
+        dev.destroyImageView(t->view);
+    }
+    if (t->view_array) {
+        dev.destroyImageView(t->view_array);
+    }
+    if (t->image) {
+        vmaDestroyImage(instance->GetAllocator(), t->image, t->allocation);
+    }
+    delete t;
+}
 
 void Init(const Vulkan::Instance& vulkan) {
     instance = &vulkan;
@@ -486,10 +684,20 @@ const Texture* Get(const std::uint32_t* tsharp) {
         return nullptr;
     }
     const u64 key = Fnv(reinterpret_cast<const u8*>(tsharp), 24);
+    const u64 now = host.serial ? host.serial() : 0;
     if (const auto it = textures.find(key); it != textures.end()) {
-        return it->second.image ? &it->second : nullptr;
+        Texture* found = it->second.get();
+        found->last_used = now;
+        // a stale texture is made again once its upload has gone (that keeps its image)
+        if (!found->stale.load(std::memory_order_acquire) || !found->ready.load(std::memory_order_acquire)) {
+            return found->image ? found : nullptr;
+        }
+        Retire(it);
+        remade.fetch_add(1, std::memory_order_relaxed);
     }
-    Texture& tex = textures[key]; // an empty entry remembers a texture that could not be made
+    // an empty entry remembers a texture that could not be made
+    Texture& tex = *(textures[key] = std::make_unique<Texture>());
+    tex.last_used = now;
     const TSharp t = Decode(tsharp);
     Layout l{};
     if (!GetLayout(t, &l)) {
@@ -507,8 +715,22 @@ const Texture* Get(const std::uint32_t* tsharp) {
         bytes += u64(l.mips[m].ew) * l.mips[m].eh * l.eb * l.slices;
     }
     if (total_bytes.load() + bytes > budget) {
-        over_budget.fetch_add(1, std::memory_order_relaxed);
-        return nullptr;
+        if (!host.retire) {
+            over_budget.fetch_add(1, std::memory_order_relaxed);
+            textures.erase(key); // tried again once memory is free
+            return nullptr;
+        }
+        Evict(bytes, now);
+        if (total_bytes.load() + bytes > budget) {
+            over_budget.fetch_add(1, std::memory_order_relaxed); // made anyway: all in use
+        }
+    }
+    // watched before it is read: a write from then on makes it stale
+    tex.base = t.base;
+    tex.size = l.total;
+    if (host.retire && rasterizer->IsMapped(t.base, l.total)) {
+        std::lock_guard lk(watch_mutex);
+        Watch(&tex);
     }
     std::vector<u8> guest(l.total);
     if (!Read(t.base, guest.data(), guest.size())) {
@@ -538,6 +760,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     const VkImageCreateInfo& raw = ici;
     const VkResult r =
         vmaCreateImage(instance->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
+    tex.allocation = allocation;
     if (r != VK_SUCCESS) {
         failed.fetch_add(1, std::memory_order_relaxed);
         Warn(key, t, vk::to_string(vk::Result(r)).c_str());
@@ -666,9 +889,15 @@ VkSampler Sampler(const std::uint32_t ss[4], bool compare) {
 }
 
 Stats GetStats() {
+    std::size_t pages = 0;
+    {
+        std::lock_guard lk(watch_mutex);
+        pages = page_watches.size();
+    }
     return Stats{textures.size(),          total_bytes.load(),   uploads_done.load(),
                  uploads_pending.load(),   upload_batches.load(), unsupported.load(),
                  unreadable.load(),        over_budget.load(),   failed.load(),
-                 samplers.size()};
+                 samplers.size(),          evicted.load(),        remade.load(),
+                 pages};
 }
 } // namespace BbNativeVk::Tex

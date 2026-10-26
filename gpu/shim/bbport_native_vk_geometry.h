@@ -57,5 +57,9 @@ Binding Use(std::uint64_t base, std::uint64_t size);
 /// Once per submission: frees buffers no draw used for a while.
 void Collect();
 
+/// The guest wrote / unmapped [addr, addr + size) (the renderer's hooks, any thread).
+void Written(std::uint64_t addr, std::uint64_t size);
+void Unmapped(std::uint64_t addr, std::uint64_t size);
+
 Stats GetStats();
 } // namespace BbNativeVk::Geo
