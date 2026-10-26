@@ -28,6 +28,7 @@ struct Window {
     u64 start = 0, end = 0;
     VkBuffer buffer = VK_NULL_HANDLE; // VK_NULL_HANDLE: import failed (not tried again)
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    bool region_end = false; // `end` is where the committed memory ends: nothing past it is readable
 };
 
 const Vulkan::Instance* instance = nullptr;
@@ -139,7 +140,7 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
     }
     const u64 last = address + size - 1;
     for (const Window* w : buckets[address >> WindowBits]) {
-        if (address >= w->start && last < w->end) {
+        if (address >= w->start && address < w->end && (last < w->end || w->region_end)) {
             if (!w->buffer) {
                 return {};
             }
@@ -147,20 +148,35 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
             return {w->buffer, address - w->start};
         }
     }
-    // a new window: the 16 MiB block(s) around the data, clipped to its committed region
+    // a new window: the 16 MiB block(s) around the data, clipped to its committed region. Engine
+    // buffer records can be longer than the memory behind them (a ring whose tail is not mapped);
+    // the GPU only reads what the draw uses, so the window then stops where the region does.
     u64 rs = 0, re = 0;
     auto w = new Window{};
-    if (!Region(address, &rs, &re) || last >= re) {
+    const bool mapped = Region(address, &rs, &re);
+    if (!mapped) {
         w->start = address & ~(alignment - 1);
         w->end = (last + alignment) & ~(alignment - 1);
     } else {
         w->start = std::max(address & ~((u64(1) << WindowBits) - 1), rs) & ~(alignment - 1);
-        w->end = (std::min((last >> WindowBits << WindowBits) + (u64(1) << WindowBits), re) +
-                  alignment - 1) & ~(alignment - 1);
-        if (!ImportWindow(*w) && failed_windows < 8) {
-            std::printf("Native Vulkan: guest memory %llx-%llx (region %llx-%llx) not importable\n",
-                        (unsigned long long)w->start, (unsigned long long)w->end,
+        w->end = std::min((last >> WindowBits << WindowBits) + (u64(1) << WindowBits), re);
+        w->region_end = w->end == re;
+        if (w->end & (alignment - 1)) { // round to the import alignment, never past the region
+            w->end = w->region_end ? w->end & ~(alignment - 1)
+                                   : (w->end + alignment - 1) & ~(alignment - 1);
+        }
+        if (w->end > address) {
+            ImportWindow(*w);
+        }
+    }
+    if (!w->buffer && failed_windows < 8) {
+        if (mapped) {
+            std::printf("Native Vulkan: guest memory %llx size %llx not importable (region %llx-%llx)\n",
+                        (unsigned long long)address, (unsigned long long)size,
                         (unsigned long long)rs, (unsigned long long)re);
+        } else {
+            std::printf("Native Vulkan: guest memory %llx size %llx not importable (not committed)\n",
+                        (unsigned long long)address, (unsigned long long)size);
         }
     }
     if (w->buffer) {

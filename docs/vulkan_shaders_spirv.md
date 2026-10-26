@@ -134,6 +134,15 @@ when available). Imports use windows of up to 16 MiB, clipped to the committed r
 data, so the GPU reads vertices and indices in place, as the PS4's GPU does. That needs no per-draw
 copy and no write tracking. Memory that will not import falls back to copying; the log reports both.
 
+First in-game run (6800U, AMD Windows driver): the import works, alignment 4096. 112 windows
+(936 MiB) cover the race; 94% of vertex streams and all but 0.05% of index ranges were read in place.
+The rest came from 2 windows that were never imported: their engine buffer records ran past the end
+of the committed memory (about 7 MiB per record), and a window then covered the whole record, which
+could not import. Windows now stop where the committed region ends, since a draw reads only vertices
+that exist, and failures are logged with the record's address and size. Also counted: 58 vertex
+layouts, no fans or quads, no unknown formats. About a third of VS inputs have no matching vertex
+element (the port feeds zeros), and many attributes are integer formats feeding float inputs.
+
 The device already enables `VK_EXT_vertex_input_dynamic_state` where supported, so vertex layouts can
 stay out of the pipeline key at the draw stage. Next: the draw itself (pipelines, descriptor sets,
 constant buffers, the b13 swizzle/conversion constants, clears and copies).
