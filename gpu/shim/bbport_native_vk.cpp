@@ -249,12 +249,12 @@ Bound bound;
 std::atomic<u64> state_skips{0}; // dynamic state and bindings left as they were
 
 /// CPU time of a draw by section: each call adds the time since the previous one to section i.
-// game's thread: resolve .. constants+indices; recorder: ring .. record
-enum DrawSection { SecResolve, SecTextures, SecVertices, SecPipeline, SecConstants, SecRing,
-                   SecPass, SecSets, SecRecord, SecCount };
+// game's thread: resolve .. packet; recorder: ring .. record
+enum DrawSection { SecResolve, SecTextures, SecVertices, SecPipeline, SecConstants, SecIndices,
+                   SecPacket, SecRing, SecPass, SecSets, SecRecord, SecCount };
 constexpr const char* DrawSectionNames[SecCount] = {
-    "resolve", "textures", "vertices", "pipeline", "constants+indices", "| ring copies", "pass",
-    "sets", "record"};
+    "resolve", "textures", "vertices", "pipeline", "constants", "indices", "packet",
+    "| ring copies", "pass", "sets", "record"};
 std::atomic<u64> section_ns[SecCount]{};
 struct Lap {
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
@@ -704,6 +704,7 @@ struct Batch {
     std::vector<std::unique_ptr<Target>> retired;
     std::vector<SubmitPacket> submits;
     Arena arena;
+    u64 seq = 0; // which opening of the batch (its arena pointers repeat across openings)
     void Clear() {
         ops.clear();
         draws.clear();
@@ -729,6 +730,14 @@ std::mutex gpu_mutex; // held while recording (Gpu is not thread safe; Report re
 std::atomic<u64> submits_queued{0}, submits_recorded{0}, batch_waits{0};
 std::mutex recorded_mutex;
 std::condition_variable recorded_cv;
+u64 batch_seq = 0;     // Batch::seq of the open batch (game side)
+u64 recording_seq = 0; // Batch::seq of the batch being recorded (recorder side)
+
+/// `b` takes the game's operations from now (holding `mutex`).
+void OpenBatch(Batch* b) {
+    open_batch = b;
+    b->seq = ++batch_seq;
+}
 
 void Flush();
 void StartRecorder();
@@ -1761,7 +1770,30 @@ void PreloadKnown() {
 // ------------------------------------------------------------------ constants
 /// Copies a stage's constant buffers (the shader header's vectors) into the upload ring; the
 /// spans go to `cbs` by slot. False: the ring could not take them.
-bool StageConstants(u64 shader, Ref cbs[14]) {
+/// The constants a stage's slot captured last (stage 0 vs, 1 ps, 2 gs; slot 13 is InfoCB).
+struct LastConstants {
+    u64 seq = 0; // Batch::seq it was captured in
+    u32 size = 0;
+    Ref ref;
+};
+LastConstants last_constants[3][14];
+std::atomic<u64> constants_reused{0}, ring_reused{0};
+
+/// `size` bytes at `src` as the constants of `stage`'s `slot`: the slot's last capture when the
+/// bytes are the same and in the open batch (the recorder then uploads them once), else a copy.
+Ref Constants(u32 stage, u32 slot, const void* src, u32 size) {
+    LastConstants& last = last_constants[stage][slot];
+    if (last.seq == open_batch->seq && last.size == size && std::memcmp(last.ref.data, src, size) == 0) {
+        constants_reused.fetch_add(1, std::memory_order_relaxed);
+        return last.ref;
+    }
+    const Ref r = Stage((size + 15) & ~15u, ubo_align);
+    std::memcpy(r.data, src, size);
+    last = LastConstants{open_batch->seq, size, r};
+    return r;
+}
+
+bool StageConstants(u32 stage, u64 shader, Ref cbs[14]) {
     const u64 hdr = Q(shader + ShHeader);
     if (!hdr) {
         return true;
@@ -1776,15 +1808,12 @@ bool StageConstants(u64 shader, Ref cbs[14]) {
         if (slot >= 13 || !data || !size || size > 65536) {
             continue;
         }
-        const Ref span = Stage((size + 15) & ~15u, ubo_align);
-        std::memcpy(span.data, reinterpret_cast<const void*>(data), size);
-        cbs[slot] = span;
+        cbs[slot] = Constants(stage, slot, reinterpret_cast<const void*>(data), size);
     }
     return true;
 }
 
-bool InfoConstants(const StageRes& res, const u32* vin, Ref* span) {
-    *span = Stage(sizeof(InfoCB), ubo_align);
+bool InfoConstants(u32 stage, const StageRes& res, const u32* vin, Ref* span) {
     InfoCB info{};
     std::memcpy(info.swz, res.swz, sizeof(info.swz));
     if (vin) {
@@ -1792,7 +1821,7 @@ bool InfoConstants(const StageRes& res, const u32* vin, Ref* span) {
     }
     info.scale[0] = info.scale[1] = 1.0f; // render scaling comes with presentation
     std::fill(std::begin(info.tscale), std::end(info.tscale), 1.0f);
-    std::memcpy(span->data, &info, sizeof(info));
+    *span = Constants(stage, 13, &info, sizeof(info));
     return true;
 }
 
@@ -2189,13 +2218,14 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
     // a draw given up from here is left in the batch as nothing to record
     auto drop = [&] { d.pipeline = VK_NULL_HANDLE; };
-    if (!StageConstants(vsh, vcb) || !InfoConstants(vres, vi.vin, &vcb[13]) ||
-        (ps && (!StageConstants(psh, pcb) || !InfoConstants(pres, nullptr, &pcb[13]))) ||
-        (gs && (!StageConstants(gsh, gcb) || !InfoConstants(gres, nullptr, &gcb[13])))) {
+    if (!StageConstants(0, vsh, vcb) || !InfoConstants(0, vres, vi.vin, &vcb[13]) ||
+        (ps && (!StageConstants(1, psh, pcb) || !InfoConstants(1, pres, nullptr, &pcb[13]))) ||
+        (gs && (!StageConstants(2, gsh, gcb) || !InfoConstants(2, gres, nullptr, &gcb[13])))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         drop();
         return;
     }
+    lap(SecConstants);
     Ref index_ref{};
     vk::IndexType index_type = vk::IndexType::eUint32;
     u32 index_count = count;
@@ -2237,11 +2267,14 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         // the whole engine index buffer when the draw's indices lie in it (one window for all
         // its draws), else just the draw's indices
         const bool inside = ib_base && index_addr >= ib_base && index_addr + bytes <= ib_base + ib_size;
-        const Buf::Slice s = force_copy ? Buf::Slice{}
-                             : inside   ? Buf::Import(ib_base, ib_size)
-                                        : Buf::Import(index_addr, bytes);
-        const u64 offset = s.offset + (inside ? index_addr - ib_base : 0);
         const Geo::Binding g = inside ? Geo::Use(ib_base, ib_size) : Geo::Binding{};
+        // imported only when the resident copy and the copy made for the vertex range are not
+        // used
+        const Buf::Slice s = (g.buffer && (index_addr - ib_base) % isize == 0) || index_copy.data || force_copy
+                                 ? Buf::Slice{}
+                             : inside ? Buf::Import(ib_base, ib_size)
+                                      : Buf::Import(index_addr, bytes);
+        const u64 offset = s.offset + (inside ? index_addr - ib_base : 0);
         if (g.buffer && (index_addr - ib_base) % isize == 0) {
             ib_resident.fetch_add(1, std::memory_order_relaxed);
             index_ref = Ref{.buffer = g.buffer, .offset = g.offset + (index_addr - ib_base)};
@@ -2252,8 +2285,11 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
             ib_in_place.fetch_add(1, std::memory_order_relaxed);
             index_ref = Ref{.buffer = s.buffer, .offset = offset};
         } else {
+            // a plain copy from memory known readable (Read is a system call, for the rest)
             const Ref span = Stage(bytes, 4);
-            if (!Read(index_addr, span.data, bytes)) {
+            if (Buf::Readable(index_addr, bytes)) {
+                std::memcpy(span.data, reinterpret_cast<const void*>(index_addr), bytes);
+            } else if (!Read(index_addr, span.data, bytes)) {
                 skipped_indices.fetch_add(1, std::memory_order_relaxed);
                 drop();
                 return;
@@ -2263,6 +2299,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         }
         index_type = isize == 2 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     }
+    lap(SecIndices);
 
     // viewport and scissor: the engine counts y from the bottom of the target (the shadow
     // cascades of the 2048x8192 atlas are at y 6144, 4096, 2048); a negative height flips y as
@@ -2330,7 +2367,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     d.depth_ro = depth_ro;
     d.layout = layout;
     d.pipeline = pipeline;
-    lap(SecConstants);
+    lap(SecPacket);
 }
 
 /// Ring bytes of a captured Ref (the recorder). False: the ring could not take them.
@@ -2338,11 +2375,30 @@ bool ToRing(Ref& r) {
     if (!r.data) {
         return true;
     }
+    // the same captured bytes (constants reused at capture) go up once per batch and command
+    // buffer: a small table of the last uploads by address
+    struct Uploaded {
+        u64 seq = 0, serial = 0;
+        const u8* data = nullptr;
+        u64 size = 0;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        u64 offset = 0;
+    };
+    static Uploaded uploaded[64];
+    Uploaded& u = uploaded[(reinterpret_cast<std::uintptr_t>(r.data) >> 4) & 63];
+    if (u.data == r.data && u.size == r.size && u.seq == recording_seq && u.serial == Gpu::Serial()) {
+        ring_reused.fetch_add(1, std::memory_order_relaxed);
+        r.buffer = u.buffer;
+        r.offset = u.offset;
+        r.data = nullptr;
+        return true;
+    }
     const Gpu::Span span = Gpu::Upload(r.size, r.align);
     if (!span.data) {
         return false;
     }
     std::memcpy(span.data, r.data, r.size);
+    u = Uploaded{recording_seq, Gpu::Serial(), r.data, r.size, span.buffer, span.offset};
     r.buffer = span.buffer;
     r.offset = span.offset;
     r.data = nullptr;
@@ -2856,8 +2912,8 @@ void Report() {
                         "load ops, %llu in the open pass, %llu recorded), "
                         "%llu copies (%llu not done). GPU: %llu submits (%llu early), %llu waits, "
                         "%llu passes, %llu barriers, %.0f MiB constants, %llu descriptor sets in "
-                        "%llu pools; stage sets: %llu made, %llu reused, %llu dropped. Display "
-                        "buffers shown: %zu\n",
+                        "%llu pools; stage sets: %llu made, %llu reused, %llu dropped; constants: %llu "
+                        "captures reused, %llu uploads reused. Display buffers shown: %zu\n",
                         (unsigned long long)drawn.load(), (unsigned long long)skipped_gs.load(),
                         (unsigned long long)skipped_vertices.load(),
                         (unsigned long long)skipped_pipeline.load(),
@@ -2875,7 +2931,9 @@ void Report() {
                         (unsigned long long)gp.barriers, gp.ring_bytes / 1048576.0,
                         (unsigned long long)gp.sets, (unsigned long long)gp.pools,
                         (unsigned long long)sets_made.load(), (unsigned long long)sets_reused.load(),
-                        (unsigned long long)sets_dropped.load(), displayed);
+                        (unsigned long long)sets_dropped.load(),
+                        (unsigned long long)constants_reused.load(),
+                        (unsigned long long)ring_reused.load(), displayed);
             std::string reasons;
             for (int r = 0; r < SkipCount; ++r) {
                 char b[64];
@@ -3097,6 +3155,7 @@ void RunRetire(std::unique_ptr<Target>& t) {
 /// Records a batch in order (the recorder thread, or the game's with BB_VK_RECORD_THREAD=0).
 void RunBatch(Batch& b) {
     std::lock_guard g(gpu_mutex);
+    recording_seq = b.seq;
     for (const auto [op, i] : b.ops) {
         switch (op) {
         case Op::Draw:
@@ -3142,6 +3201,7 @@ void Flush() {
     if (!record_thread) {
         RunBatch(*open_batch);
         open_batch->Clear();
+        OpenBatch(open_batch);
         return;
     }
     std::unique_lock lk(queue_mutex);
@@ -3151,8 +3211,9 @@ void Flush() {
         batch_waits.fetch_add(1, std::memory_order_relaxed);
         free_cv.wait(lk, [] { return !free_batches.empty(); });
     }
-    open_batch = free_batches.front();
-    free_batches.pop_front();
+    // the batch freed last: its packets and arena are the likeliest still in the caches
+    OpenBatch(free_batches.back());
+    free_batches.pop_back();
 }
 
 void RecorderThread() {
@@ -3197,7 +3258,7 @@ void StartRecorder() {
     for (Batch& b : batch_pool) {
         free_batches.push_back(&b);
     }
-    open_batch = free_batches.front();
+    OpenBatch(free_batches.front());
     free_batches.pop_front();
     const char* rt = std::getenv("BB_VK_RECORD_THREAD");
     record_thread = !(rt && rt[0] == '0');
