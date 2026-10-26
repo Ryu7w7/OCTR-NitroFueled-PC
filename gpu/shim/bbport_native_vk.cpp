@@ -26,6 +26,7 @@
 
 #include "bbport_hook.h"
 #include "bbport_native_vk_buffer.h"
+#include "bbport_native_vk_blit.h"
 #include "bbport_native_vk_gpu.h"
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
@@ -181,7 +182,7 @@ std::atomic<u64> vb_binds{0}, vb_in_place{0}, vb_copy_bytes{0}, ib_draws{0}, ib_
 std::atomic<u64> drawn{0}, skipped_gs{0}, skipped_vertices{0}, skipped_pipeline{0},
     skipped_memory{0}, skipped_indices{0}, color_feedback{0}, depth_dropped{0}, depth_read_only{0},
     pipelines_failed{0}, variants_failed{0}, clears{0}, copies{0}, copies_skipped{0},
-    submits_seen{0}, depth_copies{0};
+    submits_seen{0}, depth_copies{0}, draw_copies{0};
 // copies not done, by reason
 enum CopySkip { SkipMip, SkipSource, SkipSame, SkipDest, SkipFormat, SkipCount };
 std::atomic<u64> copy_skips[SkipCount]{};
@@ -1785,6 +1786,16 @@ __attribute__((sysv_abi)) void OnCopy(u64 ctx, const u32* src, const u32* dst, c
         return;
     }
     const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - h);
+    // a draw sampling the source into the destination (both stay compressed), else transfers:
+    // depth through the upload ring
+    const bool same_format = st.img.format == dt->img.format && !IntegerFormat(dt->img.format);
+    if ((from_depth || same_format) &&
+        Blit::Copy(st.img, st.view, {s32(sx), s_top}, dt->img, {{s32(dx), d_top}, {w, h}})) {
+        depth_copies.fetch_add(from_depth, std::memory_order_relaxed);
+        draw_copies.fetch_add(1, std::memory_order_relaxed);
+        copies.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     Gpu::Span span{};
     if (from_depth) { // the ring first: a full ring submits early
         span = Gpu::Upload(u64(w) * h * src_bytes, 16);
@@ -1844,6 +1855,7 @@ void StartTextures() {
         std::call_once(once, [inst] {
             Tex::Init(*inst);
             Buf::Init(*inst);
+            Blit::Init(*inst);
             const char* env = std::getenv("BB_VK_DRAW");
             if (env && env[0] == '0') {
                 std::printf("Native Vulkan: BB_VK_DRAW=0: nothing drawn (stage 4)\n");
@@ -1994,12 +2006,13 @@ void Report() {
             const u64 nd = d - last;
             std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; CPU %.0f ms in "
                         "draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms submits; GPU "
-                        "%.0f ms. Copies: %llu depth -> color; not done: %s\n",
+                        "%.0f ms. Copies: %llu depth -> color, %llu as draws; not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
                         (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
-                        (unsigned long long)depth_copies.load(), reasons.c_str());
+                        (unsigned long long)depth_copies.load(),
+                        (unsigned long long)draw_copies.load(), reasons.c_str());
             std::vector<Gpu::WorkTime> work;
             {
                 std::lock_guard lk(mutex);
