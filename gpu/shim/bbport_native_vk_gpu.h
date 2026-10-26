@@ -80,6 +80,14 @@ void SaveCache();
 /// The open command buffer.
 vk::CommandBuffer Cmd();
 
+/// A command buffer submitted just before the open one, for copies into buffers the GPU reads
+/// (resident vertex and index data): it waits for the vertex and index reads of earlier
+/// submissions, and its writes are visible to the vertex and index reads that follow it.
+vk::CommandBuffer Prelude();
+
+/// The open command buffer's number (submissions so far).
+std::uint64_t Serial();
+
 /// Ends the open command buffer and submits it. Nothing happens when nothing was recorded.
 void Submit();
 

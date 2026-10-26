@@ -44,6 +44,8 @@ constexpr std::size_t FrameCount = 6; // command buffers in flight at most
 struct Frame {
     vk::CommandPool pool;
     vk::CommandBuffer cmd;
+    vk::CommandBuffer prelude; // uploads into resident buffers, run before `cmd`
+    bool prelude_open = false;
     vk::Fence fence;
     vk::QueryPool timestamps; // GPU start and end of the command buffer (null: not measured)
     std::vector<Label> labels; // label i runs from timestamp i to timestamp i + 1
@@ -210,6 +212,7 @@ void Begin(Frame& f) {
     }
     f.labels.assign(1, Label{});
     f.recorded = false;
+    f.prelude_open = false;
     f.ring_begin = f.ring_end = ring_head;
 }
 
@@ -278,8 +281,23 @@ void SubmitFrame(bool early) {
     if (!pending.empty()) {
         Barrier(); // leftover layout changes (records, so the frame is submitted)
     }
-    if (!f.recorded) {
+    if (!f.recorded && !f.prelude_open) {
         return;
+    }
+    std::array<vk::CommandBuffer, 2> cmds{f.cmd};
+    u32 count = 1;
+    if (f.prelude_open) {
+        // the uploads become visible to vertex and index fetch of everything after them
+        const vk::MemoryBarrier2 written{
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eVertexAttributeInput |
+                            vk::PipelineStageFlagBits2::eIndexInput,
+            .dstAccessMask = vk::AccessFlagBits2::eVertexAttributeRead | vk::AccessFlagBits2::eIndexRead};
+        f.prelude.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+        (void)f.prelude.end();
+        cmds = {f.prelude, f.cmd};
+        count = 2;
     }
     if (f.timestamps) {
         f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, f.timestamps,
@@ -287,7 +305,7 @@ void SubmitFrame(bool early) {
     }
     (void)f.cmd.end();
     f.ring_end = ring_head;
-    const vk::SubmitInfo submit{.commandBufferCount = 1, .pCommandBuffers = &f.cmd};
+    const vk::SubmitInfo submit{.commandBufferCount = count, .pCommandBuffers = cmds.data()};
     vk::Result r;
     {
         // every graphics-queue submit and present in shadPS4 holds this lock
@@ -328,11 +346,12 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
         f.pool = pool;
         f.fence = fence;
         auto [ar, cmds] = device.allocateCommandBuffers(
-            {.commandPool = pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1});
+            {.commandPool = pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 2});
         if (ar != vk::Result::eSuccess) {
             return false;
         }
         f.cmd = cmds[0];
+        f.prelude = cmds[1];
         if (tick_ns > 0) {
             auto [qr, qp] = device.createQueryPool(
                 {.queryType = vk::QueryType::eTimestamp, .queryCount = MaxMarks + 1});
@@ -379,6 +398,25 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
 vk::CommandBuffer Cmd() {
     Cur().recorded = true;
     return Cur().cmd;
+}
+
+vk::CommandBuffer Prelude() {
+    Frame& f = Cur();
+    if (!f.prelude_open) {
+        (void)f.prelude.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+        // earlier submissions' vertex and index reads finish before the buffers are rewritten
+        const vk::MemoryBarrier2 read{
+            .srcStageMask = vk::PipelineStageFlagBits2::eVertexAttributeInput |
+                            vk::PipelineStageFlagBits2::eIndexInput,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy};
+        f.prelude.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &read});
+        f.prelude_open = true;
+    }
+    return f.prelude;
+}
+
+u64 Serial() {
+    return stats.submits;
 }
 
 void Submit() {

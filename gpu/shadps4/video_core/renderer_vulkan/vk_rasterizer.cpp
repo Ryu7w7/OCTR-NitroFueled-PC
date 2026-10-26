@@ -4006,7 +4006,18 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     }
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);
+    if (native_written) {
+        native_written(addr, size);
+    }
     return true;
+}
+
+void Rasterizer::WatchWrites(VAddr addr, u64 size, bool watch) {
+    if (watch) {
+        page_manager.UpdatePageWatchers<true>(addr, size);
+    } else {
+        page_manager.UpdatePageWatchers<false>(addr, size);
+    }
 }
 
 void Rasterizer::NoteAssetWrite(VAddr addr, u64 size) {
@@ -4103,6 +4114,9 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    if (native_unmapped) {
+        native_unmapped(addr, size);
+    }
     buffer_cache.NotePreuploadMapping(addr, size, false);
     buffer_cache.UnmapInPlace(addr, size);
     buffer_cache.DropTwins(addr, size);

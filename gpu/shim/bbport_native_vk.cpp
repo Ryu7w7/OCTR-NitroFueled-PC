@@ -31,6 +31,7 @@
 #include "bbport_hook.h"
 #include "bbport_native_vk_buffer.h"
 #include "bbport_native_vk_blit.h"
+#include "bbport_native_vk_geometry.h"
 #include "bbport_native_vk_gpu.h"
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
@@ -181,7 +182,8 @@ std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable
 std::atomic<u64> target_bytes{0};
 std::atomic<u64> texture_binds{0}, target_binds{0}, unset_textures{0}, texture_misses{0},
     bad_tsharps{0}, sampler_binds{0}, sampler_misses{0}, textures_not_ready{0};
-std::atomic<u64> vb_binds{0}, vb_in_place{0}, vb_copy_bytes{0}, ib_draws{0}, ib_in_place{0},
+std::atomic<u64> vb_binds{0}, vb_in_place{0}, vb_resident{0}, vb_copy_bytes{0}, ib_draws{0},
+    ib_in_place{0}, ib_resident{0},
     ib_copy_bytes{0}, generated_index_draws{0}, missing_attributes{0}, unknown_vertex_formats{0},
     integer_attributes{0}, bad_vertex_buffers{0};
 std::atomic<u64> drawn{0}, skipped_gs{0}, skipped_vertices{0}, skipped_pipeline{0},
@@ -914,6 +916,11 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
         if (!base || !size || !stride) {
             bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
             vi.ok = false;
+        } else if (const Geo::Binding g = vi.copy ? Geo::Use(base, size) : Geo::Binding{};
+                   g.buffer) {
+            vb_resident.fetch_add(1, std::memory_order_relaxed);
+            vi.buffers[slot] = g.buffer;
+            vi.offsets[slot] = g.offset + first;
         } else if (const Buf::Slice s = force_copy ? Buf::Slice{} : Buf::Import(base, size);
                    s.buffer) {
             vb_in_place.fetch_add(1, std::memory_order_relaxed);
@@ -1863,7 +1870,12 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
                              : inside   ? Buf::Import(ib_base, ib_size)
                                         : Buf::Import(index_addr, bytes);
         const u64 offset = s.offset + (inside ? index_addr - ib_base : 0);
-        if (index_copy.data) {
+        const Geo::Binding g = inside ? Geo::Use(ib_base, ib_size) : Geo::Binding{};
+        if (g.buffer && (index_addr - ib_base) % isize == 0) {
+            ib_resident.fetch_add(1, std::memory_order_relaxed);
+            index_buffer = g.buffer;
+            index_offset = g.offset + (index_addr - ib_base);
+        } else if (index_copy.data) {
             ib_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
             index_buffer = index_copy.buffer;
             index_offset = index_copy.offset;
@@ -2170,6 +2182,7 @@ void StartTextures() {
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
             if (drawing) {
+                Geo::Init(*inst);
                 StartCompileThreads();
                 PreloadKnown();
             }
@@ -2253,14 +2266,16 @@ void Report() {
                     (unsigned long long)textures_not_ready.load(),
                     (unsigned long long)bad_tsharps.load(), (unsigned long long)sampler_binds.load(),
                     (unsigned long long)sampler_misses.load());
-        std::printf("Native Vulkan: %zu vertex layouts; vertex streams %llu (%llu read in place, "
-                    "%.1f MiB copied, %llu unusable); indexed draws %llu (%llu in place, %.1f MiB "
+        std::printf("Native Vulkan: %zu vertex layouts; vertex streams %llu (%llu resident, %llu read "
+                    "in place, %.1f MiB copied, %llu unusable); indexed draws %llu (%llu resident, "
+                    "%llu in place, %.1f MiB "
                     "copied), %llu fan/quad draws; attributes: %llu missing, %llu unknown format, "
                     "%llu integer. Imported guest memory: %llu windows (%.0f MiB), %llu not "
                     "importable; %llu of %llu lookups in place\n",
                     layouts, (unsigned long long)vb_binds.load(),
-                    (unsigned long long)vb_in_place.load(), vb_copy_bytes.load() / 1048576.0,
-                    (unsigned long long)bad_vertex_buffers.load(), (unsigned long long)ib_draws.load(),
+                    (unsigned long long)vb_resident.load(), (unsigned long long)vb_in_place.load(),
+                    vb_copy_bytes.load() / 1048576.0, (unsigned long long)bad_vertex_buffers.load(),
+                    (unsigned long long)ib_draws.load(), (unsigned long long)ib_resident.load(),
                     (unsigned long long)ib_in_place.load(), ib_copy_bytes.load() / 1048576.0,
                     (unsigned long long)generated_index_draws.load(),
                     (unsigned long long)missing_attributes.load(),
@@ -2268,6 +2283,18 @@ void Report() {
                     (unsigned long long)integer_attributes.load(), (unsigned long long)bf.windows,
                     bf.bytes / 1048576.0, (unsigned long long)bf.failed_windows,
                     (unsigned long long)bf.hits, (unsigned long long)bf.lookups);
+        if (const Geo::Stats g = Geo::GetStats(); g.on) {
+            std::printf("Native Vulkan: resident vertex/index buffers: %llu (%.0f MiB), %llu waiting "
+                        "to stay unwritten, %llu rewritten too often, %llu unusable, %llu over "
+                        "budget, %llu freed unused; %.1f MiB uploaded, %llu partial re-uploads, %llu "
+                        "page writes heard; %llu uses, %llu copied (rewritten mid-submission)\n",
+                        (unsigned long long)g.buffers, g.bytes / 1048576.0,
+                        (unsigned long long)g.candidates, (unsigned long long)g.volatile_buffers,
+                        (unsigned long long)g.unusable, (unsigned long long)g.over_budget,
+                        (unsigned long long)g.evicted, g.uploaded_bytes / 1048576.0,
+                        (unsigned long long)g.reuploads, (unsigned long long)g.writes_heard,
+                        (unsigned long long)g.resident_uses, (unsigned long long)g.busy_uses);
+        }
         if (drawing) {
             std::printf("Native Vulkan: drawn %llu; not drawn: %llu geometry shader, %llu vertex "
                         "data, %llu pipeline, %llu ring/descriptors, %llu indices. %zu pipelines "
@@ -2467,6 +2494,7 @@ void OnSubmit() {
                       it->second.img.height};
         }
     }
+    Geo::Collect();
     Gpu::Submit();
 }
 

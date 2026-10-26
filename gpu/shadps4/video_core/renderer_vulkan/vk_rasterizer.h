@@ -97,6 +97,13 @@ public:
     [[nodiscard]] bool DmaMayWriteOnCpu(VAddr dst, u32 num_bytes);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// bbport: the native renderer's resident vertex and index data (bbport_native_vk_geometry)
+    /// watches the pages it copied (write faults, as the caches here), and hears of every
+    /// invalidation and unmap of GPU memory through these (any thread).
+    using GuestRangeHook = void (*)(VAddr addr, u64 size);
+    static inline GuestRangeHook native_written = nullptr;
+    static inline GuestRangeHook native_unmapped = nullptr;
+    void WatchWrites(VAddr addr, u64 size, bool watch);
     /// bbport: data written into GPU memory by a path we hear of (file reads, the game's resource
     /// loaders, DMA on the CPU): invalidated, and an asset for the buffer cache.
     void NoteAssetWrite(VAddr addr, u64 size);
