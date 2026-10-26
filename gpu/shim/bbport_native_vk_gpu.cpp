@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
+#include <cstdarg>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +16,7 @@
 #include <string>
 #include <tuple>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "video_core/renderer_vulkan/vk_instance.h" // first: sets up the Vulkan headers
@@ -85,6 +89,50 @@ bool full_barriers = false; // BB_VK_FULL_BARRIERS=1
 bool trace_passes = false;
 bool tracing = false; // the open command buffer is traced
 u32 trace_draws = 0;
+// the traced command buffer's lines, collected here and written to their own file by a thread of
+// their own: a thousand lines on the console fill its pipe, and the game's next print waits
+std::string trace_text;
+std::mutex trace_mutex;
+std::condition_variable trace_cv;
+std::deque<std::string> trace_queue;
+
+/// Writes finished traces to logs/<time>.trace.txt (beside BB_FRAME_LOG), else pass_trace.txt.
+void TraceWriter() {
+    std::string path = "pass_trace.txt";
+    if (const char* frames = std::getenv("BB_FRAME_LOG"); frames && *frames) {
+        path = frames;
+        const auto dot = path.rfind(".frames.csv");
+        path = (dot != std::string::npos ? path.substr(0, dot) : path) + ".trace.txt";
+    }
+    std::FILE* out = std::fopen(path.c_str(), "w");
+    std::printf("Native Vulkan: pass traces go to %s\n", out ? path.c_str() : "nowhere (not opened)");
+    for (;;) {
+        std::string text;
+        {
+            std::unique_lock lk(trace_mutex);
+            trace_cv.wait(lk, [] { return !trace_queue.empty(); });
+            text = std::move(trace_queue.front());
+            trace_queue.pop_front();
+        }
+        if (out) {
+            std::fwrite(text.data(), 1, text.size(), out);
+            std::fflush(out);
+        }
+    }
+}
+
+/// Hands the collected trace to the writer.
+void FlushTrace() {
+    if (trace_text.empty()) {
+        return;
+    }
+    {
+        std::lock_guard lk(trace_mutex);
+        trace_queue.push_back(std::move(trace_text));
+    }
+    trace_text.clear();
+    trace_cv.notify_one();
+}
 const char* end_kind = "renderer"; // what ends the open pass, for the trace
 const Image* end_image = nullptr;
 vk::ImageLayout end_layout{};
@@ -103,6 +151,17 @@ std::string Describe(const Image* i) {
 
 bool Tracing() {
     return tracing;
+}
+
+void Trace(const char* format, ...) {
+    char line[1024];
+    va_list args;
+    va_start(args, format);
+    const int n = std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (n > 0) {
+        trace_text.append(line, std::min<std::size_t>(std::size_t(n), sizeof(line) - 1));
+    }
 }
 
 namespace {
@@ -254,7 +313,8 @@ void Begin(Frame& f) {
     tracing = trace_passes && stats.submits % 1000 == 500;
     f.traced = tracing;
     if (tracing) {
-        std::printf("Pass trace: submission %llu\n", (unsigned long long)stats.submits);
+        std::printf("Pass trace: submission %llu (in the trace file)\n", (unsigned long long)stats.submits);
+        Trace("Pass trace: submission %llu\n", (unsigned long long)stats.submits);
     }
     f.prelude_open = false;
     f.ring_begin = f.ring_end = ring_head;
@@ -279,9 +339,9 @@ void Retire(Frame& f) {
             t[n - 1] > t[0]) {
             stats.gpu_ns += u64(double(t[n - 1] - t[0]) * tick_ns);
             if (f.traced) {
-                std::printf("Pass trace GPU times (%.3f ms in all):\n", double(t[n - 1] - t[0]) * tick_ns / 1e6);
+                Trace("Pass trace GPU times (%.3f ms in all):\n", double(t[n - 1] - t[0]) * tick_ns / 1e6);
                 for (std::size_t i = 0; i + 1 < n; ++i) {
-                    std::printf("  %7.3f ms  %s, %u draws\n", double(t[i + 1] - t[i]) * tick_ns / 1e6,
+                    Trace("  %7.3f ms  %s, %u draws\n", double(t[i + 1] - t[i]) * tick_ns / 1e6,
                                 WorkName(f.labels[i]).c_str(), f.labels[i].draws);
                 }
             }
@@ -295,6 +355,10 @@ void Retire(Frame& f) {
                 a.draws += f.labels[i].draws;
             }
         }
+    }
+    if (f.traced) {
+        FlushTrace();
+        f.traced = false;
     }
     for (auto& d : f.deferred) {
         d();
@@ -382,6 +446,9 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     device = vulkan.GetDevice();
     const char* pt = std::getenv("BB_VK_PASS_TRACE");
     trace_passes = pt && pt[0] == '1';
+    if (trace_passes) {
+        std::thread(TraceWriter).detach();
+    }
     const char* fb = std::getenv("BB_VK_FULL_BARRIERS");
     full_barriers = fb && fb[0] == '1';
     const auto families = vulkan.GetPhysicalDevice().getQueueFamilyProperties();
@@ -659,7 +726,7 @@ void Render(const Pass& pass) {
             a += " d=" + Describe(pass.depth) + (pass.depth_read_only ? " (read-only)" : "") +
                  (depth.loadOp == vk::AttachmentLoadOp::eClear ? " (clear)" : "");
         }
-        std::printf("  pass%s\n", a.c_str());
+        Trace("  pass%s\n", a.c_str());
         trace_draws = 0;
     }
 }
@@ -669,7 +736,7 @@ void EndRendering() {
         Cur().cmd.endRendering();
         rendering = false;
         if (tracing) {
-            std::printf("    %u draws; ended by %s%s%s%s\n", trace_draws, end_kind,
+            Trace("    %u draws; ended by %s%s%s%s\n", trace_draws, end_kind,
                         end_image ? ": " : "", end_image ? Describe(end_image).c_str() : "",
                         end_image ? (" -> " + vk::to_string(end_layout)).c_str() : "");
         }

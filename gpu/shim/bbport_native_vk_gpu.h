@@ -140,6 +140,9 @@ vk::PipelineCache PipelineCache();
 /// names it (size, format, short id).
 bool Tracing();
 std::string Describe(const Image* image);
+/// A line of the open command buffer's trace (printf format), written to the trace file once its
+/// GPU times are in.
+void Trace(const char* format, ...);
 
 Stats GetStats();
 } // namespace BbNativeVk::Gpu

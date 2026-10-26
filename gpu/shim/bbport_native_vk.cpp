@@ -2517,7 +2517,7 @@ void RecordDraw(DrawPacket& d) {
             }
         }
         if (!sampled.empty()) {
-            std::printf("    draw samples%s\n", sampled.c_str());
+            Gpu::Trace("    draw samples%s\n", sampled.c_str());
         }
     }
     if (!Gpu::Rendering()) {
@@ -2756,7 +2756,7 @@ void DoCopy(const CopyPacket& c) {
     Target& st = *c.src;
     Target* const dt = c.dst;
     if (Gpu::Tracing()) {
-        std::printf("  copy %s -> %s (%ux%u)\n", Gpu::Describe(&st.img).c_str(),
+        Gpu::Trace("  copy %s -> %s (%ux%u)\n", Gpu::Describe(&st.img).c_str(),
                     Gpu::Describe(&dt->img).c_str(), c.w, c.h);
     }
     const bool from_depth = c.from_depth;
