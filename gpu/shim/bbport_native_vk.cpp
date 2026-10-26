@@ -1386,19 +1386,31 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
         if (indexed && index_addr) {
             const u64 bytes = u64(count) * isize_;
             index_copy = Gpu::Upload(bytes, 4);
-            if (!index_copy.data || !Read(index_addr, index_copy.data, bytes)) {
+            // scanned in cached memory: the ring is write-combined, slow to read back. Guest
+            // memory is read directly when it is readable, else through a scratch copy
+            static thread_local std::vector<std::uint8_t> scratch;
+            const void* from = reinterpret_cast<const void*>(index_addr);
+            if (!Buf::Readable(index_addr, bytes)) {
+                scratch.resize(bytes);
+                from = scratch.data();
+                if (!Read(index_addr, scratch.data(), bytes)) {
+                    from = nullptr;
+                }
+            }
+            if (!index_copy.data || !from) {
                 index_copy = {};
                 index_unreadable = true;
                 return vertex_end;
             }
+            std::memcpy(index_copy.data, from, bytes);
             u32 top = 0;
             if (isize_ == 2) {
-                const auto* p = static_cast<const std::uint16_t*>(index_copy.data);
+                const auto* p = static_cast<const std::uint16_t*>(from);
                 for (u32 i = 0; i < count; ++i) {
                     top = p[i] != 0xffff ? std::max<u32>(top, p[i]) : top;
                 }
             } else {
-                const auto* p = static_cast<const u32*>(index_copy.data);
+                const auto* p = static_cast<const u32*>(from);
                 for (u32 i = 0; i < count; ++i) {
                     top = p[i] != 0xffffffffu ? std::max(top, p[i]) : top;
                 }
