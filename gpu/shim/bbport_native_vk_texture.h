@@ -36,9 +36,12 @@ struct Texture {
     std::uint64_t last_used = 0;      // Host::serial at its last bind
     bool watched = false;             // its pages are watched (Written makes it stale)
     std::atomic<bool> stale{false};   // written or unmapped since it was made
-    /// Set once its upload is submitted: a draw submitted later sees the data (same queue, and
-    /// the upload ends in a barrier). Draws recorded before that bind no image instead.
+    /// Set (and notified) once its upload is submitted: a draw submitted later sees the data
+    /// (same queue, and the upload ends in a barrier). The recorder waits for it before writing a
+    /// descriptor of the texture, so a draw never samples it before its data.
     std::atomic<bool> ready{false};
+    /// Its upload failed (set before `ready`): bound as no image.
+    std::atomic<bool> broken{false};
 };
 
 /// The fields of a T# the renderer needs besides the image.

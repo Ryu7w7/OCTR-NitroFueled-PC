@@ -322,7 +322,7 @@ void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s
 
 // ------------------------------------------------------------------ uploads
 struct Job {
-    std::atomic<bool>* ready; // the texture's flag, set once the batch is submitted
+    Texture* tex; // its `ready` is set once the batch is submitted (`broken` too if it failed)
     VkImage image;
     u32 levels, slices;
     std::vector<u8> data;                   // untiled levels, each region 16-byte aligned
@@ -332,6 +332,17 @@ struct Job {
 std::mutex upload_mutex;
 std::condition_variable upload_cv;
 std::vector<Job> upload_queue;
+
+/// Ends the jobs' waits: their textures are uploaded (submitted), or `broken`.
+void Settle(std::vector<Job>& jobs, bool ok) {
+    for (const Job& j : jobs) {
+        if (!ok) {
+            j.tex->broken.store(true, std::memory_order_relaxed);
+        }
+        j.tex->ready.store(true, std::memory_order_release);
+        j.tex->ready.notify_all();
+    }
+}
 
 void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) {
     const vk::Device dev = instance->GetDevice();
@@ -354,6 +365,7 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
         failed.fetch_add(jobs.size(), std::memory_order_relaxed);
         std::printf("Native Vulkan: no staging buffer for %zu texture uploads (%llu bytes)\n",
                     jobs.size(), (unsigned long long)size);
+        Settle(jobs, false);
         return;
     }
     auto [ar, cmds] = dev.allocateCommandBuffers(
@@ -361,6 +373,7 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
     if (ar != vk::Result::eSuccess) {
         vmaDestroyBuffer(instance->GetAllocator(), staging, allocation);
         failed.fetch_add(jobs.size(), std::memory_order_relaxed);
+        Settle(jobs, false);
         return;
     }
     const vk::CommandBuffer cmd = cmds[0];
@@ -418,10 +431,8 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
         std::scoped_lock lk{Vulkan::Scheduler::submit_mutex};
         sr = instance->GetGraphicsQueue().submit(submit, fence);
     }
+    Settle(jobs, sr == vk::Result::eSuccess);
     if (sr == vk::Result::eSuccess) {
-        for (const Job& j : jobs) {
-            j.ready->store(true, std::memory_order_release);
-        }
         (void)dev.waitForFences(fence, VK_TRUE, ~0ull);
         uploads_done.fetch_add(jobs.size(), std::memory_order_relaxed);
         upload_batches.fetch_add(1, std::memory_order_relaxed);
@@ -806,7 +817,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 
     // untile every slice and level (slice-major) into the upload job
-    Job job{&tex.ready, image, l.levels, l.slices, {}, {}};
+    Job job{&tex, image, l.levels, l.slices, {}, {}};
     u64 size = 0;
     for (u32 s = 0; s < l.slices; ++s) {
         for (u32 m = 0; m < l.levels; ++m) {

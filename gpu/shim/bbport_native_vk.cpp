@@ -1029,11 +1029,11 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             target_binds.fetch_add(1, std::memory_order_relaxed);
             out.target = it->second.get();
         } else if (const Tex::Texture* tex = Tex::Get(tsharp)) {
-            if (tex->ready.load(std::memory_order_acquire)) {
-                out.texture = tex;
-            } else {
+            // bound even while its upload is on the way: the recorder waits for it (StageSet)
+            if (!tex->ready.load(std::memory_order_acquire)) {
                 textures_not_ready.fetch_add(1, std::memory_order_relaxed);
             }
+            out.texture = tex;
         } else {
             texture_misses.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1954,8 +1954,13 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                         }
                     } else if (const Tex::Texture* tex = res.slots[slot].texture;
                                tex && (b.arrayed || tex->slices == 1)) {
+                        // its upload is submitted before this draw's submission (a remade video
+                        // frame is often still on the way): never a draw on undefined data
+                        tex->ready.wait(false, std::memory_order_acquire);
                         // a plain 2D binding takes only one-slice textures (view types must match)
-                        ii.imageView = b.arrayed ? tex->view_array : tex->view;
+                        if (!tex->broken.load(std::memory_order_relaxed)) {
+                            ii.imageView = b.arrayed ? tex->view_array : tex->view;
+                        }
                     }
                 }
                 images.push_back(ii); // no image: a null descriptor, which reads zeros
@@ -3035,7 +3040,7 @@ void Report() {
                     "waiting; not made: %llu unsupported, %llu unreadable, %llu failed; %llu made over "
                     "budget, %llu evicted, %llu made again after the game wrote them, %llu pages "
                     "watched; %llu samplers. Binds: %llu textures (%llu render targets, %llu unset "
-                    "slots, %llu without an image, %llu not uploaded yet, %llu unreadable T#), %llu "
+                    "slots, %llu without an image, %llu waited for their upload, %llu unreadable T#), %llu "
                     "samplers (%llu failed)\n",
                     (unsigned long long)tx.textures, tx.bytes / 1048576.0,
                     (unsigned long long)tx.uploads_done, (unsigned long long)tx.upload_batches,
