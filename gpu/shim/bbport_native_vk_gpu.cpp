@@ -26,6 +26,7 @@ struct Frame {
     vk::CommandPool pool;
     vk::CommandBuffer cmd;
     vk::Fence fence;
+    vk::QueryPool timestamps; // GPU start and end of the command buffer (null: not measured)
     bool in_flight = false;
     bool recorded = false;    // anything recorded since it was begun
     u64 ring_begin = 0, ring_end = 0; // its part of the ring, [begin, end) circularly
@@ -51,6 +52,7 @@ Pass open_pass{};
 std::vector<vk::ImageMemoryBarrier2> pending;
 
 Stats stats{};
+double tick_ns = 0; // nanoseconds per timestamp tick; 0: no timestamps
 
 Frame& Cur() {
     return frames[current];
@@ -66,6 +68,10 @@ vk::ImageAspectFlags Aspects(const Image& image) {
 
 void Begin(Frame& f) {
     (void)f.cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    if (f.timestamps) {
+        f.cmd.resetQueryPool(f.timestamps, 0, 2);
+        f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, f.timestamps, 0);
+    }
     f.recorded = false;
     f.ring_begin = f.ring_end = ring_head;
 }
@@ -80,6 +86,15 @@ void Retire(Frame& f) {
         (void)device.waitForFences(f.fence, VK_TRUE, ~0ull);
     }
     (void)device.resetFences(f.fence);
+    if (f.timestamps) {
+        u64 t[2]{};
+        if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueryPoolResults(
+                device, f.timestamps, 0, 2, sizeof(t), t, sizeof(u64), VK_QUERY_RESULT_64_BIT) ==
+                VK_SUCCESS &&
+            t[1] > t[0]) {
+            stats.gpu_ns += u64(double(t[1] - t[0]) * tick_ns);
+        }
+    }
     for (auto& d : f.deferred) {
         d();
     }
@@ -119,6 +134,9 @@ void SubmitFrame(bool early) {
     if (!f.recorded) {
         return;
     }
+    if (f.timestamps) {
+        f.cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, f.timestamps, 1);
+    }
     (void)f.cmd.end();
     f.ring_end = ring_head;
     const vk::SubmitInfo submit{.commandBufferCount = 1, .pCommandBuffers = &f.cmd};
@@ -144,6 +162,11 @@ void SubmitFrame(bool early) {
 bool Init(const Vulkan::Instance& vulkan) {
     instance = &vulkan;
     device = vulkan.GetDevice();
+    const auto families = vulkan.GetPhysicalDevice().getQueueFamilyProperties();
+    const u32 family = vulkan.GetGraphicsQueueFamilyIndex();
+    if (family < families.size() && families[family].timestampValidBits) {
+        tick_ns = vulkan.GetPhysicalDevice().getProperties().limits.timestampPeriod;
+    }
     for (Frame& f : frames) {
         auto [pr, pool] = device.createCommandPool(
             {.flags = vk::CommandPoolCreateFlagBits::eTransient,
@@ -160,12 +183,18 @@ bool Init(const Vulkan::Instance& vulkan) {
             return false;
         }
         f.cmd = cmds[0];
+        if (tick_ns > 0) {
+            auto [qr, qp] = device.createQueryPool(
+                {.queryType = vk::QueryType::eTimestamp, .queryCount = 2});
+            f.timestamps = qr == vk::Result::eSuccess ? qp : vk::QueryPool{};
+        }
     }
     const VkBufferCreateInfo bci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = RingSize,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO;

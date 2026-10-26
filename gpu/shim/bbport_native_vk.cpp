@@ -175,7 +175,27 @@ std::atomic<u64> vb_binds{0}, vb_in_place{0}, vb_copy_bytes{0}, ib_draws{0}, ib_
 std::atomic<u64> drawn{0}, skipped_gs{0}, skipped_vertices{0}, skipped_pipeline{0},
     skipped_memory{0}, skipped_indices{0}, color_feedback{0}, depth_dropped{0}, depth_read_only{0},
     pipelines_failed{0}, variants_failed{0}, clears{0}, copies{0}, copies_skipped{0},
-    submits_seen{0};
+    submits_seen{0}, depth_copies{0};
+// copies not done, by reason
+enum CopySkip { SkipMip, SkipSource, SkipSame, SkipDest, SkipFormat, SkipCount };
+std::atomic<u64> copy_skips[SkipCount]{};
+constexpr const char* CopySkipNames[SkipCount] = {"mip level", "source not ours", "same image",
+                                                  "unknown destination", "format size"};
+// CPU time in the hooks (ns), frames the presenter asked for
+std::atomic<u64> draw_ns{0}, clear_ns{0}, copy_ns{0}, submit_ns{0}, frames_asked{0};
+
+/// Adds the time since construction to a counter.
+struct Timer {
+    std::atomic<u64>& out;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit Timer(std::atomic<u64>& o) : out(o) {}
+    ~Timer() {
+        out.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count()),
+                      std::memory_order_relaxed);
+    }
+};
 std::unordered_set<u64> vertex_layouts; // distinct attribute/binding layouts
 std::unordered_set<u32> logged_prims;
 std::unordered_set<u64> good_tsharps; // T# addresses checked readable once
@@ -1595,6 +1615,7 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
     if (!drawing || !ctx) {
         return;
     }
+    Timer timer(clear_ns);
     std::lock_guard lk(mutex);
     clears.fetch_add(1, std::memory_order_relaxed);
     if (flags & 6) {
@@ -1620,8 +1641,8 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
 /// kCopyTexture(ctx, const T# src, const T# dst, const s32 p[8]): p = src x, y, dst x, y, width,
 /// height (-1: all), src mip, dst mip, with y counted from the bottom like the viewport. The PS4
 /// runs a copy compute shader; here it is an image copy between our images, the destination
-/// becoming one of them (the D3D11 port's CopyTextureHook). Only same-size-format color copies
-/// of mip 0 so far.
+/// becoming one of them (the D3D11 port's CopyTextureHook). Mip 0 only; a depth source goes to a
+/// color destination of the same texel size (depth -> R32F) through the upload ring.
 __attribute__((sysv_abi)) void OnCopy(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     (void)ctx;
     if (!drawing || !src || !dst || !p) {
@@ -1632,25 +1653,45 @@ __attribute__((sysv_abi)) void OnCopy(u64 ctx, const u32* src, const u32* dst, c
     if (a[0] < 0 || a[1] < 0 || a[2] < 0 || a[3] < 0) {
         return;
     }
+    Timer timer(copy_ns);
     std::lock_guard lk(mutex);
     const Tex::Info s = Tex::Describe(src), d = Tex::Describe(dst);
     const auto it = targets.find(s.base);
-    if (a[6] || a[7] || it == targets.end() || it->second.img.depth || d.base == s.base ||
-        d.format == vk::Format::eUndefined ||
-        FormatBytes(d.format) != FormatBytes(it->second.img.format)) {
-        if (copies_skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
-            std::printf("Native Vulkan: copy %llx (%ux%u mip %d%s) -> %llx (%ux%u mip %d %s) not "
-                        "done\n",
+    const bool from_depth = it != targets.end() && it->second.img.depth;
+    const u32 src_bytes = it == targets.end() ? 0
+                          : from_depth ? (it->second.img.format == vk::Format::eD16Unorm ? 2 : 4)
+                                       : FormatBytes(it->second.img.format);
+    int why = SkipCount;
+    if (a[6] || a[7]) {
+        why = SkipMip;
+    } else if (it == targets.end()) {
+        why = SkipSource;
+    } else if (d.base == s.base) {
+        why = SkipSame;
+    } else if (d.format == vk::Format::eUndefined) {
+        why = SkipDest;
+    } else if (FormatBytes(d.format) != src_bytes) {
+        why = SkipFormat;
+    }
+    auto skip = [&](int reason) {
+        copies_skipped.fetch_add(1, std::memory_order_relaxed);
+        if (copy_skips[reason].fetch_add(1, std::memory_order_relaxed) < 4) {
+            std::printf("Native Vulkan: copy %llx (%ux%u mip %d) -> %llx (%ux%u mip %d %s) not done: "
+                        "%s\n",
                         (unsigned long long)s.base, s.width, s.height, a[6],
-                        it == targets.end() ? ", not one of ours" : "", (unsigned long long)d.base,
-                        d.width, d.height, a[7], vk::to_string(d.format).c_str());
+                        (unsigned long long)d.base, d.width, d.height, a[7],
+                        vk::to_string(d.format).c_str(), CopySkipNames[reason]);
         }
+    };
+    if (why != SkipCount) {
+        skip(why);
         return;
     }
     Target& st = it->second;
-    Target* dt = MakeTarget(d.base, d.width, d.height, d.format, false, st.comp_swap, "copy target");
+    Target* dt = MakeTarget(d.base, d.width, d.height, d.format, false,
+                            from_depth ? 0 : st.comp_swap, "copy target");
     if (!dt || dt == &st) {
-        copies_skipped.fetch_add(1, std::memory_order_relaxed);
+        skip(SkipDest);
         return;
     }
     const u32 sw = st.img.width, sh = st.img.height, dw = dt->img.width, dh = dt->img.height;
@@ -1665,17 +1706,52 @@ __attribute__((sysv_abi)) void OnCopy(u64 ctx, const u32* src, const u32* dst, c
         return;
     }
     const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - h);
+    Gpu::Span span{};
+    if (from_depth) { // the ring first: a full ring submits early
+        span = Gpu::Upload(u64(w) * h * src_bytes, 16);
+        if (!span.data) {
+            skip(SkipFormat);
+            return;
+        }
+    }
     Gpu::Use(st.img, vk::ImageLayout::eTransferSrcOptimal);
     Gpu::Use(dt->img, vk::ImageLayout::eTransferDstOptimal);
     Gpu::EndRendering();
     Gpu::Barrier();
-    const vk::ImageCopy region{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                               .srcOffset = {s32(sx), s_top, 0},
-                               .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                               .dstOffset = {s32(dx), d_top, 0},
-                               .extent = {w, h, 1}};
-    Gpu::Cmd().copyImage(st.img.image, vk::ImageLayout::eTransferSrcOptimal, dt->img.image,
-                         vk::ImageLayout::eTransferDstOptimal, region);
+    if (from_depth) {
+        const vk::BufferImageCopy out{.bufferOffset = span.offset,
+                                      .imageSubresource = {vk::ImageAspectFlagBits::eDepth, 0, 0, 1},
+                                      .imageOffset = {s32(sx), s_top, 0},
+                                      .imageExtent = {w, h, 1}};
+        Gpu::Cmd().copyImageToBuffer(st.img.image, vk::ImageLayout::eTransferSrcOptimal,
+                                     span.buffer, out);
+        const vk::BufferMemoryBarrier2 ready{
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = span.buffer,
+            .offset = span.offset,
+            .size = u64(w) * h * src_bytes};
+        Gpu::Cmd().pipelineBarrier2({.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &ready});
+        const vk::BufferImageCopy in{.bufferOffset = span.offset,
+                                     .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                     .imageOffset = {s32(dx), d_top, 0},
+                                     .imageExtent = {w, h, 1}};
+        Gpu::Cmd().copyBufferToImage(span.buffer, dt->img.image,
+                                     vk::ImageLayout::eTransferDstOptimal, in);
+        depth_copies.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        const vk::ImageCopy region{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .srcOffset = {s32(sx), s_top, 0},
+                                   .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .dstOffset = {s32(dx), d_top, 0},
+                                   .extent = {w, h, 1}};
+        Gpu::Cmd().copyImage(st.img.image, vk::ImageLayout::eTransferSrcOptimal, dt->img.image,
+                             vk::ImageLayout::eTransferDstOptimal, region);
+    }
     copies.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1713,7 +1789,8 @@ void StartTextures() {
 }
 
 void Report() {
-    u64 last = 0;
+    u64 last = 0, last_draw_ns = 0, last_clear_ns = 0, last_copy_ns = 0, last_submit_ns = 0,
+        last_gpu_ns = 0, last_frames = 0, last_submits = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         const u64 d = draws.load();
@@ -1809,6 +1886,32 @@ void Report() {
                         (unsigned long long)gp.waits, (unsigned long long)gp.passes,
                         (unsigned long long)gp.barriers, gp.ring_bytes / 1048576.0,
                         (unsigned long long)gp.sets, (unsigned long long)gp.pools, displayed);
+            std::string reasons;
+            for (int r = 0; r < SkipCount; ++r) {
+                char b[64];
+                std::snprintf(b, sizeof(b), "%s%llu %s", r ? ", " : "",
+                              (unsigned long long)copy_skips[r].load(), CopySkipNames[r]);
+                reasons += b;
+            }
+            // per second over the last 5 s: CPU time in the hooks, GPU time of our command buffers
+            const u64 dn = draw_ns.load(), cn = clear_ns.load(), pn = copy_ns.load(),
+                      sn = submit_ns.load(), fr = frames_asked.load();
+            const u64 nd = d - last;
+            std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; CPU %.0f ms in "
+                        "draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms submits; GPU "
+                        "%.0f ms. Copies: %llu depth -> color; not done: %s\n",
+                        (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
+                        (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
+                        (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
+                        (sn - last_submit_ns) / 5e6, (gp.gpu_ns - last_gpu_ns) / 5e6,
+                        (unsigned long long)depth_copies.load(), reasons.c_str());
+            last_draw_ns = dn;
+            last_clear_ns = cn;
+            last_copy_ns = pn;
+            last_submit_ns = sn;
+            last_gpu_ns = gp.gpu_ns;
+            last_frames = fr;
+            last_submits = gp.submits;
         }
         std::fflush(stdout);
         last = d;
@@ -1863,6 +1966,7 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         no_context.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    Timer timer(draw_ns);
     std::lock_guard lk(mutex);
     const u64 vsh = Q(ctx + CtxVs);
     ShaderInfo* vs = Resolve(vsh, "vertex");
@@ -1912,6 +2016,7 @@ void OnSubmit() {
     if (!drawing) {
         return;
     }
+    Timer timer(submit_ns);
     std::lock_guard lk(mutex);
     submits_seen.fetch_add(1, std::memory_order_relaxed);
     if (show) {
@@ -1932,6 +2037,7 @@ void OnSubmit() {
 
 bool Display(std::uint64_t address, std::uint32_t wanted, std::uint64_t* image,
              std::uint32_t* view_format, std::uint32_t* width, std::uint32_t* height) {
+    frames_asked.fetch_add(1, std::memory_order_relaxed);
     if (!show) {
         return false;
     }

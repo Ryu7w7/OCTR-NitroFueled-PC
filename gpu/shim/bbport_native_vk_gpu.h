@@ -48,6 +48,7 @@ struct Span {
 
 struct Stats {
     std::uint64_t submits, early_submits, waits, passes, barriers, ring_bytes, sets, pools;
+    std::uint64_t gpu_ns; // GPU time of the finished command buffers (timestamps)
 };
 
 bool Init(const Vulkan::Instance& instance);

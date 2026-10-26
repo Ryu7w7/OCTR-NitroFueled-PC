@@ -38,16 +38,44 @@ std::vector<Window*> windows_list;
 std::unordered_map<u64, std::vector<Window*>> buckets; // 16 MiB index -> windows touching it
 u64 imported_bytes = 0, failed_windows = 0, lookups = 0, hits = 0;
 
-/// The committed, readable host region holding `address`: [start, end). False when there is none.
-bool Region(u64 address, u64* start, u64* end) {
+/// Whether a page run can be read: committed and not no-access or guard.
+#ifdef _WIN32
+bool Readable(const MEMORY_BASIC_INFORMATION& m) {
+    return m.State == MEM_COMMIT && !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && m.Protect;
+}
+#endif
+
+/// The committed, readable host memory around `address`: [start, end). Windows splits one
+/// allocation into regions wherever the page protection changes (shadPS4 write-protects pages it
+/// watches), so neighbouring readable regions of the same allocation are joined.
+bool Region(u64 address, u64* start, u64* end, u32* protect = nullptr) {
 #ifdef _WIN32
     MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi)) ||
-        mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+    if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi)) || !Readable(mbi)) {
         return false;
     }
+    if (protect) {
+        *protect = mbi.Protect;
+    }
+    const void* base = mbi.AllocationBase;
     *start = reinterpret_cast<u64>(mbi.BaseAddress);
     *end = *start + mbi.RegionSize;
+    for (int i = 0; i < 4096; ++i) { // forward
+        MEMORY_BASIC_INFORMATION n{};
+        if (!VirtualQuery(reinterpret_cast<const void*>(*end), &n, sizeof(n)) ||
+            n.AllocationBase != base || !Readable(n)) {
+            break;
+        }
+        *end += n.RegionSize;
+    }
+    for (int i = 0; i < 4096 && *start > reinterpret_cast<u64>(base); ++i) { // backward
+        MEMORY_BASIC_INFORMATION n{};
+        if (!VirtualQuery(reinterpret_cast<const void*>(*start - 1), &n, sizeof(n)) ||
+            n.AllocationBase != base || !Readable(n)) {
+            break;
+        }
+        *start = reinterpret_cast<u64>(n.BaseAddress);
+    }
     return true;
 #else
     std::ifstream maps("/proc/self/maps");
@@ -152,8 +180,9 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
     // buffer records can be longer than the memory behind them (a ring whose tail is not mapped);
     // the GPU only reads what the draw uses, so the window then stops where the region does.
     u64 rs = 0, re = 0;
+    u32 protect = 0;
     auto w = new Window{};
-    const bool mapped = Region(address, &rs, &re);
+    const bool mapped = Region(address, &rs, &re, &protect);
     if (!mapped) {
         w->start = address & ~(alignment - 1);
         w->end = (last + alignment) & ~(alignment - 1);
@@ -171,9 +200,11 @@ Slice Import(std::uint64_t address, std::uint64_t size) {
     }
     if (!w->buffer && failed_windows < 8) {
         if (mapped) {
-            std::printf("Native Vulkan: guest memory %llx size %llx not importable (region %llx-%llx)\n",
+            std::printf("Native Vulkan: guest memory %llx size %llx not importable (region %llx-%llx, "
+                        "window %llx-%llx, protection %x)\n",
                         (unsigned long long)address, (unsigned long long)size,
-                        (unsigned long long)rs, (unsigned long long)re);
+                        (unsigned long long)rs, (unsigned long long)re,
+                        (unsigned long long)w->start, (unsigned long long)w->end, protect);
         } else {
             std::printf("Native Vulkan: guest memory %llx size %llx not importable (not committed)\n",
                         (unsigned long long)address, (unsigned long long)size);
