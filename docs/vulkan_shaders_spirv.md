@@ -69,5 +69,19 @@ It is called from `sceGnmDrawIndex` and `sceGnmDrawIndexAuto`. At each draw it:
   primitive and index type).
 
 Programs without a translation are logged once each. A summary is logged every 5 s.
-Nothing is drawn by it yet: shadPS4 still renders. Next: render targets and depth (engine target →
-VkImage), then textures and samplers, vertex/index fetch, and the draw itself.
+First in-game run: 6.3M draws, all resolved, 300 shader modules, 386 pipeline states.
+
+## Stage 2: render and depth targets
+
+Each color and depth target bound at a draw gets a `VkImage` and view on the presenter's device (VMA),
+keyed by its GPU base address and made again when its size or format changes. The fields read are
+the ones the D3D11 port uses:
+
+- **Color** (`Gnm::RenderTarget`): `+0x10` CB_COLOR_BASE, `+0x20` CB_COLOR_INFO (format, number type,
+  COMP_SWAP), `+0x4c` width | height << 16. The format mapping follows the port's `ColorTargetFormat`.
+- **Depth** (`Gnm::DepthRenderTarget`): `+0x50` DB_Z_INFO, `+0x54` DB_STENCIL_INFO, `+0x58` Z base,
+  `+0x80` size. Z_16 without stencil (shadow maps) → `D16_UNORM`, else `D32_SFLOAT_S8_UINT`.
+
+Pipeline keys now use the target formats. Images are the engine's size; render scaling comes with
+presentation. Nothing is drawn into them yet, so they hold no data and cost VRAM beside shadPS4's own.
+Next: textures and samplers, vertex/index fetch, then the draw itself.
