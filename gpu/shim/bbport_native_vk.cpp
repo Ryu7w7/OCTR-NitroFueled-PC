@@ -21,6 +21,7 @@
 
 #include <vk_mem_alloc.h>
 
+#include "bbport_native_vk_buffer.h"
 #include "bbport_native_vk_texture.h"
 
 #ifdef _WIN32
@@ -50,9 +51,15 @@ constexpr u64 CtxAlphaToMask = 0x100, CtxBlendControl = 0x104,
               CtxDepthTarget = 0x170, CtxRasterState = 0x190, CtxRtMask = 0x198,
               CtxPsSamplers = 0x1a0, CtxPsTextures = 0x220, CtxVsSamplers = 0x2a0,
               CtxVsTextures = 0x320, CtxVs = 0x5a8, CtxGs = 0x5b0, CtxPs = 0x5b8,
-              CtxPrimType = 0x5c0, CtxIndexSize = 0x5c4;
-// shader resource (pool object) -> Gnm shader struct: common word, then PGM_LO/PGM_HI at +8
-constexpr u64 ShGnm = 0x30;
+              CtxPrimType = 0x5c0, CtxIndexSize = 0x5c4, CtxVertexBuffers = 0x4a0,
+              CtxVertexFormats = 0x520, CtxIndexBuffer = 0x5a0, CtxVbOffsets = 0x5d0,
+              CtxVbStrides = 0x610;
+// shader resource (pool object): igPS4ShaderHeader at +0x18, Gnm shader struct at +0x30 (common
+// word, then PGM_LO/PGM_HI at +8)
+constexpr u64 ShHeader = 0x18, ShGnm = 0x30;
+// igPS4ShaderHeader: vector of the VS input elements {usage, usage index, semantic} (count at +0,
+// data at +0x10)
+constexpr u64 HdrInputElements = 0x30;
 
 struct ShaderInfo {
     std::string name;
@@ -95,6 +102,11 @@ std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable
 std::atomic<u64> target_bytes{0};
 std::atomic<u64> texture_binds{0}, target_binds{0}, unset_textures{0}, texture_misses{0},
     bad_tsharps{0}, sampler_binds{0}, sampler_misses{0};
+std::atomic<u64> vb_binds{0}, vb_in_place{0}, vb_copy_bytes{0}, ib_draws{0}, ib_in_place{0},
+    ib_copy_bytes{0}, generated_index_draws{0}, missing_attributes{0}, unknown_vertex_formats{0},
+    integer_attributes{0}, bad_vertex_buffers{0};
+std::unordered_set<u64> vertex_layouts; // distinct attribute/binding layouts
+std::unordered_set<u32> logged_prims;
 std::unordered_set<u64> good_tsharps; // T# addresses checked readable once
 
 /// Reads guest memory without faulting on a bad pointer (only for things not seen before).
@@ -499,13 +511,163 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev) {
     }
 }
 
-/// Starts the texture side once both the switch is on and the presenter's instance exists (the
-/// loader and the GnmDriver registration can come in either order).
+/// Gnm vertex DataFormat (surface format | channel type << 8) -> Vulkan, as the D3D11 port's
+/// VertexFormat: integer data (uint/sint, and uscaled/sscaled) is fetched raw, and the shaders
+/// convert scaled data themselves (their conversion modes, b13).
+vk::Format VertexFormat(u32 df, bool* integer) {
+    using F = vk::Format;
+    const u32 sf = df & 0xff, ch = (df >> 8) & 0xf; // 0 unorm 1 snorm 2 uscaled 3 sscaled 4 uint
+                                                    // 5 sint 6 snorm_nz 7 float
+    const bool u = ch == 2 || ch == 4, s = ch == 3 || ch == 5, sn = ch == 1 || ch == 6, fl = ch == 7;
+    *integer = u || s;
+    switch (sf) {
+    case 4: // 32
+        return fl ? F::eR32Sfloat : u ? F::eR32Uint : s ? F::eR32Sint : F::eUndefined;
+    case 11: // 32_32
+        return fl ? F::eR32G32Sfloat : u ? F::eR32G32Uint : s ? F::eR32G32Sint : F::eUndefined;
+    case 13: // 32_32_32
+        return fl ? F::eR32G32B32Sfloat : u ? F::eR32G32B32Uint : s ? F::eR32G32B32Sint
+                                                                    : F::eUndefined;
+    case 14: // 32_32_32_32
+        return fl ? F::eR32G32B32A32Sfloat : u ? F::eR32G32B32A32Uint : s ? F::eR32G32B32A32Sint
+                                                                          : F::eUndefined;
+    case 2: // 16
+        return fl ? F::eR16Sfloat : u ? F::eR16Uint : s ? F::eR16Sint : sn ? F::eR16Snorm
+                                                                           : F::eR16Unorm;
+    case 5: // 16_16
+        return fl ? F::eR16G16Sfloat : u ? F::eR16G16Uint : s ? F::eR16G16Sint
+               : sn ? F::eR16G16Snorm : F::eR16G16Unorm;
+    case 12: // 16_16_16_16
+        return fl ? F::eR16G16B16A16Sfloat : u ? F::eR16G16B16A16Uint : s ? F::eR16G16B16A16Sint
+               : sn ? F::eR16G16B16A16Snorm : F::eR16G16B16A16Unorm;
+    case 1: // 8
+        return u ? F::eR8Uint : s ? F::eR8Sint : sn ? F::eR8Snorm : F::eR8Unorm;
+    case 3: // 8_8
+        return u ? F::eR8G8Uint : s ? F::eR8G8Sint : sn ? F::eR8G8Snorm : F::eR8G8Unorm;
+    case 10: // 8_8_8_8
+        return u ? F::eR8G8B8A8Uint : s ? F::eR8G8B8A8Sint : sn ? F::eR8G8B8A8Snorm
+                                                               : F::eR8G8B8A8Unorm;
+    case 8: // 10_10_10_2
+    case 9: // 2_10_10_10
+        return u ? F::eA2B10G10R10UintPack32 : F::eA2B10G10R10UnormPack32;
+    case 6: // 10_11_11
+    case 7: // 11_11_10
+        return F::eB10G11R11UfloatPack32;
+    default:
+        return F::eUndefined;
+    }
+}
+
+/// Vertex and index data of a draw, as the D3D11 port's GetLayout and draw code read it: each VS
+/// input semantic is matched (by usage and usage index from the shader header) to an element of
+/// the engine's vertex formats, which gives its stream slot, offset and data format. The streams'
+/// and the index buffer's guest memory is then looked up as imported buffers.
+void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, bool indexed, u32 count,
+                   u64 index_addr) {
+    const u64 hdr = Q(vsh + ShHeader);
+    const std::int32_t nin = hdr ? R<std::int32_t>(hdr + HdrInputElements) : 0;
+    const u64 ins = hdr ? Q(hdr + HdrInputElements + 0x10) : 0;
+    u64 key = 0xcbf29ce484222325ull;
+    bool used[16]{};
+    for (const auto& [sem, size] : vs.inputs) {
+        u32 usage = 0xff, uidx = 0xff;
+        for (std::int32_t k = 0; ins && k < nin && k < 64; ++k) {
+            if (R<u32>(ins + k * 12 + 8) == u32(sem)) {
+                usage = R<u32>(ins + k * 12);
+                uidx = R<u32>(ins + k * 12 + 4);
+            }
+        }
+        vk::Format format = vk::Format::eUndefined;
+        int binding = -1;
+        u32 offset = 0;
+        for (int slot = 0; slot < 16 && usage != 0xff && binding < 0; ++slot) {
+            const u64 vf = Q(ctx + CtxVertexFormats + slot * 8);
+            const u64 el = vf ? Q(vf + 0x18) : 0, fm = vf ? Q(vf + 0x28) : 0;
+            for (int k = 0; el && fm && k < 32 && R<u8>(el + k * 12) != ','; ++k) {
+                if (R<u8>(el + k * 12 + 4) != usage || R<u8>(el + k * 12 + 5) != uidx) {
+                    continue;
+                }
+                bool integer = false;
+                format = VertexFormat(R<u32>(fm + k * 4), &integer);
+                if (format == vk::Format::eUndefined) {
+                    unknown_vertex_formats.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                if (integer) {
+                    integer_attributes.fetch_add(1, std::memory_order_relaxed);
+                }
+                binding = slot;
+                offset = R<u16>(el + k * 12 + 8);
+                break;
+            }
+        }
+        if (binding < 0) {
+            missing_attributes.fetch_add(1, std::memory_order_relaxed); // the port feeds zeros
+        } else {
+            used[binding] = true;
+        }
+        Mix(key, sem);
+        Mix(key, format);
+        Mix(key, binding);
+        Mix(key, offset);
+    }
+    for (int slot = 0; slot < 16; ++slot) {
+        if (!used[slot]) {
+            continue;
+        }
+        vb_binds.fetch_add(1, std::memory_order_relaxed);
+        // engine buffer resource: {u32 size; u64 address at +8}
+        const u64 vb = Q(ctx + CtxVertexBuffers + slot * 8);
+        const u64 base = vb ? Q(vb + 8) : 0;
+        const u32 size = vb ? R<u32>(vb) : 0;
+        const u32 stride = R<u32>(ctx + CtxVbStrides + slot * 4);
+        Mix(key, stride);
+        if (!base || !size || !stride) {
+            bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
+        } else if (Buf::Import(base, size).buffer) {
+            vb_in_place.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            vb_copy_bytes.fetch_add(size, std::memory_order_relaxed);
+        }
+    }
+    vertex_layouts.insert(key);
+
+    const u32 prim = R<u32>(ctx + CtxPrimType);
+    if (prim > 6 && logged_prims.insert(prim).second) {
+        std::printf("Native Vulkan: primitive type %u (drawn as a triangle list, as the port)\n", prim);
+    }
+    if (prim == 5 || prim == 6) { // fans and quads: triangle list indices made per draw
+        generated_index_draws.fetch_add(1, std::memory_order_relaxed);
+        const u64 tris = prim == 5 ? (count > 2 ? count - 2 : 0) : count / 4 * 2;
+        ib_copy_bytes.fetch_add(tris * 3 * 4, std::memory_order_relaxed);
+    } else if (indexed) {
+        ib_draws.fetch_add(1, std::memory_order_relaxed);
+        const u32 isize = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
+        const u64 bytes = u64(count) * isize;
+        const u64 ib = Q(ctx + CtxIndexBuffer);
+        const u64 ib_base = ib ? Q(ib + 8) : 0;
+        const u32 ib_size = ib ? R<u32>(ib) : 0;
+        // the whole engine index buffer when the draw's indices lie in it (one window for all
+        // its draws), else just the draw's indices
+        const bool inside = ib_base && index_addr >= ib_base && index_addr + bytes <= ib_base + ib_size;
+        if ((inside ? Buf::Import(ib_base, ib_size) : Buf::Import(index_addr, bytes)).buffer) {
+            ib_in_place.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            ib_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        }
+    }
+}
+
+/// Starts the texture and buffer side once both the switch is on and the presenter's instance
+/// exists (the loader and the GnmDriver registration can come in either order).
 void StartTextures() {
     static std::once_flag once;
     const Vulkan::Instance* inst = instance.load();
     if (enabled && inst) {
-        std::call_once(once, [inst] { Tex::Init(*inst); });
+        std::call_once(once, [inst] {
+            Tex::Init(*inst);
+            Buf::Init(*inst);
+        });
     }
 }
 
@@ -519,11 +681,15 @@ void Report() {
         }
         std::size_t keys = 0, live_targets = 0;
         Tex::Stats tx{};
+        Buf::Stats bf{};
+        std::size_t layouts = 0;
         {
             std::lock_guard lk(mutex);
             keys = pipeline_keys.size();
             live_targets = targets.size();
             tx = Tex::GetStats();
+            bf = Buf::GetStats();
+            layouts = vertex_layouts.size();
         }
         std::printf("Native Vulkan: %.0f draws/s; in all %llu draws, %llu resolved, %llu with a "
                     "shader missing, %llu without a target, %llu without a context; %zu pipeline "
@@ -554,6 +720,21 @@ void Report() {
                     (unsigned long long)unset_textures.load(), (unsigned long long)texture_misses.load(),
                     (unsigned long long)bad_tsharps.load(), (unsigned long long)sampler_binds.load(),
                     (unsigned long long)sampler_misses.load());
+        std::printf("Native Vulkan: %zu vertex layouts; vertex streams %llu (%llu read in place, "
+                    "%.1f MiB to copy, %llu unusable); indexed draws %llu (%llu in place, %.1f MiB "
+                    "to copy), %llu fan/quad draws; attributes: %llu missing, %llu unknown format, "
+                    "%llu integer. Imported guest memory: %llu windows (%.0f MiB), %llu not "
+                    "importable; %llu of %llu lookups in place\n",
+                    layouts, (unsigned long long)vb_binds.load(),
+                    (unsigned long long)vb_in_place.load(), vb_copy_bytes.load() / 1048576.0,
+                    (unsigned long long)bad_vertex_buffers.load(), (unsigned long long)ib_draws.load(),
+                    (unsigned long long)ib_in_place.load(), ib_copy_bytes.load() / 1048576.0,
+                    (unsigned long long)generated_index_draws.load(),
+                    (unsigned long long)missing_attributes.load(),
+                    (unsigned long long)unknown_vertex_formats.load(),
+                    (unsigned long long)integer_attributes.load(), (unsigned long long)bf.windows,
+                    bf.bytes / 1048576.0, (unsigned long long)bf.failed_windows,
+                    (unsigned long long)bf.hits, (unsigned long long)bf.lookups);
         std::fflush(stdout);
         last = d;
     }
@@ -605,7 +786,8 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         return;
     }
     std::lock_guard lk(mutex);
-    ShaderInfo* vs = Resolve(Q(ctx + CtxVs), "vertex");
+    const u64 vsh = Q(ctx + CtxVs);
+    ShaderInfo* vs = Resolve(vsh, "vertex");
     const u64 psh = Q(ctx + CtxPs);
     ShaderInfo* ps = psh ? Resolve(psh, "pixel") : nullptr;
     // an export shader feeds a geometry shader (which carries its own copy VS)
@@ -637,6 +819,7 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
     if (ps) {
         BindStage(false, *ps, ctx, dev);
     }
+    FetchVertices(ctx, vsh, *vs, indexed, count, index_addr);
     // what a VkPipeline is keyed on
     u64 key = 0xcbf29ce484222325ull;
     Mix(key, vs);
@@ -651,7 +834,5 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         Mix(key, R<u32>(ctx + off));
     }
     pipeline_keys.insert(key);
-    (void)count; // used once draws are issued
-    (void)index_addr;
 }
 } // namespace BbNativeVk

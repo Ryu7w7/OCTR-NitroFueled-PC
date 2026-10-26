@@ -107,6 +107,10 @@ public:
     bool IsGuestMemoryExportSupported() const {
         return guest_memory_export;
     }
+    /// bbport: host memory can be imported as device memory (VK_EXT_external_memory_host).
+    bool IsExternalMemoryHostSupported() const {
+        return external_memory_host;
+    }
 
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
@@ -581,6 +585,7 @@ private:
     vk::Queue graphics_queue;
     vk::Queue readback_queue;
     bool guest_memory_export{};
+    bool external_memory_host{};
     u32 readback_family_index = NoFamily;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;

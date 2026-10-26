@@ -106,4 +106,34 @@ uses the device's own missing-texture T# at `device+0x580`.
 
 Not done yet: refreshing textures the CPU rewrites (videos, runtime atlases), 2D-tiled modes,
 3D textures beyond the first slice, and the per-slot swizzle constants (`ctr_swz`, b13) the shaders
-expect. Next: vertex/index fetch, then the draw itself.
+expect.
+
+First in-game run: 880 textures (538 MiB) uploaded in 312 batches, 14 samplers, none failed. 18% of
+texture binds are render targets. The 24 textures not converted are all GPU-written screen-sized
+images (tiling 14 = 2D thin, and 0): destinations of the engine's compute copies (`kCopyTexture`,
+which the D3D11 port handles in its copy hook). They are handled when copies run natively, not by
+the CPU untiler.
+
+## Stage 4: vertex and index data
+
+`FetchVertices` in `bbport_native_vk.cpp` builds each draw's vertex layout as the port's `GetLayout`
+does:
+
+- **Matching:** each VS input semantic is matched by usage and usage index (shader header `+0x18` →
+  input elements at `+0x30`) to an element of the engine's vertex formats (`ctx+0x520`). That element
+  gives its stream slot, byte offset and Gnm data format.
+- **Streams:** slot strides are at `ctx+0x610`. Engine buffer records (`{u32 size; u64 address}`) are
+  at `ctx+0x4a0` for vertex streams and `ctx+0x5a0` for the index buffer. The index size is at `ctx+0x5c4`.
+- **Formats:** integer formats (uint/sint, uscaled/sscaled) are fetched raw, as the translated shaders
+  expect, and the shaders convert scaled data themselves.
+- **Topology:** fans and quads need generated triangle-list indices, as in the port.
+
+**Improvement over the port:** instead of copying vertex and index data, `bbport_native_vk_buffer.cpp`
+imports the game's memory as `VkBuffer`s (`VK_EXT_external_memory_host`, now enabled on the device
+when available). Imports use windows of up to 16 MiB, clipped to the committed region around the
+data, so the GPU reads vertices and indices in place, as the PS4's GPU does. That needs no per-draw
+copy and no write tracking. Memory that will not import falls back to copying; the log reports both.
+
+The device already enables `VK_EXT_vertex_input_dynamic_state` where supported, so vertex layouts can
+stay out of the pipeline key at the draw stage. Next: the draw itself (pipelines, descriptor sets,
+constant buffers, the b13 swizzle/conversion constants, clears and copies).
