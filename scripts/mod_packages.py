@@ -78,11 +78,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     root=Path(environment.get('BB_MODS_DIR',Path(data)/'mods'))
     # Preserve the zero-package path, including custom patches/settings/data locations.
     if environment.get('BB_MODS_ENABLED','1')=='0' or not root.is_dir():return Path(game),str(config)
-    from prepare import sfo
-    game_info=sfo((Path(game)/'sce_sys/param.sfo').read_bytes())
+    from game_check import sfo_info
+    game_info=sfo_info(game)
     title_id,app_version=game_info.get('TITLE_ID'),game_info.get('APP_VER')
-    if title_id not in ('CUSA13795','CUSA14876') or app_version!='01.21':
-        raise ValueError('Mod packages require a supported CTR edition at 01.21')
+    supported=title_id in ('CUSA13795','CUSA14876') and app_version=='01.21'
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
     try:
@@ -92,6 +91,15 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         catalog=scan(root,library)
         for message in catalog['messages']:log('OCTR mods: '+message)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
+        if not supported:
+            # Every package ships a mods folder: a game the packages cannot target (EU 1.00, no
+            # readable param.sfo) starts as before, and is refused only with a package enabled.
+            enabled=json.loads(selection.read_text()).get('enabled',[]) if selection.exists() else []
+            if any(key.startswith(PREFIX) and key.removeprefix(PREFIX) in catalog['entries'] for key in enabled):
+                raise ValueError('Mod packages require a supported CTR edition at 01.21 (this game: '+
+                    (title_id or 'unknown')+' '+(app_version or 'unknown version')+')')
+            if catalog['entries'] or catalog['messages']:environment['BB_MODS_ENABLED']='0'  # not loose mods
+            lock.__exit__(None,None,None);return Path(game),str(config)
         patchdir=Path(environment.get('BB_PATCHES_DIR',Path(port)/'patches'))
         found=external_patches(patchdir,app_version,title_id)
         if library.resolve()!=patchdir.resolve():

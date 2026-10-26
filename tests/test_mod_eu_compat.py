@@ -97,5 +97,19 @@ class RegionalPackageTests(unittest.TestCase):
     def test_missing_game_sfo_is_not_assumed_usa(self):
         self.configure('CUSA13795','CUSA13795')
         (self.game/'sce_sys/param.sfo').unlink()
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(ValueError,'unknown'):
             self.actual_prepare()
+
+    def test_unsupported_game_without_enabled_package_starts(self):
+        # Packages ship an empty mods folder: EU 1.00 must start as before.
+        self.configure('CUSA14876','CUSA14876',version='01.00')
+        self.enable()
+        game,config=self.actual_prepare()
+        self.assertEqual((game,config),(self.game,str(self.ini)))
+        self.assertEqual(self.environment.get('BB_MODS_ENABLED'),'0')
+
+    def test_unsupported_game_with_empty_mods_folder_starts(self):
+        (self.game/'sce_sys/param.sfo').unlink()
+        self.environment={}
+        game,_=self.actual_prepare()
+        self.assertEqual(game,self.game)
