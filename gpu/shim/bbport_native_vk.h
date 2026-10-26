@@ -33,6 +33,10 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr);
 /// sceGnmSubmit(AndFlip)CommandBuffers: submits what was recorded since the last one.
 void OnSubmit();
 
+/// BB_VK_ALONE=1 (with BB_VK_SHOW=1): this renderer alone draws the frame. shadPS4 still runs
+/// the command buffers (compute, DMA, fences, flips) but skips every draw (any thread).
+bool DrawsAlone();
+
 /// For the presenter (BB_VK_SHOW=1): the renderer's image (a VkImage) of the display buffer at
 /// `address`, in General layout, and the VkFormat to view it with (`wanted`: the presenter's own
 /// view format for that buffer).

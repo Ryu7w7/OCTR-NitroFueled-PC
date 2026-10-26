@@ -149,6 +149,7 @@ u64 image_base = 0;
 bool enabled = false;
 bool drawing = false; // stage 5 on (BB_VK_DRAW != 0) and the recorder is up
 bool show = false;    // BB_VK_SHOW=1
+std::atomic<bool> alone{false}; // BB_VK_ALONE=1: shadPS4 draws nothing
 // Vertex streams are copied at each draw (default): the game rewrites its vertex memory before
 // our recorded frame runs on the GPU, so reading in place shows later data. BB_VK_VERTEX_COPY=0
 // reads in place (imported) instead.
@@ -1040,6 +1041,7 @@ struct PipelineState {
     ShaderInfo* vs = nullptr;
     VkShaderModule vs_module = VK_NULL_HANDLE;
     ShaderInfo* ps = nullptr;
+    ShaderInfo* gs = nullptr; // behind an export shader (vs then is the ES)
     vk::Format colors[8]{};
     u32 color_count = 0;
     vk::Format depth = vk::Format::eUndefined;
@@ -1053,6 +1055,7 @@ struct PipelineState {
         u64 k = 0xcbf29ce484222325ull;
         Mix(k, vs_module);
         Mix(k, ps);
+        Mix(k, gs);
         Mix(k, colors);
         Mix(k, color_count);
         Mix(k, depth);
@@ -1071,16 +1074,19 @@ struct PipelineState {
     }
 };
 
-VkPipelineLayout PipelineLayout(const ShaderInfo& vs, const ShaderInfo* ps) {
-    const VkDescriptorSetLayout sets[2] = {vs.set_layout, ps ? ps->set_layout : empty_set_layout};
+/// Sets: VS (or ES) 0, PS 1 (empty without one), GS 2 when there is one.
+VkPipelineLayout PipelineLayout(const ShaderInfo& vs, const ShaderInfo* ps,
+                                const ShaderInfo* gs = nullptr) {
+    const VkDescriptorSetLayout sets[3] = {vs.set_layout, ps ? ps->set_layout : empty_set_layout,
+                                           gs ? gs->set_layout : VK_NULL_HANDLE};
     u64 key = 0xcbf29ce484222325ull;
     Mix(key, sets);
     if (const auto it = pipeline_layouts.find(key); it != pipeline_layouts.end()) {
         return it->second;
     }
-    const vk::DescriptorSetLayout vk_sets[2] = {sets[0], sets[1]};
+    const vk::DescriptorSetLayout vk_sets[3] = {sets[0], sets[1], sets[2]};
     auto [r, layout] = instance.load()->GetDevice().createPipelineLayout(
-        {.setLayoutCount = 2, .pSetLayouts = vk_sets});
+        {.setLayoutCount = gs ? 3u : 2u, .pSetLayouts = vk_sets});
     return pipeline_layouts[key] = r == vk::Result::eSuccess ? VkPipelineLayout(layout) : VK_NULL_HANDLE;
 }
 
@@ -1091,6 +1097,10 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
     const Vulkan::Instance* inst = instance.load();
     std::vector<vk::PipelineShaderStageCreateInfo> stages{
         {.stage = vk::ShaderStageFlagBits::eVertex, .module = s.vs_module, .pName = "main"}};
+    if (s.gs) {
+        stages.push_back(
+            {.stage = vk::ShaderStageFlagBits::eGeometry, .module = s.gs->module, .pName = "main"});
+    }
     if (s.ps) {
         stages.push_back(
             {.stage = vk::ShaderStageFlagBits::eFragment, .module = s.ps->module, .pName = "main"});
@@ -1212,7 +1222,8 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
     auto [r, pipeline] = inst->GetDevice().createGraphicsPipeline(Gpu::PipelineCache(), info);
     if (r != vk::Result::eSuccess) {
         if (pipelines_failed.fetch_add(1, std::memory_order_relaxed) < 16) {
-            std::printf("Native Vulkan: pipeline %s + %s not created (%s)\n", s.vs->name.c_str(),
+            std::printf("Native Vulkan: pipeline %s%s%s + %s not created (%s)\n",
+                        s.vs->name.c_str(), s.gs ? " + " : "", s.gs ? s.gs->name.c_str() : "",
                         s.ps ? s.ps->name.c_str() : "-", vk::to_string(r).c_str());
         }
         return VK_NULL_HANDLE;
@@ -1229,7 +1240,7 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
 
 /// What a pipeline is made from, by value (one record of pipelines.bin).
 struct PipelineDesc {
-    u64 vs = 0, ps = 0; // program hashes; ps 0: none
+    u64 vs = 0, ps = 0, gs = 0; // program hashes; 0: none
     u64 vertex_key = 0;
     u32 uint_mask = 0, sint_mask = 0;
     vk::Format colors[8]{};
@@ -1345,6 +1356,7 @@ void Remember(u64 key, const PipelineState& st, const VertexInput& vi) {
     PipelineDesc d{};
     d.vs = st.vs->hash;
     d.ps = st.ps ? st.ps->hash : 0;
+    d.gs = st.gs ? st.gs->hash : 0;
     d.vertex_key = vi.key;
     d.uint_mask = vi.uint_mask;
     d.sint_mask = vi.sint_mask;
@@ -1419,18 +1431,24 @@ void PreloadKnown() {
     while (in.read(reinterpret_cast<char*>(&d), sizeof(d))) {
         const auto vs_it = shaders.find(d.vs);
         const auto ps_it = d.ps ? shaders.find(d.ps) : shaders.end();
+        const auto gs_it = d.gs ? shaders.find(d.gs) : shaders.end();
         if (vs_it == shaders.end() || (d.ps && ps_it == shaders.end()) ||
-            d.binding_count > 16 || d.attribute_count > 32) {
+            (d.gs && gs_it == shaders.end()) || d.binding_count > 16 || d.attribute_count > 32) {
             ++missing;
             continue;
         }
         ShaderInfo& vs = vs_it->second;
         ShaderInfo* ps = d.ps ? &ps_it->second : nullptr;
+        ShaderInfo* gs = d.gs ? &gs_it->second : nullptr;
         LoadModule(vs);
         if (ps) {
             LoadModule(*ps);
         }
-        if (!vs.module || !vs.set_layout || (ps && (!ps->module || !ps->set_layout))) {
+        if (gs) {
+            LoadModule(*gs);
+        }
+        if (!vs.module || !vs.set_layout || (ps && (!ps->module || !ps->set_layout)) ||
+            (gs && (!gs->module || !gs->set_layout))) {
             ++missing;
             continue;
         }
@@ -1454,6 +1472,7 @@ void PreloadKnown() {
         st.vs = &vs;
         st.vs_module = Variant(vs, d.uint_mask, d.sint_mask);
         st.ps = ps;
+        st.gs = gs;
         std::copy(std::begin(d.colors), std::end(d.colors), st.colors);
         st.color_count = d.color_count;
         st.depth = d.depth;
@@ -1468,7 +1487,7 @@ void PreloadKnown() {
         st.setup = d.setup;
         st.topology = d.topology;
         st.vertices = &vi;
-        const VkPipelineLayout layout = st.vs_module ? PipelineLayout(vs, ps) : VK_NULL_HANDLE;
+        const VkPipelineLayout layout = st.vs_module ? PipelineLayout(vs, ps, gs) : VK_NULL_HANDLE;
         if (!layout) {
             ++missing;
             continue;
@@ -1639,8 +1658,13 @@ vk::PrimitiveTopology Topology(u32 prim) {
     }
 }
 
-void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Target* colors[8],
-          Target* depth_target, bool indexed, u32 count, u64 index_addr) {
+void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u64 gsh,
+          ShaderInfo* gs, Target* colors[8], Target* depth_target, bool indexed, u32 count,
+          u64 index_addr) {
+    if (gs && (!gs->module || !gs->set_layout)) {
+        skipped_gs.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (!count || !vs.module || !vs.set_layout || (ps && (!ps->module || !ps->set_layout))) {
         skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -1749,6 +1773,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
     st.vs = &vs;
     st.vs_module = Variant(vs, vi.uint_mask, vi.sint_mask);
     st.ps = ps;
+    st.gs = gs;
     for (u32 i = 0; i < 8; ++i) {
         if (pass.color[i]) {
             st.colors[i] = pass.color[i]->format;
@@ -1779,7 +1804,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
     }
     const u64 key = st.Key();
     pipeline_keys.insert(key);
-    const VkPipelineLayout layout = PipelineLayout(vs, ps);
+    const VkPipelineLayout layout = PipelineLayout(vs, ps, gs);
     auto found = pipelines.find(key);
     if (found == pipelines.end() && compiling.count(key)) {
         TakeCompiled();
@@ -1812,14 +1837,16 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
 
     // everything taken from the upload ring first: a full ring submits early, which ends the
     // command buffer, so nothing may be bound before
-    Gpu::Span vcb[14]{}, pcb[14]{};
-    u32 vsz[14]{}, psz[14]{};
+    Gpu::Span vcb[14]{}, pcb[14]{}, gcb[14]{};
+    u32 vsz[14]{}, psz[14]{}, gsz[14]{};
+    const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
     if (!StageConstants(vsh, vcb, vsz) || !InfoConstants(vres, vi.vin, &vcb[13]) ||
-        (ps && (!StageConstants(psh, pcb, psz) || !InfoConstants(pres, nullptr, &pcb[13])))) {
+        (ps && (!StageConstants(psh, pcb, psz) || !InfoConstants(pres, nullptr, &pcb[13]))) ||
+        (gs && (!StageConstants(gsh, gcb, gsz) || !InfoConstants(gres, nullptr, &gcb[13])))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    vsz[13] = psz[13] = sizeof(InfoCB);
+    vsz[13] = psz[13] = gsz[13] = sizeof(InfoCB);
     VkBuffer index_buffer = VK_NULL_HANDLE;
     u64 index_offset = 0;
     vk::IndexType index_type = vk::IndexType::eUint32;
@@ -1910,16 +1937,21 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
         return;
     }
     const vk::DescriptorSet vset = WriteStageSet(vs, vres, vcb, vsz, depth_ro);
-    const vk::DescriptorSet pset = ps ? WriteStageSet(*ps, pres, pcb, psz, depth_ro) : vk::DescriptorSet{};
-    if (!vset || (ps && !pset)) {
+    // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
+    const vk::DescriptorSet pset = ps   ? WriteStageSet(*ps, pres, pcb, psz, depth_ro)
+                                   : gs ? Gpu::AllocateSet(empty_set_layout)
+                                        : vk::DescriptorSet{};
+    const vk::DescriptorSet gset = gs ? WriteStageSet(*gs, gres, gcb, gsz, nullptr) : vk::DescriptorSet{};
+    if (!vset || ((ps || gs) && !pset) || (gs && !gset)) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     const vk::CommandBuffer cmd = Gpu::Cmd();
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
-    const vk::DescriptorSet sets[2] = {vset, pset};
-    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 0, ps ? 2 : 1, sets, 0, nullptr);
+    const vk::DescriptorSet sets[3] = {vset, pset, gset};
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 0, gs ? 3 : ps ? 2 : 1, sets, 0,
+                           nullptr);
     // viewport and scissor: the engine counts y from the bottom of the target (the shadow
     // cascades of the 2048x8192 atlas are at y 6144, 4096, 2048); a negative height flips y as
     // in D3D
@@ -2177,6 +2209,13 @@ void StartTextures() {
                                            : (shader_root / "pipeline_cache.bin").string());
             const char* sh = std::getenv("BB_VK_SHOW");
             show = drawing && sh && sh[0] == '1';
+            const char* al = std::getenv("BB_VK_ALONE");
+            if (al && al[0] == '1') {
+                alone.store(show, std::memory_order_release);
+                std::printf("Native Vulkan: BB_VK_ALONE=1: %s\n",
+                            show ? "shadPS4 draws nothing, this renderer draws the frame alone"
+                                 : "ignored (needs BB_VK_SHOW=1)");
+            }
             const char* fc = std::getenv("BB_VK_VERTEX_COPY");
             force_copy = !(fc && fc[0] == '0');
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
@@ -2456,12 +2495,10 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         return;
     }
     resolved.fetch_add(1, std::memory_order_relaxed);
-    if (gs) {
-        skipped_gs.fetch_add(1, std::memory_order_relaxed); // the ES -> GS ring comes later
-        return;
-    }
     if (drawing) {
-        Draw(ctx, dev, vsh, *vs, psh, ps, colors, depth_target, indexed, count, index_addr);
+        // with a GS, the ES runs as the vertex stage and its outputs feed the GS directly (the
+        // ES -> GS ring of the PS4 becomes the pipeline's own interface, as in the D3D11 port)
+        Draw(ctx, dev, vsh, *vs, psh, ps, gsh, gs, colors, depth_target, indexed, count, index_addr);
         return;
     }
     // stage 4: count only
@@ -2496,6 +2533,10 @@ void OnSubmit() {
     }
     Geo::Collect();
     Gpu::Submit();
+}
+
+bool DrawsAlone() {
+    return alone.load(std::memory_order_relaxed);
 }
 
 bool Display(std::uint64_t address, std::uint32_t wanted, std::uint64_t* image,
