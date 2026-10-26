@@ -99,6 +99,7 @@ struct ShaderInfo {
     std::unordered_map<u64, VkShaderModule> variants; // integer inputs: uint mask | sint mask << 32
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     bool load_tried = false;
+    bool native = false; // a shader written for the PC (native/) in place of the translation
 };
 
 /// A Vulkan image standing in for an engine render or depth target (or a texture copy's
@@ -404,7 +405,21 @@ void LoadModule(ShaderInfo& s) {
         return;
     }
     s.load_tried = true;
-    std::ifstream f(shader_root / "spirv" / (s.name + ".spv"), std::ios::binary);
+    // a shader written for the PC in place of the translation, where there is one
+    // (BB_VK_NATIVE_SHADERS=0: the translations)
+    static const bool native_shaders = [] {
+        const char* env = std::getenv("BB_VK_NATIVE_SHADERS");
+        return !(env && env[0] == '0');
+    }();
+    fs::path path = shader_root / "native" / (s.name + ".spv");
+    std::error_code ec;
+    s.native = native_shaders && fs::exists(path, ec);
+    if (s.native) {
+        std::printf("Native Vulkan: %s: the PC shader in place of the translation\n", s.name.c_str());
+    } else {
+        path = shader_root / "spirv" / (s.name + ".spv");
+    }
+    std::ifstream f(path, std::ios::binary);
     std::vector<char> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     s.code.resize(bytes.size() / 4);
     std::memcpy(s.code.data(), bytes.data(), s.code.size() * 4);
