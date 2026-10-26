@@ -1374,20 +1374,31 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
     vi.copy = true;
     u32 vertex_end = 0; // made once, when a stream has to be copied
     const u32 isize_ = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
+    // the draw's indices, copied with its vertices: the engine rewrites index memory (rings)
+    // before the GPU runs the frame, so they are read now, and the copy gives the vertex range
+    Gpu::Span index_copy{};
+    bool index_unreadable = false;
     FetchVertices(ctx, vsh, vs, vi, [&]() -> u32 {
         if (vertex_end) {
             return vertex_end;
         }
         vertex_end = count;
-        if (indexed && index_addr && Buf::Readable(index_addr, u64(count) * isize_)) {
+        if (indexed && index_addr) {
+            const u64 bytes = u64(count) * isize_;
+            index_copy = Gpu::Upload(bytes, 4);
+            if (!index_copy.data || !Read(index_addr, index_copy.data, bytes)) {
+                index_copy = {};
+                index_unreadable = true;
+                return vertex_end;
+            }
             u32 top = 0;
             if (isize_ == 2) {
-                const auto* p = reinterpret_cast<const std::uint16_t*>(index_addr);
+                const auto* p = static_cast<const std::uint16_t*>(index_copy.data);
                 for (u32 i = 0; i < count; ++i) {
                     top = p[i] != 0xffff ? std::max<u32>(top, p[i]) : top;
                 }
             } else {
-                const auto* p = reinterpret_cast<const u32*>(index_addr);
+                const auto* p = static_cast<const u32*>(index_copy.data);
                 for (u32 i = 0; i < count; ++i) {
                     top = p[i] != 0xffffffffu ? std::max(top, p[i]) : top;
                 }
@@ -1396,6 +1407,10 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
         }
         return vertex_end;
     });
+    if (index_unreadable) {
+        skipped_indices.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (!vi.ok) {
         skipped_vertices.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -1540,9 +1555,15 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
         // the whole engine index buffer when the draw's indices lie in it (one window for all
         // its draws), else just the draw's indices
         const bool inside = ib_base && index_addr >= ib_base && index_addr + bytes <= ib_base + ib_size;
-        const Buf::Slice s = inside ? Buf::Import(ib_base, ib_size) : Buf::Import(index_addr, bytes);
+        const Buf::Slice s = force_copy ? Buf::Slice{}
+                             : inside   ? Buf::Import(ib_base, ib_size)
+                                        : Buf::Import(index_addr, bytes);
         const u64 offset = s.offset + (inside ? index_addr - ib_base : 0);
-        if (s.buffer && offset % isize == 0) {
+        if (index_copy.data) {
+            ib_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            index_buffer = index_copy.buffer;
+            index_offset = index_copy.offset;
+        } else if (s.buffer && offset % isize == 0) {
             ib_in_place.fetch_add(1, std::memory_order_relaxed);
             index_buffer = s.buffer;
             index_offset = offset;
