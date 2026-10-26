@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -124,6 +125,7 @@ struct VertexInput {
     u32 vin[32]{}; // ctr_vin: per semantic, 1 = uscaled, 2 = sscaled (the shader converts)
     u64 key = 0;
     bool ok = true;
+    bool copy = false; // streams that cannot be imported are copied (drawing)
 };
 
 /// b13 of every stage (the D3D11 port's InfoCB).
@@ -140,6 +142,7 @@ u64 image_base = 0;
 bool enabled = false;
 bool drawing = false; // stage 5 on (BB_VK_DRAW != 0) and the recorder is up
 bool show = false;    // BB_VK_SHOW=1
+bool force_copy = false; // BB_VK_VERTEX_COPY=1: vertex streams copied, never read in place
 bool dynamic_vertex_input = false;
 u64 ubo_align = 256;
 fs::path shader_root;
@@ -814,7 +817,9 @@ constexpr u32 ZeroBinding = 15;
 /// semantic is matched (by usage and usage index from the shader header) to an element of the
 /// engine's vertex formats, which gives its stream slot, offset and data format. The streams are
 /// slices of imported guest memory, read in place.
-void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi) {
+/// `vertex_end`: one past the highest vertex the draw reads (made only when a stream is copied).
+void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
+                   const std::function<u32()>& vertex_end) {
     const u64 hdr = Q(vsh + ShHeader);
     const s32 nin = hdr ? R<s32>(hdr + HdrInputElements) : 0;
     const u64 ins = hdr ? Q(hdr + HdrInputElements + 0x10) : 0;
@@ -899,13 +904,26 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi) {
         if (!base || !size || !stride) {
             bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
             vi.ok = false;
-        } else if (const Buf::Slice s = Buf::Import(base, size); s.buffer) {
+        } else if (const Buf::Slice s = force_copy ? Buf::Slice{} : Buf::Import(base, size);
+                   s.buffer) {
             vb_in_place.fetch_add(1, std::memory_order_relaxed);
             vi.buffers[slot] = s.buffer;
             vi.offsets[slot] = s.offset + first;
+        } else if (!vi.copy) {
+            vi.ok = false; // stage 4 counting only
         } else {
-            vb_copy_bytes.fetch_add(size, std::memory_order_relaxed);
-            vi.ok = false; // no copy path yet: the import has not failed in any run so far
+            // the part the draw reads, through the upload ring (only memory that is readable)
+            const u64 bytes = std::min<u64>(size, u64(first) + u64(vertex_end()) * stride);
+            const Gpu::Span span = bytes > first ? Gpu::Upload(bytes - first, 16) : Gpu::Span{};
+            if (!span.data || !Buf::Readable(base + first, bytes - first) ||
+                !Read(base + first, span.data, bytes - first)) {
+                bad_vertex_buffers.fetch_add(1, std::memory_order_relaxed);
+                vi.ok = false;
+                continue;
+            }
+            vb_copy_bytes.fetch_add(bytes - first, std::memory_order_relaxed);
+            vi.buffers[slot] = span.buffer;
+            vi.offsets[slot] = span.offset;
         }
     }
     if (zero_binding) {
@@ -1350,7 +1368,35 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, Ta
         BindStage(false, *ps, ctx, dev, pres);
     }
     VertexInput vi;
-    FetchVertices(ctx, vsh, vs, vi);
+    vi.copy = true;
+    u32 vertex_end = 0; // made once, when a stream has to be copied
+    const u32 isize_ = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
+    FetchVertices(ctx, vsh, vs, vi, [&]() -> u32 {
+        if (vertex_end) {
+            return vertex_end;
+        }
+        vertex_end = count;
+        if (indexed && index_addr) {
+            std::vector<u8> idx(u64(count) * isize_);
+            u32 top = 0;
+            if (Read(index_addr, idx.data(), idx.size())) {
+                for (u32 i = 0; i < count; ++i) {
+                    u32 v;
+                    if (isize_ == 2) {
+                        std::uint16_t h;
+                        std::memcpy(&h, &idx[i * 2], 2);
+                        v = h == 0xffff ? 0 : h;
+                    } else {
+                        std::memcpy(&v, &idx[i * 4], 4);
+                        v = v == 0xffffffffu ? 0 : v;
+                    }
+                    top = std::max(top, v);
+                }
+                vertex_end = top + 1;
+            }
+        }
+        return vertex_end;
+    });
     if (!vi.ok) {
         skipped_vertices.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -1776,9 +1822,18 @@ void StartTextures() {
                 inst->GetPhysicalDevice().getProperties().limits.minUniformBufferOffsetAlignment, 16);
             dynamic_vertex_input = inst->IsVertexInputDynamicState();
             std::lock_guard lk(mutex);
-            drawing = empty_set_layout && Gpu::Init(*inst);
+            drawing = empty_set_layout &&
+                      Gpu::Init(*inst, shader_root.empty()
+                                           ? std::string()
+                                           : (shader_root / "pipeline_cache.bin").string());
             const char* sh = std::getenv("BB_VK_SHOW");
             show = drawing && sh && sh[0] == '1';
+            const char* fc = std::getenv("BB_VK_VERTEX_COPY");
+            force_copy = drawing && fc && fc[0] == '1';
+            if (force_copy) {
+                std::printf("Native Vulkan: BB_VK_VERTEX_COPY=1: vertex streams are copied, not read "
+                            "in place\n");
+            }
             std::printf("Native Vulkan: drawing %s (dynamic vertex input %s, constant alignment "
                         "%llu)%s\n",
                         drawing ? "on" : "NOT available", dynamic_vertex_input ? "yes" : "no",
@@ -1791,6 +1846,7 @@ void StartTextures() {
 void Report() {
     u64 last = 0, last_draw_ns = 0, last_clear_ns = 0, last_copy_ns = 0, last_submit_ns = 0,
         last_gpu_ns = 0, last_frames = 0, last_submits = 0;
+    std::size_t saved_pipelines = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         const u64 d = draws.load();
@@ -1806,6 +1862,10 @@ void Report() {
             std::lock_guard lk(mutex);
             keys = pipeline_keys.size();
             made_pipelines = pipelines.size();
+            if (drawing && made_pipelines != saved_pipelines) {
+                Gpu::SaveCache(); // new pipelines compile from the file next run
+                saved_pipelines = made_pipelines;
+            }
             live_targets = targets.size();
             tx = Tex::GetStats();
             bf = Buf::GetStats();
@@ -1849,7 +1909,7 @@ void Report() {
                     (unsigned long long)bad_tsharps.load(), (unsigned long long)sampler_binds.load(),
                     (unsigned long long)sampler_misses.load());
         std::printf("Native Vulkan: %zu vertex layouts; vertex streams %llu (%llu read in place, "
-                    "%.1f MiB to copy, %llu unusable); indexed draws %llu (%llu in place, %.1f MiB "
+                    "%.1f MiB copied, %llu unusable); indexed draws %llu (%llu in place, %.1f MiB "
                     "copied), %llu fan/quad draws; attributes: %llu missing, %llu unknown format, "
                     "%llu integer. Imported guest memory: %llu windows (%.0f MiB), %llu not "
                     "importable; %llu of %llu lookups in place\n",
@@ -2009,7 +2069,7 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
         BindStage(false, *ps, ctx, dev, pres);
     }
     VertexInput vi;
-    FetchVertices(ctx, vsh, *vs, vi);
+    FetchVertices(ctx, vsh, *vs, vi, [] { return 0u; });
 }
 
 void OnSubmit() {

@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <tuple>
 #include <mutex>
 #include <vector>
 
@@ -46,6 +50,7 @@ std::uint8_t* ring_data = nullptr;
 u64 ring_head = 0;
 
 vk::PipelineCache pipeline_cache;
+std::string cache_file;
 
 bool rendering = false;
 Pass open_pass{};
@@ -159,7 +164,7 @@ void SubmitFrame(bool early) {
 }
 } // namespace
 
-bool Init(const Vulkan::Instance& vulkan) {
+bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     instance = &vulkan;
     device = vulkan.GetDevice();
     const auto families = vulkan.GetPhysicalDevice().getQueueFamilyProperties();
@@ -206,8 +211,22 @@ bool Init(const Vulkan::Instance& vulkan) {
         return false;
     }
     ring_data = static_cast<std::uint8_t*>(info.pMappedData);
-    auto [cr, cache] = device.createPipelineCache({});
+    // a cache from an earlier run (the driver ignores data from another driver or GPU)
+    cache_file = cache_path;
+    std::vector<char> data;
+    if (!cache_file.empty()) {
+        std::ifstream in(cache_file, std::ios::binary);
+        data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    auto [cr, cache] = device.createPipelineCache(
+        {.initialDataSize = data.size(), .pInitialData = data.empty() ? nullptr : data.data()});
+    if (cr != vk::Result::eSuccess && !data.empty()) {
+        std::tie(cr, cache) = device.createPipelineCache({});
+    }
     pipeline_cache = cr == vk::Result::eSuccess ? cache : vk::PipelineCache{};
+    std::printf("Native Vulkan: pipeline cache %s (%zu KiB from %s)\n",
+                pipeline_cache ? "on" : "not made", data.size() / 1024,
+                cache_file.empty() ? "nowhere" : cache_file.c_str());
     Begin(Cur());
     return true;
 }
@@ -435,6 +454,26 @@ vk::DescriptorSet AllocateSet(vk::DescriptorSetLayout layout) {
         }
         return {}; // not even an empty pool holds it
     }
+}
+
+void SaveCache() {
+    if (!pipeline_cache || cache_file.empty()) {
+        return;
+    }
+    auto [r, data] = device.getPipelineCacheData(pipeline_cache);
+    if (r != vk::Result::eSuccess || data.empty()) {
+        return;
+    }
+    const std::string tmp = cache_file + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+        if (!out) {
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, cache_file, ec);
 }
 
 vk::PipelineCache PipelineCache() {

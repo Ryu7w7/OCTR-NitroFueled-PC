@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -51,7 +52,10 @@ struct Stats {
     std::uint64_t gpu_ns; // GPU time of the finished command buffers (timestamps)
 };
 
-bool Init(const Vulkan::Instance& instance);
+/// `cache_path`: where the pipeline cache is loaded from and saved to (empty: not kept).
+bool Init(const Vulkan::Instance& instance, const std::string& cache_path);
+/// Writes the pipeline cache to its file.
+void SaveCache();
 
 /// The open command buffer.
 vk::CommandBuffer Cmd();
