@@ -190,7 +190,9 @@ def scan(root,patchdir):
             item['version_notice']='Using '+item['version']+'. Other copies retained: '+', '.join(i['source']+' ('+i['version']+')' for i in items if i is not item)
         found[ident]=item
     result={'entries':found,'messages':messages};save_json(storage(root)/'library.json',result)
-    xml=ET.Element('Patch');ids=ET.SubElement(xml,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795'
+    # Display-only catalog: native UI records only the first TitleID and would
+    # hide a multi-ID catalog on the other edition. Executable XML is checked separately.
+    xml=ET.Element('Patch')
     for ident,item in sorted(found.items()):
         meta=ET.SubElement(xml,'Metadata',Title='Crash Team Racing Nitro-Fueled',Name='Mod: '+ident,
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',

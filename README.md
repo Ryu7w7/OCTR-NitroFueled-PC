@@ -4,6 +4,9 @@
 
 # OCTR: CTR Nitro-Fueled PC, online
 
+> **EU mod packages:** [CUSA14876 01.21 loader support and update instructions](docs/eu-mod-packages.md).
+> [CNK Drift Gauge + Reserves Meter — EU](https://github.com/Majed-allababedi/CTR-CNK-Drift-Gauge-EU): original mod by tomtotom, EU adaptation by Majed-allababedi. Select **Speedometer HUD** in-game.
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
 Linux, with online play on a community server.**
 
