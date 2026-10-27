@@ -12,6 +12,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_native_vk.h"
 #include "bbport_overlay.h"
 #include "bbport_timeline.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -348,7 +349,21 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     BbTimeline::Note(BbTimeline::PipeTask, 4, draw_scheduler.CurrentTick());
     // bbport: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
-    const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
+    // bbport: BB_VK_SHOW=1: the native renderer's image of this buffer (General layout); viewed
+    // like the upscaler's display image, and handed back in General layout after the passes.
+    bool native = false;
+    {
+        std::uint64_t image = 0;
+        std::uint32_t format = 0, width = 0, height = 0;
+        native = BbNativeVk::Display(
+            cpu_address, std::uint32_t(GetFrameViewFormat(attribute.attrib.pixel_format)), &image,
+            &format, &width, &height);
+        if (native) {
+            display = {vk::Image(reinterpret_cast<VkImage>(image)), vk::Format(format), width, height};
+        }
+    }
+    const bool upscaled =
+        native || rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
     VideoCore::ImageId image_id{};
     if (!upscaled) {
         auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
@@ -383,7 +398,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         image_view = Check(device.createImageView({
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
+            .format = native ? display.format : view_info.format,
             .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
                            vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
@@ -466,6 +481,21 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             Breadcrumbs::Mark(cmdbuf, stream, pp_crumb, true);
         }
     });
+    if (native) {
+        draw_scheduler.Record([image = display.image](vk::CommandBuffer cmdbuf) {
+            const vk::ImageMemoryBarrier2 back{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderRead,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = image,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            };
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &back});
+        });
+    }
 
     // Flush frame creation commands.
     BbStats::frame_number.fetch_add(1, std::memory_order_relaxed); // bbport: game frames shown

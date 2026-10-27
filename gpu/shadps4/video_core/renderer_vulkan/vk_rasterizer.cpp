@@ -16,6 +16,7 @@
 #include "bbport_free_check.h"
 #include "bbport_clobber.h"
 #include "bbport_guest_memory.h"
+#include "bbport_native_vk.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/hash.h"
 #include "common/debug.h"
@@ -1430,6 +1431,9 @@ bool Rasterizer::FilterDrawPasses() const {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
+    if (BbNativeVk::DrawsAlone()) {
+        return; // bbport: the native renderer draws the frame (BB_VK_ALONE=1)
+    }
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -1716,6 +1720,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    if (BbNativeVk::DrawsAlone()) {
+        return; // bbport: the native renderer draws the frame (BB_VK_ALONE=1)
+    }
     // bbport: like direct draws, handed to the recording thread after the pipeline selection
     // (else the GPU thread waited here for a whole frame of queued draws).
     const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
@@ -4006,7 +4013,18 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     }
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);
+    if (native_written) {
+        native_written(addr, size);
+    }
     return true;
+}
+
+void Rasterizer::WatchWrites(VAddr addr, u64 size, bool watch) {
+    if (watch) {
+        page_manager.UpdatePageWatchers<true>(addr, size);
+    } else {
+        page_manager.UpdatePageWatchers<false>(addr, size);
+    }
 }
 
 void Rasterizer::NoteAssetWrite(VAddr addr, u64 size) {
@@ -4025,6 +4043,11 @@ void Rasterizer::InvalidateAfterWrite(VAddr addr, u64 size) {
     DrainDrawPipe();
     buffer_cache.NotePreciseUpload(addr, size);
     texture_cache.InvalidateMemory(addr, size);
+    // bbport: the native renderer's resident geometry and textures there are stale too (a course
+    // loaded over the title screen's meshes)
+    if (native_written) {
+        native_written(addr, size);
+    }
 }
 
 void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool recording_thread) {
@@ -4040,6 +4063,9 @@ void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool r
         buffer_cache.InvalidateMemory(addr, size, recording_thread);
     }
     texture_cache.InvalidateMemory(addr, size);
+    if (native_written) {
+        native_written(addr, size);
+    }
 }
 
 void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
@@ -4103,6 +4129,9 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    if (native_unmapped) {
+        native_unmapped(addr, size);
+    }
     buffer_cache.NotePreuploadMapping(addr, size, false);
     buffer_cache.UnmapInPlace(addr, size);
     buffer_cache.DropTwins(addr, size);

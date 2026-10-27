@@ -66,6 +66,11 @@ public:
         return window;
     }
 
+    /// bbport: the native Vulkan renderer (shim/bbport_native_vk.cpp) shares this device
+    const Instance& GetInstance() const {
+        return instance;
+    }
+
     Rasterizer& GetRasterizer() const {
         return *rasterizer.get();
     }

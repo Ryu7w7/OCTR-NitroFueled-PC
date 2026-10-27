@@ -25,6 +25,8 @@
 #include "bbport_timeline.h"
 #include "bbport_heap_sites.h"
 #include "bbport_gnm_hooks.h"
+#include "bbport_engine_probe.h"
+#include "bbport_native_vk.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -608,6 +610,8 @@ u32 PS4_SYSV_ABI sceGnmDispatchInitDefaultHardwareState(u32* cmdbuf, u32 size) {
 s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr_t index_addr,
                                  u32 flags, u32 type) {
     LOG_TRACE(Lib_GnmDriver, "called");
+    BbEngineProbe::NoteDraw(true);
+    BbNativeVk::OnDraw(true, index_count, index_addr);
 
     if (cmdbuf && (size == 10) && (index_addr != 0) && (index_addr & 1) == 0 &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -628,6 +632,8 @@ s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr
 
 s32 PS4_SYSV_ABI sceGnmDrawIndexAuto(u32* cmdbuf, u32 size, u32 index_count, u32 flags) {
     LOG_TRACE(Lib_GnmDriver, "called");
+    BbEngineProbe::NoteDraw(false);
+    BbNativeVk::OnDraw(false, index_count, 0);
 
     if (cmdbuf && (size == 7) &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -2469,6 +2475,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
+    BbNativeVk::OnSubmit(); // bbport: the native renderer's work recorded for these
     std::scoped_lock lk{m_submit_lock};
     if (!SubmitLockOnDecode()) {
         WaitGpuIdle();
@@ -2518,6 +2525,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
+    BbNativeVk::OnSubmit(); // bbport: the native renderer's work recorded for these
     std::scoped_lock lk{m_submit_lock};
     if (!SubmitLockOnDecode()) {
         WaitGpuIdle();
@@ -3126,6 +3134,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
     presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    BbNativeVk::Attach(presenter->GetInstance());
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {
