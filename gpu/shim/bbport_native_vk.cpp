@@ -906,7 +906,11 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
         if (slot->written_over.load(std::memory_order_acquire)) { // drawn to again: ours again
             slot->written_over.store(false, std::memory_order_relaxed);
             Tex::WatchTarget(base, slot->bytes, &slot->written_over);
-            targets_reclaimed.fetch_add(1, std::memory_order_relaxed);
+            if (targets_reclaimed.fetch_add(1, std::memory_order_relaxed) < 32) {
+                std::printf("Native Vulkan: %s %llx %ux%u %s drawn to again after the game wrote "
+                            "over it\n", what, (unsigned long long)base, w, h,
+                            vk::to_string(format).c_str());
+            }
         }
         return slot.get();
     }
@@ -1009,7 +1013,11 @@ Target* Current(u64 base) {
         return nullptr;
     }
     if (it->second->written_over.load(std::memory_order_acquire)) {
-        targets_passed_over.fetch_add(1, std::memory_order_relaxed);
+        if (targets_passed_over.fetch_add(1, std::memory_order_relaxed) < 32) {
+            std::printf("Native Vulkan: target %llx %ux%u written over by the game: read from "
+                        "memory\n", (unsigned long long)base, it->second->img.width,
+                        it->second->img.height);
+        }
         return nullptr;
     }
     return it->second.get();
