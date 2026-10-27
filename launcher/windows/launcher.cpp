@@ -3562,7 +3562,7 @@ void OnlineTab() {
                      "queda guardado en el servidor, ligado a tu apodo.",
                      "You earn it by playing: races give coins and you buy in the Pit Stop. What you buy is kept on "
                      "the server, tied to your nickname."));
-        if (ImGui::RadioButton(T("De mi partida guardada (100%)", "From my save (100%)"), from_save)) {
+        if (ImGui::RadioButton(T("Progresión de guardado local", "Local save progress"), from_save)) {
             a.game.Set("online_inventory", "save");
             SaveGameIni();
         }

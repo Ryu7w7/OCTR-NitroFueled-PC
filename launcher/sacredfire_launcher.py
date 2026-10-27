@@ -229,7 +229,7 @@ INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key in INI_P
 # player's identity on the server: the first installation to use one keeps it.
 ONLINE_SERVER = "octr.ryu7w7.xyz"
 RESERVED_NICKS = {"ryupc", "ryunet", "player", "jugador", "guest"}
-INVENTORIES = [("Bought on the server", "server"), ("From my save (100% saves)", "save")]
+INVENTORIES = [("Bought on the server", "server"), ("Local save progress", "save")]
 
 
 def nick_ok(name):
