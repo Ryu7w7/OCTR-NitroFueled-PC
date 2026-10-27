@@ -773,7 +773,7 @@ void OpenBatch(Batch* b) {
 /// A draw, clear or submission as the game's thread hands it to the capture thread: the engine
 /// context, with its pointers to the objects copied here pointing at the copies.
 struct Capture {
-    enum class Kind : u8 { Draw, Clear, Submit };
+    enum class Kind : u8 { Draw, Clear, Copy, Submit };
     Kind kind = Kind::Draw;
     u64 dev = 0;
     bool indexed = false;
@@ -782,11 +782,17 @@ struct Capture {
     u32 flags = 0, stencil = 0; // a clear's
     float color[4]{}, depth = 0.0f;
     bool has_color = false;
+    u32 copy_src[8]{}, copy_dst[8]{}; // a copy's T#s and parameters
+    s32 copy_p[8]{};
+    u64 copy_key = 0;
     alignas(16) u8 ctx[CtxBytes];
     alignas(16) u8 color_targets[8][ColorTargetBytes];
     alignas(16) u8 depth_target[DepthTargetBytes];
     alignas(16) u8 buffers[16][BufferBytes]; // vertex buffer resources, by stream slot
     alignas(16) u8 index_buffer[BufferBytes];
+    // the T#s of the vertex and pixel shaders' texture slots: the engine's texture objects are
+    // rewritten in place (a Bink video points its planes at the next decoded frame)
+    alignas(16) u32 tsharps[2][16][8];
     // the vertex, pixel and geometry shaders' constants
     struct Cb {
         u32 slot, size, offset;
@@ -2749,6 +2755,30 @@ void KeepContext(Capture& c, u64 ctx, bool colors, bool depth) {
     }
 }
 
+/// The T#s of a stage's texture slots (`field`: CtxVsTextures or CtxPsTextures), each checked
+/// readable once.
+void KeepTextures(Capture& c, u64 field, u32 (&to)[16][8]) {
+    thread_local u64 good[256]{};
+    for (int slot = 0; slot < 16; ++slot) {
+        const u64 at = u64(c.ctx) + field + slot * 8;
+        const u64 t = Q(at);
+        if (!t) {
+            continue;
+        }
+        u64& g = good[(t >> 5 ^ t >> 13) & 255];
+        if (g != t) {
+            if (!Read(t, to[slot], sizeof(to[slot]))) {
+                continue; // the capture thread finds it unreadable too
+            }
+            g = t;
+        } else {
+            std::memcpy(to[slot], reinterpret_cast<const void*>(t), sizeof(to[slot]));
+        }
+        const u64 copy = u64(to[slot]);
+        std::memcpy(c.ctx + field + slot * 8, &copy, 8);
+    }
+}
+
 /// A stage's constant buffers, as StageConstants reads them.
 void CaptureConstants(Capture& c, u32 stage, u64 shader) {
     const u64 hdr = shader ? Q(shader + ShHeader) : 0;
@@ -2902,11 +2932,6 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     if (a[0] < 0 || a[1] < 0 || a[2] < 0 || a[3] < 0) {
         return false;
     }
-    Timer timer(copy_ns);
-    if (capture_thread) {
-        WaitCaptured(); // the answer depends on the targets made by the draws before it
-    }
-    std::lock_guard lk(mutex);
     const Tex::Info s = Tex::Describe(src), d = Tex::Describe(dst);
     const auto it = targets.find(s.base);
     const bool from_depth = it != targets.end() && it->second->img.depth;
@@ -3111,10 +3136,39 @@ void RunCopy(const CopyPacket& c) {
     pending_copies.push_back(c);
 }
 
+/// Copies done before (keys of their T#s and parameters): the game's thread answers from these
+/// without waiting for the capture thread, which does the copy in order with the draws.
+std::mutex copies_known_mutex;
+std::unordered_set<u64> copies_known;
+
 /// kCopyTexture's hook: with BB_VK_ALONE=1 a copy done here replaces the engine's (its compute
 /// copy would only run in shadPS4's images, which nothing shows), else the engine's runs too.
+/// With the capture thread the copy is handed over and the answer is whether the same copy was
+/// done before: a first one also runs the engine's, which only writes shadPS4's images.
 __attribute__((sysv_abi)) bool OnCopy(u64 ctx, const u32* src, const u32* dst, const s32* p) {
-    const bool done = CopyTexture(ctx, src, dst, p);
+    if (!drawing || !src || !dst || !p) {
+        return false;
+    }
+    Timer timer(copy_ns);
+    bool done;
+    if (capture_thread) {
+        Capture& c = TakeCapture();
+        c.kind = Capture::Kind::Copy;
+        std::memcpy(c.copy_src, src, sizeof(c.copy_src));
+        std::memcpy(c.copy_dst, dst, sizeof(c.copy_dst));
+        std::memcpy(c.copy_p, p, sizeof(c.copy_p));
+        c.copy_key = Fnv(reinterpret_cast<const u8*>(c.copy_p), sizeof(c.copy_p),
+                         Fnv(reinterpret_cast<const u8*>(c.copy_dst), sizeof(c.copy_dst),
+                             Fnv(reinterpret_cast<const u8*>(c.copy_src), sizeof(c.copy_src))));
+        {
+            std::lock_guard kl(copies_known_mutex);
+            done = copies_known.count(c.copy_key) != 0;
+        }
+        Hand(c);
+    } else {
+        std::lock_guard lk(mutex);
+        done = CopyTexture(ctx, src, dst, p);
+    }
     if (done && alone.load(std::memory_order_relaxed)) {
         copies_replaced.fetch_add(1, std::memory_order_relaxed);
         return true;
@@ -3541,6 +3595,12 @@ void CaptureThread() {
             case Capture::Kind::Clear:
                 ClearFrom(ctx, c->flags, c->has_color ? c->color : nullptr, c->stencil, c->depth);
                 break;
+            case Capture::Kind::Copy:
+                if (CopyTexture(0, c->copy_src, c->copy_dst, c->copy_p)) {
+                    std::lock_guard kl(copies_known_mutex);
+                    copies_known.insert(c->copy_key);
+                }
+                break;
             case Capture::Kind::Submit:
                 SubmitNow();
                 break;
@@ -3595,6 +3655,8 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
     if (indexed && prim != 5 && prim != 6) { // fans and quads read the indices themselves
         Keep(c, CtxIndexBuffer, c.index_buffer, BufferBytes);
     }
+    KeepTextures(c, CtxVsTextures, c.tsharps[0]);
+    KeepTextures(c, CtxPsTextures, c.tsharps[1]);
     CaptureConstants(c, 0, vsh);
     CaptureConstants(c, 1, Q(cctx + CtxPs));
     // only used when the vertex shader is an export shader (Crash's fur shells), which the
