@@ -4043,6 +4043,11 @@ void Rasterizer::InvalidateAfterWrite(VAddr addr, u64 size) {
     DrainDrawPipe();
     buffer_cache.NotePreciseUpload(addr, size);
     texture_cache.InvalidateMemory(addr, size);
+    // bbport: the native renderer's resident geometry and textures there are stale too (a course
+    // loaded over the title screen's meshes)
+    if (native_written) {
+        native_written(addr, size);
+    }
 }
 
 void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool recording_thread) {
@@ -4058,6 +4063,9 @@ void Rasterizer::NoteCommandWrite(VAddr addr, const void* data, u64 size, bool r
         buffer_cache.InvalidateMemory(addr, size, recording_thread);
     }
     texture_cache.InvalidateMemory(addr, size);
+    if (native_written) {
+        native_written(addr, size);
+    }
 }
 
 void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {

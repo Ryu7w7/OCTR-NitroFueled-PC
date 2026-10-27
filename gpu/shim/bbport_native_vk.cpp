@@ -824,9 +824,11 @@ void Flush();
 // deferred copies (RunCopy)
 bool defer_copies = true;
 std::vector<CopyPacket> pending_copies; // recorder side; at most one per destination
-std::atomic<u64> copies_dropped{0};
+std::atomic<u64> copies_dropped{0}, copies_swapped{0};
 void BeforeRead(const Gpu::Image* img);
 void BeforeWrite(const Gpu::Image* img);
+void FlushCopiesFrom(const Gpu::Image* img);
+bool DropCopyInto(const Gpu::Image* img);
 void StartRecorder();
 u64 GeoSerial();
 void GeoUpload(const void* src, u64 n, VkBuffer dst, u64 dst_offset);
@@ -2946,8 +2948,52 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
     Hand(c);
 }
 
+/// A pending whole copy from `t`, which a clear is about to cover all over, goes by swapping the
+/// two targets' images instead: the destination takes the source's image as it is (what the copy
+/// would have made), the source the destination's old one, which the clear covers. True when it
+/// did (the only pending copy from `t`, same size, format and channel order).
+bool SwapForClear(Target* t) {
+    std::size_t at = pending_copies.size();
+    for (std::size_t i = 0; i < pending_copies.size(); ++i) {
+        if (pending_copies[i].src != t) {
+            continue;
+        }
+        if (at != pending_copies.size()) {
+            return false; // two copies read it: made as copies
+        }
+        at = i;
+    }
+    if (at == pending_copies.size()) {
+        return false;
+    }
+    const CopyPacket c = pending_copies[at];
+    Target* const d = c.dst;
+    if (c.from_depth || d == t || c.sx || c.dx || c.s_top || c.d_top || c.w != t->img.width ||
+        c.h != t->img.height || d->img.width != t->img.width || d->img.height != t->img.height ||
+        d->img.format != t->img.format || d->comp_swap != t->comp_swap) {
+        return false;
+    }
+    pending_copies.erase(pending_copies.begin() + at);
+    FlushCopiesFrom(&d->img); // copies reading the destination's present contents go first
+    DropCopyInto(&t->img);    // the clear covers it
+    Gpu::EndRendering();      // neither image may stay attached to an open pass
+    std::swap(t->img, d->img);
+    std::swap(t->allocation, d->allocation);
+    std::swap(t->view, d->view);
+    std::swap(t->view_array, d->view_array);
+    copies_swapped.fetch_add(1, std::memory_order_relaxed);
+    if (Gpu::Tracing()) {
+        Gpu::Trace("  swap %s <-> %s (in place of a copy)\n", Gpu::Describe(&t->img).c_str(),
+                   Gpu::Describe(&d->img).c_str());
+    }
+    return true;
+}
+
 void RunClear(const ClearPacket& c) {
-    BeforeWrite(&c.target->img);
+    const bool whole = c.color || (c.depth && (c.stencil || !c.target->img.stencil));
+    if (!(whole && !pending_copies.empty() && SwapForClear(c.target))) {
+        BeforeWrite(&c.target->img);
+    }
     if (c.color) {
         Gpu::ClearColor(c.target->img, c.c);
     } else {
@@ -3439,7 +3485,7 @@ void Report() {
             std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; game's thread "
                         "%.0f ms in draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms "
                         "submits, of it %.0f ms waiting for the capture thread (%.0f ms busy); GPU "
-                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed; not done: %s\n",
+                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed, %llu swapped instead; not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
@@ -3448,7 +3494,8 @@ void Report() {
                         (unsigned long long)depth_copies.load(),
                         (unsigned long long)draw_copies.load(),
                         (unsigned long long)copies_replaced.load(),
-                        (unsigned long long)copies_dropped.load(), reasons.c_str());
+                        (unsigned long long)copies_dropped.load(),
+                        (unsigned long long)copies_swapped.load(), reasons.c_str());
             {
                 std::size_t queued = 0;
                 {
