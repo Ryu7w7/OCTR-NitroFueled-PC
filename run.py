@@ -309,12 +309,19 @@ def proof_header(khash, method, target):
     return f'1.{ts}.{nonce}.{mac}'
 
 
+HTTPS_PORT = 443      # the server's nginx: /ryunet/ by HTTPS (tests point it elsewhere)
+HTTPS_FAILED = set()  # servers whose HTTPS failed this run: their next requests go to the port
+
+
 def ryunet_json(host, port, target, timeout, method='GET', headers=None):
     """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
-    By the server's name first, then by its address when something on the way answers for the
+    By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
+    filter on the way cannot rewrite it, and networks that only let 80/443 out reach it. Then by
+    plain HTTP on the port, by name and by address when something on the way answers for the
     name: an ISP's filter that redirects to its own warning page (Spectrum's Security Shield) or
     serves one. The game's own requests do the same (src/runtime_http.c). headers(method, target)
-    makes each attempt's headers, so a signature is never sent twice. OSError when neither works."""
+    makes each attempt's headers, so a signature is never sent twice. OSError when none works."""
+    import ipaddress
     import socket
     import urllib.error
     import urllib.request
@@ -324,29 +331,45 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None):
             return None  # the server never redirects: a redirect comes from something on the way
 
     opener = urllib.request.build_opener(NoRedirect)
-    names = [host]
+    urls = []
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:  # a name: a certificate can vouch for it (never for a bare address)
+        if host not in HTTPS_FAILED:
+            urls.append((f'https://{host}' + (f':{HTTPS_PORT}' if HTTPS_PORT != 443 else '') + target, True))
+    urls.append((f'http://{host}:{port}{target}', False))
     try:
         address = socket.gethostbyname(host)
         if address != host:
-            names.append(address)
+            urls.append((f'http://{address}:{port}{target}', False))
     except OSError:
         pass
     failure = OSError(f'{host}: no answer')
-    for name in names:
-        request = urllib.request.Request(f'http://{name}:{port}{target}', method=method,
-                                         data=b'' if method == 'POST' else None,
+    for url, secure in urls:
+        name = url.split('/')[2]
+        request = urllib.request.Request(url, method=method, data=b'' if method == 'POST' else None,
                                          headers=headers(method, target) if headers else {})
         try:
             with opener.open(request, timeout=timeout) as reply:
                 if 'json' not in (reply.headers.get('Content-Type') or ''):
                     failure = OSError(f'{name}: answered by something on the way, not the server')
+                    HTTPS_FAILED.update([host] if secure else [])
                     continue
                 return json.loads(reply.read(1 << 16)), reply  # the theme carries the item rules
         except urllib.error.HTTPError as error:
+            if secure and 'json' not in (error.headers.get('Content-Type') or ''):
+                HTTPS_FAILED.add(host)  # not the server's answer (no /ryunet/ there yet): the port
+                failure = OSError(f'{name}: HTTPS answered {error.code}')
+                continue
             if 300 <= error.code < 400:
                 failure = OSError(f'{name}: redirected to {error.headers.get("Location")}')
                 continue
             raise
+        except OSError as error:  # no 443, a certificate that does not verify, a clock far off
+            if not secure:
+                raise
+            HTTPS_FAILED.add(host)
+            failure = OSError(f'{name}: HTTPS failed ({error})')
     raise failure
 
 

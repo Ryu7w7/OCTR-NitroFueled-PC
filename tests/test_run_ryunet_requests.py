@@ -59,6 +59,15 @@ class FilteredServerTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.port = self.server.server_address[1]
+        # HTTPS goes to a closed port (nothing answers), so these requests use plain HTTP.
+        import socket
+        with socket.socket() as closed:
+            closed.bind(('127.0.0.1', 0))
+            closed_port = closed.getsockname()[1]
+        self.addCleanup(setattr, run, 'HTTPS_PORT', run.HTTPS_PORT)
+        run.HTTPS_PORT = closed_port
+        run.HTTPS_FAILED.clear()
+        self.addCleanup(run.HTTPS_FAILED.clear)
 
     def claim_through(self, kind):
         self.filter = kind
@@ -83,6 +92,26 @@ class FilteredServerTests(unittest.TestCase):
         self.filter = 'none'
         self.run.claim_nick('localhost', self.port, 'Tester', 'ab' * 32)
         self.assertEqual([(m, h) for m, h, _, _ in self.seen], [('GET', 'localhost'), ('POST', 'localhost')])
+
+    def test_https_that_fails_is_tried_once_then_the_port(self):
+        # Something that is not TLS on the HTTPS port (a filter, a missing nginx): the handshake
+        # fails, the request goes to the port, and the next ones skip HTTPS.
+        self.filter = 'none'
+        self.run.HTTPS_PORT = self.port
+        self.assertEqual(self.run.server_settings('localhost', self.port), {'theme': 'halloween'})
+        self.run.claim_nick('localhost', self.port, 'Tester', 'ab' * 32)
+        self.assertEqual(self.run.HTTPS_FAILED, {'localhost'})
+        self.assertEqual(self.lines, ['Nickname Tester: claimed on localhost'])
+        # The handshake reached the fake once (unreadable to it); then every request was plain HTTP.
+        self.assertEqual([p for _, _, p, _ in self.seen if p.startswith('/ryunet')],
+                         ['/ryunet/theme', '/ryunet/nick', '/ryunet/nick/claim'])
+
+    def test_an_address_never_tries_https(self):
+        self.filter = 'none'
+        self.run.HTTPS_PORT = self.port
+        self.assertEqual(self.run.server_settings('127.0.0.1', self.port), {'theme': 'halloween'})
+        self.assertEqual(self.run.HTTPS_FAILED, set())
+        self.assertEqual([(m, h) for m, h, _, _ in self.seen], [('GET', '127.0.0.1')])
 
 
 if __name__ == '__main__':
