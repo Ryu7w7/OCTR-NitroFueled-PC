@@ -57,13 +57,20 @@ Host host{}; // none: textures are kept as first made
 // Watched textures by guest base, and the page manager's watch on each of their pages (one for
 // all the textures on a page). The write hook comes from any thread.
 struct PageWatch {
-    u32 textures = 0;    // watched textures on the page
+    u32 textures = 0;    // watched textures and targets on the page
     bool watched = false; // our watch is on (a write takes it off; the textures there go stale)
 };
 std::mutex watch_mutex;
 std::multimap<u64, Texture*> by_base;
 std::unordered_map<u64, PageWatch> page_watches;
 u64 largest = 0; // the largest watched texture (how far below a write to look)
+// watched render targets: base and size by flag, and the flags by base
+struct TargetWatch {
+    u64 base, size;
+};
+std::unordered_map<std::atomic<bool>*, TargetWatch> target_watches;
+std::multimap<u64, std::atomic<bool>*> targets_by_base;
+u64 largest_target = 0;
 std::atomic<bool> any_watched{false};
 Vulkan::Rasterizer* rasterizer = nullptr;
 std::unordered_map<u64, VkSampler> samplers;
@@ -504,9 +511,10 @@ vk::SamplerAddressMode AddressMode(u32 c) {
     }
 }
 
-/// Watches `t`'s pages (under watch_mutex): a write from now on makes it stale.
-void Watch(Texture* t) {
-    const u64 first = t->base >> PageBits, last = (t->base + t->size - 1) >> PageBits;
+/// Counts one more watched thing on the pages of [base, base + size) (under watch_mutex), turning
+/// the page manager's watch on where it is off.
+void WatchPages(u64 base, u64 size) {
+    const u64 first = base >> PageBits, last = (base + size - 1) >> PageBits;
     u64 run = 0, run_start = 0;
     auto flush = [&] {
         if (run) {
@@ -528,6 +536,30 @@ void Watch(Texture* t) {
         ++run;
     }
     flush();
+}
+
+/// One fewer watched thing on those pages; pages with none lose our watch.
+void UnwatchPages(u64 base, u64 size) {
+    const u64 first = base >> PageBits, last = (base + size - 1) >> PageBits;
+    for (u64 p = first; p <= last; ++p) {
+        const auto it = page_watches.find(p);
+        if (it == page_watches.end() || --it->second.textures) {
+            continue;
+        }
+        if (it->second.watched) {
+            rasterizer->WatchWrites(p << PageBits, u64(1) << PageBits, false);
+        }
+        page_watches.erase(it);
+    }
+}
+
+void AnyWatched() {
+    any_watched.store(!by_base.empty() || !target_watches.empty(), std::memory_order_release);
+}
+
+/// Watches `t`'s pages (under watch_mutex): a write from now on makes it stale.
+void Watch(Texture* t) {
+    WatchPages(t->base, t->size);
     by_base.emplace(t->base, t);
     largest = std::max(largest, t->size);
     t->watched = true;
@@ -546,18 +578,25 @@ void Unwatch(Texture* t) {
             break;
         }
     }
-    const u64 first = t->base >> PageBits, last = (t->base + t->size - 1) >> PageBits;
-    for (u64 p = first; p <= last; ++p) {
-        const auto it = page_watches.find(p);
-        if (it == page_watches.end() || --it->second.textures) {
-            continue;
-        }
-        if (it->second.watched) {
-            rasterizer->WatchWrites(p << PageBits, u64(1) << PageBits, false);
-        }
-        page_watches.erase(it);
+    UnwatchPages(t->base, t->size);
+    AnyWatched();
+}
+
+/// Stops watching a target (under watch_mutex).
+void UnwatchTargetLocked(std::atomic<bool>* written) {
+    const auto it = target_watches.find(written);
+    if (it == target_watches.end()) {
+        return;
     }
-    any_watched.store(!by_base.empty(), std::memory_order_release);
+    for (auto [b, end] = targets_by_base.equal_range(it->second.base); b != end; ++b) {
+        if (b->second == written) {
+            targets_by_base.erase(b);
+            break;
+        }
+    }
+    UnwatchPages(it->second.base, it->second.size);
+    target_watches.erase(it);
+    AnyWatched();
 }
 
 /// Takes the texture out of `textures` and retires it (its memory goes once the GPU is done).
@@ -657,8 +696,14 @@ void Written(std::uint64_t addr, std::uint64_t size) {
     if (!hit) {
         return;
     }
-    // every texture on a written page is stale
+    // every texture on a written page is stale, every target there written over
     const u64 lo = first << PageBits, hi = (last + 1) << PageBits;
+    for (auto it = targets_by_base.lower_bound(lo > largest_target ? lo - largest_target : 0);
+         it != targets_by_base.end() && it->first < hi; ++it) {
+        if (it->first + target_watches[it->second].size > lo) {
+            it->second->store(true, std::memory_order_release);
+        }
+    }
     for (auto it = by_base.lower_bound(lo > largest ? lo - largest : 0); it != by_base.end() && it->first < hi;
          ++it) {
         Texture* t = it->second;
@@ -666,6 +711,27 @@ void Written(std::uint64_t addr, std::uint64_t size) {
             t->stale.store(true, std::memory_order_release);
         }
     }
+}
+
+void WatchTarget(std::uint64_t base, std::uint64_t size, std::atomic<bool>* written) {
+    if (!rasterizer || !host.retire || !size || !rasterizer->IsMapped(base, size)) {
+        return;
+    }
+    std::lock_guard lk(watch_mutex);
+    UnwatchTargetLocked(written);
+    WatchPages(base, size);
+    target_watches[written] = TargetWatch{base, size};
+    targets_by_base.emplace(base, written);
+    largest_target = std::max(largest_target, u64(size));
+    any_watched.store(true, std::memory_order_release);
+}
+
+void UnwatchTarget(std::atomic<bool>* written) {
+    if (!rasterizer) {
+        return;
+    }
+    std::lock_guard lk(watch_mutex);
+    UnwatchTargetLocked(written);
 }
 
 void Destroy(Texture* t) {

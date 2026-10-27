@@ -73,6 +73,12 @@ void SetHost(const Host& host);
 /// renderer's write hook, any thread).
 void Written(std::uint64_t addr, std::uint64_t size);
 
+/// Watches a render target's memory: a guest write or unmap there sets `*written` (the game put
+/// something else in that memory, which the target's image no longer holds). Watched again by
+/// calling this again (after the flag was cleared); `UnwatchTarget` before the flag goes.
+void WatchTarget(std::uint64_t base, std::uint64_t size, std::atomic<bool>* written);
+void UnwatchTarget(std::atomic<bool>* written);
+
 /// Frees a retired texture's image, views and the texture itself.
 void Destroy(Texture* texture);
 

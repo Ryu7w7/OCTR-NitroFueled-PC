@@ -117,7 +117,13 @@ struct Target {
     VkImageView view_array = VK_NULL_HANDLE; // sampled as a one-slice 2D array
     u32 comp_swap = 0; // CB_COLOR_INFO.COMP_SWAP: channel order the engine writes in
     u64 bytes = 0;
+    // the game wrote or freed the target's memory (a video decoded where a menu target was): the
+    // texture there is read from memory until the GPU draws to the target again
+    std::atomic<bool> written_over{false};
 };
+
+/// The target at `base` if its image holds what is there (not written over by the game).
+Target* Current(u64 base);
 
 /// What a draw binds at one texture slot.
 struct Slot {
@@ -199,7 +205,8 @@ std::unordered_map<u64, Shown> shown;
 std::atomic<u64> draws{0}, resolved{0}, missing_shader{0}, no_target{0}, no_context{0};
 std::atomic<u64> wrong_stage{0}; // a program bound in a stage it is not for (stale context state)
 std::atomic<u64> modules_made{0}, modules_failed{0}, unknown_programs{0};
-std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable_targets{0};
+std::atomic<u64> targets_made{0}, targets_remade{0}, targets_failed{0}, unusable_targets{0},
+    targets_reclaimed{0}, targets_passed_over{0};
 std::atomic<u64> target_bytes{0};
 std::atomic<u64> texture_binds{0}, target_binds{0}, unset_textures{0}, texture_misses{0},
     bad_tsharps{0}, sampler_binds{0}, sampler_misses{0}, textures_not_ready{0};
@@ -855,6 +862,7 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     const VmaAllocator vma = inst.GetAllocator();
     const VkImage image = t.img.image;
     const VmaAllocation allocation = t.allocation;
+    Tex::UnwatchTarget(&t.written_over); // usually done when it left `targets`
     set_generation.fetch_add(1, std::memory_order_release); // cached sets may hold its views
     std::vector<VkImageView> views{t.view};
     if (t.view_array) {
@@ -879,7 +887,11 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
         destroy();
     }
     target_bytes.fetch_sub(t.bytes, std::memory_order_relaxed);
-    t = Target{};
+    t.img = {};
+    t.allocation = nullptr;
+    t.view = t.view_array = VK_NULL_HANDLE;
+    t.comp_swap = 0;
+    t.bytes = 0;
 }
 
 /// The image for the target at `base`, made again when its size or format changes.
@@ -891,9 +903,15 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     }
     std::unique_ptr<Target>& slot = targets[base];
     if (slot && slot->img.width == w && slot->img.height == h && slot->img.format == format) {
+        if (slot->written_over.load(std::memory_order_acquire)) { // drawn to again: ours again
+            slot->written_over.store(false, std::memory_order_relaxed);
+            Tex::WatchTarget(base, slot->bytes, &slot->written_over);
+            targets_reclaimed.fetch_add(1, std::memory_order_relaxed);
+        }
         return slot.get();
     }
     if (slot) {
+        Tex::UnwatchTarget(&slot->written_over);
         targets_remade.fetch_add(1, std::memory_order_relaxed);
         if (drawing) {
             // work queued before still draws to the old image: it goes after that work
@@ -977,11 +995,24 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     t.img.layout = vk::ImageLayout::eUndefined;
     t.comp_swap = comp_swap;
     t.bytes = u64(w) * h * FormatBytes(format);
+    Tex::WatchTarget(base, t.bytes, &t.written_over);
     target_bytes.fetch_add(t.bytes, std::memory_order_relaxed);
     targets_made.fetch_add(1, std::memory_order_relaxed);
     std::printf("Native Vulkan: %s %llx %ux%u %s swap %u%s\n", what, (unsigned long long)base, w, h,
                 vk::to_string(format).c_str(), comp_swap, t.view && t.img.attach ? "" : " (no view)");
     return &t;
+}
+
+Target* Current(u64 base) {
+    const auto it = targets.find(base);
+    if (it == targets.end()) {
+        return nullptr;
+    }
+    if (it->second->written_over.load(std::memory_order_acquire)) {
+        targets_passed_over.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    return it->second.get();
 }
 
 /// Gnm::RenderTarget: registers from +0x10 (CB_COLOR_BASE, PITCH, SLICE, VIEW, INFO, ATTRIB),
@@ -1079,9 +1110,9 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
         }
         texture_binds.fetch_add(1, std::memory_order_relaxed);
         Slot& out = res.slots[slot];
-        if (const auto it = targets.find(Tex::TSharpBase(tsharp)); it != targets.end()) {
+        if (Target* target = Current(Tex::TSharpBase(tsharp))) {
             target_binds.fetch_add(1, std::memory_order_relaxed);
-            out.target = it->second.get();
+            out.target = target;
         } else if (const Tex::Texture* tex = Tex::Get(tsharp)) {
             // bound even while its upload is on the way: the recorder waits for it (StageSet)
             if (!tex->ready.load(std::memory_order_acquire)) {
@@ -2933,15 +2964,15 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         return false;
     }
     const Tex::Info s = Tex::Describe(src), d = Tex::Describe(dst);
-    const auto it = targets.find(s.base);
-    const bool from_depth = it != targets.end() && it->second->img.depth;
-    const u32 src_bytes = it == targets.end() ? 0
-                          : from_depth ? (it->second->img.format == vk::Format::eD16Unorm ? 2 : 4)
-                                       : FormatBytes(it->second->img.format);
+    Target* const source = Current(s.base);
+    const bool from_depth = source && source->img.depth;
+    const u32 src_bytes = !source ? 0
+                          : from_depth ? (source->img.format == vk::Format::eD16Unorm ? 2 : 4)
+                                       : FormatBytes(source->img.format);
     int why = SkipCount;
     if (a[6] || a[7]) {
         why = SkipMip;
-    } else if (it == targets.end()) {
+    } else if (!source) {
         why = SkipSource;
     } else if (d.base == s.base) {
         why = SkipSame;
@@ -2964,7 +2995,7 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         skip(why);
         return false;
     }
-    Target& st = *it->second;
+    Target& st = *source;
     Target* dt = MakeTarget(d.base, d.width, d.height, d.format, false,
                             from_depth ? 0 : st.comp_swap, "copy target");
     if (!dt || dt == &st) {
@@ -3299,11 +3330,14 @@ void Report() {
                     (unsigned long long)modules_made.load(), (unsigned long long)modules_failed.load(),
                     (unsigned long long)unknown_programs.load());
         std::printf("Native Vulkan: %zu target images (%.0f MiB); %llu made, %llu made again at a "
-                    "new size or format, %llu failed, %llu unusable target handles\n",
+                    "new size or format, %llu failed, %llu unusable target handles; %llu binds passed over "
+                    "a target the game wrote over, %llu targets drawn to again after that\n",
                     live_targets, target_bytes.load() / 1048576.0,
                     (unsigned long long)targets_made.load(), (unsigned long long)targets_remade.load(),
                     (unsigned long long)targets_failed.load(),
-                    (unsigned long long)unusable_targets.load());
+                    (unsigned long long)unusable_targets.load(),
+                    (unsigned long long)targets_passed_over.load(),
+                    (unsigned long long)targets_reclaimed.load());
         std::printf("Native Vulkan: %llu textures (%.0f MiB), %llu uploaded in %llu batches, %llu "
                     "waiting; not made: %llu unsupported, %llu unreadable, %llu failed; %llu made over "
                     "budget, %llu evicted, %llu made again after the game wrote them, %llu pages "
