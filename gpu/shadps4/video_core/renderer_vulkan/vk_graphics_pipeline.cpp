@@ -179,8 +179,10 @@ GraphicsPipeline::GraphicsPipeline(
     }
     stage = u32(Shader::SwStage::Geometry);
     if (infos[stage]) {
+        // bbport: an emulated geometry shader's expansion pass runs it as the vertex stage.
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
-            .stage = vk::ShaderStageFlagBits::eGeometry,
+            .stage = key.gs_emulation == 2 ? vk::ShaderStageFlagBits::eVertex
+                                           : vk::ShaderStageFlagBits::eGeometry,
             .module = modules[stage],
             .pName = "main",
         });
@@ -502,7 +504,9 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         if (!stage) {
             continue;
         }
-        const auto stage_bit = LogicalStageToStageBit[u32(stage->sw_stage)];
+        const auto stage_bit = key.gs_emulation == 2 && stage->sw_stage == Shader::SwStage::Geometry
+                                   ? vk::ShaderStageFlagBits::eVertex
+                                   : LogicalStageToStageBit[u32(stage->sw_stage)];
         for (const auto& buffer : stage->buffers) {
             const auto sharp =
                 preloading ? AmdGpu::Buffer{}

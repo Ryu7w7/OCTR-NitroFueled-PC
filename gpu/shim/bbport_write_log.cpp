@@ -11,7 +11,11 @@
 #include <windows.h>
 #undef near
 #else
+#ifdef __APPLE__
+#include <sys/ucontext.h> // <ucontext.h> needs _XOPEN_SOURCE on macOS
+#else
 #include <ucontext.h>
+#endif
 #include <unistd.h>
 #endif
 #include <x86intrin.h>
@@ -114,6 +118,9 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     // The loader passes EXCEPTION_POINTERS (see signal_context.cpp).
     const CONTEXT* c = static_cast<const EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
     const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->R14, c->R15};
+#elif defined(__APPLE__)
+    const auto& s = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
+    const std::uint64_t regs[] = {s.__rax, s.__rbx, s.__rcx, s.__rdx, s.__rsi, s.__rdi, s.__r14, s.__r15};
 #else
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     const auto* g = uc->uc_mcontext.gregs;

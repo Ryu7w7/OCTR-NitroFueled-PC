@@ -69,7 +69,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-if (NOT WIN32)
+if (NOT WIN32 AND NOT APPLE)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz QUIET)
@@ -165,10 +165,20 @@ set(COMMON
     shim/common/logging/log.cpp)
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+if (APPLE)
+    # macOS: FFmpeg's .pc lists "-framework AudioToolbox -framework VideoToolbox ..."; CMake
+    # de-duplicates link options, keeps only the first "-framework" and the linker then takes the
+    # other framework names for files. The options are dropped (the same frameworks are also in
+    # the target's libraries) and linked again one by one.
+    set_property(TARGET PkgConfig::FFMPEG PROPERTY INTERFACE_LINK_OPTIONS "")
+    target_link_libraries(PkgConfig::FFMPEG INTERFACE "-framework AudioToolbox" "-framework VideoToolbox"
+        "-framework CoreFoundation" "-framework CoreMedia" "-framework CoreVideo" "-framework CoreServices")
+endif()
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
 # Windows: a DLL cannot leave the runtime_* symbols for bb-probe.exe to resolve, so the
-# library is static there and linked into the executable.
-if (WIN32)
+# library is static there and linked into the executable. macOS does the same (a dylib would
+# need -undefined dynamic_lookup for them).
+if (WIN32 OR APPLE)
     set(BBGPU_KIND STATIC)
 else()
     set(BBGPU_KIND SHARED)
@@ -202,9 +212,11 @@ target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 # Loaded with bb-probe at startup (DT_NEEDED, never dlopen): thread_local access without a
 # TLS descriptor call (_dl_tlsdesc_return was ~2% of the draw recording thread).
-target_compile_options(bbgpu PRIVATE -ftls-model=initial-exec)
+if (NOT APPLE) # Mach-O thread-locals always go through TLV descriptors
+    target_compile_options(bbgpu PRIVATE -ftls-model=initial-exec)
+endif()
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
-if (NOT WIN32)
+if (NOT WIN32 AND NOT APPLE)
     target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
@@ -217,6 +229,12 @@ if (WIN32)
     target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_win_compat.h)
     target_include_directories(bbgpu PRIVATE third_party/xbyak)
     target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm)
+elseif (APPLE)
+    # macOS (x86-64 under Rosetta 2): Vulkan through the loader and MoltenVK; small POSIX helpers
+    # Darwin lacks are force-included like bb_win_compat.h on Windows.
+    target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_mac_compat.h)
+    target_include_directories(bbgpu PRIVATE third_party/xbyak)
+    target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan "-framework Metal" "-framework QuartzCore")
 else()
     target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
 endif()
@@ -299,6 +317,28 @@ if (WIN32)
     target_include_directories(nat-check-test PRIVATE ../launcher/windows)
     target_link_options(nat-check-test PRIVATE -static)
     target_link_libraries(nat-check-test PRIVATE ws2_32 bcrypt)
+endif()
+
+# SacredFire (macOS): the game executable, linked here like on Windows (build.sh builds it with
+# ninja). The loader keeps the main thread for the window (probe.c, bbgpu_main_thread_loop).
+if (APPLE)
+    file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
+    file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
+    add_library(atrac9 STATIC ${BB_ATRAC9})
+    target_compile_options(atrac9 PRIVATE -w)
+    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
+    add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_mac.c ../src/cpu_check.c
+        ../src/vulkan_smoke.c ../src/isa_rewrite.c ../src/isa_emulate.c)
+    set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
+    # isa_emulate runs inside guest code: no XMM/YMM.
+    set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
+    # Warnings stay visible but do not stop the first macOS builds.
+    target_compile_options(sacredfire PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra
+        -Wno-unknown-warning-option -Wno-unused-but-set-global -Wno-deprecated-declarations>)
+    target_include_directories(sacredfire PRIVATE .. ../src)
+    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 -pthread)
+    add_executable(bb-gpu-capabilities ../tools/gpu_capabilities.c)
+    target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan PkgConfig::SDL3)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.

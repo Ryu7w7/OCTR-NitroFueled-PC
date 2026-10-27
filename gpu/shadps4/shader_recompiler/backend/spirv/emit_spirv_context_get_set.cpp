@@ -115,6 +115,9 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
     switch (attr) {
     case IR::Attribute::Position0:
         ASSERT(ctx.sw_stage == SwStage::Geometry);
+        if (ctx.GsEmulated()) {
+            return ctx.OpCompositeExtract(ctx.F32[1], ctx.gs_emu_positions.at(index), comp);
+        }
         return ctx.OpLoad(ctx.F32[1],
                           ctx.OpAccessChain(ctx.input_f32, ctx.gl_in, ctx.ConstU32(index),
                                             ctx.ConstU32(0U), ctx.ConstU32(comp)));

@@ -24,9 +24,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 11u; // sacredfire: float-to-int as GCN (NaN 0, saturated); draw loop budget
-static constexpr u32 ShaderMetaVersion = 9u; // sacredfire: fetch shader descriptors (shader prebuild)
-static constexpr u32 PipelineKeyVersion = 7u; // sacredfire: GS permutations re-indexed; MSAA setting
+static constexpr u32 ShaderBinaryVersion = 12u; // bbport: no NoContraction on macOS; GS emulation
+static constexpr u32 ShaderMetaVersion = 10u; // bbport: GS emulation fields in the runtime info
+static constexpr u32 PipelineKeyVersion = 8u; // bbport: GS emulation pass in the key
 } // namespace Serialization
 
 namespace Vulkan {
@@ -55,7 +55,8 @@ void RegisterPipelineData(const ComputePipelineKey& key,
 
 void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
                           GraphicsPipeline::SerializationSupport& sdata) {
-    if (!Storage::DataBase::Instance().IsOpened()) {
+    // Emulated geometry shader passes embed session-local buffer device addresses.
+    if (!Storage::DataBase::Instance().IsOpened() || key.gs_emulation) {
         return;
     }
 
@@ -164,6 +165,11 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     // Motion vertex shaders embed session-local buffer device addresses. They must be
     // recompiled for the current allocation, never loaded from a previous process.
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        return false;
+    }
+    // bbport: so do the stages of an emulated geometry shader (GsEmulation).
+    if ((info.hw_stage == Shader::HwStage::Export && spec.runtime_info.hw.es.emulate_store) ||
+        (info.hw_stage == Shader::HwStage::Geometry && spec.runtime_info.hw.gs.emulate_as_vertex)) {
         return false;
     }
 

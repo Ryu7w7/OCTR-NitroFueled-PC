@@ -415,7 +415,7 @@ def parse_version(text):
         return None
     suffix = m.group(4)
     while True:
-        for drop in ('-dirty', '-windows', '-linux'):
+        for drop in ('-dirty', '-windows', '-linux', '-macos'):
             if suffix.endswith(drop):
                 suffix = suffix[:-len(drop)]
                 break

@@ -41,6 +41,10 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <set>
+#include <strings.h>
+#include <sys/stat.h>
+
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -1457,11 +1461,258 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     if (!pipeline) {
         return;
     }
+    if (pipeline->GetGraphicsKey().gs_emulation == 2) {
+        // bbport: an emulated geometry shader draw is recorded on this thread: its export pass
+        // pipeline is selected from the live registers, as the draw's own (RecordGsExportPass).
+        if (pipelined && FilterDrawPasses()) {
+            DrainDrawPipe(DrawPipe::ReasonDraw);
+            FrameCapture::Poll();
+            scheduler.PopPendingOperations();
+            if (!FilterDraw()) {
+                return;
+            }
+        }
+        gs_export_pipeline = pipeline_cache.GetGsExportPipeline();
+        if (!gs_export_pipeline) {
+            return;
+        }
+        DrawRecord(pipeline, nullptr, is_indexed, index_offset);
+        gs_export_pipeline = nullptr;
+        return;
+    }
     if (pipelined && FilterDrawPasses()) {
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
         return;
     }
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
+}
+
+bool Rasterizer::RecordGsExportPass(bool is_indexed, u32 index_offset, u32& param,
+                                    u32& vertices) {
+    BB_SECTION(DrawRecord);
+    const auto& regs = Regs();
+    const u32 count = regs.num_indices;
+    const u32 slots = regs.vgt_gs_max_vert_out / 3 * 3;
+    const u32 stride = regs.vgt_esgs_ring_itemsize / 4;
+    if (count < 3 || slots == 0 || stride == 0 || regs.num_instances.NumInstances() != 1) {
+        return false;
+    }
+    // During the Halloween event (its ghosts; BB_THEME=halloween: the server's season theme or
+    // bbport.ini theme=) binding the fur draws' resources loses the device on MoltenVK
+    // (kIOGPUCommandBufferCallbackErrorInvalidResource; cause not found, not with Metal validation
+    // on: docs/sacredfire/19-macos-apple-silicon.md). The fur is skipped then, as before the
+    // emulation, unless BB_GS_EMULATION=all.
+    static const bool skip_for_theme = [] {
+        const char* env = std::getenv("BB_GS_EMULATION");
+        const char* theme = std::getenv("BB_THEME");
+        return !(env && std::strcmp(env, "all") == 0) && theme &&
+               strcasecmp(theme, "halloween") == 0;
+    }();
+    if (skip_for_theme) {
+        return false;
+    }
+    const auto* es = gs_export_pipeline; // selected by Draw
+    if (!es) {
+        return false;
+    }
+    const auto [base_vertex, first_instance] =
+        GetDrawOffsets(regs, es->GetStage(Shader::SwStage::Vertex), es->GetFetchShader());
+    // The vertices the draw uses: the export pass stores them at entry vertex index - first.
+    u32 index_size = 0, lowest = 0, highest = count - 1;
+    const void* indices = nullptr;
+    if (is_indexed) {
+        index_size = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16 ? 2u : 4u;
+        const VAddr index_address =
+            regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size;
+        const u64 bytes = u64(count) * index_size;
+        if (!index_address || !memory->IsValidGpuMapping(index_address, 0) ||
+            memory->ClampRangeSize(index_address, bytes) != bytes) {
+            return false;
+        }
+        lowest = ~0u;
+        highest = 0;
+        const auto scan = [&](const auto* indices) {
+            for (u32 i = 0; i < count; ++i) {
+                lowest = std::min<u32>(lowest, indices[i]);
+                highest = std::max<u32>(highest, indices[i]);
+            }
+        };
+        if (index_size == 2) {
+            scan(reinterpret_cast<const u16*>(index_address));
+        } else {
+            scan(reinterpret_cast<const u32*>(index_address));
+        }
+        indices = reinterpret_cast<const void*>(index_address);
+    }
+    const u32 first = (is_indexed ? lowest : 0) + base_vertex;
+    param = pipeline_cache.GetGsEmulation().Prepare({
+        .entries = highest - lowest + 1,
+        .stride = stride,
+        .es_bias = -s32(first),
+        .entry_bias = is_indexed ? -s32(lowest) : 0,
+        .index_size = index_size,
+        .indices = indices,
+        .count = count,
+        .slots = slots,
+    });
+    if (param == 0) {
+        return false;
+    }
+    vertices = count / 3 * slots;
+    {
+        // Each kind of emulated draw once (diagnostics).
+        static std::mutex kinds_mutex;
+        static std::set<std::tuple<u64, u64, u32, u32, u32>> kinds;
+        const u64 es_hash = es->GetStage(Shader::SwStage::Vertex).pgm_hash;
+        const u64 gs_hash = regs.gs_program.Address<u64>();
+        std::scoped_lock lock{kinds_mutex};
+        if (kinds.emplace(es_hash, gs_hash, stride, slots, index_size).second) {
+            std::printf("GS emulation: es %016llx gs program %#llx, %u indices (size %u), %u "
+                        "vertices x %u vec4, %u slots, out prim %u, in prim %u\n",
+                        (unsigned long long)es_hash, (unsigned long long)gs_hash, count, index_size,
+                        highest - lowest + 1, stride, slots,
+                        u32(regs.vgt_gs_out_prim_type.GetPrimitiveType(0)),
+                        u32(regs.primitive_type));
+        }
+    }
+
+    draw_inputs = {es, nullptr, index_offset, is_indexed, true, false};
+    const bool bound = BindResources(es);
+    draw_inputs.pending = false;
+    if (!bound) {
+        return false;
+    }
+    // No attachments (the pipeline has none: RefreshGraphicsKey), the size of the draw's screen
+    // scissor so the viewport and scissor stay inside the render area.
+    RenderState state{};
+    {
+        const auto extent = [](s32 screen, s32 window, s32 generic, u32 limit) {
+            return u16(std::clamp<s32>(std::min({screen, window, generic}), 1, s32(limit)));
+        };
+        state.width = extent(regs.screen_scissor.bottom_right_x, regs.window_scissor.bottom_right_x,
+                             regs.generic_scissor.bottom_right_x,
+                             std::min<u32>(instance.GetMaxFramebufferWidth(), 16384));
+        state.height = extent(regs.screen_scissor.bottom_right_y,
+                              regs.window_scissor.bottom_right_y,
+                              regs.generic_scissor.bottom_right_y,
+                              std::min<u32>(instance.GetMaxFramebufferHeight(), 16384));
+        state.num_layers = 1;
+    }
+    ResolveVertexBuffers(es, nullptr);
+    if (is_indexed) {
+        ResolveIndexBuffer(index_offset);
+    }
+    EmitVertexBuffers();
+    if (is_indexed) {
+        EmitIndexBuffer();
+    }
+    if (needs_barrier) {
+        runtime.FlushBarriers();
+    }
+    push_data.motion_param = param;
+    es->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
+                      {buffer_infos.data(), buffer_infos.size()});
+    UpdateDynamicState(es, is_indexed);
+    auto& dynamic_state = scheduler.GetDynamicState();
+    dynamic_state.SetRasterizerDiscardEnabled(true);
+    dynamic_state.CommitWith(instance.IsDepthBoundsSupported(),
+                             instance.IsDynamicColorWriteMaskSupported(),
+                             instance.IsAttachmentFeedbackLoopLayoutSupported(),
+                             [&](auto&& command) { scheduler.Record(std::move(command)); });
+    scheduler.BeginRendering(state);
+    const vk::Pipeline handle = es->Handle();
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        if (is_indexed) {
+            cmdbuf.drawIndexed(count, 1, 0, s32(base_vertex), first_instance);
+        } else {
+            cmdbuf.draw(count, 1, base_vertex, first_instance);
+        }
+    });
+    // The expansion pass reads the stored vertices in its vertex stage. A barrier inside the
+    // render pass left some unwritten on Apple GPUs (stray fur triangles): the pass ends first.
+    scheduler.EndRendering();
+    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eVertexShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eVertexShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &barrier,
+        });
+    });
+    ResetBindings(false);
+    return true;
+}
+
+// bbport (diagnostic): BB_SKIP_FILE=<file> holds one word, re-read while the game runs; draws of
+// passes of that kind are not recorded (the passes still begin and end), to find which kind costs
+// the GPU time: mrt4 (4+ color targets), color1, depthonly, none (no targets), big (over 1920x1080),
+// half (960 wide or less), ps:<hex> (pixel shader hash), all. Empty: nothing is skipped.
+static bool SkipDrawForDiagnosis(const RenderState& state, u64 ps_hash) {
+    static const char* path = std::getenv("BB_SKIP_FILE");
+    if (!path || !*path) {
+        return false;
+    }
+    static std::mutex mutex;
+    static std::string word;
+    static timespec mtime{};
+    static auto last_check = std::chrono::steady_clock::time_point{};
+    std::string current;
+    {
+        std::scoped_lock lock{mutex};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_check > std::chrono::milliseconds(250)) {
+            last_check = now;
+            struct stat st;
+            // Whole-second times everywhere (Windows): the size tells two edits within a second apart.
+            if (stat(path, &st) == 0 &&
+                (st.st_mtime != mtime.tv_sec || long(st.st_size) != mtime.tv_nsec)) {
+                mtime = {st.st_mtime, long(st.st_size)};
+                char buffer[64] = {};
+                if (FILE* f = std::fopen(path, "r")) {
+                    if (std::fscanf(f, "%63s", buffer) != 1) {
+                        buffer[0] = 0;
+                    }
+                    std::fclose(f);
+                }
+                word = buffer;
+                std::printf("Draw skip: \"%s\"\n", word.c_str());
+            }
+        }
+        current = word;
+    }
+    if (current.empty()) {
+        return false;
+    }
+    u32 colors = 0;
+    for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+        colors += state.color_attachments[cb].image_view ? 1 : 0;
+    }
+    const bool depth = bool(state.depth_stencil_attachment.image_view);
+    if (current == "list1") {
+        // Each pixel shader of one-target passes once, with the pass size: candidates for ps:<hex>.
+        static std::mutex list_mutex;
+        static std::set<u64> listed;
+        std::scoped_lock lock{list_mutex};
+        if (colors == 1 && listed.insert(ps_hash).second) {
+            std::printf("Draw skip list: ps %016llx pass %ux%u depth %d\n",
+                        (unsigned long long)ps_hash, u32(state.width), u32(state.height), depth);
+        }
+        return false;
+    }
+    if (current == "all") return true;
+    if (current == "mrt4") return colors >= 4;
+    if (current == "color1") return colors == 1;
+    if (current == "depthonly") return colors == 0 && depth;
+    if (current == "none") return colors == 0 && !depth;
+    if (current == "big") return u32(state.width) * state.height > 1920u * 1080u;
+    if (current == "half") return state.width <= 960;
+    if (current.rfind("ps:", 0) == 0) return std::strtoull(current.c_str() + 3, nullptr, 16) == ps_hash;
+    return false;
 }
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
@@ -1526,6 +1777,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
+    // bbport: an emulated geometry shader draw: the export pass first, then this pipeline (the
+    // expansion pass) as a triangle list of its output vertex slots, without index buffer.
+    const bool gs_emulated = pipeline->GetGraphicsKey().gs_emulation == 2;
+    u32 gs_param = 0, gs_vertices = 0;
+    if (gs_emulated) {
+        bind_prepared = nullptr;
+        if (!RecordGsExportPass(is_indexed, index_offset, gs_param, gs_vertices)) {
+            return;
+        }
+        is_indexed = false;
+    }
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -1648,6 +1910,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
+    if (gs_emulated) {
+        push_data.motion_param = gs_param;
+    }
     {
         BB_SECTION(PipelineBind);
         pipeline->BindResources(set_writes, push_data, {image_infos.data(), image_infos.size()},
@@ -1684,9 +1949,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         .program = {vs_info.ProgramBase(), ps_info ? ps_info->ProgramBase() : 0},
         .count = {num_indices, num_instances, 0},
     };
+    const bool skipped = SkipDrawForDiagnosis(state, ps_info ? ps_info->pgm_hash : 0);
     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+        if (skipped) {
+            return;
+        }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
-        if (is_indexed) {
+        if (gs_emulated) {
+            cmdbuf.draw(gs_vertices, 1, 0, 0);
+        } else if (is_indexed) {
             cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
         } else {
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
