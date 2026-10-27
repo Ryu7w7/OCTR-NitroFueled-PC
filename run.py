@@ -33,7 +33,7 @@ PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
 APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
-UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3: GPU, driver or loader (gpu/.../vk_platform.h)
+UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
 
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
@@ -834,9 +834,9 @@ def main():
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
                 if code == UNSUPPORTED_GPU_CODE:
-                    say('--- This GPU or its driver does not support Vulkan 1.3, which the game needs. '
-                        'Update the graphics driver; if it is already the latest, the GPU is too old for '
-                        'Windows (on Linux, the Mesa driver supports Vulkan 1.3 on many older GPUs).')
+                    say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
+                        'sparse buffers; the STOP line above says which). Update the graphics driver; if it '
+                        'is already the latest, the GPU is too old for this system.')
                 mod_packages.finish(code)
                 return code
             say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (restart from the menu)')

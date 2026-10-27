@@ -2717,10 +2717,10 @@ void PlayTab() {
         if (a.exit_code == 0 || a.stopped) ImGui::TextColored(kGrey, "%s", T("El juego se cerró.", "The game was closed."));
         else if (a.exit_code == kUnsupportedGpuCode) {
             ImGui::PushStyleColor(ImGuiCol_Text, kRed);
-            ImGui::TextWrapped("%s", T("Tu tarjeta gráfica o su driver no soporta Vulkan 1.3, que el juego necesita. Actualiza el "
+            ImGui::TextWrapped("%s", T("Tu tarjeta gráfica o su driver no soporta Vulkan 1.3 / sparse binding, que el juego necesita. Actualiza el "
                                        "driver de la GPU; si ya es el último, la tarjeta es demasiado antigua para Windows (en "
                                        "Linux, el driver Mesa da Vulkan 1.3 a muchas GPU antiguas).",
-                                       "Your graphics card or its driver doesn't support Vulkan 1.3, which the game needs. Update "
+                                       "Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game needs. Update "
                                        "the GPU driver; if it is already the latest, the card is too old for Windows (on Linux, "
                                        "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
             ImGui::PopStyleColor();

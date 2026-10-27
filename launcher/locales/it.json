@@ -287,7 +287,7 @@
  "Downloading %s... %d%%": "Download di %s... %d%%",
  "The update failed (nothing was changed): ": "L'aggiornamento non è riuscito (non è stato cambiato nulla): ",
  "Retry": "Riprova",
- "Your graphics card or its driver doesn't support Vulkan 1.3, which the game needs. Update the GPU driver; if it is already the latest, the card is too old for this system.": "La tua scheda video o il suo driver non supporta Vulkan 1.3, necessario al gioco. Aggiorna il driver della GPU (Mesa); se è già il più recente, la scheda è troppo vecchia.",
+ "Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game needs. Update the GPU driver; if it is already the latest, the card is too old for this system.": "La tua scheda video o il suo driver non supporta Vulkan 1.3 / sparse binding, necessario al gioco. Aggiorna il driver della GPU (Mesa); se è già il più recente, la scheda è troppo vecchia.",
  "Your account is banned from online play.": "Il tuo account è bannato dall'online.",
  "Your connection (IP) is banned from online play.": "La tua connessione (IP) è bannata dall'online.",
  "Reason: {}": "Motivo: {}",

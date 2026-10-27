@@ -3137,7 +3137,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.set_visible(True)
         self.present()
         if status == UNSUPPORTED_GPU_CODE:
-            self.inform("Vulkan 1.3", tr("Your graphics card or its driver doesn't support Vulkan 1.3, which the game "
+            self.inform("Vulkan 1.3 / sparse binding", tr("Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game "
                                          "needs. Update the GPU driver; if it is already the latest, the card is too "
                                          "old for this system."))
 

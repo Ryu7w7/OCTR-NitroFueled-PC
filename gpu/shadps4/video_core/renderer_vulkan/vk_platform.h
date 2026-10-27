@@ -29,6 +29,9 @@ constexpr int UnsupportedVulkanExitCode = 24;
 // UnsupportedVulkanExitCode.
 [[noreturn]] void StopUnsupportedVulkan(std::string_view what, u32 version);
 
+// bbport: the same for a device with Vulkan 1.3 that lacks a feature the port cannot do without.
+[[noreturn]] void StopUnsupportedFeature(std::string_view device, std::string_view feature);
+
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,

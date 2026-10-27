@@ -272,6 +272,14 @@ void StopUnsupportedVulkan(std::string_view what, u32 version) {
     std::_Exit(UnsupportedVulkanExitCode);
 }
 
+void StopUnsupportedFeature(std::string_view device, std::string_view feature) {
+    LOG_CRITICAL(Render_Vulkan, "{} has no {}, which the game needs", device, feature);
+    std::fflush(stdout);
+    std::fprintf(stderr, "STOP: this GPU or its driver has no %.*s, which the game needs (%.*s)\n",
+                 int(feature.size()), feature.data(), int(device.size()), device.data());
+    std::_Exit(UnsupportedVulkanExitCode);
+}
+
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,
                                   bool enable_crash_diagnostic) {
     LOG_INFO(Render_Vulkan, "Creating vulkan instance");
