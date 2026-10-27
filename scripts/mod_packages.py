@@ -26,8 +26,10 @@ def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_ve
     selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
     claims=[]
     for key,path,meta in selected:
+        # Built-in render patches have no XML path.
+        mod_content=path is not None and path.name=='OCTR-Mod-Content.xml'
         writes=compile_external([(key,path,meta)],eboot_segments(elf),elf,
-            strict=path.name=='OCTR-Mod-Content.xml',require_verification=path.name=='OCTR-Mod-Content.xml')
+            strict=mod_content,require_verification=mod_content)
         if len(writes)!=len(list(meta.iter('Line'))):raise ValueError('Incomplete executable patch: '+key)
         for offset,data in writes:
             for old,raw,owner in claims:

@@ -343,6 +343,18 @@ class PackageTests(unittest.TestCase):
         (profile/'game/eboot.bin').write_bytes(fixture())
         self.assertEqual(adapter.preflight(profile,str(self.ini),self.prefs),0)
 
+    def test_preflight_builtin_render_patches_without_xml_path(self):
+        from test_patches import tiny_elf
+        from patches import RENDER_SCALE_SIGNATURE,OUTPUT_DOUBLE_SIGNATURE,GPU_HEAP_SIGNATURE
+        code=bytes.fromhex(OUTPUT_DOUBLE_SIGNATURE)+b'\0'*16
+        code+=bytes.fromhex(RENDER_SCALE_SIGNATURE)+b'\0'*16+bytes.fromhex(GPU_HEAP_SIGNATURE)
+        elf=tiny_elf(code)
+        for resolution,count in [('480',3),('720',3),('1080',0),('1440',0),('1620',1),('2160',2)]:
+            with self.subTest(resolution=resolution):
+                self.ini.write_text('render_res='+resolution+'\nonline=0\n')
+                with patch('prepare.parse_self',return_value=(elf,)),patch.dict(os.environ,{'BB_ONLINE':'0'}):
+                    self.assertEqual(adapter.preflight(self.port,self.ini,self.prefs,game=self.game),count)
+
     def test_preflight_rejects_signature_skip(self):
         from test_prepare import fixture
         profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
