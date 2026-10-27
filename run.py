@@ -38,6 +38,7 @@ UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3: GPU, driver or loader (gpu/.../vk_pl
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
+import item_rules  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
@@ -308,42 +309,76 @@ def proof_header(khash, method, target):
     return f'1.{ts}.{nonce}.{mac}'
 
 
+def ryunet_json(host, port, target, timeout, method='GET', headers=None):
+    """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
+    By the server's name first, then by its address when something on the way answers for the
+    name: an ISP's filter that redirects to its own warning page (Spectrum's Security Shield) or
+    serves one. The game's own requests do the same (src/runtime_http.c). headers(method, target)
+    makes each attempt's headers, so a signature is never sent twice. OSError when neither works."""
+    import socket
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None  # the server never redirects: a redirect comes from something on the way
+
+    opener = urllib.request.build_opener(NoRedirect)
+    names = [host]
+    try:
+        address = socket.gethostbyname(host)
+        if address != host:
+            names.append(address)
+    except OSError:
+        pass
+    failure = OSError(f'{host}: no answer')
+    for name in names:
+        request = urllib.request.Request(f'http://{name}:{port}{target}', method=method,
+                                         data=b'' if method == 'POST' else None,
+                                         headers=headers(method, target) if headers else {})
+        try:
+            with opener.open(request, timeout=timeout) as reply:
+                if 'json' not in (reply.headers.get('Content-Type') or ''):
+                    failure = OSError(f'{name}: answered by something on the way, not the server')
+                    continue
+                return json.loads(reply.read(1 << 16)), reply  # the theme carries the item rules
+        except urllib.error.HTTPError as error:
+            if 300 <= error.code < 400:
+                failure = OSError(f'{name}: redirected to {error.headers.get("Location")}')
+                continue
+            raise
+    raise failure
+
+
 def claim_nick(host, port, name, khash):
     """Registers this installation for a free nickname, before the game logs in with it (the
     game's own requests are signed and cannot register). The key's hash crosses the network only
     here, once. Nothing happens when the server cannot be reached or is older."""
     import urllib.parse
-    import urllib.request
     q = urllib.parse.urlencode({'name': name})
     try:
-        target = f'/ryunet/nick?{q}'
-        req = urllib.request.Request(f'http://{host}:{port}{target}',
-                                     headers={'X-RyuNET-Proof': proof_header(khash, 'GET', target)})
-        with urllib.request.urlopen(req, timeout=4) as reply:
-            if json.loads(reply.read(4096)).get('status') != 'free':
-                return
-        target = f'/ryunet/nick/claim?{q}'
-        req = urllib.request.Request(f'http://{host}:{port}{target}', data=b'', method='POST',
-                                     headers={'X-RyuNET-Proof': proof_header(khash, 'POST', target),
-                                              'X-RyuNET-Key-Hash': khash})
-        with urllib.request.urlopen(req, timeout=4) as reply:
-            say(f'Nickname {name}: {json.loads(reply.read(4096)).get("status")} on {host}')
-    except (OSError, ValueError):
-        pass
+        status, _ = ryunet_json(host, port, f'/ryunet/nick?{q}', 4,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+        if status.get('status') != 'free':
+            return
+        claimed, _ = ryunet_json(host, port, f'/ryunet/nick/claim?{q}', 4, method='POST',
+                                 headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t),
+                                                       'X-RyuNET-Key-Hash': khash})
+        say(f'Nickname {name}: {claimed.get("status")} on {host}')
+    except (OSError, ValueError) as error:
+        say(f'Nickname {name}: could not register it on {host} ({error})')
 
 
 def server_settings(host, port):
     """What the server announces for every player (GET /ryunet/theme): the season theme, which
     scripts/patches.py loads in every level (THEME_VALUES), and the seconds an online race goes on
     after the first player finishes (end_race_patches). {} when it does not answer."""
-    import urllib.request
     try:
-        with urllib.request.urlopen(f'http://{host}:{port}/ryunet/theme', timeout=3) as reply:
-            note_server_clock(reply)
-            reply = json.loads(reply.read(4096))
+        settings, reply = ryunet_json(host, port, '/ryunet/theme', 3)
     except (OSError, ValueError):
         return {}
-    return reply if isinstance(reply, dict) else {}
+    note_server_clock(reply)
+    return settings if isinstance(settings, dict) else {}
 
 
 RELEASES_API = 'https://api.github.com/repos/Ryu7w7/OCTR-NitroFueled-PC/releases/latest'
@@ -388,6 +423,9 @@ def update_notice(env, version):
 
 
 def setup_online(env, config, data):
+    # The item-box rules come only from the server (below): items are drawn on each player's PC,
+    # so a local setting would let one player pick their own odds.
+    env.pop('BB_ITEM_RULES', None)
     ini_values = {}
     try:
         for l in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
@@ -498,6 +536,15 @@ def setup_online(env, config, data):
     if not env.get('BB_END_RACE_TIMEOUT') and isinstance(end_race, (int, float)) and 10 <= end_race <= 120:
         env['BB_END_RACE_TIMEOUT'] = str(end_race)
         say(f'Online race end countdown from the server: {end_race} s')
+    # The item-box rules (odds, cooldowns) the server's administrators chose, for every player
+    # (scripts/item_rules.py); none: the game's own.
+    items = announced.get('items')
+    rules_file = data / 'out' / 'item_rules' / 'server.json'
+    if isinstance(items, dict) and items:
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
+        rules_file.write_text(json.dumps(items, sort_keys=True), encoding='utf-8')
+        env['BB_ITEM_RULES'] = str(rules_file)
+        say(f'Item rules from the server: {items.get("name") or "custom"}')
 
 
 def pump(stream):
@@ -665,6 +712,13 @@ def main():
             base_patches.update(button_prompts.prepare(game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f'Button prompts: {error}; PlayStation buttons')
+        # Item-box rules (scripts/item_rules.py): the server's, which setup_online saved.
+        try:
+            rules_path = env.get('BB_ITEM_RULES')
+            rules = json.loads(Path(rules_path).read_text(encoding='utf-8')) if rules_path else None
+            base_patches.update(item_rules.prepare(game, out, rules, base_patches, log=say))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            say(f"Item rules: {error}; the game's own odds")
         env.setdefault('BB_NEO', '0')
         # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),
