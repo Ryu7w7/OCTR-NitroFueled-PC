@@ -3,7 +3,8 @@
 """Button prompts with Xbox buttons (bbport.ini button_prompts=xbox; default playstation).
 
 The game draws every button prompt (Cross, Circle, L1, the sticks...) from one image, "button",
-of its fonts fonts/GeekSpeak.igz and fonts/GeekSpeak_Outline.igz: 512x263 RGBA8 in the PS4's
+of its fonts fonts/GeekSpeak.igz, fonts/GeekSpeak_Outline.igz and the title font
+fonts/Zoinks_Outline.igz (each has its own copy): 512x263 RGBA8 in the PS4's
 1D-thin tiling (8x8 micro tiles, Morton order inside each), referenced by the fonts' alternate
 character metrics. For Xbox prompts the PlayStation buttons in it are replaced by ours
 (button_prompts/xbox.png, drawn by tools/make_button_prompts.py) and the fonts go to the game
@@ -22,7 +23,9 @@ import archive_patch
 from archive_reader import Archive
 
 STYLES = ('playstation', 'xbox')
-FONTS = ('fonts/GeekSpeak.igz', 'fonts/GeekSpeak_Outline.igz')
+# Zoinks_Outline is the title font, with its own copy of the button image: "Press X to skip" in
+# cutscenes and "Press X to continue" on the podium (issue #90).
+FONTS = ('fonts/GeekSpeak.igz', 'fonts/GeekSpeak_Outline.igz', 'fonts/Zoinks_Outline.igz')
 # The archives with those fonts (the update's copies are the ones the 1.21 game reads; the
 # others are patched too, so no screen shows a PlayStation button).
 ARCHIVES = ('update.pak', 'languagestartup.pak', 'permanent.pak')
@@ -282,7 +285,7 @@ def prepare(game, out, config, env, base):
     folder = Path(out) / 'button_prompts'
     from mod_file_paths import resolve
     archives = [resolve(Path(game) / 'archives' / name) for name in ARCHIVES if resolve(Path(game) / 'archives' / name).is_file()]
-    stamp = {'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(),
+    stamp = {'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(), 'fonts': list(FONTS),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}
     stamp_file = folder / 'stamp.json'

@@ -230,7 +230,7 @@ INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key in INI_P
 # player's identity on the server: the first installation to use one keeps it.
 ONLINE_SERVER = "octr.ryu7w7.xyz"
 RESERVED_NICKS = {"ryupc", "ryunet", "player", "jugador", "guest"}
-INVENTORIES = [("Bought on the server", "server"), ("From my save (100% saves)", "save")]
+INVENTORIES = [("Bought on the server", "server"), ("Local save progress", "save")]
 
 
 def nick_ok(name):
@@ -3146,7 +3146,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.set_visible(True)
         self.present()
         if status == UNSUPPORTED_GPU_CODE:
-            self.inform("Vulkan 1.3", tr("Your graphics card or its driver doesn't support Vulkan 1.3, which the game "
+            self.inform("Vulkan 1.3 / sparse binding", tr("Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game "
                                          "needs. Update the GPU driver; if it is already the latest, the card is too "
                                          "old for this system."))
 

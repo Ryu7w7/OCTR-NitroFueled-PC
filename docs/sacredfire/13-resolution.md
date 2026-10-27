@@ -70,6 +70,13 @@ also drop the Pro path's output doubling (`add %ecx,%ecx` at 0x17aa648 and `add 
 0x17aa658 become NOPs), so the picture stays 1920x1080. All six tested on an RTX 3070
 (2026-10-12). The game sizes its targets at start, so a change needs a restart (the menu does it).
 
+The targets are sized by 0x13e2eb0 (6.72+ build): `scale(this, f)` returns 1.0 on the base path
+and `f * [this+0x548]` on the Pro path. Its four callers ask for an x and a y scale and multiply
+authored 1920x1080 sizes by them. The display size at +0x540/+0x544 sizes only the display
+buffers (the vtable call 0x178 in the display setup). A larger display size therefore does not
+enlarge the scene on the base path; widescreen layouts use the Pro path for that
+([18-widescreen-layouts.md](18-widescreen-layouts.md)).
+
 ## Linux desktop scaling (SDL window)
 
 `gpu/shim/window.cpp` sets `SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN=true` so

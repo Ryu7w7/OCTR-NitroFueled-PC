@@ -268,8 +268,15 @@ def main():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
     # The launcher's artwork and menu font (art\README.txt says where each comes from).
     shutil.copytree(ROOT / 'art', folder / 'art', dirs_exist_ok=True)
-    if (ROOT / 'out' / 'aerolib.inl').is_file():
-        shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
+    # shadPS4's import names (tools/gen_import_names.py) ship with the package: without them a
+    # first start where raw.githubusercontent.com cannot be reached stops at the first import
+    # the runtime's compiled table does not name (_sceKernelSetThreadDtors, code 20).
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import gen_import_names
+    aerolib = ROOT / 'out' / 'aerolib.inl'
+    if not gen_import_names.aerolib_names(aerolib):
+        sys.exit(f'{aerolib} could not be fetched; the package needs it')
+    shutil.copy2(aerolib, folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in
     # bbport.default.ini and ship under the real name.
     # The launcher sets up the game folder and starts it; the .bat is the way without it.

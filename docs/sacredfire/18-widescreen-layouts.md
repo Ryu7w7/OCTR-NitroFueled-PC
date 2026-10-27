@@ -30,9 +30,17 @@ and the boost gauge. Choosing one turns that ultrawide off, since the layout set
   16:9 and every layout share it. The transform is tcosi's `position_scale`; the C++ one gives
   the same bytes for all 24 variants (checked against the data's SHA-256).
 - **Render settings**: scripts/patches.py and the render path read `out/widescreen/bbport.ini`,
-  the player's settings with the ones the layouts were made for: render_res 1080 on the base PS4
-  path (the variant sets the size), no FSR or DLSS (`BB_TEMPORAL=off`), ultrawide off. The
-  player's bbport.ini, saves and shader cache are the usual ones.
+  the player's settings with the ones the layouts were made for: render_res 1080 plus
+  `layout_internal` (the variant's height), no FSR or DLSS (`BB_TEMPORAL=off`), ultrawide off.
+  The player's bbport.ini, saves and shader cache are the usual ones.
+- **Scene size**: the variant's lines set the display buffers (for example 5160x2160), but the
+  game sizes its 3D targets as 1920x1080 times the render-scale getter (0x13e2eb0 in the 6.72+
+  build), which returns 1.0 on the base PS4 path. At internal 1080 the scene is therefore
+  1920x1080 stretched to the layout's width. For any other internal resolution,
+  `render_plan` takes the Pro path with that height's scale (2.0 at 2160, so a 3840x2160
+  scene), removes the Pro output doubling so the layout's size stays as it is, and at 2160
+  enlarges the GPU heap as at 16:9 ([13-resolution.md](13-resolution.md)). The scale is the
+  same on both axes, so the 16:9 scene is stretched to 21:9 or 32:9 at every internal resolution.
 
 ## The European edition
 
@@ -41,7 +49,7 @@ GPL-2.0), in `scripts/widescreen_data/eu`:
 
 - `ultrawide_eu.json`: the executable runs the same code with two patch sites 16 bytes
   earlier and three constants 64 bytes earlier; `port_meta` moves each line, re-aims its
-  RIP-relative and branch operands and gives it the EU bytes as its signature. All 12 variants
+  RIP-relative and branch operands and gives it the EU bytes as its signature. All 18 variants
   apply their 15 writes to the EU 1.21 executable.
 - `assets.json`: the 224 asset changes of each set ported per file to the EU archives (their UI
   files are the USA ones with other strings), checked by SHA-256 like the USA ones. Their port
@@ -105,8 +113,8 @@ and internal resolution, copy deltas, the HUD list, and archive patches stacked 
 (on a synthetic archive). With the game, all 672 rebuilt assets of the three sets read back
 through the patches with their expected SHA-256. The USA online corrections were also
 checked against actual source assets: named fields only, native bindings/fixups/object
-graphs unchanged, and generated archive entries read back as expected. All 12 USA marker
-variants were checked against the executable signatures and emulated over 336 viewport/
-position cases, including preservation of the relocated 21:9 constant pool. Native Windows
-frontend compilation passed during the v0.5.4 test build. A full engine rebuild and Linux
+graphs unchanged, and generated archive entries read back as expected. Every USA marker
+variant is checked against the executable signatures; the original 12 were also emulated
+over 336 viewport/position cases, including preservation of the relocated 21:9 constant
+pool. Native Windows frontend compilation passed during the v0.5.4 test build. A full engine rebuild and Linux
 live rendering were not performed for these interface corrections.

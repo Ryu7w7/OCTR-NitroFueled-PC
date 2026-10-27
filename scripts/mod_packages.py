@@ -26,8 +26,10 @@ def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_ve
     selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
     claims=[]
     for key,path,meta in selected:
+        # Built-in render patches have no XML path.
+        mod_content=path is not None and path.name=='OCTR-Mod-Content.xml'
         writes=compile_external([(key,path,meta)],eboot_segments(elf),elf,
-            strict=path.name=='OCTR-Mod-Content.xml',require_verification=path.name=='OCTR-Mod-Content.xml')
+            strict=mod_content,require_verification=mod_content)
         if len(writes)!=len(list(meta.iter('Line'))):raise ValueError('Incomplete executable patch: '+key)
         for offset,data in writes:
             for old,raw,owner in claims:
@@ -78,6 +80,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     root=Path(environment.get('BB_MODS_DIR',Path(data)/'mods'))
     # Preserve the zero-package path, including custom patches/settings/data locations.
     if environment.get('BB_MODS_ENABLED','1')=='0' or not root.is_dir():return Path(game),str(config)
+    from game_check import sfo_info
+    game_info=sfo_info(game)
+    title_id,app_version=game_info.get('TITLE_ID'),game_info.get('APP_VER')
+    supported=title_id in ('CUSA13795','CUSA14876') and app_version=='01.21'
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
     try:
@@ -87,10 +93,19 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         catalog=scan(root,library)
         for message in catalog['messages']:log('OCTR mods: '+message)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
+        if not supported:
+            # Every package ships a mods folder: a game the packages cannot target (EU 1.00, no
+            # readable param.sfo) starts as before, and is refused only with a package enabled.
+            enabled=json.loads(selection.read_text()).get('enabled',[]) if selection.exists() else []
+            if any(key.startswith(PREFIX) and key.removeprefix(PREFIX) in catalog['entries'] for key in enabled):
+                raise ValueError('Mod packages require a supported CTR edition at 01.21 (this game: '+
+                    (title_id or 'unknown')+' '+(app_version or 'unknown version')+')')
+            if catalog['entries'] or catalog['messages']:environment['BB_MODS_ENABLED']='0'  # not loose mods
+            lock.__exit__(None,None,None);return Path(game),str(config)
         patchdir=Path(environment.get('BB_PATCHES_DIR',Path(port)/'patches'))
-        found=external_patches(patchdir)
+        found=external_patches(patchdir,app_version,title_id)
         if library.resolve()!=patchdir.resolve():
-            found+=[p for p in external_patches(library) if p[0].startswith(PREFIX)]
+            found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
         original=json.loads(selection.read_text()) if selection.exists() else {'enabled':[],'disabled':[]}
@@ -118,7 +133,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             (user/'cache').rename(session/'cache-before-reset')
         ini=session/'bbport.ini';ini.write_text(''.join(k+'='+v+'\n' for k,v in plan['settings'].items()),encoding='utf-8')
         snapshot=session/'patches.json';save_json(snapshot,original)
-        writes=preflight(plan['profile'],ini,snapshot,game=plan['game'])
+        writes=preflight(plan['profile'],ini,snapshot,title_id=title_id,app_version=app_version,game=plan['game'])
         if plan['has_shaders'] and not prepare_only:
             from mod_shaders import ensure_shaders
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))

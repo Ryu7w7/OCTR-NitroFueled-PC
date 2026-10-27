@@ -441,6 +441,16 @@ bool Instance::CreateDevice() {
         return false;
     }
 
+    // bbport: the buffer cache keeps the game's memory in sparse buffers bound on this queue
+    // (vkQueueBindSparse at every submission). Without them the first submission loses the
+    // device (Mesa on Gen9 Intel, issue #97): stop as an unsupported GPU instead of code 23.
+    if (const auto base = physical_device.getFeatures();
+        !base.sparseBinding || !base.sparseResidencyBuffer ||
+        !(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
+        StopUnsupportedFeature(properties.deviceName.data(),
+                               "sparse buffers (sparseBinding, sparseResidencyBuffer)");
+    }
+
     static constexpr std::array queue_priorities = {1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,

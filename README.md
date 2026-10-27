@@ -4,6 +4,9 @@
 
 # OCTR: CTR Nitro-Fueled PC, online
 
+> **EU mod packages:** [CUSA14876 01.21 loader support and update instructions](docs/eu-mod-packages.md).
+> [CNK Drift Gauge + Reserves Meter — EU](https://github.com/Majed-allababedi/CTR-CNK-Drift-Gauge-EU): original mod by tomtotom, EU adaptation by Majed-allababedi. Select **Speedometer HUD** in-game.
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
 Linux, with online play on a community server.**
 
@@ -38,6 +41,7 @@ compile them; the few the recipe lacks are compiled when first seen and cached.
 
 | Release | What it brought |
 |---|---|
+| [v0.6.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.5) | Online item-box odds set by the server; 21:9/32:9 layouts render at the chosen internal resolution up to 4K (startupandhold); mods start at any internal resolution (Vo1dTear), EU mod packages (Majed-allababedi) and several name mods together (SoyAlejandroCalixto); no code 20 at a first start without GitHub; nicknames register behind ISP filters; GPUs without sparse buffers get a clear message |
 | [v0.6.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.4) | Mods checked at the code they change, so they work on more 1.21 dumps (tcosi); mods import from deep folders; no freeze when a controller connects or drops (SoyAlejandroCalixto); the Controllers tab shows each player's controller; Linux launcher with Achievements and Mods (Brony666); a racer's outfit no longer ends the game with code 3 |
 | [v0.6.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.3) | Mod fixes: game mods start again without a 21:9/32:9 layout, "Apply and restart" works with mods, and loose mods work with the game on another drive |
 | [v0.6.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.2) | Mods load without copying the game (tcosi); ping counter in the corner and a Room tab in the in-game menu; online login goes through networks and antivirus filters that redirect it; GameBanana link on the Mods page |
