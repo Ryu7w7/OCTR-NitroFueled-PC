@@ -42,6 +42,18 @@ def parse_elf(data):
     return bytearray(span(data, 0, end)), header, ph, [], []
 
 
+def read_game_file(path):
+    """A file of the game's executable or modules; an empty one (0 bytes, after an interrupted
+    copy, a cloud folder whose files are not downloaded, or an antivirus) is named plainly
+    instead of failing as "out of bounds: 0x0+0x4 / 0x0"."""
+    data = Path(path).read_bytes()
+    if not data:
+        raise ValueError(f'{path} is empty (0 bytes): the game folder is incomplete. Copy or dump the game '
+                         'again (an interrupted copy, a cloud folder such as OneDrive whose files are not '
+                         'downloaded, or an antivirus can leave files empty).')
+    return data
+
+
 def parse_self(data):
     if span(data, 0, 4) == b'\x7fELF':
         return parse_elf(data)
@@ -111,7 +123,7 @@ def nid(name):
 
 def inspect_libc(path):
     """Prove that this dump's _init_env is exactly RET; never assume it."""
-    source = path.read_bytes()
+    source = read_game_file(path)
     elf, header, ph, _, missing = parse_self(source)
     dynamic = next(p for p in ph if p['type'] == 2)
     tags = dict(unpack('<QQ', elf, pos) for pos in
@@ -146,7 +158,7 @@ class GameCheckError(Exception):
 
 
 def prepare(game, out):
-    source = (game / 'eboot.bin').read_bytes()
+    source = read_game_file(game / 'eboot.bin')
     elf, header, ph, segments, missing = parse_self(source)
     loads = [p for p in ph if p['type'] in (1, 0x61000010)]
     def mapped(addr, size=8):
