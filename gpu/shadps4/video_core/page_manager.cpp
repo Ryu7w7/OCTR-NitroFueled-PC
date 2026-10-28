@@ -106,6 +106,16 @@ std::array<ImageFaultSite, 256> image_fault_sites;
 
 void NoteFaultSite(void* context, VAddr address) {
     current_fault_rip = 0;
+    // lab: a diagnostic (the "Write fault sites" lines), BB_FAULT_SITES=1: it reads the stack
+    // through a system call at every fault, ~14% of the game's render thread while a menu video
+    // rewrote watched texture pages
+    static const bool on = [] {
+        const char* env = std::getenv("BB_FAULT_SITES");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return;
+    }
     const u64 rip = u64(Common::GetRip(context));
     const bool guest_code = rip >= GuestImage && rip < GuestImageEnd;
     u64 caller = 0;

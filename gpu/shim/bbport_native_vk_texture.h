@@ -29,6 +29,8 @@ struct Texture {
     VkImageView view = VK_NULL_HANDLE;       // 2D (one slice) or 2D array
     VkImageView view_array = VK_NULL_HANDLE; // always a 2D array (shaders that index slices)
     std::uint32_t width = 0, height = 0, levels = 0, slices = 0;
+    std::uint32_t first_level = 0; // the views' first mip level
+    bool cube = false;             // `view` is a cube view
     vk::Format format = vk::Format::eUndefined;
     std::uint64_t bytes = 0;
     VmaAllocation allocation = nullptr;
@@ -49,11 +51,13 @@ struct Info {
     std::uint64_t base;
     std::uint32_t width, height, dfmt, nfmt, dst_sel, last_level;
     vk::Format format; // Undefined: not a format this renderer makes
+    std::uint32_t tiling = 0, type = 0;
 };
 
 struct Stats {
     std::uint64_t textures, bytes, uploads_done, uploads_pending, upload_batches, unsupported,
         unreadable, over_budget, failed, samplers, evicted, remade, watched_pages;
+    std::uint64_t pool_reused = 0, pool_kept = 0, pool_bytes = 0; // images reused for remade textures
 };
 
 /// What replacing textures needs from the renderer: the game-side submission number, and the
@@ -80,7 +84,10 @@ void WatchTarget(std::uint64_t base, std::uint64_t size, std::atomic<bool>* writ
 void UnwatchTarget(std::atomic<bool>* written);
 
 /// Frees a retired texture's image, views and the texture itself.
-void Destroy(Texture* texture);
+/// Once the GPU is done with it. Its image and views go back to a pool for the next texture of
+/// the same shape (a video's next frame) when there is room: true only when views were destroyed
+/// (cached descriptor sets may then name a handle the driver hands out again).
+bool Destroy(Texture* texture);
 
 /// Base address of the image a T# (8 dwords) describes.
 std::uint64_t TSharpBase(const std::uint32_t* tsharp);

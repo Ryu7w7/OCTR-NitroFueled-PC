@@ -214,12 +214,31 @@ std::atomic<const Vulkan::Instance*> instance{nullptr};
 
 std::mutex mutex; // draws can come from more than one game thread
 std::unordered_map<u64, ShaderInfo> shaders;          // FNV-1a 64 of the GCN program
-std::unordered_map<u64, ShaderInfo*> shader_by_code;  // program address -> entry (nullptr: unknown)
+struct CachedProgram {
+    ShaderInfo* info = nullptr; // nullptr: unknown
+    u64 fingerprint = 0;        // ProgramFingerprint of the program when it was resolved
+};
+std::unordered_map<u64, CachedProgram> shader_by_code; // program address -> entry
 std::unordered_set<u64> pipeline_keys;
 std::unordered_map<u64, VkPipeline> pipelines;        // key -> pipeline (null: failed)
 std::unordered_map<u64, VkPipelineLayout> pipeline_layouts;
 VkDescriptorSetLayout empty_set_layout = VK_NULL_HANDLE;
 std::unordered_map<u64, std::unique_ptr<Target>> targets; // GPU base address -> image
+
+/// Lab BB_VK_LOG_COPIES=1: engine copies not done, and draws sampling their destinations.
+bool LogCopies() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_VK_LOG_COPIES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+/// Seconds since the renderer started (log lines).
+double Seconds() {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+std::unordered_map<u64, u64> missed_copies; // destination base -> source base (LogCopies)
 
 /// Display buffers the presenter asked for (BB_VK_SHOW): address -> our image, once submitted.
 struct Shown {
@@ -533,7 +552,24 @@ VkShaderModule Variant(ShaderInfo& s, u32 uint_mask, u32 sint_mask) {
     return s.variants[key] = m;
 }
 
-/// The translated shader for a bound engine shader (cached by program address).
+/// Which program is at `code` now: the shader hash of its OrbShdr footer (the program's second
+/// dword is the distance to it), else a hash of its first bytes; with its size.
+u64 ProgramFingerprint(u64 code, u32 size) {
+    if (size >= 8 && R<u32>(code) == 0xBEEB03FFu) {
+        const u64 footer = code + (u64(R<u32>(code + 4)) + 1) * 8;
+        if (footer + 24 <= code + size + 64 && std::memcmp(reinterpret_cast<const void*>(footer), "OrbShdr", 7) == 0) {
+            return R<u64>(footer + 16) ^ (u64(size) << 40);
+        }
+    }
+    return Fnv(reinterpret_cast<const u8*>(code), std::min<u32>(size, 64)) ^ (u64(size) << 40);
+}
+
+std::atomic<u64> programs_replaced{0}; // a cached address held another program by now
+
+/// The translated shader for a bound engine shader (cached by program address, checked against
+/// the program there: the game unloads shader packages and loads others at the same addresses
+/// when it changes screens, and a stale entry gave the track select's preview video draw the
+/// title screen's shader, a "program in the wrong stage", so it was left out).
 ShaderInfo* Resolve(u64 handle, const char* stage) {
     if (!handle) {
         return nullptr;
@@ -544,8 +580,16 @@ ShaderInfo* Resolve(u64 handle, const char* stage) {
     }
     const u32 size = R<u32>(gnm) & 0x7fffff;
     const u64 code = (u64(R<u32>(gnm + 8)) << 8) | (u64(R<u32>(gnm + 12)) << 40);
+    const u64 fingerprint = size ? ProgramFingerprint(code, size) : 0;
     if (const auto it = shader_by_code.find(code); it != shader_by_code.end()) {
-        return it->second;
+        if (it->second.fingerprint == fingerprint) {
+            return it->second.info;
+        }
+        if (programs_replaced.fetch_add(1, std::memory_order_relaxed) < 40) {
+            std::printf("Native Vulkan: another %s program at %llx now (%s before): resolved again\n",
+                        stage, (unsigned long long)code,
+                        it->second.info ? it->second.info->name.c_str() : "none");
+        }
     }
     ShaderInfo* info = nullptr;
     std::vector<u8> bytes(size);
@@ -565,7 +609,7 @@ ShaderInfo* Resolve(u64 handle, const char* stage) {
         std::printf("Native Vulkan: %s program at %llx (%u bytes) is not readable\n", stage,
                     (unsigned long long)code, size);
     }
-    shader_by_code[code] = info;
+    shader_by_code[code] = CachedProgram{info, fingerprint};
     return info;
 }
 
@@ -1185,6 +1229,38 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
         if (Target* target = Current(Tex::TSharpBase(tsharp))) {
             target_binds.fetch_add(1, std::memory_order_relaxed);
             out.target = target;
+            if (LogCopies()) {
+                // lab: a T# that does not describe our image there (another size or format) means
+                // the memory holds something else now (a video frame where a menu target was)
+                const Tex::Info info = Tex::Describe(tsharp);
+                if (info.width != target->img.width || info.height != target->img.height) {
+                    static std::unordered_set<u64> logged_mismatch;
+                    const u64 key = info.base ^ (u64(info.width) << 40) ^ (u64(info.height) << 20) ^
+                                    std::hash<std::string>{}(s.name);
+                    if (logged_mismatch.size() < 500 && logged_mismatch.insert(key).second) {
+                        std::printf("Native Vulkan: [%.1f s] %s slot %u samples our image %llx (%ux%u %s) "
+                                    "through a T# of %ux%u dfmt %u nfmt %u tiling %u\n",
+                                    Seconds(), s.name.c_str(), slot, (unsigned long long)info.base,
+                                    target->img.width, target->img.height,
+                                    vk::to_string(target->img.format).c_str(), info.width, info.height,
+                                    info.dfmt, info.nfmt, info.tiling);
+                    }
+                }
+            }
+            if (LogCopies() && !missed_copies.empty()) {
+                const u64 base = Tex::TSharpBase(tsharp);
+                if (const auto m = missed_copies.find(base); m != missed_copies.end()) {
+                    static std::unordered_set<u64> logged;
+                    const u64 key = base ^ std::hash<std::string>{}(s.name);
+                    if (logged.size() < 500 && logged.insert(key).second) {
+                        std::printf("Native Vulkan: [%.1f s] %s samples our image %llx (%ux%u), whose "
+                                    "copy from %llx was not done: it shows what was drawn there before\n",
+                                    Seconds(), s.name.c_str(), (unsigned long long)base,
+                                    target->img.width, target->img.height,
+                                    (unsigned long long)m->second);
+                    }
+                }
+            }
         } else if (const Tex::Texture* tex = Tex::Get(tsharp)) {
             // bound even while its upload is on the way: the recorder waits for it (StageSet)
             if (!tex->ready.load(std::memory_order_acquire)) {
@@ -3229,6 +3305,23 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     }
     auto skip = [&](int reason) -> void {
         copies_skipped.fetch_add(1, std::memory_order_relaxed);
+        if (LogCopies()) {
+            // lab: every skipped copy (once per source, destination and reason), and whether the
+            // destination is one of our images, which then keeps what was drawn there before
+            const auto it = targets.find(d.base);
+            const bool stale = it != targets.end() && it->second;
+            missed_copies[d.base] = s.base;
+            static std::unordered_set<u64> logged;
+            const u64 key = s.base * 31 + d.base * 7 + u64(reason);
+            if (logged.size() < 2000 && logged.insert(key).second) {
+                std::printf("Native Vulkan: [%.1f s] copy %llx (%ux%u mip %d, dfmt %u tiling %u) -> %llx "
+                            "(%ux%u mip %d %s) not done: %s%s\n",
+                            Seconds(), (unsigned long long)s.base, s.width, s.height, a[6], s.dfmt,
+                            s.tiling, (unsigned long long)d.base, d.width, d.height, a[7],
+                            vk::to_string(d.format).c_str(), CopySkipNames[reason],
+                            stale ? "; the destination keeps our older image" : "");
+            }
+        }
         if (copy_skips[reason].fetch_add(1, std::memory_order_relaxed) < 4) {
             std::printf("Native Vulkan: copy %llx (%ux%u mip %d) -> %llx (%ux%u mip %d %s) not done: "
                         "%s\n",
@@ -3260,6 +3353,7 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         return false;
     }
     const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - h);
+    missed_copies.erase(d.base);
     CopyPacket& c = Push(Op::Copy, open_batch->copies);
     c = CopyPacket{.src = &st, .dst = dt, .from_depth = from_depth, .sx = sx, .dx = dx, .w = w,
                    .h = h, .src_bytes = src_bytes, .s_top = s_top, .d_top = d_top};
@@ -3595,6 +3689,9 @@ void Report() {
                     (unsigned long long)unusable_targets.load(),
                     (unsigned long long)targets_passed_over.load(),
                     (unsigned long long)targets_reclaimed.load());
+        std::printf("Native Vulkan: texture pool: %llu images reused, %llu kept, %.0f MiB held\n",
+                    (unsigned long long)tx.pool_reused, (unsigned long long)tx.pool_kept,
+                    tx.pool_bytes / 1048576.0);
         std::printf("Native Vulkan: %llu textures (%.0f MiB), %llu uploaded in %llu batches, %llu "
                     "waiting; not made: %llu unsupported, %llu unreadable, %llu failed; %llu made over "
                     "budget, %llu evicted, %llu made again after the game wrote them, %llu pages "
@@ -3840,6 +3937,9 @@ void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
         if (const u64 h = Q(ctx + CtxColorTargets + i * 8)) {
             colors[i] = ColorTarget(h);
             any_color |= colors[i] != nullptr;
+            if (colors[i] && !missed_copies.empty()) {
+                missed_copies.erase(u64(R<u32>(h + 0x10)) << 8); // drawn to: up to date again
+            }
         }
     }
     const u64 dh = Q(ctx + CtxDepthTarget);
@@ -4162,9 +4262,14 @@ void RunBatch(Batch& b) {
         }
         case Op::TexRetire: {
             // after the draws captured before it; cached sets may hold its views
+            // (a retired texture's image and views usually go back to the texture pool and are
+            // not destroyed: the cached sets stay; only destroyed views drop them, then)
             Tex::Texture* t = b.tex_retired[i];
-            set_generation.fetch_add(1, std::memory_order_release);
-            Gpu::Defer([t] { Tex::Destroy(t); });
+            Gpu::Defer([t] {
+                if (Tex::Destroy(t)) {
+                    set_generation.fetch_add(1, std::memory_order_release);
+                }
+            });
             break;
         }
         case Op::GeoFree: {

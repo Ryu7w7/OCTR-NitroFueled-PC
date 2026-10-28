@@ -414,8 +414,63 @@ void Report() {
     std::fflush(stdout);
 }
 
+/// BB_VK_EARLY_LABELS=1: labels, writes, DMA and memory waits run as soon as the submission is
+/// captured (the native renderer copied what it reads from guest memory by then: constants,
+/// vertices, indices, texture snapshots), not once the GPU has run it. The game (Bink in the track
+/// select) waits on those labels before it reuses its buffers. Flips and frame ends still wait
+/// for the GPU (on a thread of their own), which keeps the game's pace and the presented frames.
+bool EarlyLabels() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_VK_EARLY_LABELS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+struct GatedOp {
+    u64 k;
+    Kind kind;
+    u64 frame;
+};
+std::mutex gated_mutex;
+std::condition_variable gated_cv;
+std::deque<GatedOp> gated;
+
+void GatedWorker() {
+    BbCpu::Register("bb:NativeSignalsGpu");
+    for (;;) {
+        GatedOp op;
+        {
+            std::unique_lock lk(gated_mutex);
+            gated_cv.wait(lk, [] { return !gated.empty(); });
+            op = gated.front();
+            gated.pop_front();
+        }
+        const auto start = std::chrono::steady_clock::now();
+        while (!BbNativeVk::WaitSubmissionDone(op.k, 5'000'000'000ull)) {
+            gpu_timeouts.fetch_add(1, std::memory_order_relaxed);
+            std::printf("Native signals: native submission %llu not done after 5 s\n",
+                        (unsigned long long)op.k);
+            std::fflush(stdout);
+        }
+        gpu_wait_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count()),
+                              std::memory_order_relaxed);
+        Group g;
+        g.k = op.k;
+        g.frame = op.frame;
+        RunOp(g, Op{op.kind, 0});
+    }
+}
+
 void Worker() {
     BbCpu::Register("bb:NativeSignals");
+    if (EarlyLabels()) {
+        std::printf("Native signals: BB_VK_EARLY_LABELS=1: labels written once a submission is "
+                    "captured; flips and frame ends after the GPU\n");
+        std::thread(GatedWorker).detach();
+    }
     for (;;) {
         std::unique_ptr<Group> g;
         {
@@ -427,6 +482,22 @@ void Worker() {
             }
             g = std::move(queue.front());
             queue.pop_front();
+        }
+        if (EarlyLabels()) {
+            for (const Op& op : g->ops) {
+                if (op.kind == Flip || op.kind == Retire) {
+                    {
+                        std::lock_guard lk(gated_mutex);
+                        gated.push_back(GatedOp{g->k, op.kind, g->frame});
+                    }
+                    gated_cv.notify_one();
+                } else {
+                    RunOp(*g, op);
+                }
+            }
+            groups_run.fetch_add(1, std::memory_order_relaxed);
+            Report();
+            continue;
         }
         const auto start = std::chrono::steady_clock::now();
         // as an end-of-pipe event: the work submitted before it is done

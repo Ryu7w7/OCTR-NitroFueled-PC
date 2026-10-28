@@ -18,6 +18,10 @@ bool NativeOnly();
 /// replays the mappings made before).
 void Install();
 
+/// Install ran: a write the CPU made outside page tracking (MemoryManager::InvalidateMemory,
+/// decoded video frames) reaches the native renderer.
+void NoteWrite(std::uint64_t addr, std::uint64_t size);
+
 /// A tracker exists (the Rasterizer, or Install ran).
 bool Ready();
 

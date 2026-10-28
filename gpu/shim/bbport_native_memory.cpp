@@ -94,6 +94,12 @@ void Install() {
     });
 }
 
+void NoteWrite(std::uint64_t addr, std::uint64_t size) {
+    if (installed) {
+        Written(addr, size);
+    }
+}
+
 bool Ready() {
     return installed || Core::Memory::Instance()->GetRasterizer() != nullptr;
 }

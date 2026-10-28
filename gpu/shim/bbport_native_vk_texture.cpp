@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,8 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #endif
+
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 
 namespace BbNativeVk::Tex {
 namespace {
@@ -86,6 +89,12 @@ std::atomic<u64> unsupported{0}, unreadable{0}, over_budget{0}, failed{0}, evict
 bool Read(u64 address, void* out, std::size_t size) {
     if (address < 0x10000) {
         return false;
+    }
+    // mapped guest memory is read directly (a system call per texture made, every frame of a
+    // video, otherwise)
+    if (runtime_memory_is_mapped(uintptr_t(address), size)) {
+        std::memcpy(out, reinterpret_cast<const void*>(address), size);
+        return true;
     }
 #ifdef _WIN32
     SIZE_T done = 0;
@@ -469,6 +478,36 @@ u32 MortonInTile(u32 x, u32 y) {
            ((y & 4) << 3);
 }
 
+/// The 64 elements of one 8x8 micro tile (contiguous at `tile`, element i of the tile at
+/// index[y * 8 + x]) into rows of `dst` (row_bytes apart), clipped to w x h.
+template <u32 EB>
+void CopyMicroTile(const u8* tile, const u8* index, u8* dst, std::size_t row_bytes, u32 w, u32 h) {
+    for (u32 y = 0; y < h; ++y) {
+        u8* d = dst + y * row_bytes;
+        const u8* ix = index + y * 8;
+        for (u32 x = 0; x < w; ++x) {
+            std::memcpy(d + x * EB, tile + u32(ix[x]) * EB, EB);
+        }
+    }
+}
+
+void CopyMicroTileAny(u32 eb, const u8* tile, const u8* index, u8* dst, std::size_t row_bytes, u32 w,
+                      u32 h) {
+    switch (eb) {
+    case 1: return CopyMicroTile<1>(tile, index, dst, row_bytes, w, h);
+    case 2: return CopyMicroTile<2>(tile, index, dst, row_bytes, w, h);
+    case 4: return CopyMicroTile<4>(tile, index, dst, row_bytes, w, h);
+    case 8: return CopyMicroTile<8>(tile, index, dst, row_bytes, w, h);
+    case 16: return CopyMicroTile<16>(tile, index, dst, row_bytes, w, h);
+    default:
+        for (u32 y = 0; y < h; ++y) {
+            for (u32 x = 0; x < w; ++x) {
+                std::memcpy(dst + y * row_bytes + x * eb, tile + u32(index[y * 8 + x]) * eb, eb);
+            }
+        }
+    }
+}
+
 /// One level of one slice into tightly packed rows (8x8-element micro tiles stored row-major,
 /// elements in Morton order inside a tile).
 void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s, u8* dst) {
@@ -477,6 +516,51 @@ void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s
     const std::size_t row_bytes = std::size_t(mp.ew) * l.eb;
     if (l.macro) {
         const MacroTiling mt(t.tiling, l.eb);
+        // A micro tile of at most 256 bytes and no tile split lies whole inside one 256-byte
+        // pipe interleave: its address is the tile's first element's plus the element's index,
+        // so it is worked out once per tile instead of per element (a video frame's planes,
+        // 6 MB, held every frame of the track select's preview videos back)
+        const u32 micro_bytes = 64 * l.eb;
+        if (micro_bytes <= 256 && micro_bytes <= mt.tile_split) {
+            u8 index[64];
+            for (u32 y = 0; y < 8; ++y) {
+                for (u32 x = 0; x < 8; ++x) {
+                    index[y * 8 + x] = u8(mt.PixelIndex(x, y));
+                }
+            }
+            for (u32 ty = 0; ty * 8 < mp.eh; ++ty) {
+                for (u32 tx = 0; tx * 8 < mp.ew; ++tx) {
+                    const u64 base = mt.Address(tx * 8, ty * 8, mp.row_e, l.macro_height);
+                    if (base + micro_bytes > mp.slice_bytes) {
+                        continue;
+                    }
+                    CopyMicroTileAny(l.eb, sb + base, index,
+                                     dst + std::size_t(ty) * 8 * row_bytes + std::size_t(tx) * 8 * l.eb,
+                                     row_bytes, std::min(8u, mp.ew - tx * 8), std::min(8u, mp.eh - ty * 8));
+                }
+            }
+            // lab BB_VK_DETILE_CHECK=1: the first textures compared with the per-element path
+            static const bool check = [] {
+                const char* v = std::getenv("BB_VK_DETILE_CHECK");
+                return v && v[0] == '1';
+            }();
+            static std::atomic<int> checked{0};
+            if (check && checked.fetch_add(1) < 40) {
+                std::size_t wrong = 0;
+                for (u32 y = 0; y < mp.eh; ++y) {
+                    for (u32 x = 0; x < mp.ew; ++x) {
+                        const u64 off = mt.Address(x, y, mp.row_e, l.macro_height);
+                        if (off + l.eb <= mp.slice_bytes &&
+                            std::memcmp(dst + y * row_bytes + std::size_t(x) * l.eb, sb + off, l.eb) != 0) {
+                            ++wrong;
+                        }
+                    }
+                }
+                std::printf("Native Vulkan: detile check %llx %ux%u eb %u tiling %u: %zu elements differ\n",
+                            (unsigned long long)t.base, mp.ew, mp.eh, l.eb, t.tiling, wrong);
+            }
+            return;
+        }
         for (u32 y = 0; y < mp.eh; ++y) {
             u8* drow = dst + y * row_bytes;
             for (u32 x = 0; x < mp.ew; ++x) {
@@ -494,56 +578,119 @@ void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s
         }
         return;
     }
-    for (u32 y = 0; y < mp.eh; ++y) {
-        u8* drow = dst + y * row_bytes;
-        const u64 tile_row = u64(y >> 3) * (mp.row_e >> 3);
-        for (u32 x = 0; x < mp.ew; ++x) {
-            const u64 off = ((tile_row + (x >> 3)) * 64 + MortonInTile(x & 7, y & 7)) * l.eb;
-            std::memcpy(drow + std::size_t(x) * l.eb, sb + off, l.eb);
+    // 1D thin: whole 8x8 micro tiles one after another, elements in Morton order inside
+    static const std::array<u8, 64> morton = [] {
+        std::array<u8, 64> m{};
+        for (u32 y = 0; y < 8; ++y) {
+            for (u32 x = 0; x < 8; ++x) {
+                m[y * 8 + x] = u8(MortonInTile(x, y));
+            }
+        }
+        return m;
+    }();
+    for (u32 ty = 0; ty * 8 < mp.eh; ++ty) {
+        const u64 tile_row = u64(ty) * (mp.row_e >> 3);
+        for (u32 tx = 0; tx * 8 < mp.ew; ++tx) {
+            CopyMicroTileAny(l.eb, sb + (tile_row + tx) * 64 * l.eb, morton.data(),
+                             dst + std::size_t(ty) * 8 * row_bytes + std::size_t(tx) * 8 * l.eb, row_bytes,
+                             std::min(8u, mp.ew - tx * 8), std::min(8u, mp.eh - ty * 8));
         }
     }
 }
 
 // ------------------------------------------------------------------ uploads
+/// Bytes without the zero fill of std::vector (a video frame's planes, ~6 MB every frame).
+struct Bytes {
+    std::unique_ptr<u8[]> p;
+    std::size_t n = 0, cap = 0;
+    u8* data() {
+        return p.get();
+    }
+    const u8* data() const {
+        return p.get();
+    }
+    std::size_t size() const {
+        return n;
+    }
+    bool empty() const {
+        return n == 0;
+    }
+};
+
+// guest snapshots, recycled once detiled (they used to be allocated and zeroed on the capture
+// thread, which the game waits for at each submission, for every remade texture)
+std::mutex bytes_mutex;
+std::vector<Bytes> free_bytes;
+u64 free_bytes_total = 0;
+constexpr u64 FreeBytesBudget = 64ull << 20;
+
+Bytes TakeBytes(std::size_t n) {
+    {
+        std::lock_guard lk(bytes_mutex);
+        // the smallest one that fits
+        std::size_t best = free_bytes.size();
+        for (std::size_t i = 0; i < free_bytes.size(); ++i) {
+            if (free_bytes[i].cap >= n && (best == free_bytes.size() || free_bytes[i].cap < free_bytes[best].cap)) {
+                best = i;
+            }
+        }
+        if (best != free_bytes.size()) {
+            Bytes b = std::move(free_bytes[best]);
+            free_bytes.erase(free_bytes.begin() + best);
+            free_bytes_total -= b.cap;
+            b.n = n;
+            return b;
+        }
+    }
+    Bytes b;
+    b.p.reset(new u8[std::max<std::size_t>(n, 1)]);
+    b.n = n;
+    b.cap = std::max<std::size_t>(n, 1);
+    return b;
+}
+
+void GiveBytes(Bytes&& b) {
+    if (!b.p) {
+        return;
+    }
+    std::lock_guard lk(bytes_mutex);
+    if (free_bytes_total + b.cap > FreeBytesBudget || b.cap > FreeBytesBudget / 4) {
+        return; // freed
+    }
+    free_bytes_total += b.cap;
+    b.n = 0;
+    free_bytes.push_back(std::move(b));
+}
+
 struct Job {
     Texture* tex; // its `ready` is set once the batch is submitted (`broken` too if it failed)
     VkImage image;
     u32 levels, slices;
-    std::vector<u8> data;                   // untiled levels, each region 16-byte aligned
-    std::vector<vk::BufferImageCopy> regions; // offsets into `data`
-    // lab: the guest copy, detiled into `data` on the upload thread (the capture thread, which
-    // the game waits for at each submit, only copies the memory)
+    u64 out_bytes = 0;                        // untiled levels, each region 16-byte aligned
+    std::vector<vk::BufferImageCopy> regions; // offsets from the job's start in the staging buffer
+    // lab: the guest copy, detiled on the upload thread straight into the staging buffer (the
+    // capture thread, which the game waits for at each submit, only copies the memory)
     TSharp t{};
     Layout l{};
-    std::vector<u8> guest;
+    Bytes guest;
 };
 
-/// Bytes a job uploads (before it is detiled: its guest copy, about the same).
+/// Bytes a job uploads (before it is planned: its guest copy, about the same).
 u64 JobBytes(const Job& j) {
-    return j.data.empty() ? j.guest.size() : j.data.size();
+    return j.out_bytes ? j.out_bytes : j.guest.size();
 }
 
-/// Untiles every slice and level (slice-major) of the job's guest copy into its upload data.
-void Detile(Job& job) {
+/// The job's regions (every slice and level, slice-major) and their size once untiled.
+void Plan(Job& job) {
     if (job.guest.empty()) {
         return;
     }
-    const TSharp& t = job.t;
     const Layout& l = job.l;
-    u64 size = 0;
-    for (u32 s = 0; s < l.slices; ++s) {
-        for (u32 m = 0; m < l.levels; ++m) {
-            size = (size + 15) & ~u64(15);
-            size += u64(l.mips[m].ew) * l.mips[m].eh * l.eb;
-        }
-    }
-    job.data.resize(size);
     u64 at = 0;
     for (u32 s = 0; s < l.slices; ++s) {
         for (u32 m = 0; m < l.levels; ++m) {
             at = (at + 15) & ~u64(15);
             const Mip& mp = l.mips[m];
-            DetileLevel(t, l, job.guest.data(), m, s, job.data.data() + at);
             job.regions.push_back(vk::BufferImageCopy{
                 .bufferOffset = at,
                 .bufferRowLength = mp.ew * l.bw,
@@ -558,7 +705,21 @@ void Detile(Job& job) {
             at += u64(mp.ew) * mp.eh * l.eb;
         }
     }
-    std::vector<u8>().swap(job.guest);
+    job.out_bytes = at;
+}
+
+/// Untiles the job's guest copy into `out` (its regions' layout), then recycles the copy.
+void DetileInto(Job& job, u8* out) {
+    if (!job.guest.empty()) {
+        const Layout& l = job.l;
+        std::size_t r = 0;
+        for (u32 s = 0; s < l.slices; ++s) {
+            for (u32 m = 0; m < l.levels; ++m, ++r) {
+                DetileLevel(job.t, l, job.guest.data(), m, s, out + job.regions[r].bufferOffset);
+            }
+        }
+    }
+    GiveBytes(std::move(job.guest));
 }
 
 std::mutex upload_mutex;
@@ -576,39 +737,82 @@ void Settle(std::vector<Job>& jobs, bool ok) {
     }
 }
 
-void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) {
+/// One upload batch in flight: its fence, command buffer and staging buffer (kept and reused;
+/// a batch used to wait for the GPU before the next one could go, so a video's next frame waited
+/// behind a whole GPU frame and the track select's preview videos ran at ~40 FPS).
+struct UploadSlot {
+    vk::Fence fence;
+    vk::CommandBuffer cmd;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    void* mapped = nullptr;
+    u64 capacity = 0;
+    std::size_t jobs = 0;
+    bool in_flight = false;
+};
+
+/// Waits for the slot's last batch (counted done then).
+void Reclaim(UploadSlot& slot) {
+    if (!slot.in_flight) {
+        return;
+    }
     const vk::Device dev = instance->GetDevice();
+    (void)dev.waitForFences(slot.fence, VK_TRUE, ~0ull);
+    (void)dev.resetFences(slot.fence);
+    uploads_done.fetch_add(slot.jobs, std::memory_order_relaxed);
+    upload_batches.fetch_add(1, std::memory_order_relaxed);
+    slot.in_flight = false;
+}
+
+void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs) {
+    const vk::Device dev = instance->GetDevice();
+    Reclaim(slot);
     u64 size = 0;
     for (const Job& j : jobs) {
-        size += (j.data.size() + 15) & ~u64(15);
+        size += (j.out_bytes + 15) & ~u64(15);
     }
+    if (slot.staging && slot.capacity < size) {
+        vmaDestroyBuffer(instance->GetAllocator(), slot.staging, slot.allocation);
+        slot.staging = VK_NULL_HANDLE;
+        slot.allocation = nullptr;
+    }
+    const u64 want = std::max<u64>(size, 4ull << 20); // room for a video frame's planes
     const VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                 .size = std::max<u64>(size, 16),
+                                 .size = want,
                                  .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                  .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO;
-    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    VkBuffer staging = VK_NULL_HANDLE;
-    VmaAllocation allocation = nullptr;
+    // cached host memory: uploads are detiled straight into it, in a scattered order that
+    // write-combined memory would make slow
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info{};
-    if (vmaCreateBuffer(instance->GetAllocator(), &bci, &aci, &staging, &allocation, &info) !=
-        VK_SUCCESS) {
+    if (!slot.staging &&
+        vmaCreateBuffer(instance->GetAllocator(), &bci, &aci, &slot.staging, &slot.allocation, &info) ==
+            VK_SUCCESS) {
+        slot.mapped = info.pMappedData;
+        slot.capacity = want;
+    }
+    const VkBuffer staging = slot.staging;
+    if (!staging) {
         failed.fetch_add(jobs.size(), std::memory_order_relaxed);
         std::printf("Native Vulkan: no staging buffer for %zu texture uploads (%llu bytes)\n",
                     jobs.size(), (unsigned long long)size);
         Settle(jobs, false);
         return;
     }
-    auto [ar, cmds] = dev.allocateCommandBuffers(
-        {.commandPool = pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1});
-    if (ar != vk::Result::eSuccess) {
-        vmaDestroyBuffer(instance->GetAllocator(), staging, allocation);
-        failed.fetch_add(jobs.size(), std::memory_order_relaxed);
-        Settle(jobs, false);
-        return;
+    if (!slot.cmd) {
+        auto [ar, cmds] = dev.allocateCommandBuffers(
+            {.commandPool = pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1});
+        if (ar != vk::Result::eSuccess) {
+            failed.fetch_add(jobs.size(), std::memory_order_relaxed);
+            Settle(jobs, false);
+            return;
+        }
+        slot.cmd = cmds[0];
     }
-    const vk::CommandBuffer cmd = cmds[0];
+    const vk::CommandBuffer cmd = slot.cmd;
+    (void)cmd.reset();
     (void)cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
     // one barrier into transfer layout for every image, the copies, one barrier to shader reads
     std::vector<vk::ImageMemoryBarrier2> to_dst, to_read;
@@ -646,12 +850,12 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
                           .pImageMemoryBarriers = to_dst.data()});
     u64 at = 0;
     for (Job& j : jobs) {
-        std::memcpy(static_cast<u8*>(info.pMappedData) + at, j.data.data(), j.data.size());
+        DetileInto(j, static_cast<u8*>(slot.mapped) + at);
         for (vk::BufferImageCopy& r : j.regions) {
             r.bufferOffset += at;
         }
         cmd.copyBufferToImage(staging, j.image, vk::ImageLayout::eTransferDstOptimal, j.regions);
-        at += (j.data.size() + 15) & ~u64(15);
+        at += (j.out_bytes + 15) & ~u64(15);
     }
     cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_read.size()),
                           .pImageMemoryBarriers = to_read.data()});
@@ -661,20 +865,17 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
     {
         // every graphics-queue submit and present in shadPS4 holds this lock
         std::scoped_lock lk{Vulkan::Scheduler::submit_mutex};
-        sr = instance->GetGraphicsQueue().submit(submit, fence);
+        sr = instance->GetGraphicsQueue().submit(submit, slot.fence);
     }
     Settle(jobs, sr == vk::Result::eSuccess);
     if (sr == vk::Result::eSuccess) {
-        (void)dev.waitForFences(fence, VK_TRUE, ~0ull);
-        uploads_done.fetch_add(jobs.size(), std::memory_order_relaxed);
-        upload_batches.fetch_add(1, std::memory_order_relaxed);
+        // not waited for here: the slot is reclaimed when it comes round again
+        slot.in_flight = true;
+        slot.jobs = jobs.size();
     } else {
         failed.fetch_add(jobs.size(), std::memory_order_relaxed);
         std::printf("Native Vulkan: texture upload submit failed (%s)\n", vk::to_string(sr).c_str());
     }
-    (void)dev.resetFences(fence);
-    dev.freeCommandBuffers(pool, cmd);
-    vmaDestroyBuffer(instance->GetAllocator(), staging, allocation);
 }
 
 /// Uploads queued textures in batches of up to 64 MiB.
@@ -682,10 +883,18 @@ void UploadThread() {
     BbCpu::Register("bb:NativeTexUpload");
     const vk::Device dev = instance->GetDevice();
     auto [pr, pool] = dev.createCommandPool(
-        {.flags = vk::CommandPoolCreateFlagBits::eTransient,
+        {.flags = vk::CommandPoolCreateFlagBits::eTransient |
+                  vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
          .queueFamilyIndex = instance->GetGraphicsQueueFamilyIndex()});
-    auto [fr, fence] = dev.createFence({});
-    if (pr != vk::Result::eSuccess || fr != vk::Result::eSuccess) {
+    std::array<UploadSlot, 4> slots{};
+    bool fences_ok = true;
+    for (UploadSlot& slot : slots) {
+        auto [fr, fence] = dev.createFence({});
+        fences_ok = fences_ok && fr == vk::Result::eSuccess;
+        slot.fence = fence;
+    }
+    std::size_t next_slot = 0;
+    if (pr != vk::Result::eSuccess || !fences_ok) {
         std::printf("Native Vulkan: no command pool or fence for texture uploads\n");
         return;
     }
@@ -705,9 +914,10 @@ void UploadThread() {
             upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
         }
         for (Job& job : jobs) {
-            Detile(job);
+            Plan(job);
         }
-        SubmitBatch(pool, fence, jobs);
+        SubmitBatch(pool, slots[next_slot], jobs);
+        next_slot = (next_slot + 1) % slots.size();
         uploads_pending.fetch_sub(jobs.size(), std::memory_order_relaxed);
     }
 }
@@ -875,7 +1085,27 @@ void Written(std::uint64_t addr, std::uint64_t size) {
         return;
     }
     std::lock_guard lk(watch_mutex);
-    const u64 first = addr >> PageBits, last = (addr + size - 1) >> PageBits;
+    // A write to a watched texture takes the watch off the whole texture at once (it is stale
+    // now; remade, it is watched again): page by page, a game copying a video frame's planes
+    // (6 MB) into watched textures took ~1500 faults and protection calls a frame (~14% of its
+    // render thread). Textures overlapping the widened range go stale with it (conservative:
+    // remade from memory rather than missing a write on a shared page).
+    u64 lo_addr = addr, hi_addr = addr + size;
+    static const bool whole = [] {
+        const char* env = std::getenv("BB_VK_WHOLE_TEXTURE_UNWATCH");
+        return !(env && env[0] == '0');
+    }();
+    if (whole) {
+        for (auto it = by_base.lower_bound(addr > largest ? addr - largest : 0);
+             it != by_base.end() && it->first < addr + size; ++it) {
+            const Texture* t = it->second;
+            if (t->base + t->size > addr) {
+                lo_addr = std::min(lo_addr, t->base);
+                hi_addr = std::max(hi_addr, t->base + t->size);
+            }
+        }
+    }
+    const u64 first = lo_addr >> PageBits, last = (hi_addr - 1) >> PageBits;
     // our watch comes off the written pages (the write goes ahead), in runs
     bool hit = false;
     u64 run = 0, run_start = 0;
@@ -962,8 +1192,78 @@ void UnwatchTarget(std::atomic<bool>* written) {
     UnwatchTargetLocked(written);
 }
 
-void Destroy(Texture* t) {
+// Images (with their views) of retired textures, kept for the next texture of the same shape: a
+// video rewrites its planes every frame, and each new frame used to create an image and views on
+// the capture thread and, retiring the old ones, drop every cached descriptor set (the intro
+// videos ran at 30-50 FPS against shadPS4's 200).
+struct PoolKey {
+    vk::Format format;
+    u32 width, height, levels, slices, first;
+    bool cube;
+    bool operator==(const PoolKey&) const = default;
+};
+struct Pooled {
+    PoolKey key;
+    VkImage image;
+    VmaAllocation allocation;
+    VkImageView view, view_array;
+    u64 bytes;
+};
+constexpr u64 PoolBudget = 192ull << 20;
+std::mutex pool_mutex;
+std::vector<Pooled> pool; // oldest first
+u64 pool_bytes = 0;
+std::atomic<u64> pool_reused{0}, pool_kept{0};
+
+bool PoolOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_VK_TEXTURE_POOL");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+bool TakePooled(const PoolKey& key, Pooled* out) {
+    std::lock_guard lk(pool_mutex);
+    for (auto it = pool.rbegin(); it != pool.rend(); ++it) {
+        if (it->key == key) {
+            *out = *it;
+            pool_bytes -= it->bytes;
+            pool.erase(std::next(it).base());
+            pool_reused.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Destroy(Texture* t) {
     const vk::Device dev = instance->GetDevice();
+    if (PoolOn() && t->image && t->view && t->view_array && !t->broken.load() &&
+        t->bytes <= PoolBudget / 4) {
+        std::lock_guard lk(pool_mutex);
+        // the oldest entries go first to make room (their views destroyed: sets dropped)
+        bool destroyed = false;
+        while (!pool.empty() && pool_bytes + t->bytes > PoolBudget) {
+            const Pooled old = pool.front();
+            pool.erase(pool.begin());
+            pool_bytes -= old.bytes;
+            if (old.view && old.view != old.view_array) {
+                dev.destroyImageView(old.view);
+            }
+            dev.destroyImageView(old.view_array);
+            vmaDestroyImage(instance->GetAllocator(), old.image, old.allocation);
+            destroyed = true;
+        }
+        pool.push_back(Pooled{{t->format, t->width, t->height, t->levels, t->slices,
+                               t->first_level, t->cube},
+                              t->image, t->allocation, t->view, t->view_array, t->bytes});
+        pool_bytes += t->bytes;
+        pool_kept.fetch_add(1, std::memory_order_relaxed);
+        delete t;
+        return destroyed;
+    }
+    const bool views = t->view || t->view_array;
     if (t->view && t->view != t->view_array) {
         dev.destroyImageView(t->view);
     }
@@ -974,6 +1274,7 @@ void Destroy(Texture* t) {
         vmaDestroyImage(instance->GetAllocator(), t->image, t->allocation);
     }
     delete t;
+    return views;
 }
 
 void Init(const Vulkan::Instance& vulkan) {
@@ -992,7 +1293,7 @@ std::uint64_t TSharpBase(const std::uint32_t* tsharp) {
 Info Describe(const std::uint32_t* tsharp) {
     const TSharp t = Decode(tsharp);
     return Info{t.base,    t.width,      t.height,     t.dfmt, t.nfmt,
-                t.dst_sel, t.last_level, TextureFormat(t.dfmt, t.nfmt)};
+                t.dst_sel, t.last_level, TextureFormat(t.dfmt, t.nfmt), t.tiling, t.type};
 }
 
 const Texture* Get(const std::uint32_t* tsharp) {
@@ -1001,6 +1302,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     }
     const u64 key = Fnv(reinterpret_cast<const u8*>(tsharp), 24);
     const u64 now = host.serial ? host.serial() : 0;
+    bool remade_now = false;
     if (const auto it = textures.find(key); it != textures.end()) {
         Texture* found = it->second.get();
         found->last_used = now;
@@ -1010,6 +1312,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
         }
         Retire(it);
         remade.fetch_add(1, std::memory_order_relaxed);
+        remade_now = true;
     }
     // an empty entry remembers a texture that could not be made
     Texture& tex = *(textures[key] = std::make_unique<Texture>());
@@ -1059,8 +1362,32 @@ const Texture* Get(const std::uint32_t* tsharp) {
         std::lock_guard lk(watch_mutex);
         Watch(&tex);
     }
-    std::vector<u8> guest(l.total);
+    // lab BB_VK_LOG_COPIES=1 (track select bug): textures that can never go stale, and remakes
+    static const bool log_textures_life = [] {
+        const char* v = std::getenv("BB_VK_LOG_COPIES");
+        return v && v[0] == '1';
+    }();
+    if (log_textures_life) {
+        static const auto start = std::chrono::steady_clock::now();
+        const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        static std::unordered_set<u64> told_unwatched;
+        static std::unordered_map<u64, double> last_remake_log;
+        if (!tex.watched && told_unwatched.size() < 300 && told_unwatched.insert(t.base).second) {
+            std::printf("Native Vulkan: [%.1f s] texture %llx %ux%u dfmt %u tiling %u is not watched "
+                        "(%s): game writes to it will not refresh it\n",
+                        sec, (unsigned long long)t.base, t.width, t.height, t.dfmt, t.tiling,
+                        host.retire ? "not GPU-mapped memory" : "no host");
+        }
+        double& last = last_remake_log[t.base];
+        if (remade_now && sec - last >= 1.0) {
+            last = sec;
+            std::printf("Native Vulkan: [%.1f s] texture %llx %ux%u dfmt %u remade (the game wrote it)\n",
+                        sec, (unsigned long long)t.base, t.width, t.height, t.dfmt);
+        }
+    }
+    Bytes guest = TakeBytes(l.total);
     if (!Read(t.base, guest.data(), guest.size())) {
+        GiveBytes(std::move(guest));
         unreadable.fetch_add(1, std::memory_order_relaxed);
         Warn(key, t, "memory not readable");
         return nullptr;
@@ -1080,20 +1407,31 @@ const Texture* Get(const std::uint32_t* tsharp) {
         .sharingMode = vk::SharingMode::eExclusive,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
-    VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    const u32 first = std::min(t.base_level, l.levels - 1);
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
-    const VkImageCreateInfo& raw = ici;
-    const VkResult r =
-        vmaCreateImage(instance->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
-    tex.allocation = allocation;
-    if (r != VK_SUCCESS) {
-        failed.fetch_add(1, std::memory_order_relaxed);
-        Warn(key, t, vk::to_string(vk::Result(r)).c_str());
-        return nullptr;
+    // an image of the same shape a retired texture left (a video's previous frame), views and all
+    Pooled reused{};
+    const bool from_pool =
+        PoolOn() && TakePooled(PoolKey{l.format, l.width0, l.height0, l.levels, l.slices, first, l.cube},
+                               &reused);
+    if (from_pool) {
+        image = reused.image;
+        allocation = reused.allocation;
+    } else {
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        const VkImageCreateInfo& raw = ici;
+        const VkResult r =
+            vmaCreateImage(instance->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
+        if (r != VK_SUCCESS) {
+            tex.allocation = allocation;
+            failed.fetch_add(1, std::memory_order_relaxed);
+            Warn(key, t, vk::to_string(vk::Result(r)).c_str());
+            return nullptr;
+        }
     }
-    const u32 first = std::min(t.base_level, l.levels - 1);
+    tex.allocation = allocation;
     auto view_of = [&](vk::ImageViewType type) {
         const vk::ImageViewCreateInfo vci{
             .image = image,
@@ -1109,10 +1447,17 @@ const Texture* Get(const std::uint32_t* tsharp) {
         return vr == vk::Result::eSuccess ? VkImageView(view) : VK_NULL_HANDLE;
     };
     tex.image = image;
-    tex.view_array = view_of(vk::ImageViewType::e2DArray);
-    tex.view = l.cube ? view_of(vk::ImageViewType::eCube)
-               : l.slices == 1 ? view_of(vk::ImageViewType::e2D)
-                               : tex.view_array;
+    if (from_pool) {
+        tex.view_array = reused.view_array;
+        tex.view = reused.view;
+    } else {
+        tex.view_array = view_of(vk::ImageViewType::e2DArray);
+        tex.view = l.cube ? view_of(vk::ImageViewType::eCube)
+                   : l.slices == 1 ? view_of(vk::ImageViewType::e2D)
+                                   : tex.view_array;
+    }
+    tex.first_level = first;
+    tex.cube = l.cube;
     tex.width = l.width0;
     tex.height = l.height0;
     tex.levels = l.levels;
@@ -1200,6 +1545,10 @@ Stats GetStats() {
                  uploads_pending.load(),   upload_batches.load(), unsupported.load(),
                  unreadable.load(),        over_budget.load(),   failed.load(),
                  samplers.size(),          evicted.load(),        remade.load(),
-                 pages};
+                 pages,                    pool_reused.load(),    pool_kept.load(),
+                 [] {
+                     std::lock_guard lk(pool_mutex);
+                     return pool_bytes;
+                 }()};
 }
 } // namespace BbNativeVk::Tex

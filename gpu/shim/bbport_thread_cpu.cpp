@@ -17,6 +17,20 @@
 #include <time.h>
 #endif
 
+// lab: the runtime names each guest thread as it starts (src/runtime_thread.c); counted (and
+// sampled with BB_VK_PROFILE) as "game:<name>"
+extern "C" void (*runtime_thread_started_hook)(const char* name);
+namespace {
+struct GuestThreadHook {
+    GuestThreadHook() {
+        runtime_thread_started_hook = [](const char* name) {
+            const std::string n = std::string("game:") + (name ? name : "?");
+            BbCpu::Register(n.c_str());
+        };
+    }
+} guest_thread_hook;
+} // namespace
+
 namespace BbCpu {
 namespace {
 
