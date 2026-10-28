@@ -1698,9 +1698,13 @@ void CompileThread() {
     }
 }
 
-/// Starts the compile threads: a few, leaving cores to the game.
+/// Starts the compile threads: a few, leaving cores to the game. BB_VK_COMPILE_THREADS=<n>
+/// (lab): NVIDIA 610.88 crashed with two threads compiling pipelines of the same fur ES+GS.
 void StartCompileThreads() {
-    const unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+    unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+    if (const char* env = std::getenv("BB_VK_COMPILE_THREADS"); env && std::atoi(env) > 0) {
+        n = std::min(unsigned(std::atoi(env)), 8u);
+    }
     for (unsigned i = 0; i < n; ++i) {
         std::thread(CompileThread).detach();
     }
