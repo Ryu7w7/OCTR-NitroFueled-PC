@@ -125,3 +125,12 @@ presence, not a frame-accurate HUD, and Discord may delay displaying state chang
 Python tests cover timestamp anchoring, aged snapshots, countdown serialization,
 pause, restart, and a real synthetic-child bridge read. The Python AppImage needs
 both the updated launcher formatter and `discord_ipc.py` for countdown support.
+
+Final installed-AppImage check: the packaged bridge emitted `timer_start` and the
+Discord UI showed `Time Trial · Crash Cove` / `Local Arcade · Racing · Lap 1/3`.
+Three direct IPC samples at engine times 16.059448, 19.101318, and 22.142090 seconds
+received the same native start timestamp, 1793226181000 milliseconds. Each anchor
+was within one second of the sampled engine clock; Discord echoed the expected
+layout and timestamp. The temporary activity was cleared afterward. Native game
+and GPU hashes matched the original package. All 15 launcher and 4 bridge tests
+passed; C/Windows compilation and other live race modes remain untested.
