@@ -1299,6 +1299,67 @@ bool NickTaken() {
     return s == "taken" || s == "reserved" || s == "invalid";
 }
 
+/// The game's own state (ryunet_state.txt next to bbport.ini, src/runtime_state.c): online,
+/// nickname, and the peers of the room the game talks to (RyuNET ping), written 5 seconds after
+/// anything changed. Read at most every 2 s, and fresh (its "at" is at most 20 s old): the game
+/// stops when it quits, so a stale file is no state.
+struct GameStatus {
+    bool ok = false;
+    int room = 0, extra = 0;
+    std::string phase, mode, race;
+    int lap = 0, laps = 0, race_seconds = -1;
+    std::string peers;  // "", up to three nicknames with commas, for the state
+};
+GameStatus g_game_status;
+ULONGLONG g_game_status_at = 0;
+
+void ReadGameStatus() {
+    const ULONGLONG now = GetTickCount64();
+    if (g_game_status_at && now - g_game_status_at < 2000) return;
+    g_game_status_at = now;
+    GameStatus read;
+    long long at = 0;
+    std::ifstream in(GameIni().parent_path() / L"ryunet_state.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = Trim(line.substr(0, eq));
+        const std::string value = Trim(line.substr(eq + 1));
+        if (key == "phase") read.phase = value.substr(0, 64);
+        else if (key == "mode") read.mode = value.substr(0, 64);
+        else if (key == "race") read.race = value.substr(0, 64);
+        else if (key == "lap" || key == "laps" || key == "race_seconds") {
+            char* end = nullptr;
+            const long number = std::strtol(value.c_str(), &end, 10);
+            if (!value.empty() && *end == '\0' && number >= 0 && number < 86400) {
+                if (key == "lap") read.lap = int(number);
+                else if (key == "laps") read.laps = int(number);
+                else read.race_seconds = int(number);
+            }
+        }
+        else if (key == "room") read.room = std::atoi(value.c_str());
+        else if (key == "extra") read.extra = std::atoi(value.c_str());
+        else if (key == "peers") {
+            std::string shown, rest = value;
+            for (int named = 0; named < 3 && !rest.empty(); named++) {
+                const auto comma = rest.find(',');
+                const std::string name = Trim(rest.substr(0, comma));
+                if (!name.empty()) {
+                    if (!shown.empty()) shown += ", ";
+                    shown += name;
+                }
+                if (comma == std::string::npos) break;
+                rest.erase(0, comma + 1);
+            }
+            read.peers = shown;
+        } else if (key == "at") at = std::atoll(value.c_str());
+    }
+    if (read.extra > 0) read.peers += " +" + std::to_string(read.extra);
+    read.ok = at > 0 && at <= int64_t(std::time(nullptr)) && int64_t(std::time(nullptr)) - at <= 20;
+    g_game_status = read;
+}
+
 /// The lobby this player hosts (their party or private room), from the server's
 /// /ryunet/party, refreshed in the background every 5 s while it is asked for: Discord's
 /// "1 of 8" follows players joining and leaving. Only changes reach Discord (DiscordPresence
@@ -1682,7 +1743,33 @@ void UpdateDiscord() {
     if (a.game.Flag("online", true)) {
         activity.details = T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
-        if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
+        // The game's own state (ReadGameStatus) tells who it is sharing the room with, and how
+        // long it has been running: the same as Python's discord_activity_for (sacredfire_launcher.py).
+        std::vector<std::string> parts;
+        if (!nick.empty()) parts.push_back(std::string(T("Apodo: ", "Nickname: ")) + nick);
+        ReadGameStatus();
+        if (g_game_status.ok && g_game_status.room > 0) {
+            if (!g_game_status.peers.empty())
+                parts.push_back(std::string(T("Sala online: ", "Online room: ")) + g_game_status.peers);
+            else {
+                char count[96];
+                std::snprintf(count, sizeof count,
+                              T("Sala online: %s jugadores", "Online room: %s players"),
+                              std::to_string(g_game_status.room).c_str());
+                parts.push_back(count);
+            }
+        } else {
+            parts.push_back(T("Jugando online", "Playing online"));
+        }
+        parts.push_back(std::to_string(started
+                                           ? (int64_t(std::time(nullptr)) - started) / 60
+                                           : 0) + " min");
+        std::string where;
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (i) where += " · ";
+            where += parts[i];
+        }
+        activity.state = where;
         // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
         // whoever accepts; their launcher adds us as a friend and starts their game.
         const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
@@ -1701,6 +1788,25 @@ void UpdateDiscord() {
         }
     } else {
         activity.details = T("Jugando sin conexión", "Playing offline");
+        activity.state = std::to_string(started ? (int64_t(std::time(nullptr)) - started) / 60 : 0) + " min";
+    }
+    ReadGameStatus();
+    if (g_game_status.ok && !g_game_status.phase.empty()) {
+        const auto& game = g_game_status;
+        activity.details = game.mode;
+        if (!game.race.empty()) {
+            if (!activity.details.empty()) activity.details += " · ";
+            activity.details += game.race;
+        }
+        if (activity.details.empty()) activity.details = "Playing";
+        activity.state = game.phase;
+        if (game.lap >= 1 && game.lap <= game.laps && game.laps <= 99)
+            activity.state += " · Lap " + std::to_string(game.lap) + "/" + std::to_string(game.laps);
+        if (game.race_seconds >= 0 && game.race_seconds < 86400) {
+            char clock[32];
+            std::snprintf(clock, sizeof clock, " · %d:%02d", game.race_seconds / 60, game.race_seconds % 60);
+            activity.state += clock;
+        }
     }
     activity.start = started;
     activity.large_image = "logo";

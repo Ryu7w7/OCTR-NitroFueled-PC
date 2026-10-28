@@ -290,5 +290,82 @@ class PresenceTests(unittest.TestCase):
             del os.environ['CTR_DISCORD_SOCKET']
 
 
+try:
+    import sacredfire_launcher as sf  # the launcher's own modules: needs gi (GTK) to import
+except ImportError:
+    sf = None
+
+
+@unittest.skipUnless(sf is not None, 'sacredfire_launcher needs gi (GTK) to import')
+class ActivityTests(unittest.TestCase):
+    def setUp(self):
+        os.environ['BB_CONFIG'] = os.path.join(tempfile.mkdtemp(), 'bbport.ini')
+
+    def state_file(self, body, at_age=0):
+        with open(os.environ['BB_CONFIG'].replace('bbport.ini', 'ryunet_state.txt'), 'w',
+                  encoding='utf-8') as f:
+            f.write(body.format(int(time.time()) - at_age, at=int(time.time()) - at_age))
+
+    def test_offline_and_minutes(self):
+        ini = {'online': '0', 'online_name': 'Crash'}
+        activity = sf.discord_activity_for(ini, int(time.time()) - 200, None)
+        self.assertEqual(activity.details, sf.tr('Playing offline'))
+        self.assertEqual(activity.state, sf.tr('{} min').format(3))
+        self.assertEqual(activity.party_size, 0)
+
+    def test_online_menu_room_and_minutes(self):
+        started = int(time.time()) - 200
+        ini = {'online': '1', 'online_name': 'Crash', 'online_server': 'octr.ryu7w7.xyz'}
+        party, game = (3, 8), {'room': 0, 'peers': [], 'extra': 0}
+        activity = sf.discord_activity_for(ini, started, party, game)
+        self.assertEqual((activity.party_size, activity.party_max), (3, 8))
+        self.assertTrue(activity.join_secret)
+        self.assertIn(sf.tr('Playing online'), activity.state)
+        self.assertIn(sf.tr('Nickname: {}').format('Crash'), activity.state)
+        # the game's own state: who the room is, and a longer room carries "extra"
+        game = {'room': 3, 'peers': ['Andy', 'Carol', 'Judy'], 'extra': 0}
+        activity = sf.discord_activity_for(ini, started, party, game)
+        self.assertIn(sf.tr('Online room: {}').format('Andy, Carol, Judy'), activity.state)
+        game = {'room': 6, 'peers': ['Andy', 'Carol', 'Judy'], 'extra': 3}
+        activity = sf.discord_activity_for(ini, started, party, game)
+        self.assertIn(sf.tr('Online room: {}').format('Andy, Carol, Judy +3'), activity.state)
+        # without names (a too-old port): the room's size stands in
+        game = {'room': 4, 'peers': [], 'extra': 0}
+        activity = sf.discord_activity_for(ini, started, party, game)
+        self.assertIn(sf.tr('Online room: {} players').format(4), activity.state)
+        self.assertIn(sf.tr('{} min').format(3), activity.state)
+
+    def test_actual_race_overrides_connection_setting(self):
+        self.state_file('phase=Racing\nmode=Local Arcade\nrace=Time Trial\n'
+                        'lap=2\nlaps=3\nrace_seconds=83\nat={at}\n')
+        game = sf.read_game_state()
+        for online in ('0', '1'):
+            activity = sf.discord_activity_for({'online': online}, 100, None, game)
+            self.assertEqual(activity.details, 'Local Arcade · Time Trial')
+            self.assertEqual(activity.state, 'Racing · Lap 2/3 · 1:23')
+            self.assertEqual(activity.start, 100)
+        self.state_file('phase=Menus / loading\nmode=Local Arcade\nat={at}\n')
+        activity = sf.discord_activity_for({'online': '1'}, 100, None, sf.read_game_state())
+        self.assertEqual(activity.state, 'Menus / loading')
+        self.assertNotIn('Time Trial', activity.details)
+
+    def test_bad_race_values_and_future_snapshot(self):
+        self.state_file('phase=Racing\nlap=oops\nlaps=3\nrace_seconds=nan\nat={at}\n')
+        self.assertEqual(sf.game_presence(sf.read_game_state()), ('Playing', 'Racing'))
+        self.state_file('phase=Racing\nat={at}\n', at_age=-60)
+        self.assertEqual(sf.read_game_state(), {})
+
+    def test_stale_state_is_not_a_state(self):
+        started = int(time.time()) - 200
+        self.state_file('online=1\nnick=Alice\nroom=2\npeers=Andy\nat={}\n', at_age=60)
+        ini = {'online': '1', 'online_name': 'Crash', 'online_server': 'octr.ryu7w7.xyz'}
+        self.assertEqual(sf.read_game_state(), {})
+        self.state_file('online=1\nnick=Alice\nroom=2\npeers=Andy\nat={}\n')
+        self.assertEqual(sf.read_game_state(), {'room': 2, 'peers': ['Andy'], 'extra': 0})
+        game = sf.read_game_state()
+        activity = sf.discord_activity_for(ini, started, (3, 8), game)
+        self.assertIn(sf.tr('Online room: {}').format('Andy'), activity.state)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -688,16 +688,82 @@ def import_saves(user_dir, source):
     return ""
 
 
-def discord_activity_for(ini, started, party):
-    """What Discord shows while the game runs, from bbport.ini: online with the nickname and a
-    joinable party (the Windows launcher's), or offline. party: (players, max) of the lobby the
-    player hosts, None when unknown."""
+def read_game_state():
+    """Read fresh peer and gameplay fields from runtime_state.c; old builds omit gameplay."""
+    try:
+        raw = (ini_path().parent / "ryunet_state.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values = {}
+    for line in raw.splitlines():
+        text, sep, value = line.partition("=")
+        if sep:
+            values[text.strip()] = value.strip()
+    try:
+        if not 0 <= int(time.time()) - int(values.get("at", "0")) <= 20:
+            return {}
+    except ValueError:
+        return {}
+    try:
+        room, extra = int(values.get("room", "0")), int(values.get("extra", "0"))
+    except ValueError:
+        return {}
+    result = {"room": max(0, room), "extra": max(0, extra),
+              "peers": [p for p in values.get("peers", "").split(",") if p]}
+    for key in ("phase", "mode", "race"):
+        if values.get(key):
+            result[key] = values[key][:64]
+    for key in ("lap", "laps", "race_seconds"):
+        try:
+            value = int(values.get(key, "-1"))
+            if 0 <= value < 86400:
+                result[key] = value
+        except ValueError:
+            pass
+    return result
+
+
+def game_presence(game):
+    """Use only sampled game fields; session elapsed time stays in Discord's timestamp."""
+    if not game or not game.get("phase"):
+        return None
+    details = " · ".join(tr(game[k]) for k in ("mode", "race") if game.get(k)) or tr("Playing")
+    parts = [tr(game["phase"])]
+    lap, laps = game.get("lap", 0), game.get("laps", 0)
+    if 1 <= lap <= laps <= 99:
+        parts.append(tr("Lap {}/{}").format(lap, laps))
+    seconds = game.get("race_seconds", -1)
+    if 0 <= seconds < 86400:
+        parts.append(f"{seconds // 60}:{seconds % 60:02d}")
+    return details, " · ".join(parts)
+
+
+def discord_activity_for(ini, started, party, game=None):
+    """Actual gameplay when sampled, plus the configured online party/invite support."""
     nick, server = ini.get("online_name", "").strip(), ini.get("online_server", ONLINE_SERVER).strip()
+    minutes = max(0, (int(time.time()) - started) // 60) if started else 0
+    sampled = game_presence(game)
     if ini.get("online") != "1":
-        return discord_ipc.Activity(tr("Playing offline"), start=started, large_image="logo",
+        return discord_ipc.Activity(sampled[0] if sampled else tr("Playing offline"),
+                                    state=sampled[1] if sampled else tr("{} min").format(minutes),
+                                    start=started, large_image="logo",
                                     large_text="Crash Team Racing Nitro-Fueled")
-    activity = discord_ipc.Activity(tr("Playing online"), state=tr("Nickname: {}").format(nick) if nick else "",
-                                    start=started, large_image="logo", large_text="Crash Team Racing Nitro-Fueled")
+    parts = [tr("Nickname: {}").format(nick)] if nick else []
+    room = (game or {}).get("room", 0)
+    names, extra = (game or {}).get("peers") or [], (game or {}).get("extra", 0)
+    if room:
+        shown = ", ".join(names[:3])
+        if extra and shown:
+            shown = f"{shown} +{extra}"
+        parts.append(tr("Online room: {}").format(shown) if shown
+                     else tr("Online room: {} players").format(room))
+    else:
+        parts.append(tr("Playing online"))
+    parts.append(tr("{} min").format(minutes))
+    activity = discord_ipc.Activity(tr("Playing online"), state=" · ".join(parts), start=started,
+                                    large_image="logo", large_text="Crash Team Racing Nitro-Fueled")
+    if sampled:
+        activity.details, activity.state = sampled
     if nick_ok(nick) and ryunet_http.valid_server(server):
         players, maximum = party or (1, 8)  # a server without /ryunet/party: offer it anyway
         if 0 < players <= maximum:
@@ -2838,7 +2904,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         """What Discord shows while the game runs; joinable online (the Windows launcher's)."""
         if self.process is None:
             return None
-        return discord_activity_for(self.ini, self.game_started, self.party)
+        return discord_activity_for(self.ini, self.game_started, self.party, read_game_state())
 
     def poll_party(self):
         """The lobby this player hosts, every 5 s while the game runs online: Discord's
@@ -3207,7 +3273,7 @@ def play():
         ini, _lines = load_ini()
         online = ini.get("online") == "1"
         server, nick = ini.get("online_server", ONLINE_SERVER), ini.get("online_name", "")
-        presence.update(True, app_id, discord_activity_for(ini, started, state["party"]))
+        presence.update(True, app_id, discord_activity_for(ini, started, state["party"], read_game_state()))
         while (secret := presence.take_join()) is not None:
             parsed = parse_join_secret(secret)
             if not parsed or parsed[1].lower() == nick.lower():
