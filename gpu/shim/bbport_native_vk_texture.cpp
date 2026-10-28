@@ -334,7 +334,55 @@ struct Job {
     u32 levels, slices;
     std::vector<u8> data;                   // untiled levels, each region 16-byte aligned
     std::vector<vk::BufferImageCopy> regions; // offsets into `data`
+    // lab: the guest copy, detiled into `data` on the upload thread (the capture thread, which
+    // the game waits for at each submit, only copies the memory)
+    TSharp t{};
+    Layout l{};
+    std::vector<u8> guest;
 };
+
+/// Bytes a job uploads (before it is detiled: its guest copy, about the same).
+u64 JobBytes(const Job& j) {
+    return j.data.empty() ? j.guest.size() : j.data.size();
+}
+
+/// Untiles every slice and level (slice-major) of the job's guest copy into its upload data.
+void Detile(Job& job) {
+    if (job.guest.empty()) {
+        return;
+    }
+    const TSharp& t = job.t;
+    const Layout& l = job.l;
+    u64 size = 0;
+    for (u32 s = 0; s < l.slices; ++s) {
+        for (u32 m = 0; m < l.levels; ++m) {
+            size = (size + 15) & ~u64(15);
+            size += u64(l.mips[m].ew) * l.mips[m].eh * l.eb;
+        }
+    }
+    job.data.resize(size);
+    u64 at = 0;
+    for (u32 s = 0; s < l.slices; ++s) {
+        for (u32 m = 0; m < l.levels; ++m) {
+            at = (at + 15) & ~u64(15);
+            const Mip& mp = l.mips[m];
+            DetileLevel(t, l, job.guest.data(), m, s, job.data.data() + at);
+            job.regions.push_back(vk::BufferImageCopy{
+                .bufferOffset = at,
+                .bufferRowLength = mp.ew * l.bw,
+                .bufferImageHeight = mp.eh * l.bw,
+                .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                     .mipLevel = m,
+                                     .baseArrayLayer = s,
+                                     .layerCount = 1},
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {std::max(1u, l.width0 >> m), std::max(1u, l.height0 >> m), 1},
+            });
+            at += u64(mp.ew) * mp.eh * l.eb;
+        }
+    }
+    std::vector<u8>().swap(job.guest);
+}
 
 std::mutex upload_mutex;
 std::condition_variable upload_cv;
@@ -470,13 +518,16 @@ void UploadThread() {
             upload_cv.wait(lk, [] { return !upload_queue.empty(); });
             u64 size = 0;
             std::size_t n = 0;
-            while (n < upload_queue.size() && (n == 0 || size + upload_queue[n].data.size() <= (64ull << 20))) {
-                size += upload_queue[n].data.size();
+            while (n < upload_queue.size() && (n == 0 || size + JobBytes(upload_queue[n]) <= (64ull << 20))) {
+                size += JobBytes(upload_queue[n]);
                 ++n;
             }
             jobs.assign(std::make_move_iterator(upload_queue.begin()),
                         std::make_move_iterator(upload_queue.begin() + n));
             upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
+        }
+        for (Job& job : jobs) {
+            Detile(job);
         }
         SubmitBatch(pool, fence, jobs);
         uploads_pending.fetch_sub(jobs.size(), std::memory_order_relaxed);
@@ -893,36 +944,11 @@ const Texture* Get(const std::uint32_t* tsharp) {
     tex.bytes = bytes;
     total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 
-    // untile every slice and level (slice-major) into the upload job
+    // the guest copy goes to the upload thread, which untiles it (Detile)
     Job job{&tex, image, l.levels, l.slices, {}, {}};
-    u64 size = 0;
-    for (u32 s = 0; s < l.slices; ++s) {
-        for (u32 m = 0; m < l.levels; ++m) {
-            size = (size + 15) & ~u64(15);
-            size += u64(l.mips[m].ew) * l.mips[m].eh * l.eb;
-        }
-    }
-    job.data.resize(size);
-    u64 at = 0;
-    for (u32 s = 0; s < l.slices; ++s) {
-        for (u32 m = 0; m < l.levels; ++m) {
-            at = (at + 15) & ~u64(15);
-            const Mip& mp = l.mips[m];
-            DetileLevel(t, l, guest.data(), m, s, job.data.data() + at);
-            job.regions.push_back(vk::BufferImageCopy{
-                .bufferOffset = at,
-                .bufferRowLength = mp.ew * l.bw,
-                .bufferImageHeight = mp.eh * l.bw,
-                .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
-                                     .mipLevel = m,
-                                     .baseArrayLayer = s,
-                                     .layerCount = 1},
-                .imageOffset = {0, 0, 0},
-                .imageExtent = {std::max(1u, l.width0 >> m), std::max(1u, l.height0 >> m), 1},
-            });
-            at += u64(mp.ew) * mp.eh * l.eb;
-        }
-    }
+    job.t = t;
+    job.l = l;
+    job.guest = std::move(guest);
     uploads_pending.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard lk(upload_mutex);
