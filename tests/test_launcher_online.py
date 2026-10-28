@@ -406,6 +406,31 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(discord_ipc.track_name('octane/t505_nitro_festival/t505_nitro_festival'), 'Koala Carnival')
         self.assertEqual(discord_ipc.track_name('octane/t508_toxic/t508_toxic'), 'Drive-Thru Danger')
 
+    def test_custom_buttons_never_conflict_with_join_secrets(self):
+        ini = {'online': '1', 'online_name': 'Crash', 'online_server': 'octr.ryu7w7.xyz'}
+        game = {'phase': 'Racing', 'mode': 'Local Arcade', 'race': 'Time Trial',
+                'track': 'octane/t132_tiger_temple/t132_tiger_temple', 'lap': 1, 'laps': 3}
+        data = sf.discord_activity_for(ini, 0, (1, 8), game).to_json()
+        self.assertIn('buttons', data)
+        self.assertNotIn('secrets', data)
+        self.assertNotIn('party', data)
+        game['mode'] = 'Online'
+        data = sf.discord_activity_for(ini, 0, (1, 8), game).to_json()
+        self.assertIn('secrets', data)
+        self.assertNotIn('buttons', data)
+        data = sf.discord_activity_for(ini, 0, (8, 8), game).to_json()
+        self.assertNotIn('secrets', data)
+        self.assertIn('buttons', data)
+        game['phase'] = 'In menus'
+        game.pop('mode')
+        data = sf.discord_activity_for(ini, 0, (1, 8), game).to_json()
+        self.assertNotIn('party', data)
+        self.assertIn('buttons', data)
+        raw = discord_ipc.Activity('Online race', party_id='room', party_size=1, party_max=8,
+                                  join_secret='join', buttons=(('Website', 'https://example.com'),)).to_json()
+        self.assertIn('secrets', raw)
+        self.assertNotIn('buttons', raw)
+
     def test_bad_race_values_and_future_snapshot(self):
         self.state_file('phase=Racing\nlap=oops\nlaps=3\nrace_seconds=nan\nat={at}\n')
         self.assertEqual(sf.game_presence(sf.read_game_state()), ('Playing', 'Racing'))

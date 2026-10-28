@@ -268,7 +268,8 @@ private:
             if (!a.small_text.empty()) j += ",\"small_text\":\"" + Escape(a.small_text) + "\"";
             j += "}";
         }
-        if (!a.buttons.empty()) {
+        const bool joinable = !a.party_id.empty() && a.party_size > 0 && a.party_max >= a.party_size && !a.join_secret.empty();
+        if (!a.buttons.empty() && !joinable) {
             j += ",\"buttons\":[";
             for (size_t i = 0; i < a.buttons.size() && i < 2; i++) {
                 if (i) j += ",";

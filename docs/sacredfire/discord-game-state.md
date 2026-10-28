@@ -156,3 +156,19 @@ This was a temporary synthetic design preview, not a live gameplay test. Buttons
 are only visible to other users according to Discord's guide; their rendering on
 another account was not checked. The screenshot captured another application,
 so visual rendering of this artwork revision has not been verified.
+
+## Active-launcher rejection fix
+
+The user's actual GUI launcher was inspected while the game ran on Tiger Temple.
+Its snapshot was current, but Discord returned error 5005:
+`secrets cannot currently be sent with buttons`. An enabled online setting had
+also attached an online party/join secret to an observed Local Arcade race.
+
+Both serializers now prefer a valid join secret over custom URL buttons. Both
+launchers suppress party/join data for sampled non-online game states. Legacy
+basic presence without a gameplay snapshot retains its previous join behavior.
+The actual running GUI launcher was patched without restarting the game; its
+status changed from the above rejection to `connected`, with Tiger Temple,
+Time Trial, lap 1/3, race timestamp and artwork in the desired activity.
+Regression tests cover Local Arcade with online enabled, joinable Online,
+full parties, menus, and serializer-level buttons/secrets exclusion.

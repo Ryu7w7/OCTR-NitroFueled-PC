@@ -128,7 +128,9 @@ class Activity:
             a.setdefault("assets", {})["small_image"] = self.small_image
             if self.small_text:
                 a["assets"]["small_text"] = self.small_text
-        if self.buttons:
+        # Discord rejects custom buttons together with join secrets (RPC error 5005).
+        joinable = self.party_id and 0 < self.party_size <= self.party_max and self.join_secret
+        if self.buttons and not joinable:
             a["buttons"] = [{"label": label, "url": url} for label, url in self.buttons[:2]]
         if self.party_id and self.party_size > 0 and self.party_max >= self.party_size:
             a["party"] = {"id": self.party_id, "size": [self.party_size, self.party_max]}

@@ -772,7 +772,7 @@ def discord_activity_for(ini, started, party, game=None):
                                     **discord_ipc.game_assets(game))
     if sampled:
         activity.details, activity.state = sampled
-    if nick_ok(nick) and ryunet_http.valid_server(server):
+    if nick_ok(nick) and ryunet_http.valid_server(server) and (not sampled or game.get("mode") == "Online"):
         players, maximum = party or (1, 8)  # a server without /ryunet/party: offer it anyway
         if 0 < players <= maximum:
             activity.party_id = f"ctr:{server.lower()}:{nick.lower()}"

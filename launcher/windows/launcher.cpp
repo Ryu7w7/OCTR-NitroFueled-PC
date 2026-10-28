@@ -1855,6 +1855,11 @@ void UpdateDiscord() {
     activity.small_image = JsonField(art, "badge");
     if (activity.small_image.empty()) activity.small_image = "https://raw.githubusercontent.com/Ryu7w7/OCTR-NitroFueled-PC/main/launcher/io.github.sacredfire.Launcher.png";
     activity.small_text = frontend ? g_game_status.phase : g_game_status.mode + " · " + g_game_status.phase;
+    if (g_game_status.ok && !g_game_status.phase.empty() && g_game_status.mode != "Online") {
+        activity.party_id.clear();
+        activity.party_size = activity.party_max = 0;
+        activity.join_secret.clear();
+    }
     activity.buttons = {{"OCTR Project", "https://github.com/Ryu7w7/OCTR-NitroFueled-PC"},
                         {"Join Community", "https://discord.gg/PAT5SJzdXw"}};
     DiscordPresence::Update(enabled, app_id, &activity);
