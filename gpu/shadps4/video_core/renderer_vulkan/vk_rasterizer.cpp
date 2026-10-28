@@ -1909,6 +1909,32 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (!BindResources(pipeline)) {
         return;
     }
+    // bbport lab: with BB_VK_ALONE=1 shadPS4 still runs compute, into its own images; the native
+    // renderer then reads guest memory without the result. Name what each compute shader writes.
+    if (BbNativeVk::DrawsAlone()) {
+        static std::mutex seen_mutex;
+        static std::unordered_set<u64> seen;
+        std::lock_guard seen_lock(seen_mutex);
+        if (seen.size() < 150 && seen.insert(cs.pgm_hash).second) {
+            std::string written;
+            for (const auto& image : cs.images) {
+                if (image.is_written) {
+                    const auto sharp = image.GetSharp(cs);
+                    written += fmt::format(" image {:x} {}x{} dfmt {}", sharp.Address(), sharp.width + 1,
+                                           sharp.height + 1, u32(sharp.GetDataFmt()));
+                }
+            }
+            for (const auto& buffer : cs.buffers) {
+                if (buffer.is_written) {
+                    const auto sharp = buffer.GetSharp(cs);
+                    written += fmt::format(" buffer {:x} {} bytes", u64(sharp.base_address), sharp.GetSize());
+                }
+            }
+            std::printf("Native Vulkan: compute %016llx (%ux%ux%u groups) writes:%s\n",
+                        static_cast<unsigned long long>(cs.pgm_hash), cs_program.dim_x, cs_program.dim_y,
+                        cs_program.dim_z, written.empty() ? " nothing named" : written.c_str());
+        }
+    }
 
     if (needs_barrier) {
         runtime.FlushBarriers();

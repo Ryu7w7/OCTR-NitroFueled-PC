@@ -798,6 +798,17 @@ const Texture* Get(const std::uint32_t* tsharp) {
         Warn(key, t, "too large");
         return nullptr;
     }
+    // lab: BB_VK_LOG_TEXTURES=1 names every texture made from guest memory (to find ones whose
+    // memory only shadPS4's compute writes, which this renderer then reads stale)
+    static const bool log_textures = [] {
+        const char* v = std::getenv("BB_VK_LOG_TEXTURES");
+        return v && v[0] == '1';
+    }();
+    if (log_textures) {
+        std::printf("Native Vulkan: texture made %llx %ux%u tiling %u dfmt %u nfmt %u levels %u\n",
+                    (unsigned long long)t.base, t.width, t.height, t.tiling, t.dfmt, t.nfmt,
+                    t.last_level + 1);
+    }
     u64 bytes = 0;
     for (u32 m = 0; m < l.levels; ++m) {
         bytes += u64(l.mips[m].ew) * l.mips[m].eh * l.eb * l.slices;
