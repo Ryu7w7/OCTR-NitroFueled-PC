@@ -673,11 +673,13 @@ struct Job {
     TSharp t{};
     Layout l{};
     Bytes guest;
+    u64 key = 0;         // the texture's key (warnings)
+    bool failed = false; // not read or not made: settled as broken
 };
 
 /// Bytes a job uploads (before it is planned: its guest copy, about the same).
 u64 JobBytes(const Job& j) {
-    return j.out_bytes ? j.out_bytes : j.guest.size();
+    return j.out_bytes ? j.out_bytes : j.l.total;
 }
 
 /// The job's regions (every slice and level, slice-major) and their size once untiled.
@@ -727,9 +729,11 @@ std::condition_variable upload_cv;
 std::vector<Job> upload_queue;
 
 /// Ends the jobs' waits: their textures are uploaded (submitted), or `broken`.
+void Realize(Job& job);
+
 void Settle(std::vector<Job>& jobs, bool ok) {
     for (const Job& j : jobs) {
-        if (!ok) {
+        if (!ok || j.failed) {
             j.tex->broken.store(true, std::memory_order_relaxed);
         }
         j.tex->ready.store(true, std::memory_order_release);
@@ -819,6 +823,9 @@ void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs)
     to_dst.reserve(jobs.size());
     to_read.reserve(jobs.size());
     for (const Job& j : jobs) {
+        if (j.failed) {
+            continue;
+        }
         const vk::ImageSubresourceRange all{.aspectMask = vk::ImageAspectFlagBits::eColor,
                                             .baseMipLevel = 0,
                                             .levelCount = j.levels,
@@ -846,10 +853,15 @@ void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs)
                            .image = j.image,
                            .subresourceRange = all});
     }
-    cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_dst.size()),
-                          .pImageMemoryBarriers = to_dst.data()});
+    if (!to_dst.empty()) {
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_dst.size()),
+                              .pImageMemoryBarriers = to_dst.data()});
+    }
     u64 at = 0;
     for (Job& j : jobs) {
+        if (j.failed) {
+            continue;
+        }
         DetileInto(j, static_cast<u8*>(slot.mapped) + at);
         for (vk::BufferImageCopy& r : j.regions) {
             r.bufferOffset += at;
@@ -857,8 +869,10 @@ void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs)
         cmd.copyBufferToImage(staging, j.image, vk::ImageLayout::eTransferDstOptimal, j.regions);
         at += (j.out_bytes + 15) & ~u64(15);
     }
-    cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_read.size()),
-                          .pImageMemoryBarriers = to_read.data()});
+    if (!to_read.empty()) {
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_read.size()),
+                              .pImageMemoryBarriers = to_read.data()});
+    }
     (void)cmd.end();
     const vk::SubmitInfo submit{.commandBufferCount = 1, .pCommandBuffers = &cmd};
     vk::Result sr;
@@ -914,6 +928,7 @@ void UploadThread() {
             upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
         }
         for (Job& job : jobs) {
+            Realize(job);
             Plan(job);
         }
         SubmitBatch(pool, slots[next_slot], jobs);
@@ -1047,6 +1062,7 @@ void Retire(std::unordered_map<u64, std::unique_ptr<Texture>>::iterator it) {
         Unwatch(t);
     }
     if (!t->image) {
+        total_bytes.fetch_sub(t->bytes, std::memory_order_relaxed);
         delete t;
         return;
     }
@@ -1277,6 +1293,89 @@ bool Destroy(Texture* t) {
     return views;
 }
 
+namespace {
+/// The upload thread: the job's guest copy, and its image and views (a pooled one when a
+/// retired texture of the same shape left it). `failed` when either is not possible.
+void Realize(Job& job) {
+    Texture& tex = *job.tex;
+    const TSharp& t = job.t;
+    const Layout& l = job.l;
+    job.guest = TakeBytes(l.total);
+    // the game runs on meanwhile and may unmap the memory: a read that fails safely
+    if (!Read(t.base, job.guest.data(), job.guest.size())) {
+        GiveBytes(std::move(job.guest));
+        unreadable.fetch_add(1, std::memory_order_relaxed);
+        Warn(job.key, t, "memory not readable");
+        job.failed = true;
+        return;
+    }
+    const u32 first = tex.first_level;
+    Pooled reused{};
+    const bool from_pool =
+        PoolOn() && TakePooled(PoolKey{l.format, l.width0, l.height0, l.levels, l.slices, first, l.cube},
+                               &reused);
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    if (from_pool) {
+        image = reused.image;
+        allocation = reused.allocation;
+    } else {
+        const vk::ImageCreateInfo ici{
+            .flags = l.cube ? vk::ImageCreateFlags{vk::ImageCreateFlagBits::eCubeCompatible}
+                            : vk::ImageCreateFlags{},
+            .imageType = vk::ImageType::e2D,
+            .format = l.format,
+            .extent = {l.width0, l.height0, 1},
+            .mipLevels = l.levels,
+            .arrayLayers = l.slices,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        };
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        const VkImageCreateInfo& raw = ici;
+        const VkResult r =
+            vmaCreateImage(instance->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
+        if (r != VK_SUCCESS) {
+            failed.fetch_add(1, std::memory_order_relaxed);
+            Warn(job.key, t, vk::to_string(vk::Result(r)).c_str());
+            GiveBytes(std::move(job.guest));
+            job.failed = true;
+            return;
+        }
+    }
+    auto view_of = [&](vk::ImageViewType type) {
+        const vk::ImageViewCreateInfo vci{
+            .image = image,
+            .viewType = type,
+            .format = l.format,
+            .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                 .baseMipLevel = first,
+                                 .levelCount = l.levels - first,
+                                 .baseArrayLayer = 0,
+                                 .layerCount = l.slices},
+        };
+        auto [vr, view] = instance->GetDevice().createImageView(vci);
+        return vr == vk::Result::eSuccess ? VkImageView(view) : VK_NULL_HANDLE;
+    };
+    tex.allocation = allocation;
+    tex.image = image;
+    if (from_pool) {
+        tex.view_array = reused.view_array;
+        tex.view = reused.view;
+    } else {
+        tex.view_array = view_of(vk::ImageViewType::e2DArray);
+        tex.view = l.cube ? view_of(vk::ImageViewType::eCube)
+                   : l.slices == 1 ? view_of(vk::ImageViewType::e2D)
+                                   : tex.view_array;
+    }
+    job.image = image;
+}
+} // namespace
+
 void Init(const Vulkan::Instance& vulkan) {
     instance = &vulkan;
     anisotropy = vulkan.IsAnisotropicFilteringSupported();
@@ -1307,8 +1406,11 @@ const Texture* Get(const std::uint32_t* tsharp) {
         Texture* found = it->second.get();
         found->last_used = now;
         // a stale texture is made again once its upload has gone (that keeps its image)
-        if (!found->stale.load(std::memory_order_acquire) || !found->ready.load(std::memory_order_acquire)) {
-            return found->image ? found : nullptr;
+        if (!found->ready.load(std::memory_order_acquire)) {
+            return found; // made on the upload thread: the recorder waits for it
+        }
+        if (!found->stale.load(std::memory_order_acquire)) {
+            return found->image && !found->broken.load(std::memory_order_relaxed) ? found : nullptr;
         }
         Retire(it);
         remade.fetch_add(1, std::memory_order_relaxed);
@@ -1319,15 +1421,20 @@ const Texture* Get(const std::uint32_t* tsharp) {
     tex.last_used = now;
     const TSharp t = Decode(tsharp);
     Layout l{};
+    auto unmade = [&tex] {
+        tex.broken.store(true, std::memory_order_relaxed);
+        tex.ready.store(true, std::memory_order_release);
+        return nullptr;
+    };
     if (!GetLayout(t, &l)) {
         unsupported.fetch_add(1, std::memory_order_relaxed);
         Warn(key, t, "format or tiling");
-        return nullptr;
+        return unmade();
     }
     if (l.total > MaxTextureBytes) {
         unsupported.fetch_add(1, std::memory_order_relaxed);
         Warn(key, t, "too large");
-        return nullptr;
+        return unmade();
     }
     // lab: BB_VK_LOG_TEXTURES=1 names every texture made from guest memory (to find ones whose
     // memory only shadPS4's compute writes, which this renderer then reads stale)
@@ -1385,77 +1492,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
                         sec, (unsigned long long)t.base, t.width, t.height, t.dfmt);
         }
     }
-    Bytes guest = TakeBytes(l.total);
-    if (!Read(t.base, guest.data(), guest.size())) {
-        GiveBytes(std::move(guest));
-        unreadable.fetch_add(1, std::memory_order_relaxed);
-        Warn(key, t, "memory not readable");
-        return nullptr;
-    }
-
-    const vk::ImageCreateInfo ici{
-        .flags = l.cube ? vk::ImageCreateFlags{vk::ImageCreateFlagBits::eCubeCompatible}
-                        : vk::ImageCreateFlags{},
-        .imageType = vk::ImageType::e2D,
-        .format = l.format,
-        .extent = {l.width0, l.height0, 1},
-        .mipLevels = l.levels,
-        .arrayLayers = l.slices,
-        .samples = vk::SampleCountFlagBits::e1,
-        .tiling = vk::ImageTiling::eOptimal,
-        .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
-        .sharingMode = vk::SharingMode::eExclusive,
-        .initialLayout = vk::ImageLayout::eUndefined,
-    };
     const u32 first = std::min(t.base_level, l.levels - 1);
-    VkImage image = VK_NULL_HANDLE;
-    VmaAllocation allocation = nullptr;
-    // an image of the same shape a retired texture left (a video's previous frame), views and all
-    Pooled reused{};
-    const bool from_pool =
-        PoolOn() && TakePooled(PoolKey{l.format, l.width0, l.height0, l.levels, l.slices, first, l.cube},
-                               &reused);
-    if (from_pool) {
-        image = reused.image;
-        allocation = reused.allocation;
-    } else {
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-        const VkImageCreateInfo& raw = ici;
-        const VkResult r =
-            vmaCreateImage(instance->GetAllocator(), &raw, &aci, &image, &allocation, nullptr);
-        if (r != VK_SUCCESS) {
-            tex.allocation = allocation;
-            failed.fetch_add(1, std::memory_order_relaxed);
-            Warn(key, t, vk::to_string(vk::Result(r)).c_str());
-            return nullptr;
-        }
-    }
-    tex.allocation = allocation;
-    auto view_of = [&](vk::ImageViewType type) {
-        const vk::ImageViewCreateInfo vci{
-            .image = image,
-            .viewType = type,
-            .format = l.format,
-            .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
-                                 .baseMipLevel = first,
-                                 .levelCount = l.levels - first,
-                                 .baseArrayLayer = 0,
-                                 .layerCount = l.slices},
-        };
-        auto [vr, view] = instance->GetDevice().createImageView(vci);
-        return vr == vk::Result::eSuccess ? VkImageView(view) : VK_NULL_HANDLE;
-    };
-    tex.image = image;
-    if (from_pool) {
-        tex.view_array = reused.view_array;
-        tex.view = reused.view;
-    } else {
-        tex.view_array = view_of(vk::ImageViewType::e2DArray);
-        tex.view = l.cube ? view_of(vk::ImageViewType::eCube)
-                   : l.slices == 1 ? view_of(vk::ImageViewType::e2D)
-                                   : tex.view_array;
-    }
     tex.first_level = first;
     tex.cube = l.cube;
     tex.width = l.width0;
@@ -1466,11 +1503,12 @@ const Texture* Get(const std::uint32_t* tsharp) {
     tex.bytes = bytes;
     total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 
-    // the guest copy goes to the upload thread, which untiles it (Detile)
-    Job job{&tex, image, l.levels, l.slices, {}, {}};
+    // read, made and untiled on the upload thread (Realize, Plan, DetileInto): the capture thread,
+    // which the game waits for, took up to 70 ms where a race started with new textures
+    Job job{&tex, VK_NULL_HANDLE, l.levels, l.slices, {}, {}};
     job.t = t;
     job.l = l;
-    job.guest = std::move(guest);
+    job.key = key;
     uploads_pending.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard lk(upload_mutex);

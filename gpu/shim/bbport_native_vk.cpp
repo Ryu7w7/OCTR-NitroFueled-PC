@@ -479,6 +479,28 @@ void LoadModule(ShaderInfo& s) {
         return;
     }
     s.load_tried = true;
+    // lab: a first draw with a new shader cost the capture thread 23-30 ms ("resolve") on a new
+    // track; slow loads are logged by part (file, SPIR-V preparation, driver)
+    using LoadClock = std::chrono::steady_clock;
+    struct SlowLoadLog {
+        const ShaderInfo& s;
+        LoadClock::time_point start = LoadClock::now(), read{}, prepared{};
+        static double Ms(LoadClock::time_point a, LoadClock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        }
+        ~SlowLoadLog() {
+            static std::atomic<int> told{0};
+            const auto end = LoadClock::now();
+            const double all = Ms(start, end);
+            if (all >= 3.0 && told.fetch_add(1, std::memory_order_relaxed) < 200) {
+                const auto r = read == LoadClock::time_point{} ? end : read;
+                const auto p = prepared == LoadClock::time_point{} ? end : prepared;
+                std::printf("Native Vulkan: shader %s loaded in %.1f ms (file %.1f, preparation "
+                            "%.1f, driver %.1f)\n",
+                            s.name.c_str(), all, Ms(start, r), Ms(r, p), Ms(p, end));
+            }
+        }
+    } slow_load{s};
     // a shader written for the PC in place of the translation, where there is one
     // (BB_VK_NATIVE_SHADERS=0: the translations)
     static const bool native_shaders = [] {
@@ -497,12 +519,14 @@ void LoadModule(ShaderInfo& s) {
     std::vector<char> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     s.code.resize(bytes.size() / 4);
     std::memcpy(s.code.data(), bytes.data(), s.code.size() * 4);
+    slow_load.read = LoadClock::now();
     if (bytes.empty() || bytes.size() % 4 ||
         !Spirv::Prepare(s.code, StageSet(s), &s.bindings, &s.input_locations)) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
         std::printf("Native Vulkan: %s.spv missing or damaged\n", s.name.c_str());
         return;
     }
+    slow_load.prepared = LoadClock::now();
     s.module = MakeModule(*inst, s.code);
     if (!s.module) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
@@ -2020,12 +2044,20 @@ fs::path PipelineFile() {
     return shader_root / "pipelines.bin";
 }
 
-/// Writes every description to pipelines.bin (holding `mutex`).
-void SaveKnown() {
+/// Every description, when new ones came since the last save (holding `mutex`).
+bool TakeKnown(std::vector<PipelineDesc>* out) {
     if (!known_dirty || shader_root.empty()) {
-        return;
+        return false;
     }
     known_dirty = false;
+    *out = known;
+    return true;
+}
+
+/// Writes the descriptions to pipelines.bin (not holding `mutex`: the capture thread needs it
+/// for every draw, and this and the pipeline cache's 27 MB took it 30-45 ms every 5 seconds
+/// while a new track compiled its pipelines).
+void SaveKnown(const std::vector<PipelineDesc>& known) {
     const fs::path tmp = PipelineFile().string() + ".tmp";
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
@@ -2287,10 +2319,11 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                 if (slot < 32 && b.dim == 3 && !b.arrayed) {
                     // a cube (gcn2hlsl's TextureCube): the cube view of a six-face texture, which
                     // filters across faces as the PS4 does (no seams on rough reflections)
-                    if (const Tex::Texture* tex = res.slots[slot].texture;
-                        tex && tex->slices == 6 && tex->view && tex->view != tex->view_array) {
+                    if (const Tex::Texture* tex = res.slots[slot].texture; tex && tex->slices == 6) {
+                        // its views are made on the upload thread: read once it is ready
                         tex->ready.wait(false, std::memory_order_acquire);
-                        if (!tex->broken.load(std::memory_order_relaxed)) {
+                        if (!tex->broken.load(std::memory_order_relaxed) && tex->view &&
+                            tex->view != tex->view_array) {
                             ii.imageView = tex->view;
                         }
                     }
@@ -3634,16 +3667,18 @@ void Report() {
         Buf::Stats bf{};
         Gpu::Stats gp{};
         std::size_t layouts = 0, displayed = 0;
+        bool save_cache = false, save_known = false;
+        std::vector<PipelineDesc> known_now;
         {
             std::lock_guard lk(mutex);
             keys = pipeline_keys.size();
             made_pipelines = pipelines.size();
             if (drawing && made_pipelines != saved_pipelines) {
-                Gpu::SaveCache(); // new pipelines compile from the file next run
+                save_cache = true; // new pipelines compile from the file next run
                 saved_pipelines = made_pipelines;
             }
             if (drawing) {
-                SaveKnown();
+                save_known = TakeKnown(&known_now);
             }
             live_targets = targets.size();
             tx = Tex::GetStats();
@@ -3653,6 +3688,13 @@ void Report() {
                 gp = Gpu::GetStats();
             }
             layouts = vertex_layouts.size();
+        }
+        // saved without `mutex` (vkGetPipelineCacheData needs no lock of ours; compiles go on)
+        if (save_cache) {
+            Gpu::SaveCache();
+        }
+        if (save_known) {
+            SaveKnown(known_now);
         }
         {
             std::lock_guard lk(display_mutex);
