@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <utility>
 
 namespace DiscordPresence {
 
@@ -22,6 +24,8 @@ struct Activity {
     int64_t end = 0;      // Unix seconds; countdown; 0 = none
     std::string large_image;  // asset key uploaded to the Discord application, optional
     std::string large_text;
+    std::string small_image, small_text;
+    std::vector<std::pair<std::string, std::string>> buttons;
     // Joinable: all four set, or none. Discord shows "(size of max)" after the state.
     std::string party_id;
     int party_size = 0;

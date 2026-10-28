@@ -728,17 +728,14 @@ def game_presence(game):
     if not game or not game.get("phase"):
         return None
     if game["phase"] in ("In menus", "Loading", "Starting game"):
-        return tr(game["phase"]), tr("Crash Team Racing Nitro-Fueled")
+        return tr({"In menus": "Main menu", "Loading": "Loading", "Starting game": "Starting game"}[game["phase"]]), tr("Browsing menus" if game["phase"] == "In menus" else "Getting ready")
     details = tr(game.get("race") or "Playing")
-    track = game.get("track", "").rsplit("/", 1)[-1]
-    prefix, sep, name = track.partition("_")
-    if sep and len(prefix) > 1 and prefix[0] in "tabh" and prefix[1:].isdigit():
-        track = name
-    track = track.replace("_", " ").title()
+    track = discord_ipc.track_name(game.get("track", ""))
     if track:
-        details += " · " + track
-    parts = [tr(game["mode"])] if game.get("mode") else []
-    parts.append(tr(game["phase"]))
+        details = track
+    parts = [tr(game["race"])] if game.get("race") else []
+    if game["phase"] != "Racing" or not parts:
+        parts.append(tr(game["phase"]))
     lap, laps = game.get("lap", 0), game.get("laps", 0)
     if 1 <= lap <= laps <= 99:
         parts.append(tr("Lap {}/{}").format(lap, laps))
@@ -758,8 +755,7 @@ def discord_activity_for(ini, started, party, game=None):
     if ini.get("online") != "1":
         return discord_ipc.Activity(sampled[0] if sampled else tr("Playing offline"),
                                     state=sampled[1] if sampled else tr("{} min").format(minutes),
-                                    start=clock_start, end=clock_end, large_image="logo",
-                                    large_text="Crash Team Racing Nitro-Fueled")
+                                    start=clock_start, end=clock_end, **discord_ipc.game_assets(game))
     parts = [tr("Nickname: {}").format(nick)] if nick else []
     room = (game or {}).get("room", 0)
     names, extra = (game or {}).get("peers") or [], (game or {}).get("extra", 0)
@@ -773,7 +769,7 @@ def discord_activity_for(ini, started, party, game=None):
         parts.append(tr("Playing online"))
     parts.append(tr("{} min").format(minutes))
     activity = discord_ipc.Activity(tr("Playing online"), state=" · ".join(parts), start=clock_start, end=clock_end,
-                                    large_image="logo", large_text="Crash Team Racing Nitro-Fueled")
+                                    **discord_ipc.game_assets(game))
     if sampled:
         activity.details, activity.state = sampled
     if nick_ok(nick) and ryunet_http.valid_server(server):

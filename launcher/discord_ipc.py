@@ -59,19 +59,58 @@ def socket_paths():
     return paths
 
 
+# Public artwork URLs only; Discord fetches them, never the game/launcher thread.
+try:
+    ARTWORK = json.loads((Path(__file__).resolve().parents[1] / "art/discord-presence.json").read_text())
+except (OSError, ValueError):
+    ARTWORK = {}
+ARTWORK.setdefault("default", "https://raw.githubusercontent.com/Ryu7w7/OCTR-NitroFueled-PC/main/art/ctr-hero.png")
+ARTWORK.setdefault("badge", "https://raw.githubusercontent.com/Ryu7w7/OCTR-NitroFueled-PC/main/launcher/io.github.sacredfire.Launcher.png")
+
+
+def track_key(track):
+    slug = track.rsplit("/", 1)[-1].lower()
+    prefix, sep, name = slug.partition("_")
+    if sep and len(prefix) > 1 and prefix[0] in "tabh" and prefix[1:].isdigit():
+        slug = name
+    return slug.replace("_", "-")
+
+
+def track_name(track):
+    slug = track_key(track)
+    return ARTWORK.get("name:" + slug, slug.replace("-", " ").title())
+
+
+def game_assets(game):
+    game = game or {}
+    phase = game.get("phase", "")
+    slug = track_key(game.get("track", ""))
+    frontend = phase in ("In menus", "Loading", "Starting game")
+    return dict(large_image=ARTWORK.get(slug, ARTWORK["default"]) if not frontend else ARTWORK["default"],
+                large_text="Crash Team Racing Nitro-Fueled" if frontend or not slug else track_name(game.get("track", "")),
+                small_image=ARTWORK["badge"],
+                small_text=" · ".join(game[k] for k in ("mode", "phase") if game.get(k))
+                           if not frontend else phase,
+                buttons=(("OCTR Project", "https://github.com/Ryu7w7/OCTR-NitroFueled-PC"),
+                         ("Join Community", "https://discord.gg/PAT5SJzdXw")))
+
+
 class Activity:
     """What the presence shows. Joinable: party_id, party_size, party_max and join_secret."""
 
     def __init__(self, details, state="", start=0, large_image="", large_text="",
-                 party_id="", party_size=0, party_max=0, join_secret="", end=0):
+                 party_id="", party_size=0, party_max=0, join_secret="", end=0, small_image="", small_text="", buttons=()):
         self.details, self.state, self.start, self.end = details, state, start, end
         self.large_image, self.large_text = large_image, large_text
         self.party_id, self.party_size, self.party_max = party_id, party_size, party_max
         self.join_secret = join_secret
+        self.small_image, self.small_text = small_image, small_text
+        self.buttons = tuple(buttons)
 
     def key(self):
         return (self.details, self.state, self.start, self.end, self.large_image, self.large_text,
-                self.party_id, self.party_size, self.party_max, self.join_secret)
+                self.party_id, self.party_size, self.party_max, self.join_secret,
+                self.small_image, self.small_text, self.buttons)
 
     def to_json(self):
         a = {"details": self.details}
@@ -85,6 +124,12 @@ class Activity:
             a["assets"] = {"large_image": self.large_image}
             if self.large_text:
                 a["assets"]["large_text"] = self.large_text
+        if self.small_image:
+            a.setdefault("assets", {})["small_image"] = self.small_image
+            if self.small_text:
+                a["assets"]["small_text"] = self.small_text
+        if self.buttons:
+            a["buttons"] = [{"label": label, "url": url} for label, url in self.buttons[:2]]
         if self.party_id and self.party_size > 0 and self.party_max >= self.party_size:
             a["party"] = {"id": self.party_id, "size": [self.party_size, self.party_max]}
             if self.join_secret:

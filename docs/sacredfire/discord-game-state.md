@@ -134,3 +134,25 @@ was within one second of the sampled engine clock; Discord echoed the expected
 layout and timestamp. The temporary activity was cleared afterward. Native game
 and GPU hashes matched the original package. All 15 launcher and 4 bridge tests
 passed; C/Windows compilation and other live race modes remain untested.
+
+## Artwork and compact Rich Presence
+
+Design references: Discord's Rich Presence best practices
+(https://discord.com/developers/rich-presence/best-practices) and the official
+setting-rich-presence guide. The public application asset endpoint returned an
+empty list: the old `logo` key had no uploaded artwork behind it.
+
+Both launchers now use verified external image URLs: a track preview, a small CTR
+badge with mode/phase tooltip, and project/community buttons. The compact race
+layout is `Crash Cove` / `Time Trial · Lap 2/3`, with the existing native race clock.
+Menus/loading clear track artwork and show default CTR art. The shared catalog in
+`art/discord-presence.json` covers all 40 retail race tracks and 12 arenas; exact
+internal aliases also provide names such as Koala Carnival instead of Nitro Festival.
+Unknown custom tracks use default CTR art. Image loading depends on external hosts.
+
+Actual Discord IPC accepted the large/small image URLs, converted both to external
+media proxy assets, and echoed both tooltip strings and two button labels/URLs.
+This was a temporary synthetic design preview, not a live gameplay test. Buttons
+are only visible to other users according to Discord's guide; their rendering on
+another account was not checked. The screenshot captured another application,
+so visual rendering of this artwork revision has not been verified.

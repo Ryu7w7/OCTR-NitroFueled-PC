@@ -342,15 +342,15 @@ class ActivityTests(unittest.TestCase):
         game = sf.read_game_state()
         for online in ('0', '1'):
             activity = sf.discord_activity_for({'online': online}, 100, None, game)
-            self.assertEqual(activity.details, 'Time Trial · Tiny Temple')
-            self.assertEqual(activity.state, 'Local Arcade · Racing · Lap 2/3 · 1:23')
+            self.assertEqual(activity.details, 'Tiny Temple')
+            self.assertEqual(activity.state, 'Time Trial · Lap 2/3 · 1:23')
             self.assertEqual(activity.start, 0)
         for phase in ('In menus', 'Loading', 'Starting game'):
             self.state_file('phase='+phase+'\nmode=Local Arcade\nrace=Time Trial\n'
                             'track=octane/t213_tiny_temple/t213_tiny_temple\nlap=2\nat={at}\n')
             activity = sf.discord_activity_for({'online': '1'}, 100, None, sf.read_game_state())
-            self.assertEqual(activity.details, phase)
-            self.assertEqual(activity.state, 'Crash Team Racing Nitro-Fueled')
+            self.assertEqual(activity.details, "Main menu" if phase == "In menus" else phase)
+            self.assertEqual(activity.state, 'Browsing menus' if phase == 'In menus' else 'Getting ready')
 
     def test_race_clock_ticks_without_new_presence_packets(self):
         sample_at = int(time.time()) - 4
@@ -360,7 +360,7 @@ class ActivityTests(unittest.TestCase):
                     'race_seconds': 83, 'timer_start': sample_at - 83}
             activity = sf.discord_activity_for({'online': online}, 100, None, game)
             self.assertEqual(activity.to_json()['timestamps'], {'start': sample_at - 83})
-            self.assertEqual(activity.state, 'Local Arcade · Racing · Lap 2/3')
+            self.assertEqual(activity.state, 'Time Trial · Lap 2/3')
             self.assertEqual(int(time.time()) - activity.start, 87)
             game.pop('timer_start')
             game['timer_end'] = sample_at + 30
@@ -374,6 +374,37 @@ class ActivityTests(unittest.TestCase):
             game.update(phase='Racing', race_seconds=0, timer_start=sample_at)
             activity = sf.discord_activity_for({'online': online}, 100, None, game)
             self.assertEqual(activity.start, sample_at)
+
+    def test_rich_artwork_badge_buttons_and_menu_reset(self):
+        game = {'phase': 'Racing', 'mode': 'Local Arcade', 'race': 'Time Trial',
+                'track': 'octane/t111_crash_cove/t111_crash_cove', 'lap': 1, 'laps': 3}
+        a = sf.discord_activity_for({'online': '0'}, 0, None, game)
+        data = a.to_json()
+        self.assertEqual((a.details, a.state), ('Crash Cove', 'Time Trial · Lap 1/3'))
+        self.assertTrue(data['assets']['large_image'].endswith('/crash-cove.jpg'))
+        self.assertEqual(data['assets']['small_text'], 'Local Arcade · Racing')
+        self.assertEqual(len(data['buttons']), 2)
+        old_key = a.key()
+        a.small_text = 'Paused'
+        self.assertNotEqual(a.key(), old_key)
+        game['phase'] = 'In menus'
+        data = sf.discord_activity_for({'online': '0'}, 0, None, game).to_json()
+        self.assertNotIn('crash-cove', data['assets']['large_image'])
+        self.assertEqual(data['assets']['small_text'], 'In menus')
+        game.update(phase='Racing', track='mods/custom_track')
+        data = sf.discord_activity_for({'online': '0'}, 0, None, game).to_json()
+        self.assertTrue(data['assets']['large_image'].endswith('/ctr-hero.png'))
+
+    def test_all_retail_tracks_and_arenas_have_artwork(self):
+        tracks = ('t111_crash_cove', 't112_roos_tubes', 't113_mystery_caves', 't114_sewer_speedway', 't121_slide_coliseum', 't122_turbo_track', 't131_coco_park', 't132_tiger_temple', 't133_papus_pyramid', 't134_dingo_canyon', 't141_blizzard_bluff', 't142_dragon_mines', 't143_polar_pass', 't144_tiny_arena', 't151_ngin_labs', 't152_cortex_castle', 't153_hot_air_skyway', 't154_oxide_station', 't211_inferno_island', 't212_jungle_boogie', 't213_tiny_temple', 't222_barin_ruins', 't223_deep_sea_driving', 't231_out_of_time', 't232_clockwork_wumpa', 't233_thunder_struck', 't241_assembly_lane', 't242_android_alley', 't243_electron_avenue', 't255_hyper_spaceway', 't501_july_world_tour', 't155_sony_stadium', 't221_meteor_gorge', 't502_back_in_time', 't503_september_spyro', 't504_october_spooky', 't505_nitro_festival', 't506_luminous', 't507_dry_land', 't508_toxic', 'a115_skull_rock', 'a135_rampage_ruins', 'a145_rocky_road', 'a155_nitro_court', 'a191_parking_lot', 'a192_the_north_bowl', 'a193_lab_basement', 'a214_temple_turmoil', 'a224_frozen_frenzy', 'a234_desert_storm', 'a244_magnetic_mayhem', 'a254_terra_drome')
+        self.assertEqual(len(tracks), 52)
+        for track in tracks:
+            with self.subTest(track=track):
+                art = discord_ipc.game_assets({'phase': 'Racing', 'track': f'octane/{track}/{track}'})
+                self.assertNotEqual(art['large_image'], discord_ipc.ARTWORK['default'])
+                self.assertTrue(art['large_image'].startswith('https://'))
+        self.assertEqual(discord_ipc.track_name('octane/t505_nitro_festival/t505_nitro_festival'), 'Koala Carnival')
+        self.assertEqual(discord_ipc.track_name('octane/t508_toxic/t508_toxic'), 'Drive-Thru Danger')
 
     def test_bad_race_values_and_future_snapshot(self):
         self.state_file('phase=Racing\nlap=oops\nlaps=3\nrace_seconds=nan\nat={at}\n')

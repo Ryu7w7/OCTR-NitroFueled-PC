@@ -1816,9 +1816,13 @@ void UpdateDiscord() {
             else c = char(word_start ? std::toupper((unsigned char)c) : std::tolower((unsigned char)c));
             word_start = c == ' ';
         }
-        if (!track.empty()) activity.details += " · " + track;
+        if (!track.empty()) activity.details = track;
         if (activity.details.empty()) activity.details = "Playing";
-        activity.state = game.mode.empty() ? game.phase : game.mode + " · " + game.phase;
+        activity.state = game.race;
+        if (game.phase != "Racing" || activity.state.empty()) {
+            if (!activity.state.empty()) activity.state += " · ";
+            activity.state += game.phase;
+        }
         if (game.lap >= 1 && game.lap <= game.laps && game.laps <= 99)
             activity.state += " · Lap " + std::to_string(game.lap) + "/" + std::to_string(game.laps);
         if (game.race_seconds >= 0 && game.race_seconds < 86400 && !game.timer_start && !game.timer_end) {
@@ -1829,13 +1833,30 @@ void UpdateDiscord() {
     }
     if (g_game_status.ok && (g_game_status.phase == "In menus" ||
         g_game_status.phase == "Loading" || g_game_status.phase == "Starting game")) {
-        activity.details = g_game_status.phase;
-        activity.state = "Crash Team Racing Nitro-Fueled";
+        activity.details = g_game_status.phase == "In menus" ? "Main menu" : g_game_status.phase;
+        activity.state = g_game_status.phase == "In menus" ? "Browsing menus" : "Getting ready";
     }
     activity.start = g_game_status.ok && !g_game_status.phase.empty() ? (g_game_status.phase == "Racing" ? g_game_status.timer_start : 0) : started;
     activity.end = g_game_status.ok && g_game_status.phase == "Racing" ? g_game_status.timer_end : 0;
-    activity.large_image = "logo";
-    activity.large_text = "Crash Team Racing Nitro-Fueled";
+    static const std::string art = ReadText(g_app.root / L"art" / L"discord-presence.json");
+    const bool frontend = !g_game_status.ok || g_game_status.phase.empty() || g_game_status.phase == "In menus" ||
+                          g_game_status.phase == "Loading" || g_game_status.phase == "Starting game";
+    std::string slug = g_game_status.track.substr(g_game_status.track.find_last_of('/') + 1);
+    const auto split = slug.find('_');
+    if (split != std::string::npos && split > 1 && std::string("tabh").find(slug[0]) != std::string::npos &&
+        slug.substr(1, split-1).find_first_not_of("0123456789") == std::string::npos) slug.erase(0, split+1);
+    for (char& c : slug) c = c == '_' ? '-' : char(std::tolower((unsigned char)c));
+    const std::string track_label = JsonField(art, ("name:" + slug).c_str());
+    if (!frontend && !track_label.empty()) activity.details = track_label;
+    activity.large_image = frontend ? "" : JsonField(art, slug.c_str());
+    if (activity.large_image.empty()) activity.large_image = JsonField(art, "default");
+    if (activity.large_image.empty()) activity.large_image = "https://raw.githubusercontent.com/Ryu7w7/OCTR-NitroFueled-PC/main/art/ctr-hero.png";
+    activity.large_text = frontend ? "Crash Team Racing Nitro-Fueled" : activity.details;
+    activity.small_image = JsonField(art, "badge");
+    if (activity.small_image.empty()) activity.small_image = "https://raw.githubusercontent.com/Ryu7w7/OCTR-NitroFueled-PC/main/launcher/io.github.sacredfire.Launcher.png";
+    activity.small_text = frontend ? g_game_status.phase : g_game_status.mode + " · " + g_game_status.phase;
+    activity.buttons = {{"OCTR Project", "https://github.com/Ryu7w7/OCTR-NitroFueled-PC"},
+                        {"Join Community", "https://discord.gg/PAT5SJzdXw"}};
     DiscordPresence::Update(enabled, app_id, &activity);
 }
 

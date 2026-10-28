@@ -40,6 +40,7 @@ struct Desired {
         return enabled == o.enabled && app_id == o.app_id && has_activity == o.has_activity &&
                (!has_activity ||
                 (a.details == b.details && a.state == b.state && a.start == b.start && a.end == b.end &&
+                 a.small_image == b.small_image && a.small_text == b.small_text && a.buttons == b.buttons &&
                  a.large_image == b.large_image && a.large_text == b.large_text && a.party_id == b.party_id &&
                  a.party_size == b.party_size && a.party_max == b.party_max && a.join_secret == b.join_secret));
     }
@@ -263,7 +264,17 @@ private:
         if (!a.large_image.empty()) {
             j += ",\"assets\":{\"large_image\":\"" + Escape(a.large_image) + "\"";
             if (!a.large_text.empty()) j += ",\"large_text\":\"" + Escape(a.large_text) + "\"";
+            if (!a.small_image.empty()) j += ",\"small_image\":\"" + Escape(a.small_image) + "\"";
+            if (!a.small_text.empty()) j += ",\"small_text\":\"" + Escape(a.small_text) + "\"";
             j += "}";
+        }
+        if (!a.buttons.empty()) {
+            j += ",\"buttons\":[";
+            for (size_t i = 0; i < a.buttons.size() && i < 2; i++) {
+                if (i) j += ",";
+                j += "{\"label\":\"" + Escape(a.buttons[i].first) + "\",\"url\":\"" + Escape(a.buttons[i].second) + "\"}";
+            }
+            j += "]";
         }
         if (!a.party_id.empty() && a.party_size > 0 && a.party_max >= a.party_size) {
             j += ",\"party\":{\"id\":\"" + Escape(a.party_id) + "\",\"size\":[" + std::to_string(a.party_size) + "," +
