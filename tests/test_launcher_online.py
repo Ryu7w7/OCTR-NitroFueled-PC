@@ -337,17 +337,43 @@ class ActivityTests(unittest.TestCase):
 
     def test_actual_race_overrides_connection_setting(self):
         self.state_file('phase=Racing\nmode=Local Arcade\nrace=Time Trial\n'
+                        'track=octane/t213_tiny_temple/t213_tiny_temple\n'
                         'lap=2\nlaps=3\nrace_seconds=83\nat={at}\n')
         game = sf.read_game_state()
         for online in ('0', '1'):
             activity = sf.discord_activity_for({'online': online}, 100, None, game)
-            self.assertEqual(activity.details, 'Local Arcade · Time Trial')
-            self.assertEqual(activity.state, 'Racing · Lap 2/3 · 1:23')
-            self.assertEqual(activity.start, 100)
-        self.state_file('phase=Menus / loading\nmode=Local Arcade\nat={at}\n')
-        activity = sf.discord_activity_for({'online': '1'}, 100, None, sf.read_game_state())
-        self.assertEqual(activity.state, 'Menus / loading')
-        self.assertNotIn('Time Trial', activity.details)
+            self.assertEqual(activity.details, 'Time Trial · Tiny Temple')
+            self.assertEqual(activity.state, 'Local Arcade · Racing · Lap 2/3 · 1:23')
+            self.assertEqual(activity.start, 0)
+        for phase in ('In menus', 'Loading', 'Starting game'):
+            self.state_file('phase='+phase+'\nmode=Local Arcade\nrace=Time Trial\n'
+                            'track=octane/t213_tiny_temple/t213_tiny_temple\nlap=2\nat={at}\n')
+            activity = sf.discord_activity_for({'online': '1'}, 100, None, sf.read_game_state())
+            self.assertEqual(activity.details, phase)
+            self.assertEqual(activity.state, 'Crash Team Racing Nitro-Fueled')
+
+    def test_race_clock_ticks_without_new_presence_packets(self):
+        sample_at = int(time.time()) - 4
+        for online in ('0', '1'):
+            game = {'phase': 'Racing', 'mode': 'Local Arcade', 'race': 'Time Trial',
+                    'track': 'octane/t111_crash_cove/t111_crash_cove', 'lap': 2, 'laps': 3,
+                    'race_seconds': 83, 'timer_start': sample_at - 83}
+            activity = sf.discord_activity_for({'online': online}, 100, None, game)
+            self.assertEqual(activity.to_json()['timestamps'], {'start': sample_at - 83})
+            self.assertEqual(activity.state, 'Local Arcade · Racing · Lap 2/3')
+            self.assertEqual(int(time.time()) - activity.start, 87)
+            game.pop('timer_start')
+            game['timer_end'] = sample_at + 30
+            activity = sf.discord_activity_for({'online': online}, 100, None, game)
+            self.assertEqual(activity.to_json()['timestamps'], {'end': sample_at + 30})
+            game.pop('timer_end')
+            game['phase'] = 'Paused'
+            activity = sf.discord_activity_for({'online': online}, 100, None, game)
+            self.assertNotIn('timestamps', activity.to_json())
+            self.assertIn('1:23', activity.state)
+            game.update(phase='Racing', race_seconds=0, timer_start=sample_at)
+            activity = sf.discord_activity_for({'online': online}, 100, None, game)
+            self.assertEqual(activity.start, sample_at)
 
     def test_bad_race_values_and_future_snapshot(self):
         self.state_file('phase=Racing\nlap=oops\nlaps=3\nrace_seconds=nan\nat={at}\n')

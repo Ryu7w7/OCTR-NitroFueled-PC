@@ -710,13 +710,13 @@ def read_game_state():
         return {}
     result = {"room": max(0, room), "extra": max(0, extra),
               "peers": [p for p in values.get("peers", "").split(",") if p]}
-    for key in ("phase", "mode", "race"):
+    for key in ("phase", "mode", "race", "track"):
         if values.get(key):
-            result[key] = values[key][:64]
-    for key in ("lap", "laps", "race_seconds"):
+            result[key] = values[key][:160] if key == "track" else values[key][:64]
+    for key in ("lap", "laps", "race_seconds", "timer_start", "timer_end"):
         try:
             value = int(values.get(key, "-1"))
-            if 0 <= value < 86400:
+            if 0 <= value < (4102444800 if key.startswith("timer_") else 86400):
                 result[key] = value
         except ValueError:
             pass
@@ -724,16 +724,26 @@ def read_game_state():
 
 
 def game_presence(game):
-    """Use only sampled game fields; session elapsed time stays in Discord's timestamp."""
+    """Race identity, progress and status; running time uses Discord timestamps."""
     if not game or not game.get("phase"):
         return None
-    details = " · ".join(tr(game[k]) for k in ("mode", "race") if game.get(k)) or tr("Playing")
-    parts = [tr(game["phase"])]
+    if game["phase"] in ("In menus", "Loading", "Starting game"):
+        return tr(game["phase"]), tr("Crash Team Racing Nitro-Fueled")
+    details = tr(game.get("race") or "Playing")
+    track = game.get("track", "").rsplit("/", 1)[-1]
+    prefix, sep, name = track.partition("_")
+    if sep and len(prefix) > 1 and prefix[0] in "tabh" and prefix[1:].isdigit():
+        track = name
+    track = track.replace("_", " ").title()
+    if track:
+        details += " · " + track
+    parts = [tr(game["mode"])] if game.get("mode") else []
+    parts.append(tr(game["phase"]))
     lap, laps = game.get("lap", 0), game.get("laps", 0)
     if 1 <= lap <= laps <= 99:
         parts.append(tr("Lap {}/{}").format(lap, laps))
     seconds = game.get("race_seconds", -1)
-    if 0 <= seconds < 86400:
+    if 0 <= seconds < 86400 and not (game.get("timer_start") or game.get("timer_end")):
         parts.append(f"{seconds // 60}:{seconds % 60:02d}")
     return details, " · ".join(parts)
 
@@ -743,10 +753,12 @@ def discord_activity_for(ini, started, party, game=None):
     nick, server = ini.get("online_name", "").strip(), ini.get("online_server", ONLINE_SERVER).strip()
     minutes = max(0, (int(time.time()) - started) // 60) if started else 0
     sampled = game_presence(game)
+    clock_start = (game.get("timer_start", 0) if game.get("phase") == "Racing" else 0) if sampled else started
+    clock_end = game.get("timer_end", 0) if sampled and game.get("phase") == "Racing" else 0
     if ini.get("online") != "1":
         return discord_ipc.Activity(sampled[0] if sampled else tr("Playing offline"),
                                     state=sampled[1] if sampled else tr("{} min").format(minutes),
-                                    start=started, large_image="logo",
+                                    start=clock_start, end=clock_end, large_image="logo",
                                     large_text="Crash Team Racing Nitro-Fueled")
     parts = [tr("Nickname: {}").format(nick)] if nick else []
     room = (game or {}).get("room", 0)
@@ -760,7 +772,7 @@ def discord_activity_for(ini, started, party, game=None):
     else:
         parts.append(tr("Playing online"))
     parts.append(tr("{} min").format(minutes))
-    activity = discord_ipc.Activity(tr("Playing online"), state=" · ".join(parts), start=started,
+    activity = discord_ipc.Activity(tr("Playing online"), state=" · ".join(parts), start=clock_start, end=clock_end,
                                     large_image="logo", large_text="Crash Team Racing Nitro-Fueled")
     if sampled:
         activity.details, activity.state = sampled

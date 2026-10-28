@@ -53,8 +53,22 @@ class Game:
         q, b = self.value, self.base
         manager = q(b + 0x2ab3cd8)
         mode = {1: 'Adventure', 8: 'Local Arcade', 16: 'Online'}.get(q(manager + 0x144, 'i'), '')
-        result = {'mode': mode, 'phase': 'Menus / loading'}
-        racer = next((p for p in self.items(q(q(b + 0x2ad4b70) + 0x10), 16)
+        loading = q(manager + 0x88)
+        if q(loading) != b + 0x2540eb8:
+            return {'phase': 'Starting game'}
+        loading_state = q(loading + 0xc, 'i', -1)
+        if loading_state in (1, 2, 3, 4):
+            return {'phase': 'Loading'}
+        if loading_state != 0:
+            return {}
+        track = self.read(q(manager + 0xc0), 160).split(b'\0')[0]
+        # Racers survive a return to the frontend; the loaded level takes precedence.
+        if track.rsplit(b'/', 1)[-1].lower() in (b'octane_startscreen', b'octane_onlinelobby',
+                                                b'octane_scrapbook', b'octane_credits'):
+            return {'phase': 'In menus'}
+        result = {'phase': 'In menus'}
+        racer_list = q(q(b + 0x2ad4b70) + 0x10)
+        racer = next((p for p in (self.items(racer_list, 16) if racer_list else [])
                       if q(p) == b + 0x26d5f78 and q(p + 0x40, 'B', 1) == 0
                       and q(p + 0xb0, 'B') == 1), None)
         if racer is None:
@@ -67,12 +81,12 @@ class Game:
         if not 0 < race < len(races):
             raise ValueError('Invalid or changing race mode')
         finished = q(racer + 0x8c, 'B')
-        result.update(race=races[race], phase='Exploring' if race == 7 else 'Finished' if finished else 'Racing')
+        result.update(mode=mode, race=races[race], phase='Exploring' if race == 7 else 'Finished' if finished else 'Racing')
         lap, laps = q(racer + 0x4c, 'i', -1), q(q(b + 0x2ad4e30) + 0xc, 'i')
         if 1 <= race <= 6 and 0 <= lap <= laps+1 and 1 <= laps <= 99:
             result.update(lap=max(1, min(lap, laps)), laps=laps)
-        track = self.read(q(racer + 0xf8), 160).split(b'\0')[0]
-        result['track_internal'] = track.decode('utf-8', 'replace')
+        if track and all(32 <= c < 127 for c in track):
+            result['track'] = track.decode('ascii')
         handle, pool = q(b + 0x2a92888, 'I'), q(b + 0x2a92880)
         index, generations = handle & 0x7fff, q(pool + 0x28)
         if not handle & 0x8000 or handle == q(b + 0x2a922d0, 'I'):
@@ -102,6 +116,9 @@ class Game:
             result['phase'] = 'Paused'
         if not finished and race != 7 and 0 <= seconds < 86400:
             result.update(race_seconds=int(seconds), precise_seconds=seconds)
+            if result['phase'] == 'Racing' and q(timer + 0x14, 'B') and not q(timer + 0x15, 'B'):
+                key = 'timer_end' if clock_mode == 1 else 'timer_start'
+                result[key] = round(time.time() + seconds if clock_mode == 1 else time.time() - seconds)
         return result
 
 

@@ -39,7 +39,7 @@ struct Desired {
         const Activity& b = o.activity;
         return enabled == o.enabled && app_id == o.app_id && has_activity == o.has_activity &&
                (!has_activity ||
-                (a.details == b.details && a.state == b.state && a.start == b.start &&
+                (a.details == b.details && a.state == b.state && a.start == b.start && a.end == b.end &&
                  a.large_image == b.large_image && a.large_text == b.large_text && a.party_id == b.party_id &&
                  a.party_size == b.party_size && a.party_max == b.party_max && a.join_secret == b.join_secret));
     }
@@ -258,7 +258,8 @@ private:
     static std::string ActivityJson(const Activity& a) {
         std::string j = "{\"details\":\"" + Escape(a.details) + "\"";
         if (!a.state.empty()) j += ",\"state\":\"" + Escape(a.state) + "\"";
-        if (a.start > 0) j += ",\"timestamps\":{\"start\":" + std::to_string(a.start) + "}";
+        if (a.end > 0) j += ",\"timestamps\":{\"end\":" + std::to_string(a.end) + "}";
+        else if (a.start > 0) j += ",\"timestamps\":{\"start\":" + std::to_string(a.start) + "}";
         if (!a.large_image.empty()) {
             j += ",\"assets\":{\"large_image\":\"" + Escape(a.large_image) + "\"";
             if (!a.large_text.empty()) j += ",\"large_text\":\"" + Escape(a.large_text) + "\"";

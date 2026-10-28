@@ -19,6 +19,7 @@ struct Activity {
     std::string details;  // first line, e.g. "Playing online"
     std::string state;    // second line, optional
     int64_t start = 0;    // Unix seconds; shows "elapsed"; 0 = none
+    int64_t end = 0;      // Unix seconds; countdown; 0 = none
     std::string large_image;  // asset key uploaded to the Discord application, optional
     std::string large_text;
     // Joinable: all four set, or none. Discord shows "(size of max)" after the state.

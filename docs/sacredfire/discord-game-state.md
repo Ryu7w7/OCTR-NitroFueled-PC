@@ -1,8 +1,8 @@
 # Discord game state (CUSA13795 1.21)
 
-`runtime_state.c` samples the loaded game every five seconds into `ryunet_state.txt`.
-Both launchers use `phase`, `mode`, `race`, `lap`, `laps`, and `race_seconds` when
-present. The Discord start timestamp remains session elapsed time. A missing or
+`runtime_state.c` samples the loaded game every second into `ryunet_state.txt`.
+Both launchers use `phase`, `mode`, `race`, `track`, `lap`, `laps`, and `race_seconds` when
+present. Running races use Discord timestamps synchronized to the sampled game clock. A missing or
 unsupported snapshot keeps basic presence; network peers alone do not imply a menu.
 
 The reader starts at guest entry, including offline play. It reads its own process
@@ -30,11 +30,8 @@ unmapped objects. Launcher tests cover offline/online formatting, invalid fields
 future/stale timestamps, and transition back to menus. Memory-reader tests need
 an environment allowing self `process_vm_readv`; socket tests need local sockets.
 
-Remaining live verification: compare Discord against the HUD in each mode and
-through loading, pause, restart, and finish. With no local racer the reader reports
-**Menus / loading**; it does not yet identify individual menu pages or distinguish
-loading from menus. No claim of live gameplay validation is made by the synthetic
-tests. Unsupported timer types omit the time instead of using wall-clock time.
+Remaining live verification: other modes, finish time, and individual frontend pages.
+Unsupported timer types omit the time instead of using wall-clock time.
 
 ## No-build live validation, 2026-10-29
 
@@ -82,3 +79,49 @@ closing. It did not subscribe to join requests or send invitations. This verifie
 live data → launcher formatting → actual Discord IPC acceptance for the observed
 paused race. It is not visual verification of the Discord UI or a test of mode/lap
 transitions; the revised compiled C writer remains untested in the running binary.
+
+## Menu, loading, and track correction
+
+`CGameManager._loadingScreen=0x88`, reflected from names `0x25e2840`, offsets
+`0x1d9fa70`; its `CLoadingScreen` vtable is `0x2540eb8`. `_state=0xc` values
+at `0x1da5640` are Closed=0, PendingOpen=1, LightweightScreenOpen=2, Open=3,
+Closing=4. Nonzero valid states report Loading before inspecting racers.
+
+`CGameManager._levelName=0xc0` gives the current map, including at the start of a
+race when `CRacer._lastTrackName` is still empty. The frontend level
+`octane/octane_startscreen/octane_startscreen` overrides racers: live testing
+confirmed that the previous local racer survives returning to menus. Known
+frontend maps report In menus and omit mode, race, track, laps, and time.
+Track paths pass through the state file and are formatted as readable names
+(e.g. `t111_crash_cove` → Crash Cove). This uses the asset name, not localized
+track-name resources; unusual internal names may differ from the UI label.
+
+No-build live checks on 2026-10-29 observed Loading (state=3), Crash Cove
+Time Trial starting and racing, Paused at 14.800537109375 seconds, and a return
+to the frontend with the stale racer still present. Actual Discord IPC accepted
+`Local Arcade · Time Trial · Crash Cove` / `Paused · Lap 1/3 · 0:14`, then
+`In menus` / `Crash Team Racing Nitro-Fueled`. Temporary test activities were
+cleared. Python bridge tests cover loading overriding a stale racer and frontend
+level overriding a stale racer. The C reader and Windows launcher were updated
+but were not compiled, as requested.
+
+The existing Linux AppImage can use `packaging/presence_bridge.py` installed next
+to `tools/re/presence_live.py`, invoked as the parent of its unchanged native
+binary. It uses the same reader and atomically writes only gameplay fields.
+This bridge does not provide the newer C writer's network peer fields.
+
+## Running race timer and presence layout
+
+Race details show `Time Trial · Crash Cove`; the state shows
+`Local Arcade · Racing · Lap 1/3`. The native Discord elapsed timer is anchored
+to the sampled engine time via `timer_start` (Unix seconds), rather than the
+launcher start or a static text counter. Countdown clocks use `timer_end`.
+Paused/stopped clocks omit timestamps and show their frozen sampled time in text.
+Menu/loading/finished states have no session clock masquerading as race time.
+Snapshots update once per second for pause, lap, restart, and phase transitions;
+Discord animates elapsed/remaining time between updates. This is second-resolution
+presence, not a frame-accurate HUD, and Discord may delay displaying state changes.
+
+Python tests cover timestamp anchoring, aged snapshots, countdown serialization,
+pause, restart, and a real synthetic-child bridge read. The Python AppImage needs
+both the updated launcher formatter and `discord_ipc.py` for countdown support.

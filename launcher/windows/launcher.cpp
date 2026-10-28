@@ -1306,7 +1306,8 @@ bool NickTaken() {
 struct GameStatus {
     bool ok = false;
     int room = 0, extra = 0;
-    std::string phase, mode, race;
+    std::string phase, mode, race, track;
+    int64_t timer_start = 0, timer_end = 0;
     int lap = 0, laps = 0, race_seconds = -1;
     std::string peers;  // "", up to three nicknames with commas, for the state
 };
@@ -1315,7 +1316,7 @@ ULONGLONG g_game_status_at = 0;
 
 void ReadGameStatus() {
     const ULONGLONG now = GetTickCount64();
-    if (g_game_status_at && now - g_game_status_at < 2000) return;
+    if (g_game_status_at && now - g_game_status_at < 1000) return;
     g_game_status_at = now;
     GameStatus read;
     long long at = 0;
@@ -1329,6 +1330,15 @@ void ReadGameStatus() {
         if (key == "phase") read.phase = value.substr(0, 64);
         else if (key == "mode") read.mode = value.substr(0, 64);
         else if (key == "race") read.race = value.substr(0, 64);
+        else if (key == "track") read.track = value.substr(0, 160);
+        else if (key == "timer_start" || key == "timer_end") {
+            char* end = nullptr;
+            const auto number = std::strtoll(value.c_str(), &end, 10);
+            if (!value.empty() && *end == '\0' && number > 0 && number < 4102444800LL) {
+                if (key == "timer_start") read.timer_start = number;
+                else read.timer_end = number;
+            }
+        }
         else if (key == "lap" || key == "laps" || key == "race_seconds") {
             char* end = nullptr;
             const long number = std::strtol(value.c_str(), &end, 10);
@@ -1793,22 +1803,37 @@ void UpdateDiscord() {
     ReadGameStatus();
     if (g_game_status.ok && !g_game_status.phase.empty()) {
         const auto& game = g_game_status;
-        activity.details = game.mode;
-        if (!game.race.empty()) {
-            if (!activity.details.empty()) activity.details += " · ";
-            activity.details += game.race;
+        activity.details = game.race;
+        std::string track = game.track.substr(game.track.find_last_of('/') + 1);
+        const auto underscore = track.find('_');
+        if (underscore != std::string::npos && underscore > 1 &&
+            std::string("tabh").find(track[0]) != std::string::npos &&
+            track.substr(1, underscore-1).find_first_not_of("0123456789") == std::string::npos)
+            track.erase(0, underscore+1);
+        bool word_start = true;
+        for (char& c : track) {
+            if (c == '_') c = ' ';
+            else c = char(word_start ? std::toupper((unsigned char)c) : std::tolower((unsigned char)c));
+            word_start = c == ' ';
         }
+        if (!track.empty()) activity.details += " · " + track;
         if (activity.details.empty()) activity.details = "Playing";
-        activity.state = game.phase;
+        activity.state = game.mode.empty() ? game.phase : game.mode + " · " + game.phase;
         if (game.lap >= 1 && game.lap <= game.laps && game.laps <= 99)
             activity.state += " · Lap " + std::to_string(game.lap) + "/" + std::to_string(game.laps);
-        if (game.race_seconds >= 0 && game.race_seconds < 86400) {
+        if (game.race_seconds >= 0 && game.race_seconds < 86400 && !game.timer_start && !game.timer_end) {
             char clock[32];
             std::snprintf(clock, sizeof clock, " · %d:%02d", game.race_seconds / 60, game.race_seconds % 60);
             activity.state += clock;
         }
     }
-    activity.start = started;
+    if (g_game_status.ok && (g_game_status.phase == "In menus" ||
+        g_game_status.phase == "Loading" || g_game_status.phase == "Starting game")) {
+        activity.details = g_game_status.phase;
+        activity.state = "Crash Team Racing Nitro-Fueled";
+    }
+    activity.start = g_game_status.ok && !g_game_status.phase.empty() ? (g_game_status.phase == "Racing" ? g_game_status.timer_start : 0) : started;
+    activity.end = g_game_status.ok && g_game_status.phase == "Racing" ? g_game_status.timer_end : 0;
     activity.large_image = "logo";
     activity.large_text = "Crash Team Racing Nitro-Fueled";
     DiscordPresence::Update(enabled, app_id, &activity);

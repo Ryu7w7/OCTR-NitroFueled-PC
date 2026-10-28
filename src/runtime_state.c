@@ -1,5 +1,5 @@
 /* ryunet_state.txt beside bbport.ini: network peers plus a bounded game snapshot.
- * Replaced atomically every five seconds, with a Unix timestamp for stale-file detection.
+ * Replaced atomically every second, with a Unix timestamp for stale-file detection.
  * Game layout evidence and remaining live checks: docs/sacredfire/discord-game-state.md. */
 #define _GNU_SOURCE
 #include <pthread.h>
@@ -23,7 +23,7 @@
 #include "runtime_np_online.h"
 #include "runtime_state.h"
 
-#define STATE_SECONDS 5
+#define STATE_SECONDS 1
 #define STATE_NAMES 4
 #define STATE_NAME "ryunet_state.txt"
 
@@ -93,11 +93,41 @@ void runtime_state_game(char *out, size_t size) {
     if (!base) return;
     uintptr_t manager = pointer_at(base+0x2ab3cd8);
     if (!manager) return;
+    uintptr_t loading = pointer_at(manager+0x88);
+    if (pointer_at(loading) != base+0x2540eb8) {
+        snprintf(out, size, "phase=Starting game\n");
+        return;
+    }
+    int loading_state = int_at(loading+0xc, -1);
+    if (loading_state >= 1 && loading_state <= 4) {
+        snprintf(out, size, "phase=Loading\n");
+        return;
+    }
+    if (loading_state != 0) return;
+    char track[160] = "";
+    uintptr_t track_ptr = pointer_at(manager+0xc0);
+    for (size_t i = 0; i < sizeof track-1; i++) {
+        unsigned char c;
+        if (!read_game(track_ptr+i, &c, 1) || (c && (c < 32 || c >= 127))) {
+            track[0] = 0;
+            break;
+        }
+        track[i] = (char)c;
+        if (!c) break;
+    }
+    char level[160];
+    snprintf(level, sizeof level, "%s", strrchr(track, '/') ? strrchr(track, '/')+1 : track);
+    for (char *c = level; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 'a'-'A';
+    if (!strcmp(level, "octane_startscreen") || !strcmp(level, "octane_onlinelobby") ||
+        !strcmp(level, "octane_scrapbook") || !strcmp(level, "octane_credits")) {
+        snprintf(out, size, "phase=In menus\n");
+        return;
+    }
     int game_mode = int_at(manager+0x144, 0);
     const char *mode = game_mode == 1 ? "Adventure" : game_mode == 8 ? "Local Arcade" :
                        game_mode == 16 ? "Online" : "";
     uintptr_t racers = pointer_at(pointer_at(base+0x2ad4b70)+0x10);
-    int count = int_at(racers+0xc, -1);
+    int count = racers ? int_at(racers+0xc, -1) : 0;
     uintptr_t racer = 0, entries = pointer_at(racers+0x20);
     if (count < 0 || count > 16) return;
     for (int i = 0; i < count; i++) {
@@ -110,9 +140,7 @@ void runtime_state_game(char *out, size_t size) {
         }
     }
     if (!racer) {
-        /* shortcut: no active local racer cannot distinguish loading from menus; use both
-         * until a verified frontend/loading state is available. */
-        snprintf(out, size, "phase=Menus / loading\nmode=%s\n", mode);
+        snprintf(out, size, "phase=In menus\n");
         return;
     }
     static const char *const races[] = {"", "Single Race", "Time Trial", "Relic Race", "Boss Race",
@@ -151,7 +179,17 @@ void runtime_state_game(char *out, size_t size) {
         snprintf(lap_text, sizeof lap_text, "lap=%d\nlaps=%d\n", lap < 1 ? 1 : lap > laps ? laps : lap, laps);
     if (race != 7 && isfinite(seconds) && seconds >= 0 && seconds < 86400)
         snprintf(time_text, sizeof time_text, "race_seconds=%d\n", (int)seconds);
-    snprintf(out, size, "phase=%s\nmode=%s\nrace=%s\n%s%s", phase, mode, races[race], lap_text, time_text);
+    char timestamp[64] = "";
+    unsigned char running = 0, stopped = 1;
+    if (!strcmp(phase, "Racing") && isfinite(seconds) && seconds >= 0 && seconds < 86400 &&
+        read_game(timer+0x14, &running, 1) && read_game(timer+0x15, &stopped, 1) && running && !stopped) {
+        struct timespec now;
+        timespec_get(&now, TIME_UTC);
+        double epoch = now.tv_sec + now.tv_nsec / 1e9;
+        snprintf(timestamp, sizeof timestamp, "%s=%lld\n", clock_mode == 1 ? "timer_end" : "timer_start",
+                 (long long)((clock_mode == 1 ? epoch+seconds : epoch-seconds) + 0.5));
+    }
+    snprintf(out, size, "phase=%s\nmode=%s\nrace=%s\ntrack=%s\n%s%s%s", phase, mode, races[race], track, lap_text, time_text, timestamp);
 }
 
 /* The same clock the ping's views run on (runtime_net.c's now_ms, here the state's own). */
@@ -209,7 +247,7 @@ static void *state_thread(void *arg) {
         }
         const int extra = named > listed ? named - listed : 0;
         const char *nick = runtime_np_get_online_name();
-        char body[1024], game[256];
+        char body[1024], game[512];
         runtime_state_game(game, sizeof game);
         if (extra > 0)
             snprintf(body, sizeof body,

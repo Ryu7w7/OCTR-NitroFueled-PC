@@ -124,8 +124,12 @@ static void test_game_snapshot(void) {
     memcpy(image+0x10ddd66, "\x8b\x90\x44\x01\x00\x00", 6);
     memcpy(image+0x1d424aa, "CRaceSettingsManager", 20);
     unsigned char manager[0x148] = {0}, octane[0xd50] = {0}, rm[0x18] = {0};
-    unsigned char list[0x28] = {0}, settings[0x10] = {0}, racer[0xb8] = {0}, ai[0xb8] = {0};
+    unsigned char list[0x28] = {0}, settings[0x10] = {0}, racer[0x100] = {0}, ai[0xb8] = {0};
     void *entries[] = {ai, racer};
+    unsigned char loading[0x60] = {0};
+    put_pointer(manager+0x88, loading);
+    put_pointer(loading, image+0x2540eb8);
+    put_pointer(manager+0xc0, "octane/t213_tiny_temple/t213_tiny_temple");
     put_pointer(image+0x2ab3cd8, manager);
     put_pointer(image+0x2acde48, octane);
     put_pointer(image+0x2ad4b70, rm);
@@ -141,12 +145,23 @@ static void test_game_snapshot(void) {
     put_int(racer+0x4c, 2);
     runtime_state_bind(image, size);
     runtime_state_game(body, sizeof body);
-    CHECK(strstr(body, "phase=Menus / loading\n") && !strstr(body, "race="));
+    CHECK(strstr(body, "phase=In menus\n") && !strstr(body, "race="));
     put_int(list+0xc, 2);
     runtime_state_game(body, sizeof body);
     CHECK(strstr(body, "mode=Local Arcade\n") && strstr(body, "race=Time Trial\n"));
     CHECK(strstr(body, "lap=2\nlaps=3\n") && !strstr(body, "race_seconds="));
 
+    CHECK(strstr(body, "track=octane/t213_tiny_temple/t213_tiny_temple\n"));
+    for (int state = 1; state <= 4; state++) {
+        put_int(loading+0xc, state);
+        runtime_state_game(body, sizeof body);
+        CHECK(!strcmp(body, "phase=Loading\n"));
+    }
+    put_int(loading+0xc, 0);
+    put_pointer(manager+0xc0, "Octane/Octane_StartScreen/Octane_StartScreen");
+    runtime_state_game(body, sizeof body);
+    CHECK(!strcmp(body, "phase=In menus\n"));
+    put_pointer(manager+0xc0, "octane/t213_tiny_temple/t213_tiny_temple");
     unsigned char pool[0x30] = {0}, generations[0x28] = {0}, clock[0x50] = {0};
     unsigned char timer[0x20] = {0}, data[0x10] = {0}, time[0x30] = {0};
     uint16_t generation = 0x8000;
@@ -194,7 +209,7 @@ static void test_game_snapshot(void) {
     CHECK(strstr(body, "phase=Finished\n") && !strstr(body, "race_seconds="));
     entries[1] = (void *)(uintptr_t)0xdead0000;
     runtime_state_game(body, sizeof body); /* unmapped guest object must not crash */
-    CHECK(strstr(body, "phase=Menus / loading\n"));
+    CHECK(strstr(body, "phase=In menus\n"));
     runtime_state_bind(NULL, 0);
     free(image);
 }
