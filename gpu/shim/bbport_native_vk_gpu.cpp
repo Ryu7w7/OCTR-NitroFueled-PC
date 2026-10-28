@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <atomic>
 #include <map>
 #include <string>
 #include <tuple>
@@ -90,7 +91,12 @@ bool full_barriers = false; // BB_VK_FULL_BARRIERS=1
 // BB_VK_PASS_TRACE=1: every 1000th command buffer logs its passes, their draws and what ended
 // each (the image changing layout and to which, the next pass, a clear, the submit)
 bool trace_passes = false;
+u64 trace_every = 1000; // BB_VK_PASS_TRACE_EVERY (lab): one command buffer in this many is traced
 bool tracing = false; // the open command buffer is traced
+// lab: GPU time of every draw's shader in the traced command buffers, for the whole run
+std::map<std::string, WorkAcc> draw_times;
+u64 traced_ns = 0, traced_buffers = 0;
+std::atomic<u64> last_gpu_ns{0}; // GPU time of the last finished command buffer
 u32 trace_draws = 0;
 // the traced command buffer's lines, collected here and written to their own file by a thread of
 // their own: a thousand lines on the console fill its pipe, and the game's next print waits
@@ -313,7 +319,7 @@ void Begin(Frame& f) {
     f.labels.assign(1, Label{});
     f.recorded = false;
     ++state_epoch;
-    tracing = trace_passes && stats.submits % 1000 == 500;
+    tracing = trace_passes && stats.submits % trace_every == trace_every / 2;
     f.traced = tracing;
     if (tracing) {
         std::printf("Pass trace: submission %llu (in the trace file)\n", (unsigned long long)stats.submits);
@@ -341,7 +347,18 @@ void Retire(Frame& f) {
                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
             t[n - 1] > t[0]) {
             stats.gpu_ns += u64(double(t[n - 1] - t[0]) * tick_ns);
+            last_gpu_ns.store(u64(double(t[n - 1] - t[0]) * tick_ns), std::memory_order_relaxed);
             if (f.traced) {
+                traced_ns += u64(double(t[n - 1] - t[0]) * tick_ns);
+                ++traced_buffers;
+                for (std::size_t i = 0; i + 1 < n; ++i) {
+                    if (f.labels[i].kind == Work::Draw && t[i + 1] >= t[i]) {
+                        WorkAcc& a = draw_times[WorkName(f.labels[i])];
+                        a.ns += u64(double(t[i + 1] - t[i]) * tick_ns);
+                        ++a.count;
+                        a.draws += f.labels[i].draws;
+                    }
+                }
                 Trace("Pass trace GPU times (%.3f ms in all):\n", double(t[n - 1] - t[0]) * tick_ns / 1e6);
                 for (std::size_t i = 0; i + 1 < n; ++i) {
                     Trace("  %7.3f ms  %s, %u draws\n", double(t[i + 1] - t[i]) * tick_ns / 1e6,
@@ -449,6 +466,9 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     device = vulkan.GetDevice();
     const char* pt = std::getenv("BB_VK_PASS_TRACE");
     trace_passes = pt && pt[0] == '1';
+    if (const char* every = std::getenv("BB_VK_PASS_TRACE_EVERY"); every && std::atoi(every) >= 2) {
+        trace_every = u64(std::atoi(every));
+    }
     if (trace_passes) {
         std::thread(TraceWriter).detach();
     }
@@ -873,6 +893,21 @@ void NoteDraw() {
     if (!Cur().labels.empty()) {
         ++Cur().labels.back().draws;
     }
+}
+
+std::vector<WorkTime> DrawTimes(std::uint64_t& all_ns, std::uint64_t& buffers) {
+    all_ns = traced_ns;
+    buffers = traced_buffers;
+    std::vector<WorkTime> out;
+    for (const auto& [what, a] : draw_times) {
+        out.push_back({what, a.ns, a.count, a.draws});
+    }
+    std::sort(out.begin(), out.end(), [](const WorkTime& a, const WorkTime& b) { return a.ns > b.ns; });
+    return out;
+}
+
+std::uint64_t LastGpuNs() {
+    return last_gpu_ns.load(std::memory_order_relaxed);
 }
 
 std::vector<WorkTime> TakeWorkTimes() {

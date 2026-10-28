@@ -3543,6 +3543,29 @@ void Report() {
             }
             std::printf("Native Vulkan: GPU per second, most first: %s\n", top.c_str());
             {
+                // lab: the shaders that cost the GPU most, over every traced command buffer
+                u64 all = 0, buffers = 0;
+                std::vector<Gpu::WorkTime> shaders;
+                {
+                    std::lock_guard g(gpu_mutex);
+                    shaders = Gpu::DrawTimes(all, buffers);
+                }
+                if (buffers && all) {
+                    std::string list;
+                    for (std::size_t i = 0; i < shaders.size() && i < 12; ++i) {
+                        char b[192];
+                        std::snprintf(b, sizeof(b), "%s%s %.1f%% (%.3f ms/draw, %llu draws)",
+                                      i ? "; " : "", shaders[i].what.c_str(),
+                                      100.0 * double(shaders[i].ns) / double(all),
+                                      shaders[i].draws ? shaders[i].ns / 1e6 / shaders[i].draws : 0.0,
+                                      (unsigned long long)shaders[i].draws);
+                        list += b;
+                    }
+                    std::printf("Native Vulkan: shaders by GPU time over %llu traced command buffers: %s\n",
+                                (unsigned long long)buffers, list.c_str());
+                }
+            }
+            {
                 static u64 last_sec[SecCount]{};
                 std::string secs;
                 const u64 n = d - last;
@@ -3773,10 +3796,47 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
     Hand(c);
 }
 
+/// Lab: a submission that came much later than usual (a hitch) is logged with what happened
+/// since the last one: pipelines compiling, draws left out for them, the game waiting for the
+/// capture thread, and the GPU time of the last finished command buffer.
+void NoteHitch() {
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last{};
+    static double average_ms = 0;
+    static u64 last_skipped = 0, last_compiled = 0, last_wait = 0, last_print_ns = 0, hitches = 0;
+    const auto now = Clock::now();
+    const u64 skipped = skipped_compiling.load(), compiled = compiles_done.load(),
+              wait = capture_wait_ns.load();
+    if (last != Clock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+        const u64 now_ns =
+            u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        if (average_ms > 0 && ms > 25.0 && ms > 2.0 * average_ms) {
+            ++hitches;
+            if (now_ns - last_print_ns > 500'000'000ull) { // at most two lines a second
+                last_print_ns = now_ns;
+                std::printf("Native Vulkan: hitch %.1f ms (usual %.1f; %llu so far): %llu pipelines "
+                            "compiled, %llu draws left out compiling, game waited %.1f ms for the "
+                            "capture thread, last GPU command buffer %.1f ms\n",
+                            ms, average_ms, (unsigned long long)hitches,
+                            (unsigned long long)(compiled - last_compiled),
+                            (unsigned long long)(skipped - last_skipped), (wait - last_wait) / 1e6,
+                            Gpu::LastGpuNs() / 1e6);
+            }
+        }
+        average_ms = average_ms > 0 ? average_ms * 0.95 + std::min(ms, 100.0) * 0.05 : ms;
+    }
+    last = now;
+    last_skipped = skipped;
+    last_compiled = compiled;
+    last_wait = wait;
+}
+
 void OnSubmit() {
     if (!drawing) {
         return;
     }
+    NoteHitch();
     Timer timer(submit_ns);
     if (!capture_thread) {
         std::lock_guard lk(mutex);

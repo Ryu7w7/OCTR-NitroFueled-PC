@@ -76,6 +76,11 @@ void Mark(Work kind, std::uint32_t width, std::uint32_t height, vk::Format forma
 void NoteDraw();
 /// GPU time by work since the last call, most first.
 std::vector<WorkTime> TakeWorkTimes();
+/// Lab: GPU time per draw shader in the traced command buffers since the start, most first;
+/// `all_ns` and `buffers`: their whole GPU time and how many were traced.
+std::vector<WorkTime> DrawTimes(std::uint64_t& all_ns, std::uint64_t& buffers);
+/// Lab: GPU time of the last finished command buffer.
+std::uint64_t LastGpuNs();
 /// Writes the pipeline cache to its file.
 void SaveCache();
 
