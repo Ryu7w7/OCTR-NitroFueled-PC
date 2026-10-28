@@ -73,6 +73,9 @@ vk::Device device;
 std::array<Frame, FrameCount> frames;
 std::size_t current = 0;
 
+// lab: 16 bytes of zeros, then a float4 of ones, for vertex inputs no engine element feeds
+VkBuffer constant_vertices = VK_NULL_HANDLE;
+VmaAllocation constant_vertices_allocation = nullptr;
 VkBuffer ring = VK_NULL_HANDLE; // RingSize, then uniform_range of zeros (UniformBuffer)
 u64 uniform_range = 65536;
 VmaAllocation ring_allocation = nullptr;
@@ -530,6 +533,22 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
                 static_cast<unsigned long long>(RingSize >> 20),
                 ring_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "video (device-local)" : "system");
     ring_data = static_cast<std::uint8_t*>(info.pMappedData);
+    {
+        const VkBufferCreateInfo cbci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                      .size = 32,
+                                      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                      .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VmaAllocationCreateInfo caci{};
+        caci.usage = VMA_MEMORY_USAGE_AUTO;
+        caci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo cinfo{};
+        if (vmaCreateBuffer(vulkan.GetAllocator(), &cbci, &caci, &constant_vertices,
+                            &constant_vertices_allocation, &cinfo) == VK_SUCCESS) {
+            const float values[8] = {0, 0, 0, 0, 1, 1, 1, 1};
+            std::memcpy(cinfo.pMappedData, values, sizeof(values));
+        }
+    }
     std::memset(ring_data + RingSize, 0, uniform_range);
     // a cache from an earlier run (the driver ignores data from another driver or GPU)
     cache_file = cache_path;
@@ -573,6 +592,10 @@ vk::CommandBuffer Prelude() {
 
 VkBuffer UniformBuffer() {
     return ring;
+}
+
+VkBuffer ConstantVertices() {
+    return constant_vertices;
 }
 
 u64 UniformRange() {

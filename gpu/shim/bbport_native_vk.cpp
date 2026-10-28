@@ -1326,7 +1326,9 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             }
             binding = ZeroBinding;
             format = vk::Format::eR32G32B32A32Sfloat;
-            offset = 0;
+            // lab: a missing vertex color (usage 4) reads white, as engines give a mesh without
+            // colors; zeros made the blended track's plates layer black (Roo's Tubes)
+            offset = usage == 4 && Gpu::ConstantVertices() ? 16 : 0;
             zero_binding = true;
         } else {
             used[binding] = true;
@@ -2772,7 +2774,9 @@ void RecordDraw(DrawPacket& d) {
     }
     for (u32 k = 0; k < d.binding_count; ++k) {
         const u32 binding = d.bindings[k].binding;
-        const VkBuffer buffer = binding == ZeroBinding || binding >= 16 ? VK_NULL_HANDLE : d.vb[binding].buffer;
+        const VkBuffer buffer = binding == ZeroBinding ? Gpu::ConstantVertices()
+                                : binding >= 16              ? VK_NULL_HANDLE
+                                                             : d.vb[binding].buffer;
         const u64 offset = binding == ZeroBinding || binding >= 16 ? 0 : d.vb[binding].offset;
         if (binding < 16 && bound.vb[binding] == buffer && bound.vb_offset[binding] == offset && buffer) {
             continue;

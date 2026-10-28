@@ -111,6 +111,8 @@ void Defer(std::function<void()> f);
 /// of zeros that is never written (at ZeroUniform()): a window from any ring offset stays in
 /// the buffer, and a constant buffer a draw does not have reads zeros there.
 VkBuffer UniformBuffer();
+/// Lab: a vertex buffer of 16 bytes of zeros then a float4 of ones (null if not made).
+VkBuffer ConstantVertices();
 std::uint64_t UniformRange();
 std::uint64_t ZeroUniform();
 
