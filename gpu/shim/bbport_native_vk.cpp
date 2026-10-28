@@ -41,6 +41,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "renderdoc_app.h" // lab: in-app RenderDoc captures (F11)
 #else
 #include <sys/uio.h>
 #include <unistd.h>
@@ -3947,6 +3948,44 @@ void OnSubmit() {
 }
 
 namespace {
+#ifdef _WIN32
+/// Lab: under RenderDoc, F11 captures this renderer's next command buffers. RenderDoc's own frame
+/// (present to present) misses them: they go out of step with shadPS4's presenter.
+void RenderDocCapture(bool after_submit) {
+    static RENDERDOC_API_1_1_2* api = [] {
+        RENDERDOC_API_1_1_2* found = nullptr;
+        if (HMODULE m = GetModuleHandleA("renderdoc.dll")) {
+            if (auto get = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(m, "RENDERDOC_GetAPI"))) {
+                if (get(eRENDERDOC_API_Version_1_1_2, reinterpret_cast<void**>(&found)) != 1) {
+                    found = nullptr;
+                }
+            }
+        }
+        std::printf("Native Vulkan: RenderDoc %s (F11 captures this renderer's next 4 submissions)\n",
+                    found ? "found" : "not loaded");
+        return found;
+    }();
+    static int remaining = 0;
+    static bool was_down = false;
+    if (!api || !after_submit) {
+        return;
+    }
+    if (remaining > 0 && --remaining == 0) {
+        api->EndFrameCapture(nullptr, nullptr);
+        std::printf("Native Vulkan: RenderDoc capture ended\n");
+    }
+    const bool down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    if (down && !was_down && remaining == 0) {
+        api->StartFrameCapture(nullptr, nullptr);
+        remaining = 4;
+        std::printf("Native Vulkan: RenderDoc capture started\n");
+    }
+    was_down = down;
+}
+#else
+void RenderDocCapture(bool) {}
+#endif
+
 void RunSubmit(const SubmitPacket& sp) {
     for (const auto& [address, t] : sp.shown) {
         BeforeRead(&t->img); // the presenter reads it
@@ -3955,6 +3994,7 @@ void RunSubmit(const SubmitPacket& sp) {
         shown[address] = Shown{t->img.image, t->img.format, t->img.width, t->img.height};
     }
     Gpu::Submit();
+    RenderDocCapture(true);
     {
         std::lock_guard rl(recorded_mutex);
         submits_recorded.fetch_add(1, std::memory_order_release);
