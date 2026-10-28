@@ -29,7 +29,10 @@ namespace {
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 
-constexpr u64 RingSize = 256ull << 20; // vertex data is copied into it every draw
+// Vertex data is copied into it every draw. BB_VK_RING_MB (lab, default 256): a dedicated GPU
+// without resizable BAR has a ~256 MiB device-local host-visible heap, so a 256 MiB ring lands in
+// system memory and every draw's vertices cross PCIe; a smaller one can sit in video memory.
+u64 RingSize = 256ull << 20;
 constexpr u32 MaxMarks = 1024;         // timestamps per command buffer
 
 /// One timed piece of a command buffer: from its timestamp to the next one.
@@ -480,6 +483,9 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
         }
     }
     uniform_range = std::min<u64>(65536, vulkan.GetPhysicalDevice().getProperties().limits.maxUniformBufferRange);
+    if (const char* mb = std::getenv("BB_VK_RING_MB"); mb && std::atoi(mb) >= 16) {
+        RingSize = u64(std::min(std::atoi(mb), 1024)) << 20;
+    }
     const VkBufferCreateInfo bci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = RingSize + uniform_range,
@@ -491,11 +497,17 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     aci.usage = VMA_MEMORY_USAGE_AUTO;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    aci.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT; // video memory the CPU can write, if it fits
     VmaAllocationInfo info{};
     if (vmaCreateBuffer(vulkan.GetAllocator(), &bci, &aci, &ring, &ring_allocation, &info) !=
         VK_SUCCESS) {
         return false;
     }
+    VkMemoryPropertyFlags ring_flags = 0;
+    vmaGetAllocationMemoryProperties(vulkan.GetAllocator(), ring_allocation, &ring_flags);
+    std::printf("Native Vulkan: vertex ring %llu MiB in %s memory (BB_VK_RING_MB)\n",
+                static_cast<unsigned long long>(RingSize >> 20),
+                ring_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "video (device-local)" : "system");
     ring_data = static_cast<std::uint8_t*>(info.pMappedData);
     std::memset(ring_data + RingSize, 0, uniform_range);
     // a cache from an earlier run (the driver ignores data from another driver or GPU)
