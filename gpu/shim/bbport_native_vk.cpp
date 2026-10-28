@@ -3961,7 +3961,7 @@ void RenderDocCapture(bool after_submit) {
                 }
             }
         }
-        std::printf("Native Vulkan: RenderDoc %s (F11 captures this renderer's next 4 submissions)\n",
+        std::printf("Native Vulkan: RenderDoc %s (F11 captures this renderer's next submissions)\n",
                     found ? "found" : "not loaded");
         return found;
     }();
@@ -3977,7 +3977,9 @@ void RenderDocCapture(bool after_submit) {
     const bool down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     if (down && !was_down && remaining == 0) {
         api->StartFrameCapture(nullptr, nullptr);
-        remaining = 4;
+        // BB_VK_RD_SUBMITS: how many submissions (default 2, about one frame)
+        const char* n = std::getenv("BB_VK_RD_SUBMITS");
+        remaining = n && std::atoi(n) > 0 ? std::atoi(n) : 2;
         std::printf("Native Vulkan: RenderDoc capture started\n");
     }
     was_down = down;
