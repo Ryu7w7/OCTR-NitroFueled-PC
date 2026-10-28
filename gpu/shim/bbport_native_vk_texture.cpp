@@ -259,6 +259,14 @@ bool GetLayout(const TSharp& t, Layout* l) {
         l->slices = 1; // 3D textures: only the first slice for now
     }
     l->levels = std::min<u32>(t.last_level + 1, 16);
+    // lab: BB_VK_TEX_MIP0=1 makes only the first level (to tell a wrong mip layout from the rest)
+    static const bool mip0_only = [] {
+        const char* v = std::getenv("BB_VK_TEX_MIP0");
+        return v && v[0] == '1';
+    }();
+    if (mip0_only) {
+        l->levels = 1;
+    }
     l->width0 = bc ? Align(t.width, 4) : t.width;
     l->height0 = bc ? Align(t.height, 4) : t.height;
     u64 offset = 0;
