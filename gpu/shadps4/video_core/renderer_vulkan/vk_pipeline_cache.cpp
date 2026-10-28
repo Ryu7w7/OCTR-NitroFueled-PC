@@ -388,8 +388,20 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
         .supports_shader_subgroup_clock = instance_.IsShaderSubgroupClockSupported(),
-        .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
-                                      instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+        // bbport: without it V_INTERP_P1/P2 read the hardware-interpolated attribute and ignore
+        // the (i, j) the shader passes, which is wrong when the shader moved them (CTR's fur
+        // shells on AMD: speckled grey, shadPS4 #4413). BB_MANUAL_INTERP=1 interpolates by hand
+        // wherever per-vertex attributes exist (AMD: its explicit vertex parameter), 0 never;
+        // opt-in until AMD players confirm the fur.
+        .needs_manual_interpolation = [&] {
+            const bool per_vertex = instance.IsAmdShaderExplicitVertexParameterSupported() ||
+                                    instance.IsFragmentShaderBarycentricSupported();
+            if (const char* env = std::getenv("BB_MANUAL_INTERP")) {
+                return per_vertex && env[0] == '1';
+            }
+            return instance.IsFragmentShaderBarycentricSupported() &&
+                   instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+        }(),
         // bbport: older NVIDIA (Pascal) has no barycentrics; BB_INTERP_INT_FIX=0/1 overrides.
         .needs_integer_interpolation_fix = [&] {
             if (const char* env = std::getenv("BB_INTERP_INT_FIX")) {

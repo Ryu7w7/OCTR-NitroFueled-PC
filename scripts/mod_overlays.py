@@ -4,6 +4,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 from pathlib import Path
 import json, struct
 import archive_patch
+import mod_strings
 from archive_reader import Archive
 from mod_components import payload_bytes, under, sha_bytes, plain_path
 
@@ -44,21 +45,36 @@ def compose(game, out, records, base_patches):
     made = dict(base_patches)
     groups = {}
     for op, folder in records:
-        if op['kind'] == 'archive_asset':
+        if op['kind'] in ('archive_asset', 'localized_strings'):
             groups.setdefault(op['archive'], []).append((op, Path(folder)))
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     for name, items in groups.items():
         path = under(game, 'archives/' + name)
         archive = Archive(path)
         entries = {}
+        texts = {}  # index -> {(object, field): text} of every package's localized_strings
         try:
             for op, folder in items:
                 entry = archive.files[op['index']]
                 if entry['path'] != op['asset']:
                     raise ValueError('Archive asset/index mismatch: ' + op['asset'])
+                if op['kind'] == 'localized_strings':
+                    changes = texts.setdefault(op['index'], {})
+                    for obj, fields in op['strings'].items():
+                        for field, text in fields.items():
+                            if (obj, field) in changes:
+                                raise ValueError('Duplicate localized string: ' + obj + ' ' + field)
+                            changes[(obj, field)] = text
+                    if sha_bytes(archive.extract(entry)) != op['original_sha256']:
+                        raise ValueError('Original content checksum mismatch: ' + op['asset'])
+                    continue
                 if op['index'] in entries:
                     raise ValueError('Duplicate mod archive entry: ' + op['asset'])
                 entries[op['index']] = payload_bytes(op, folder, archive.extract(entry))
+            for index, changes in texts.items():
+                if index in entries:
+                    raise ValueError('Duplicate mod archive entry: ' + archive.files[index]['path'])
+                entries[index] = mod_strings.apply(archive.extract(archive.files[index]), changes)
         finally:
             archive.data.close(); archive._file.close()
         guest = '/app0/archives/' + name

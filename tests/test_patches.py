@@ -160,6 +160,23 @@ class RenderResTests(unittest.TestCase):
         self.assertEqual(writes, [(0x1100, b'\xb8' + struct.pack('<I', 3440)),
                                   (0x1115, b'\xb8' + struct.pack('<I', 1440))])
 
+    def test_layout_internal_scales_the_scene(self):
+        # The base path draws 1920x1080 targets whatever the layout's display size, so a layout
+        # above (or below) 1080 takes the Pro path's scale, without its output doubling.
+        addresses = lambda s: [line.get('Address') for _, _, meta in patches.render_patches(s)
+                               for line in meta.iter('Line')]
+        settings = {'render_res': '1080', 'layout_internal': '2160', 'temporal': 'off'}
+        plan = patches.render_plan(settings)
+        self.assertEqual(plan['label'], '2160p ultrawide')
+        self.assertTrue(plan['pro'] and plan['single'] and plan['heap'])
+        self.assertEqual(plan['scale'], 2.0)
+        self.assertEqual(addresses(settings), ['0x017aa662', '0x017aa648', '0x017aa658', '0x01fbb93e'])
+        # 1440: the Pro path's own scale.
+        settings['layout_internal'] = '1440'
+        self.assertEqual(addresses(settings), ['0x017aa648', '0x017aa658'])
+        self.assertEqual(patches.render_plan({'render_res': '1080', 'layout_internal': '1080'})['label'], '1080p')
+        self.assertEqual(patches.render_patches({'render_res': '1080', 'layout_internal': '1080'}), [])
+
     def test_dlss_quality_picks_the_render_size(self):
         plan = patches.render_plan
         dlss = lambda q, out='1080': {'temporal': 'dlss', 'dlss_quality': q, 'dlss_output': out,

@@ -4,7 +4,7 @@
   "name": "21:9 UltraWide",
   "version": "1.1.0",
   "author": "tcosi",
-  "description": "21:9 aspect ratio with centered HUD. 3440x1440 or 2560x1080, selected internal resolution up to 1440p. Offline.",
+  "description": "21:9 aspect ratio with centered HUD. 3440x1440 or 2560x1080, internal resolution from 480p to 4K. Offline.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -19262,9 +19262,7 @@
           "3440x1440"
         ],
         "render_res": [
-          "1440",
-          "1620",
-          "2160"
+          "1440"
         ]
       },
       "useOperations": [
@@ -19416,9 +19414,7 @@
           "2560x1080"
         ],
         "render_res": [
-          "1440",
-          "1620",
-          "2160"
+          "1440"
         ]
       },
       "useOperations": [
@@ -19448,9 +19444,171 @@
           "2560x1080"
         ]
       }
+    },
+    {
+      "id": "output-3440-internal-1620",
+      "when": {
+        "output_res": [
+          "3440x1440"
+        ],
+        "render_res": [
+          "1620"
+        ]
+      },
+      "useOperations": [
+        "assets-3440"
+      ],
+      "operations": [
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x00000000d4aaf527_0.spv",
+          "original_sha256": "d0050870723e20fc7ad53b765bdc6f74b662c134419e74503784787d87976116",
+          "patched_sha256": "5b0c3af36e278897fa3d5d1968950879fd8dd26055a6264a04b50ba0d70082be",
+          "factor": 0.7441860465116279
+        },
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x0000000008948e32_0.spv",
+          "original_sha256": "a69c2785a4e066fd76262e1837364b5ecae2f8abe80bf7d45856081603775ae6",
+          "patched_sha256": "02b1f8f07f7cc114f396e33425fac590ed9c20bcdfec9cdb020bae1fc4ac1e43",
+          "factor": 0.7441860465116279
+        }
+      ],
+      "patches": [
+        "patches/ultrawide-3440-1620.xml"
+      ],
+      "constraints": {
+        "output_res": [
+          "3440x1440"
+        ]
+      }
+    },
+    {
+      "id": "output-3440-internal-2160",
+      "when": {
+        "output_res": [
+          "3440x1440"
+        ],
+        "render_res": [
+          "2160"
+        ]
+      },
+      "useOperations": [
+        "assets-3440"
+      ],
+      "operations": [
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x00000000d4aaf527_0.spv",
+          "original_sha256": "d0050870723e20fc7ad53b765bdc6f74b662c134419e74503784787d87976116",
+          "patched_sha256": "5b0c3af36e278897fa3d5d1968950879fd8dd26055a6264a04b50ba0d70082be",
+          "factor": 0.7441860465116279
+        },
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x0000000008948e32_0.spv",
+          "original_sha256": "a69c2785a4e066fd76262e1837364b5ecae2f8abe80bf7d45856081603775ae6",
+          "patched_sha256": "02b1f8f07f7cc114f396e33425fac590ed9c20bcdfec9cdb020bae1fc4ac1e43",
+          "factor": 0.7441860465116279
+        }
+      ],
+      "patches": [
+        "patches/ultrawide-3440-2160.xml"
+      ],
+      "constraints": {
+        "output_res": [
+          "3440x1440"
+        ]
+      }
+    },
+    {
+      "id": "output-2560-internal-1620",
+      "when": {
+        "output_res": [
+          "2560x1080"
+        ],
+        "render_res": [
+          "1620"
+        ]
+      },
+      "useOperations": [
+        "assets-2560"
+      ],
+      "operations": [
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x00000000d4aaf527_0.spv",
+          "original_sha256": "d0050870723e20fc7ad53b765bdc6f74b662c134419e74503784787d87976116",
+          "patched_sha256": "03fff0ead05a4b66fbf607da682bafbb2371446855746d88cebbece48a870a8a",
+          "factor": 0.75
+        },
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x0000000008948e32_0.spv",
+          "original_sha256": "a69c2785a4e066fd76262e1837364b5ecae2f8abe80bf7d45856081603775ae6",
+          "patched_sha256": "38ad4c9f6c550d84630bcacd7d73ac6ae25304c31e4d576a06865f0aabe69727",
+          "factor": 0.75
+        }
+      ],
+      "patches": [
+        "patches/ultrawide-2560-1620.xml"
+      ],
+      "constraints": {
+        "output_res": [
+          "2560x1080"
+        ]
+      }
+    },
+    {
+      "id": "output-2560-internal-2160",
+      "when": {
+        "output_res": [
+          "2560x1080"
+        ],
+        "render_res": [
+          "2160"
+        ]
+      },
+      "useOperations": [
+        "assets-2560"
+      ],
+      "operations": [
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x00000000d4aaf527_0.spv",
+          "original_sha256": "d0050870723e20fc7ad53b765bdc6f74b662c134419e74503784787d87976116",
+          "patched_sha256": "03fff0ead05a4b66fbf607da682bafbb2371446855746d88cebbece48a870a8a",
+          "factor": 0.75
+        },
+        {
+          "kind": "shader_position_scale",
+          "target": "cache/CUSA13795/0x0000000008948e32_0.spv",
+          "original_sha256": "a69c2785a4e066fd76262e1837364b5ecae2f8abe80bf7d45856081603775ae6",
+          "patched_sha256": "38ad4c9f6c550d84630bcacd7d73ac6ae25304c31e4d576a06865f0aabe69727",
+          "factor": 0.75
+        }
+      ],
+      "patches": [
+        "patches/ultrawide-2560-2160.xml"
+      ],
+      "constraints": {
+        "output_res": [
+          "2560x1080"
+        ]
+      }
     }
   ],
   "files": [
+    {
+      "file": "README.txt",
+      "sha256": "75ded0488f4fa8823d6844368fed1e76b26c7cd7cf217cf4f9abcc34f0dc0c6c",
+      "bytes": 282
+    },
+    {
+      "file": "SOURCES.json",
+      "sha256": "7274dac51cf32428551bf3391323929b855d44c14473b5f8fe252ada4e22ff42",
+      "bytes": 1982
+    },
     {
       "file": "format-v2.required",
       "sha256": "e7e6599eed407c3b63bd5c29ab6c692a49679868274f08057c8101958e56f04e",
@@ -19464,6 +19622,16 @@
     {
       "file": "patches/ultrawide-2560-1440.xml",
       "sha256": "f375e369790baa3824c8c3736d94c9b388268bca8a5a9352ea0cc193f606b2cb",
+      "bytes": 8076
+    },
+    {
+      "file": "patches/ultrawide-2560-1620.xml",
+      "sha256": "0e5330f1999117ddae86b8cf4b9586c1c0e04cff2dcf3470d7001bfae96f94e8",
+      "bytes": 8076
+    },
+    {
+      "file": "patches/ultrawide-2560-2160.xml",
+      "sha256": "5db1609dc59b114dc80504494cac0158ba7aa8d51fb30520821f8e07f2982088",
       "bytes": 8076
     },
     {
@@ -19484,6 +19652,16 @@
     {
       "file": "patches/ultrawide-3440-1440.xml",
       "sha256": "4fce1f86610237315242d097d7f3b7fcaff2b260bd402c638b136ac7cf87f273",
+      "bytes": 8076
+    },
+    {
+      "file": "patches/ultrawide-3440-1620.xml",
+      "sha256": "b955f5b9cfe6225c95b25f8528760397dcac6fc7eb5d9d7342c84310223d4bcd",
+      "bytes": 8076
+    },
+    {
+      "file": "patches/ultrawide-3440-2160.xml",
+      "sha256": "3a5ae4174de3d48f00cf97beadf24b3e5897ff6a85b350ae0a33b24e7c9711e2",
       "bytes": 8076
     },
     {
@@ -19525,16 +19703,6 @@
       "file": "payloads/3440/update2.pak/4409.delta.json",
       "sha256": "6c63581b77369ae0dba87e011ba2de4e53e1fa87b75819076611472e3fbdebae",
       "bytes": 6764
-    },
-    {
-      "file": "README.txt",
-      "sha256": "75ded0488f4fa8823d6844368fed1e76b26c7cd7cf217cf4f9abcc34f0dc0c6c",
-      "bytes": 282
-    },
-    {
-      "file": "SOURCES.json",
-      "sha256": "7274dac51cf32428551bf3391323929b855d44c14473b5f8fe252ada4e22ff42",
-      "bytes": 1982
     }
   ],
   "variantSettings": {
