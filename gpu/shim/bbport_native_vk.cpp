@@ -1607,6 +1607,21 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
         .pColorBlendState = &blend,
         .pDynamicState = &dynamic,
         .layout = layout};
+    // Lab: a driver whose shader compiler crashes on a translation (NVIDIA 610.88's nvgpucomp64,
+    // a null read) ends the game with no hint of the shader: each compile names its shaders
+    // first, and BB_VK_SKIP_SHADERS=<name>,<name> leaves such pipelines out.
+    const std::string names = s.vs->name + (s.gs ? " + " + s.gs->name : "") + " + " +
+                              (s.ps ? s.ps->name : std::string("-"));
+    if (const char* skip = std::getenv("BB_VK_SKIP_SHADERS")) {
+        for (const auto* sh : {s.vs, s.gs, s.ps}) {
+            if (sh && !sh->name.empty() && std::strstr(skip, sh->name.c_str())) {
+                return VK_NULL_HANDLE;
+            }
+        }
+    }
+    std::printf("Native Vulkan: compiling pipeline %s (thread %zu)\n", names.c_str(),
+                std::hash<std::thread::id>{}(std::this_thread::get_id()) % 100000);
+    std::fflush(stdout);
     auto [r, pipeline] = inst->GetDevice().createGraphicsPipeline(Gpu::PipelineCache(), info);
     if (r != vk::Result::eSuccess) {
         if (pipelines_failed.fetch_add(1, std::memory_order_relaxed) < 16) {
