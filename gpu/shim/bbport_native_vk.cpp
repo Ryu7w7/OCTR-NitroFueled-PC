@@ -1144,6 +1144,38 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             }
         }
         res.swz[slot] = SwizzleCode(tsharp, out.target);
+        // lab: BB_VK_LOG_SHADER=<part of a name>: every texture bound to that shader's draws, once
+        // per (shader, slot, texture), to catch textures read in the wrong format or channel order
+        static const char* log_shader = std::getenv("BB_VK_LOG_SHADER");
+        const auto wanted = [&] { // comma-separated parts of names
+            if (!log_shader || !*log_shader) {
+                return false;
+            }
+            std::string list = log_shader;
+            for (std::size_t at = 0; at <= list.size();) {
+                const std::size_t end = std::min(list.find(',', at), list.size());
+                if (end > at && s.name.find(list.substr(at, end - at)) != std::string::npos) {
+                    return true;
+                }
+                at = end + 1;
+            }
+            return false;
+        };
+        if (wanted()) {
+            static std::mutex log_mutex;
+            static std::unordered_set<u64> logged;
+            const Tex::Info info = Tex::Describe(tsharp);
+            const u64 key = std::hash<std::string>{}(s.name) ^ (u64(slot) << 56) ^ info.base;
+            std::lock_guard ll(log_mutex);
+            if (logged.size() < 400 && logged.insert(key).second) {
+                std::printf("Native Vulkan: bind %s slot %u: %llx %ux%u dfmt %u nfmt %u dst_sel %03o "
+                            "levels %u -> %s, vk format %s, swizzle code %o\n",
+                            s.name.c_str(), slot, (unsigned long long)info.base, info.width, info.height,
+                            info.dfmt, info.nfmt, info.dst_sel, info.last_level + 1,
+                            out.target ? "render target" : out.texture ? "texture" : "NO IMAGE",
+                            vk::to_string(info.format).c_str(), res.swz[slot]);
+            }
+        }
     }
     const u64 sampler_slots = ctx + (vertex ? CtxVsSamplers : CtxPsSamplers);
     for (const auto& [slot, compare] : s.samplers) {
