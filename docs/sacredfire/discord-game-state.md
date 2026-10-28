@@ -64,3 +64,21 @@ paused Time Trial. It does **not** validate the newly edited C code in the runni
 old binary, Discord's final rendering, other modes, or transitions. The C fixture
 was updated for entity indirection and pause; it was not recompiled in this no-build
 validation pass.
+
+### Actual Discord IPC check
+
+A separate temporary Python test connected to the running Discord Flatpak socket
+using the PR's `discord_ipc._Connection` and `_request`, received `READY`, and sent
+three `SET_ACTIVITY` commands five seconds apart. Each activity came from the live
+probe and `discord_activity_for`, using the test process's PID. All three Discord
+responses echoed exactly:
+
+- details: `Local Arcade · Time Trial`
+- state: `Paused · Lap 1/3 · 0:25`
+
+The test asserted both echoed fields, rejected error replies/timeouts, and cleared
+its temporary activity with an acknowledged `SET_ACTIVITY(activity=null)` before
+closing. It did not subscribe to join requests or send invitations. This verifies
+live data → launcher formatting → actual Discord IPC acceptance for the observed
+paused race. It is not visual verification of the Discord UI or a test of mode/lap
+transitions; the revised compiled C writer remains untested in the running binary.
