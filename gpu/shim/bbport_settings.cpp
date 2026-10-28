@@ -66,8 +66,6 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.show_fps = i != 0;
     } else if (key == "show_ping") {
         v.show_ping = i != 0;
-    } else if (key == "speed_mode") {
-        v.speed_mode = i != 0;
     } else if (key == "split_auto") {
         v.split_auto = i != 0;
     } else if (key == "friends_hide_activity") {
@@ -387,7 +385,6 @@ void Save() {
     put("debug_view", std::to_string(v.debug_view.load()));
     put("show_fps", flag(v.show_fps));
     put("show_ping", flag(v.show_ping));
-    put("speed_mode", flag(v.speed_mode));
     put("friends_hide_activity", flag(v.friends_hide_activity));
     put("friends_hide_me", flag(v.friends_hide_me));
     put("friends_no_notices", flag(v.friends_no_notices));

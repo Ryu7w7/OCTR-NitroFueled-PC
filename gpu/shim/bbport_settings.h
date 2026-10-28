@@ -109,8 +109,6 @@ struct Values {
     std::atomic<bool> show_fps{false};
     /// show_ping: the round trip to the players in the online room, under the FPS counter.
     std::atomic<bool> show_ping{false};
-    /// Archive overlays for private Speed races. Prepared at launch; toggle applies to the next race.
-    std::atomic<bool> speed_mode{false};
     /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
     /// friends (the server hides it); no friend notices at all.
     std::atomic<bool> friends_hide_activity{false};

@@ -179,9 +179,6 @@ THEME_SIGNATURE='49 8b 87 30 01 00 00 4c 89 ef 8b 70 18 e8'
 
 def theme_patches(settings):
     """The built-in patch element for the season event (none for the normal season)."""
-    # Speed races should have no collectibles from the seasonal hidden-object manager.
-    if os.environ.get('BB_SPEED_MODE') == '1':
-        return []
     theme=(os.environ.get('BB_THEME') or (settings or {}).get('theme') or 'default').strip().lower()
     value=THEME_VALUES.get(theme,0)
     if not value:

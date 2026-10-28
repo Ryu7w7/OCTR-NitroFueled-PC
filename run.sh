@@ -169,6 +169,7 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
         --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
     strict_overlap=(--strict-overlap)
 fi
+unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
     if [[ $title_id == CUSA13795 ]]; then
         speed_bases=()
@@ -176,6 +177,18 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
         for speed_patch in "${speed_existing[@]}"; do
             if [[ -n $speed_patch ]]; then speed_bases+=(--base "$speed_patch"); fi
         done
+        if [[ ${BB_ONLINE:-0} == 1 ]]; then
+            mode_result=$("$PYTHON" scripts/online_mode.py "$game" --out "$out/online-mode" \
+                --elf "$out/eboot.elf" "${speed_bases[@]}") || exit 1
+            while IFS='=' read -r key value; do
+                case $key in
+                    archive_patches) IFS='|' read -r -a speed_existing <<< "$value" ;;
+                    online_mode_hook) export BB_ONLINE_MODE_HOOK=$value ;;
+                esac
+            done <<< "$mode_result"
+            speed_bases=()
+            for speed_patch in "${speed_existing[@]}"; do speed_bases+=(--base "$speed_patch"); done
+        fi
         speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}") || exit 1
         while IFS='=' read -r key value; do
             case $key in
@@ -184,11 +197,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
                 'Speed Mode (Experimental): private overlays prepared for '* ) echo "$key" ;;
             esac
         done <<< "$speed_result"
-    elif [[ ${BB_SPEED_MODE:-0} == 1 ]]; then
-        echo 'Speed test needs USA CUSA13795 1.21.' >&2; exit 1
     fi
-elif [[ ${BB_SPEED_MODE:-0} == 1 ]]; then
-    echo 'Speed mode inactive offline (private online rooms only)'
 fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from

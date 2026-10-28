@@ -55,7 +55,6 @@ extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
-extern "C" void runtime_speed_mode_set(int enabled); // runtime_file.c
 
 namespace BbOverlay {
 
@@ -1201,16 +1200,6 @@ void Menu() {
     }
     if (ImGui::BeginTabItem(BbSettings::MenuText("Room", "Комната"))) {
         RoomTab();
-        ImGui::SeparatorText(BbSettings::MenuText("Private race", "Приватная гонка"));
-        bool speed_mode = s.speed_mode;
-        if (ImGui::Checkbox(BbSettings::MenuText("Speed Mode (Experimental)",
-                                              "Режим скорости (экспериментальный)"), &speed_mode)) {
-            s.speed_mode = speed_mode;
-            runtime_speed_mode_set(speed_mode);
-            BbSettings::Save();
-        }
-        Hint(BbSettings::MenuText("Applies to the next private room race without a restart: no item or Wumpa boxes, and the Tiger Temple gate is open. Adventure and Arcade keep their items. Every player needs this build.",
-                                  "Применяется к следующей приватной гонке без перезапуска: без ящиков предметов и Вумпа, проход в Tiger Temple открыт. В приключении и Arcade предметы остаются. Всем игрокам нужна эта сборка."));
         ImGui::EndTabItem();
     }
     {

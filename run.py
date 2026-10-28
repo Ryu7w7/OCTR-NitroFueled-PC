@@ -40,6 +40,7 @@ import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
+import online_mode  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
@@ -459,9 +460,8 @@ def setup_online(env, config, data):
     except OSError:
         pass
 
-    # The in-game menu writes this key. A restart must pick up its new value even when
-    # the previous launch left BB_SPEED_MODE in the child environment.
-    env['BB_SPEED_MODE'] = '1' if ini_values.get('speed_mode') == '1' else '0'
+    # Ignore the retired launcher toggle; the native selector owns this session's mode.
+    env.pop('BB_SPEED_MODE', None)
 
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
@@ -754,7 +754,7 @@ def main():
         layout_saved = {}
 
         def apply_layout():
-            env['BB_SPEED_MODE'] = '1' if ini_has(config, 'speed_mode=1') else '0'
+            env.pop('BB_SPEED_MODE', None)
             for key, value in layout_saved.items():
                 if value is None:
                     env.pop(key, None)
@@ -774,17 +774,17 @@ def main():
                 composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
                 archives = '|'.join(str(p) for p in composed.values())
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
+            env.pop('BB_ONLINE_MODE_HOOK', None)
             if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
                 if title_id == 'CUSA13795':
                     base = [Path(p) for p in archives.split('|') if p]
+                    if env.get('BB_ONLINE') == '1':
+                        base, env['BB_ONLINE_MODE_HOOK'] = online_mode.prepare(
+                            game, out / 'online-mode', out / 'eboot.elf', base)
                     normal_patches, speed_patches, track_count = speed_mode.prepare(game, out / 'speed-mode', base)
                     archives = '|'.join(map(str, normal_patches))
                     env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
                     say(f'Speed Mode (Experimental): {track_count} tracks prepared for private rooms')
-                elif env.get('BB_SPEED_MODE') == '1':
-                    raise ValueError('Speed test needs USA CUSA13795 1.21.')
-            elif env.get('BB_SPEED_MODE') == '1':
-                say('Speed mode inactive offline (private online rooms only)')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:

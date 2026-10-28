@@ -28,6 +28,10 @@ EXTRA_ITEM_ASSETS = {
     CRATE_SPAWNER,
     'maps/Octane/T241_Assembly_Lane/T241_Assembly_Lane.igz',
 }
+# PUBLIC_SPEED_STEP_4: these legacy guards disable public-entry graph callbacks
+# in the Speed archive view. Once isolated public queues are validated, preserve
+# those graphs in the public Speed view (or remove this branch for both views).
+# Do not remove the guard as a substitute for server queue separation.
 PUBLIC_BUTTONS = (
     'vsc/UI/Octane_Lobby_Main/Octane_Lobby_Main_MatchmakingButton.igz',
     'vsc/UI/Octane_Online_Lobby/Octane_Online_Lobby_StartMatchMakingButton.igz',

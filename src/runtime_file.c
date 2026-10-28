@@ -403,26 +403,33 @@ static void load_archive_patches(void) {
     }
 }
 
-static int speed_mode_enabled = -1;
+static int speed_mode_enabled;
 
 void runtime_speed_mode_set(int enabled) {
     __atomic_store_n(&speed_mode_enabled, !!enabled, __ATOMIC_RELEASE);
 }
 
 static int runtime_speed_mode_enabled(void) {
-    int enabled = __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
-    if (enabled < 0) {
-        const char *env = getenv("BB_SPEED_MODE");
-        int initial = env && env[0] == '1';
-        __atomic_compare_exchange_n(&speed_mode_enabled, &enabled, initial, 0,
-                                    __ATOMIC_RELEASE, __ATOMIC_ACQUIRE);
-        enabled = __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
-    }
-    return enabled;
+    return __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
+}
+
+int runtime_speed_race_active(void) {
+    /* PUBLIC_SPEED_STEP_3: after implementing server-confirmed room state, replace
+     * only the room predicate below with:
+     *   (runtime_private_room_active() || runtime_public_speed_confirmed())
+     * Proposed API: true only for the current authenticated Speed lobby with a
+     * compatible content version. A UI selection or advertised capability alone
+     * is insufficient. Clear confirmation on leave, disconnect, failed join,
+     * migration or replacement of the lobby; re-confirm before loading assets.
+     * This predicate gates both archive assets and seasonal pickup spawning.
+     * Keep runtime_speed_mode_enabled() so remembered private selection alone
+     * cannot enable Speed outside an active eligible room.
+     */
+    return runtime_speed_mode_enabled() && runtime_private_room_active();
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
-    return normal && normal->private_view && runtime_speed_mode_enabled() && runtime_private_room_active()
+    return normal && normal->private_view && runtime_speed_race_active()
                ? normal->private_view : normal;
 }
 
