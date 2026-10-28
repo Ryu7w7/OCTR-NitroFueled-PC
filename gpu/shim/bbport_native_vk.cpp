@@ -1131,6 +1131,17 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             out.texture = tex;
         } else {
             texture_misses.fetch_add(1, std::memory_order_relaxed);
+            // lab: which texture was left without an image, the first time each one is
+            static std::mutex miss_mutex;
+            static std::unordered_set<u64> missed;
+            const Tex::Info info = Tex::Describe(tsharp);
+            std::lock_guard ml(miss_mutex);
+            if (missed.size() < 80 && missed.insert(info.base).second) {
+                std::printf("Native Vulkan: texture without an image: %llx %ux%u dfmt %u nfmt %u "
+                            "levels %u (slot %u of %s)\n",
+                            (unsigned long long)info.base, info.width, info.height, info.dfmt, info.nfmt,
+                            info.last_level + 1, slot, s.name.c_str());
+            }
         }
         res.swz[slot] = SwizzleCode(tsharp, out.target);
     }
@@ -3804,6 +3815,11 @@ void NoteHitch() {
     static Clock::time_point last{};
     static double average_ms = 0;
     static u64 last_skipped = 0, last_compiled = 0, last_wait = 0, last_print_ns = 0, hitches = 0;
+    static u64 last_sections[SecCount]{};
+    u64 sections[SecCount];
+    for (int i = 0; i < SecCount; ++i) {
+        sections[i] = section_ns[i].load(std::memory_order_relaxed);
+    }
     const auto now = Clock::now();
     const u64 skipped = skipped_compiling.load(), compiled = compiles_done.load(),
               wait = capture_wait_ns.load();
@@ -3822,11 +3838,23 @@ void NoteHitch() {
                             (unsigned long long)(compiled - last_compiled),
                             (unsigned long long)(skipped - last_skipped), (wait - last_wait) / 1e6,
                             Gpu::LastGpuNs() / 1e6);
+                std::string spent;
+                for (int i = 0; i < SecCount; ++i) {
+                    const double ms = (sections[i] - last_sections[i]) / 1e6;
+                    if (ms >= 0.5) {
+                        char b[64];
+                        std::snprintf(b, sizeof(b), " %s %.1f ms", DrawSectionNames[i], ms);
+                        spent += b;
+                    }
+                }
+                std::printf("Native Vulkan:   hitch time by section (capture thread, then | recorder):%s\n",
+                            spent.empty() ? " none over 0.5 ms" : spent.c_str());
             }
         }
         average_ms = average_ms > 0 ? average_ms * 0.95 + std::min(ms, 100.0) * 0.05 : ms;
     }
     last = now;
+    std::copy(std::begin(sections), std::end(sections), std::begin(last_sections));
     last_skipped = skipped;
     last_compiled = compiled;
     last_wait = wait;
