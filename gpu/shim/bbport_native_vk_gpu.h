@@ -106,6 +106,13 @@ void Submit();
 /// Runs `f` once the GPU has finished everything recorded so far.
 void Defer(std::function<void()> f);
 
+/// Thread safe: the number of command buffers submitted so far (a timeline semaphore value), and
+/// a wait until the GPU has finished the first `value` of them (false on timeout). Without a
+/// timeline semaphore (HasTimeline false) the wait returns at once.
+std::uint64_t Submitted();
+bool WaitDone(std::uint64_t value, std::uint64_t timeout_ns);
+bool HasTimeline();
+
 /// The upload ring for dynamic uniform buffers: a descriptor covers [0, UniformRange()) of
 /// UniformBuffer() and a draw's offset moves it. Past the ring's end there is UniformRange()
 /// of zeros that is never written (at ZeroUniform()): a window from any ring offset stays in

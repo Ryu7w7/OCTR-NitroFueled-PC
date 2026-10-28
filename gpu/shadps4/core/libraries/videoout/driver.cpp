@@ -18,6 +18,8 @@
 #include "bbport_settings.h"
 #include "bbport_heap_sites.h"
 #include "bbport_wait_trace.h"
+#include "bbport_native_signals.h"
+#include "bbport_native_memory.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -788,7 +790,21 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         const auto& buffer = port->buffer_slots[index];
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
-        frame = presenter->PrepareFrame(group, buffer.address_left);
+        // lab BB_VK_OWN_PRESENT: on the native signal thread, without shadPS4's GPU thread; a
+        // buffer the native renderer has no image of yet goes the old way (and is waited for,
+        // so the requests stay in order)
+        frame = nullptr;
+        if (is_eop && BbSignals::OwnPresent()) {
+            frame = presenter->PrepareNativeFrame(group, buffer.address_left);
+            if (!frame && BbMem::NativeOnly()) {
+                frame = presenter->PrepareBlankFrame(false); // no Rasterizer to read it from
+            } else if (!frame) {
+                liverpool->SendCommand<true>(
+                    [&] { frame = presenter->PrepareFrame(group, buffer.address_left); });
+            }
+        } else {
+            frame = presenter->PrepareFrame(group, buffer.address_left);
+        }
     }
 
     {

@@ -87,20 +87,28 @@ public:
         pp_settings.hdr = enable ? 1 : 0;
     }
 
-    VideoCore::Image& RegisterVideoOutSurface(
-        const Libraries::VideoOut::BufferAttributeGroup& attribute, VAddr cpu_address) {
+    void RegisterVideoOutSurface(const Libraries::VideoOut::BufferAttributeGroup& attribute,
+                                 VAddr cpu_address) {
         vo_buffers_addr.emplace_back(cpu_address);
+        if (!texture_cache) {
+            return; // lab BB_VK_NATIVE_ONLY: no Rasterizer
+        }
         auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
-        const auto image_id = texture_cache.FindImage(desc);
-        auto& image = texture_cache.GetImage(image_id);
+        const auto image_id = texture_cache->FindImage(desc);
+        auto& image = texture_cache->GetImage(image_id);
         image.usage.vo_surface = 1u;
-        return image;
     }
 
     bool IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const;
 
     Frame* PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                         VAddr cpu_address);
+
+    /// lab BB_VK_OWN_PRESENT: the native renderer's image of the display buffer, post processed
+    /// into a frame with the presenter's own command buffer (any thread but the swap thread; no
+    /// shadPS4 scheduler or GPU thread). nullptr when the native renderer has no such image.
+    Frame* PrepareNativeFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
+                              VAddr cpu_address);
 
     Frame* PrepareBlankFrame(bool present_thread);
 
@@ -131,10 +139,11 @@ private:
     std::deque<u64> recent_frame_ticks; ///< bbport: BB_FRAMES_AHEAD bound (PrepareFrame)
     Scheduler present_scheduler;
     Scheduler flip_scheduler;
+    Scheduler native_scheduler; ///< lab: PrepareNativeFrame only
     Swapchain swapchain;
     Runtime runtime;
     std::unique_ptr<Rasterizer> rasterizer;
-    VideoCore::TextureCache& texture_cache;
+    VideoCore::TextureCache* texture_cache; ///< null with BB_VK_NATIVE_ONLY (no Rasterizer)
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;

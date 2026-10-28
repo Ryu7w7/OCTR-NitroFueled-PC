@@ -37,6 +37,16 @@ void OnSubmit();
 /// the command buffers (compute, DMA, fences, flips) but skips every draw (any thread).
 bool DrawsAlone();
 
+/// Stage 5 runs (draws are recorded and submitted).
+bool Drawing();
+
+/// BB_VK_OWN_SIGNALS (bbport_native_signals.cpp): submissions handed to the recorder so far
+/// (complete once OnSubmit returns), and a wait until the GPU has finished submission `k`
+/// (false on timeout). GpuTimeline: whether that wait is real (a timeline semaphore).
+std::uint64_t SubmissionsQueued();
+bool WaitSubmissionDone(std::uint64_t k, std::uint64_t timeout_ns);
+bool GpuTimeline();
+
 /// For the presenter (BB_VK_SHOW=1): the renderer's image (a VkImage) of the display buffer at
 /// `address`, in General layout, and the VkFormat to view it with (`wanted`: the presenter's own
 /// view format for that buffer).

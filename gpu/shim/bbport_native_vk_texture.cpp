@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_native_vk_texture.h"
+#include "bbport_thread_cpu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -22,7 +23,10 @@
 #include <vk_mem_alloc.h>
 
 #include "core/memory.h"
+#include "video_core/amdgpu/tiling.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "bbport_native_memory.h"
+#include "video_core/texture_cache/tile.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -234,7 +238,9 @@ struct Layout {
     u32 eb, bw; // element bytes, block width (1 or 4)
     u32 slices, levels;
     bool cube;
+    bool macro; // 2D thin macro tiling (one level, one slice: MacroAddress)
     u32 width0, height0;
+    u32 macro_height; // the macro-tile-aligned height of level 0
     Mip mips[16];
     u64 total;
 };
@@ -244,10 +250,150 @@ bool TilingSupported(u32 tiling) {
     return tiling == 8 || tiling == 5 || tiling == 9 || tiling == 13;
 }
 
+/// 2D thin macro tiling (the GPU's render target tiling: tiling 14 and the other 2D thin modes),
+/// read here for one-level, one-slice textures written outside our renderer (video frames).
+bool MacroTilingSupported(u32 tiling) {
+    if (tiling > 26) {
+        return false;
+    }
+    return AmdGpu::GetArrayMode(AmdGpu::TileMode(tiling)) == AmdGpu::ArrayMode::Array2DTiledThin1;
+}
+
+/// The byte offset of element (x, y) of a 2D thin macro tiled surface: GCN addrlib's
+/// ComputeSurfaceAddrFromCoordMacroTiled, as shadPS4's tiling.comp does it on the GPU (one
+/// sample, thickness 1, slice 0, bank swizzle 0 as shadPS4 uses outside PS4 Pro mode).
+struct MacroTiling {
+    u32 bpp, micro_mode, pipe_config, num_pipes, pipe_bits, bank_w, bank_h, banks, bank_bits,
+        tile_split, aspect;
+
+    MacroTiling(u32 tiling, u32 element_bytes) {
+        const auto tile_mode = AmdGpu::TileMode(tiling);
+        const auto array_mode = AmdGpu::GetArrayMode(tile_mode);
+        const auto micro = AmdGpu::GetMicroTileMode(tile_mode);
+        bpp = element_bytes * 8;
+        micro_mode = u32(micro);
+        pipe_config = u32(AmdGpu::GetPipeConfig(tile_mode));
+        num_pipes = pipe_config == 0 ? 2 : 8;
+        pipe_bits = pipe_config == 0 ? 1 : 3;
+        const auto macro_mode = AmdGpu::CalculateMacrotileMode(tile_mode, bpp, 1);
+        bank_w = AmdGpu::GetBankWidth(macro_mode);
+        bank_h = AmdGpu::GetBankHeight(macro_mode);
+        banks = AmdGpu::GetNumBanks(macro_mode);
+        bank_bits = std::bit_width(banks) - 1;
+        tile_split = AmdGpu::CalculateTileSplit(tile_mode, array_mode, micro, bpp);
+        aspect = AmdGpu::GetMacrotileAspect(macro_mode);
+    }
+
+    static u32 Bit(u32 v, u32 b) {
+        return (v >> b) & 1;
+    }
+
+    u32 PixelIndex(u32 x, u32 y) const {
+        u32 p[6];
+        const u32 x0 = Bit(x, 0), x1 = Bit(x, 1), x2 = Bit(x, 2);
+        const u32 y0 = Bit(y, 0), y1 = Bit(y, 1), y2 = Bit(y, 2);
+        if (micro_mode == 0) { // display micro tiling: by element size
+            switch (bpp) {
+            case 8: p[0] = x0; p[1] = x1; p[2] = x2; p[3] = y1; p[4] = y0; p[5] = y2; break;
+            case 16: p[0] = x0; p[1] = x1; p[2] = x2; p[3] = y0; p[4] = y1; p[5] = y2; break;
+            case 32: p[0] = x0; p[1] = x1; p[2] = y0; p[3] = x2; p[4] = y1; p[5] = y2; break;
+            case 64: p[0] = x0; p[1] = y0; p[2] = x1; p[3] = x2; p[4] = y1; p[5] = y2; break;
+            default: p[0] = x0; p[1] = y0; p[2] = x1; p[3] = y1; p[4] = x2; p[5] = y2; break;
+            }
+        } else { // thin and depth micro tiling (rotated is not used by these textures)
+            p[0] = x0; p[1] = y0; p[2] = x1; p[3] = y1; p[4] = x2; p[5] = y2;
+        }
+        return p[0] | (p[1] << 1) | (p[2] << 2) | (p[3] << 3) | (p[4] << 4) | (p[5] << 5);
+    }
+
+    u32 Pipe(u32 x, u32 y) const {
+        const u32 tx = x / 8, ty = y / 8;
+        const u32 x3 = Bit(tx, 0), x4 = Bit(tx, 1), x5 = Bit(tx, 2);
+        const u32 y3 = Bit(ty, 0), y4 = Bit(ty, 1), y5 = Bit(ty, 2);
+        u32 p0 = 0, p1 = 0, p2 = 0;
+        if (pipe_config == 0) { // P2
+            p0 = x3 ^ y3;
+        } else if (pipe_config == 10) { // P8_32x32_8x16
+            p0 = x4 ^ y3 ^ x5;
+            p1 = x3 ^ y4;
+            p2 = x5 ^ y5;
+        } else if (pipe_config == 12) { // P8_32x32_16x16
+            p0 = x3 ^ y3 ^ x4;
+            p1 = x4 ^ y4;
+            p2 = x5 ^ y5;
+        }
+        return (p0 | (p1 << 1) | (p2 << 2)) & (num_pipes - 1);
+    }
+
+    u32 Bank(u32 x, u32 y, u32 tile_split_slice) const {
+        const u32 tx = x / 8 / (bank_w * num_pipes), ty = y / 8 / bank_h;
+        const u32 x3 = Bit(tx, 0), x4 = Bit(tx, 1), x5 = Bit(tx, 2), x6 = Bit(tx, 3);
+        const u32 y3 = Bit(ty, 0), y4 = Bit(ty, 1), y5 = Bit(ty, 2), y6 = Bit(ty, 3);
+        u32 b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+        if (banks == 16) {
+            b0 = x3 ^ y6;
+            b1 = x4 ^ y5 ^ y6;
+            b2 = x5 ^ y4;
+            b3 = x6 ^ y3;
+        } else if (banks == 8) {
+            b0 = x3 ^ y5;
+            b1 = x4 ^ y4 ^ y5;
+            b2 = x5 ^ y3;
+        } else if (banks == 4) {
+            b0 = x3 ^ y4;
+            b1 = x4 ^ y3;
+        } else if (banks == 2) {
+            b0 = x3 ^ y3;
+        }
+        u32 bank = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+        bank ^= ((banks / 2) + 1) * tile_split_slice; // 2D thin: tile split rotation
+        return bank & (banks - 1);
+    }
+
+    u64 Address(u32 x, u32 y, u32 pitch, u32 height) const {
+        u32 element_offset = PixelIndex(x, y) * bpp / 8;
+        const u32 micro_tile_bytes_full = 64 * bpp / 8;
+        u32 micro_tile_bytes = micro_tile_bytes_full;
+        u32 slices_per_tile = 1, tile_split_slice = 0;
+        if (micro_tile_bytes_full > tile_split) {
+            slices_per_tile = micro_tile_bytes_full / tile_split;
+            tile_split_slice = element_offset / tile_split;
+            element_offset %= tile_split;
+            micro_tile_bytes = tile_split;
+        }
+        const u32 macro_pitch = 8 * bank_w * num_pipes * aspect;
+        const u32 macro_height = 8 * bank_h * banks / aspect;
+        const u64 macro_bytes =
+            u64(micro_tile_bytes) * (macro_pitch / 8) * (macro_height / 8) / (num_pipes * banks);
+        const u32 macro_per_row = pitch / macro_pitch;
+        const u64 macro_offset = (u64(y / macro_height) * macro_per_row + x / macro_pitch) * macro_bytes;
+        const u64 macro_per_slice = u64(macro_per_row) * (height / macro_height);
+        const u64 slice_offset = macro_per_slice * macro_bytes * tile_split_slice;
+        const u32 tile_row = (y / 8) % bank_h;
+        const u32 tile_column = ((x / 8) / num_pipes) % bank_w;
+        const u64 tile_offset = u64(tile_row * bank_w + tile_column) * micro_tile_bytes;
+        const u64 total = slice_offset + macro_offset + element_offset + tile_offset;
+        (void)slices_per_tile;
+        const u64 interleave = total & 0xff; // 256-byte pipe interleave
+        const u64 rest = total >> 8;
+        return interleave | (u64(Pipe(x, y)) << 8) | (u64(Bank(x, y, tile_split_slice)) << (8 + pipe_bits)) |
+               (rest << (8 + pipe_bits + bank_bits));
+    }
+};
+
 bool GetLayout(const TSharp& t, Layout* l) {
     l->format = TextureFormat(t.dfmt, t.nfmt);
-    if (l->format == vk::Format::eUndefined || !TilingSupported(t.tiling)) {
+    l->macro = !TilingSupported(t.tiling) && MacroTilingSupported(t.tiling);
+    if (l->format == vk::Format::eUndefined || !(TilingSupported(t.tiling) || l->macro)) {
         return false;
+    }
+    if (l->macro) {
+        // one level of one 2D slice (video frames, menu layers): mips and slices of macro tiled
+        // images have their own rules, not done here yet
+        const bool flat = (t.type == 9 || t.type == 8) && t.last_level == 0 && t.base_level == 0;
+        if (!flat) {
+            return false;
+        }
     }
     bool bc = false;
     l->eb = ElementBytes(t.dfmt, &bc);
@@ -269,6 +415,9 @@ bool GetLayout(const TSharp& t, Layout* l) {
     }
     l->width0 = bc ? Align(t.width, 4) : t.width;
     l->height0 = bc ? Align(t.height, 4) : t.height;
+    // each level holds all slices; with pow2pad the slice count in memory is a power of two too
+    // (a cube map with mips has 8 slices per level, as shadPS4's NumLayers)
+    const u32 stored_slices = t.pow2pad ? std::bit_ceil(l->slices) : l->slices;
     u64 offset = 0;
     for (u32 m = 0; m < l->levels; ++m) {
         Mip& mp = l->mips[m];
@@ -282,7 +431,14 @@ bool GetLayout(const TSharp& t, Layout* l) {
             pw = std::bit_ceil(pw);
             ph = std::bit_ceil(ph);
         }
-        if (t.tiling == 8) {
+        if (l->macro) {
+            // pitch and height aligned to whole macro tiles (shadPS4's ImageSizeMacroTiled)
+            const auto [pa, ha, bytes] = VideoCore::ImageSizeMacroTiled(
+                pw, ph, l->eb * 8, 1, AmdGpu::TileMode(t.tiling), false);
+            mp.row_e = pa;
+            l->macro_height = ha;
+            mp.slice_bytes = bytes;
+        } else if (t.tiling == 8) {
             const u32 pitch_align = std::max(8u, 64u / l->eb);
             u32 row = Align(pw, pitch_align);
             const u32 slice_align = std::max(64u, 256u / l->eb);
@@ -302,7 +458,7 @@ bool GetLayout(const TSharp& t, Layout* l) {
         }
         mp.ew = std::min(mp.ew, mp.row_e);
         mp.offset = offset;
-        offset += mp.slice_bytes * l->slices;
+        offset += mp.slice_bytes * stored_slices;
     }
     l->total = offset;
     return true;
@@ -319,6 +475,19 @@ void DetileLevel(const TSharp& t, const Layout& l, const u8* guest, u32 m, u32 s
     const Mip& mp = l.mips[m];
     const u8* sb = guest + mp.offset + s * mp.slice_bytes;
     const std::size_t row_bytes = std::size_t(mp.ew) * l.eb;
+    if (l.macro) {
+        const MacroTiling mt(t.tiling, l.eb);
+        for (u32 y = 0; y < mp.eh; ++y) {
+            u8* drow = dst + y * row_bytes;
+            for (u32 x = 0; x < mp.ew; ++x) {
+                const u64 off = mt.Address(x, y, mp.row_e, l.macro_height);
+                if (off + l.eb <= mp.slice_bytes) {
+                    std::memcpy(drow + std::size_t(x) * l.eb, sb + off, l.eb);
+                }
+            }
+        }
+        return;
+    }
     if (t.tiling == 8) {
         for (u32 y = 0; y < mp.eh; ++y) {
             std::memcpy(dst + y * row_bytes, sb + u64(y) * mp.row_e * l.eb, row_bytes);
@@ -510,6 +679,7 @@ void SubmitBatch(vk::CommandPool pool, vk::Fence fence, std::vector<Job>& jobs) 
 
 /// Uploads queued textures in batches of up to 64 MiB.
 void UploadThread() {
+    BbCpu::Register("bb:NativeTexUpload");
     const vk::Device dev = instance->GetDevice();
     auto [pr, pool] = dev.createCommandPool(
         {.flags = vk::CommandPoolCreateFlagBits::eTransient,
@@ -577,7 +747,7 @@ void WatchPages(u64 base, u64 size) {
     u64 run = 0, run_start = 0;
     auto flush = [&] {
         if (run) {
-            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, true);
+            BbMem::Watch(run_start << PageBits, run << PageBits, true);
             run = 0;
         }
     };
@@ -606,7 +776,7 @@ void UnwatchPages(u64 base, u64 size) {
             continue;
         }
         if (it->second.watched) {
-            rasterizer->WatchWrites(p << PageBits, u64(1) << PageBits, false);
+            BbMem::Watch(p << PageBits, u64(1) << PageBits, false);
         }
         page_watches.erase(it);
     }
@@ -695,8 +865,7 @@ void Evict(u64 need, u64 now) {
 } // namespace
 
 void SetHost(const Host& h) {
-    rasterizer = Core::Memory::Instance()->GetRasterizer();
-    if (rasterizer) {
+    if (BbMem::Ready()) {
         host = h;
     }
 }
@@ -712,7 +881,7 @@ void Written(std::uint64_t addr, std::uint64_t size) {
     u64 run = 0, run_start = 0;
     auto flush = [&] {
         if (run) {
-            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, false);
+            BbMem::Watch(run_start << PageBits, run << PageBits, false);
             run = 0;
         }
     };
@@ -773,7 +942,7 @@ void Written(std::uint64_t addr, std::uint64_t size) {
 }
 
 void WatchTarget(std::uint64_t base, std::uint64_t size, std::atomic<bool>* written) {
-    if (!rasterizer || !host.retire || !size || !rasterizer->IsMapped(base, size)) {
+    if (!BbMem::Ready() || !host.retire || !size || !BbMem::IsMapped(base, size)) {
         return;
     }
     std::lock_guard lk(watch_mutex);
@@ -786,7 +955,7 @@ void WatchTarget(std::uint64_t base, std::uint64_t size, std::atomic<bool>* writ
 }
 
 void UnwatchTarget(std::atomic<bool>* written) {
-    if (!rasterizer) {
+    if (!BbMem::Ready()) {
         return;
     }
     std::lock_guard lk(watch_mutex);
@@ -886,7 +1055,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     // watched before it is read: a write from then on makes it stale
     tex.base = t.base;
     tex.size = l.total;
-    if (host.retire && rasterizer->IsMapped(t.base, l.total)) {
+    if (host.retire && BbMem::IsMapped(t.base, l.total)) {
         std::lock_guard lk(watch_mutex);
         Watch(&tex);
     }

@@ -73,6 +73,10 @@ vk::Device device;
 std::array<Frame, FrameCount> frames;
 std::size_t current = 0;
 
+// counts the submitted command buffers on the GPU (BB_VK_OWN_SIGNALS waits on it from its thread)
+vk::Semaphore timeline;
+std::atomic<u64> timeline_submitted{0};
+
 // lab: 16 bytes of zeros, then a float4 of ones, for vertex inputs no engine element feeds
 VkBuffer constant_vertices = VK_NULL_HANDLE;
 VmaAllocation constant_vertices_allocation = nullptr;
@@ -444,7 +448,14 @@ void SubmitFrame(bool early) {
     }
     (void)f.cmd.end();
     f.ring_end = ring_head;
-    const vk::SubmitInfo submit{.commandBufferCount = count, .pCommandBuffers = cmds.data()};
+    const u64 value = timeline_submitted.load(std::memory_order_relaxed) + 1;
+    const vk::TimelineSemaphoreSubmitInfo timeline_info{.signalSemaphoreValueCount = 1,
+                                                        .pSignalSemaphoreValues = &value};
+    const vk::SubmitInfo submit{.pNext = timeline ? &timeline_info : nullptr,
+                                .commandBufferCount = count,
+                                .pCommandBuffers = cmds.data(),
+                                .signalSemaphoreCount = timeline ? 1u : 0u,
+                                .pSignalSemaphores = &timeline};
     vk::Result r;
     {
         // every graphics-queue submit and present in shadPS4 holds this lock
@@ -453,6 +464,8 @@ void SubmitFrame(bool early) {
     }
     if (r != vk::Result::eSuccess) {
         std::printf("Native Vulkan: submit failed (%s)\n", vk::to_string(r).c_str());
+    } else if (timeline) {
+        timeline_submitted.store(value, std::memory_order_release);
     }
     f.in_flight = r == vk::Result::eSuccess;
     ++stats.submits;
@@ -481,6 +494,16 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
     const u32 family = vulkan.GetGraphicsQueueFamilyIndex();
     if (family < families.size() && families[family].timestampValidBits) {
         tick_ns = vulkan.GetPhysicalDevice().getProperties().limits.timestampPeriod;
+    }
+    {
+        vk::SemaphoreTypeCreateInfo type{.semaphoreType = vk::SemaphoreType::eTimeline,
+                                         .initialValue = 0};
+        auto [tr, sem] = device.createSemaphore({.pNext = &type});
+        if (tr == vk::Result::eSuccess) {
+            timeline = sem;
+        } else {
+            std::printf("Native Vulkan: no timeline semaphore (%s)\n", vk::to_string(tr).c_str());
+        }
     }
     for (Frame& f : frames) {
         auto [pr, pool] = device.createCommandPool(
@@ -624,6 +647,23 @@ void Submit() {
 
 void Defer(std::function<void()> f) {
     Cur().deferred.push_back(std::move(f));
+}
+
+u64 Submitted() {
+    return timeline_submitted.load(std::memory_order_acquire);
+}
+
+bool WaitDone(u64 value, u64 timeout_ns) {
+    if (!timeline || value == 0) {
+        return true;
+    }
+    const vk::SemaphoreWaitInfo wait{.semaphoreCount = 1, .pSemaphores = &timeline,
+                                     .pValues = &value};
+    return device.waitSemaphores(wait, timeout_ns) == vk::Result::eSuccess;
+}
+
+bool HasTimeline() {
+    return bool(timeline);
 }
 
 Span Upload(u64 size, u64 align) {

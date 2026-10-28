@@ -17,6 +17,10 @@
 #include "bbport_clobber.h"
 #include "bbport_guest_memory.h"
 #include "bbport_native_vk.h"
+#include "bbport_pm4_census.h"
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/hash.h"
 #include "common/debug.h"
@@ -1897,6 +1901,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (upscaler->Enabled()) {
         upscaler->OnDispatch(cs.pgm_hash);
     }
+    BbPm4::CountDispatch(cs.pgm_hash); // lab: what compute shadPS4 still runs, by program
     bool hle;
     {
         BB_SECTION(ShaderHle);
@@ -1933,6 +1938,41 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             std::printf("Native Vulkan: compute %016llx (%ux%ux%u groups) writes:%s\n",
                         static_cast<unsigned long long>(cs.pgm_hash), cs_program.dim_x, cs_program.dim_y,
                         cs_program.dim_z, written.empty() ? " nothing named" : written.c_str());
+            // lab: the program for the native compute translation (logs/cs-dump/<hash>.bin: the code
+            // up to the end of its OrbShdr info; <hash>.json: the dispatch registers)
+            {
+                const auto* code = cs_program.Address<const u32*>();
+                const auto& info = AmdGpu::SearchBinaryInfo(code);
+                const auto* end = reinterpret_cast<const u8*>(&info) + sizeof(info);
+                const auto bytes = std::size_t(end - reinterpret_cast<const u8*>(code));
+                std::error_code ec;
+                std::filesystem::create_directories("logs/cs-dump", ec);
+                const std::string base = fmt::format("logs/cs-dump/{:016x}", cs.pgm_hash);
+                if (FILE* f = std::fopen((base + ".bin").c_str(), "wb")) {
+                    std::fwrite(code, 1, bytes, f);
+                    std::fclose(f);
+                }
+                if (FILE* f = std::fopen((base + ".json").c_str(), "w")) {
+                    u32 settings;
+                    std::memcpy(&settings, &cs_program.settings, sizeof(settings));
+                    std::string user;
+                    for (u32 i = 0; i < cs_program.settings.num_user_regs && i < 16; ++i) {
+                        user += fmt::format("{}{}", i ? ", " : "", cs_program.user_data[i]);
+                    }
+                    std::fprintf(f,
+                                 "{\"hash\": \"%016llx\", \"code_bytes\": %u, \"file_bytes\": %zu, "
+                                 "\"rsrc2\": %u, \"num_user_regs\": %u, \"tgid_enable\": %u, "
+                                 "\"lds_bytes\": %u, \"threads\": [%u, %u, %u], "
+                                 "\"groups\": [%u, %u, %u], \"user_data\": [%s]}\n",
+                                 static_cast<unsigned long long>(cs.pgm_hash), u32(info.length), bytes,
+                                 settings, u32(cs_program.settings.num_user_regs),
+                                 u32(cs_program.settings.tgid_enable), cs_program.SharedMemSize(),
+                                 u32(cs_program.num_thread_x.full), u32(cs_program.num_thread_y.full),
+                                 u32(cs_program.num_thread_z.full), cs_program.dim_x, cs_program.dim_y,
+                                 cs_program.dim_z, user.c_str());
+                    std::fclose(f);
+                }
+            }
         }
     }
 
@@ -2051,13 +2091,18 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    BbPm4::PhaseLap(BbPm4::OsDrain); // lab: where the submission end's time goes
     DrainDrawPipe();
+    BbPm4::PhaseLap(BbPm4::OsFaults);
     if (fault_process_pending) {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();
     }
+    BbPm4::PhaseLap(BbPm4::OsDownloads);
     texture_cache.ProcessDownloadImages();
+    BbPm4::PhaseLap(BbPm4::OsGarbage);
     texture_cache.RunGarbageCollector();
+    BbPm4::PhaseLap(BbPm4::OsTick);
     runtime.TickFrame();
 }
 

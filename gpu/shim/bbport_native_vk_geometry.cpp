@@ -16,6 +16,7 @@
 
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "bbport_native_memory.h"
 
 #include "bbport_native_vk_buffer.h"
 
@@ -27,7 +28,9 @@ using u64 = std::uint64_t;
 
 constexpr u64 PageBits = 12; // the page manager's pages
 constexpr u64 PageSize = u64(1) << PageBits;
-constexpr u64 MinSize = 16 << 10;         // smaller buffers are copied at each draw
+// smaller buffers are copied at each draw (BB_VK_GEO_MIN_KB, default 4: one page; it was 16, and
+// the adventure hub's thousands of small meshes were then all copied at every draw)
+u64 MinSize = 4 << 10;
 constexpr u64 Budget = 1536ull << 20;     // resident bytes at most
 constexpr u64 EvictAfter = 900;           // submissions without a draw using it
 constexpr u64 RewriteWindow = 120;        // rewrites closer than this (submissions) add up...
@@ -109,7 +112,7 @@ void Watch(u64 first, u64 count) {
     u64 run = 0, run_start = 0;
     auto flush = [&] {
         if (run) {
-            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, true);
+            BbMem::Watch(run_start << PageBits, run << PageBits, true);
             run = 0;
         }
     };
@@ -134,7 +137,7 @@ void Written(u64 first, u64 last) {
     u64 run = 0, run_start = 0;
     auto flush = [&] {
         if (run) {
-            rasterizer->WatchWrites(run_start << PageBits, run << PageBits, false);
+            BbMem::Watch(run_start << PageBits, run << PageBits, false);
             run = 0;
         }
     };
@@ -212,7 +215,7 @@ void Unregister(Entry* e) {
         std::erase(list, e);
         if (list.empty()) {
             if (it->second.watched) {
-                rasterizer->WatchWrites(p << PageBits, PageSize, false);
+                BbMem::Watch(p << PageBits, PageSize, false);
             }
             pages.erase(it);
         }
@@ -337,7 +340,7 @@ void Drop(Entry* e) {
 
 /// A new entry: watched from now on, all of it clean.
 void Begin(Entry* e, u64 now) {
-    if (!Buf::Readable(e->base, e->size) || !rasterizer->IsMapped(e->base, e->size)) {
+    if (!Buf::Readable(e->base, e->size) || !BbMem::IsMapped(e->base, e->size)) {
         e->state = State::Unusable;
         n_unusable.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -370,6 +373,9 @@ void Init(const Vulkan::Instance& instance, const Host& h) {
     host = h;
     const char* env = std::getenv("BB_VK_RESIDENT");
     on = !(env && env[0] == '0');
+    if (const char* kb = std::getenv("BB_VK_GEO_MIN_KB"); kb && std::atoi(kb) > 0) {
+        MinSize = u64(std::atoi(kb)) << 10;
+    }
     allocator = instance.GetAllocator();
     std::printf("Native Vulkan: vertex and index buffers of %llu KiB and more %s\n",
                 (unsigned long long)(MinSize >> 10),
@@ -382,11 +388,8 @@ Binding Use(std::uint64_t base, std::uint64_t size) {
     if (!on || size < MinSize || !base) {
         return {};
     }
-    if (!rasterizer) {
-        rasterizer = Core::Memory::Instance()->GetRasterizer();
-        if (!rasterizer) {
-            return {};
-        }
+    if (!BbMem::Ready()) {
+        return {};
     }
     std::scoped_lock lk{lock};
     const u64 now = host.serial();
@@ -418,7 +421,7 @@ Binding Use(std::uint64_t base, std::uint64_t size) {
         }
         if (e->dirty_pages) {
             // written since: a candidate again from now, or copied for good
-            if (++e->rewrites >= 2 || !rasterizer->IsMapped(base, size)) {
+            if (++e->rewrites >= 2 || !BbMem::IsMapped(base, size)) {
                 MakeVolatile(e);
                 return {};
             }
@@ -443,7 +446,7 @@ Binding Use(std::uint64_t base, std::uint64_t size) {
             }
             e->rewrites = now - e->last_rewrite < RewriteWindow ? e->rewrites + 1 : 1;
             e->last_rewrite = now;
-            if (e->rewrites >= VolatileAfter || !rasterizer->IsMapped(base, size)) {
+            if (e->rewrites >= VolatileAfter || !BbMem::IsMapped(base, size)) {
                 MakeVolatile(e);
                 return {};
             }

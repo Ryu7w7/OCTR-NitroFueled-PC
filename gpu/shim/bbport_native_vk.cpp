@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <x86intrin.h>
 
 #include "video_core/renderer_vulkan/vk_instance.h" // first: sets up the Vulkan headers
 
@@ -33,6 +34,8 @@
 #include "bbport_native_vk_buffer.h"
 #include "bbport_native_vk_blit.h"
 #include "bbport_native_vk_geometry.h"
+#include "bbport_pm4_census.h"
+#include "bbport_thread_cpu.h"
 #include "bbport_native_vk_gpu.h"
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
@@ -149,6 +152,19 @@ struct Ref {
 };
 
 /// The vertex streams and attributes of a draw.
+/// A non-owning callable reference (std::function allocated for the draw's capturing lambda).
+template <typename R>
+struct FnRef {
+    void* obj;
+    R (*call)(void*);
+    template <typename F>
+    FnRef(F&& f) : obj(const_cast<void*>(static_cast<const void*>(&f))),
+                   call([](void* o) -> R { return (*static_cast<std::remove_reference_t<F>*>(o))(); }) {}
+    R operator()() const {
+        return call(obj);
+    }
+};
+
 struct VertexInput {
     std::vector<vk::VertexInputBindingDescription2EXT> bindings;
     std::vector<vk::VertexInputAttributeDescription2EXT> attributes;
@@ -158,6 +174,17 @@ struct VertexInput {
     u64 key = 0;
     bool ok = true;
     bool copy = false; // streams that cannot be imported are copied (drawing)
+    /// As constructed, keeping the vectors' memory (a draw used to allocate both every time)
+    void Reset() {
+        bindings.clear();
+        attributes.clear();
+        std::fill(std::begin(buffers), std::end(buffers), Ref{});
+        uint_mask = sint_mask = 0;
+        std::fill(std::begin(vin), std::end(vin), 0u);
+        key = 0;
+        ok = true;
+        copy = false;
+    }
 };
 
 /// b13 of every stage (the D3D11 port's InfoCB).
@@ -229,17 +256,30 @@ std::atomic<u64> draw_ns{0}, clear_ns{0}, copy_ns{0}, submit_ns{0}, frames_asked
 // the capture thread's time, and the game's waits for it (submissions, copies, a full queue)
 std::atomic<u64> capture_ns{0}, capture_wait_ns{0};
 std::atomic<u64> copies_replaced{0}; // engine copies not run (BB_VK_ALONE=1)
+// lab: clears and copies the engine still ran itself (its compute shaders, in shadPS4), per report
+std::atomic<u64> clears_to_engine{0}, copies_to_engine{0};
 
-/// Adds the time since construction to a counter.
+/// Nanoseconds per time stamp counter tick (measured once against steady_clock).
+double TscNs() {
+    static const double ns = [] {
+        const auto t0 = std::chrono::steady_clock::now();
+        const u64 c0 = __rdtsc();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const u64 c1 = __rdtsc();
+        const auto t1 = std::chrono::steady_clock::now();
+        return double(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()) /
+               double(std::max<u64>(1, c1 - c0));
+    }();
+    return ns;
+}
+
+/// Adds the time since construction to a counter (ns).
 struct Timer {
     std::atomic<u64>& out;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    u64 start = __rdtsc();
     explicit Timer(std::atomic<u64>& o) : out(o) {}
     ~Timer() {
-        out.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              std::chrono::steady_clock::now() - start)
-                              .count()),
-                      std::memory_order_relaxed);
+        out.fetch_add(u64(double(__rdtsc() - start) * TscNs()), std::memory_order_relaxed);
     }
 };
 /// What the open command buffer has bound (Gpu::StateEpoch): a draw sets only what changed.
@@ -276,14 +316,13 @@ constexpr const char* DrawSectionNames[SecCount] = {
     "| ring copies", "pass", "sets", "record"};
 std::atomic<u64> section_ns[SecCount]{};
 struct Lap {
-    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    u64 t = __rdtsc(); // section_ns counts ticks (the report converts: TscNs)
     void Start() {
-        t = std::chrono::steady_clock::now();
+        t = __rdtsc();
     }
     void operator()(DrawSection i) {
-        const auto now = std::chrono::steady_clock::now();
-        section_ns[i].fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count()),
-                                std::memory_order_relaxed);
+        const u64 now = __rdtsc();
+        section_ns[i].fetch_add(now - t, std::memory_order_relaxed);
         t = now;
     }
 };
@@ -671,6 +710,10 @@ struct Arena {
 
 /// A draw as captured: everything its recording needs, by value.
 struct DrawPacket {
+    // user-provided: a value-initialized packet is not zeroed whole first (6.4 KB a draw, ~9% of
+    // the capture thread in the adventure hub); the members below keep their initializers, and
+    // the vertex input arrays, filled by Draw up to their counts (vb whole), none
+    DrawPacket() {}
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     const ShaderInfo* vs = nullptr;
@@ -686,9 +729,14 @@ struct DrawPacket {
     u32 stencil_ref = 0;
     u64 vertex_key = 0;
     u32 binding_count = 0, attribute_count = 0;
-    vk::VertexInputBindingDescription2EXT bindings[17];
-    vk::VertexInputAttributeDescription2EXT attributes[32];
-    Ref vb[16];
+    union {
+        u8 no_init_ = 0;
+        struct {
+            vk::VertexInputBindingDescription2EXT bindings[17];
+            vk::VertexInputAttributeDescription2EXT attributes[32];
+            Ref vb[16];
+        };
+    };
     bool indexed = false;
     bool writes_depth = false; // depth or stencil written (else the attachment is only read)
     Ref ib;
@@ -769,6 +817,9 @@ std::mutex gpu_mutex; // held while recording (Gpu is not thread safe; Report re
 std::atomic<u64> submits_queued{0}, submits_recorded{0}, batch_waits{0};
 std::mutex recorded_mutex;
 std::condition_variable recorded_cv;
+// the GPU timeline value once submission k (submits_recorded) is on the queue (BB_VK_OWN_SIGNALS)
+constexpr u64 SubmitValueRing = 4096;
+std::atomic<u64> submit_values[SubmitValueRing]{};
 u64 batch_seq = 0;     // Batch::seq of the open batch (game side)
 u64 recording_seq = 0; // Batch::seq of the batch being recorded (recorder side)
 
@@ -818,7 +869,9 @@ std::mutex capture_mutex;
 std::condition_variable capture_cv, capture_free_cv;
 std::deque<Capture*> capture_queue, capture_free;
 u64 captures_handed = 0;                  // under capture_mutex
+int free_waiters = 0;                     // under capture_mutex: threads waiting for a free capture
 std::atomic<u64> captures_done{0};        // the capture thread's count, in order
+std::atomic<int> done_waiters{0};         // threads waiting on captures_done (WaitCaptured)
 const Capture* capturing = nullptr;       // the capture being turned into a batch (under `mutex`)
 
 void Flush();
@@ -1110,14 +1163,22 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             unset_textures.fetch_add(1, std::memory_order_relaxed);
         }
         u32 tsharp[8];
-        if (!good_tsharps.count(t)) {
+        // a direct-mapped cache in front of the set (its lookup was ~6% of the capture thread in
+        // the adventure hub)
+        static std::array<u64, 65536> recent_good{}; // the hub binds thousands of T#s a frame
+        u64& recent = recent_good[(t * 0x9E3779B97F4A7C15ull) >> 48];
+        if (recent == t) {
+            std::memcpy(tsharp, reinterpret_cast<const void*>(t), sizeof(tsharp));
+        } else if (!good_tsharps.count(t)) {
             if (!Read(t, tsharp, sizeof(tsharp))) {
                 bad_tsharps.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
             good_tsharps.insert(t);
+            recent = t;
         } else {
             std::memcpy(tsharp, reinterpret_cast<const void*>(t), sizeof(tsharp));
+            recent = t;
         }
         texture_binds.fetch_add(1, std::memory_order_relaxed);
         Slot& out = res.slots[slot];
@@ -1260,7 +1321,7 @@ constexpr u32 ZeroBinding = 15;
 /// slices of imported guest memory, read in place.
 /// `vertex_end`: one past the highest vertex the draw reads (made only when a stream is copied).
 void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
-                   const std::function<u32()>& vertex_end) {
+                   FnRef<u32> vertex_end) {
     const u64 hdr = Q(vsh + ShHeader);
     const s32 nin = hdr ? R<s32>(hdr + HdrInputElements) : 0;
     const u64 ins = hdr ? Q(hdr + HdrInputElements + 0x10) : 0;
@@ -1756,6 +1817,7 @@ bool known_dirty = false;
 std::atomic<u64> compiles_done{0}, compile_ns{0}, preloaded{0}, skipped_compiling{0};
 
 void CompileThread() {
+    BbCpu::Register("bb:NativeCompile");
     for (;;) {
         std::unique_ptr<CompileJob> job;
         {
@@ -2146,7 +2208,17 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
             for (u32 i = 0; i < b.count; ++i) {
                 const u32 slot = b.binding + i - 64;
                 vk::DescriptorImageInfo ii{.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
-                if (slot < 32 && b.dim == 1) { // 2D only: no 3D or cube targets/textures yet
+                if (slot < 32 && b.dim == 3 && !b.arrayed) {
+                    // a cube (gcn2hlsl's TextureCube): the cube view of a six-face texture, which
+                    // filters across faces as the PS4 does (no seams on rough reflections)
+                    if (const Tex::Texture* tex = res.slots[slot].texture;
+                        tex && tex->slices == 6 && tex->view && tex->view != tex->view_array) {
+                        tex->ready.wait(false, std::memory_order_acquire);
+                        if (!tex->broken.load(std::memory_order_relaxed)) {
+                            ii.imageView = tex->view;
+                        }
+                    }
+                } else if (slot < 32 && b.dim == 1) { // 2D (no 3D or cube targets yet)
                     if (const Target* t = res.slots[slot].target) {
                         ii.imageView = b.arrayed ? t->view_array : t->view;
                         if (t == depth_ro) {
@@ -2288,7 +2360,9 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         BindStage(false, *ps, ctx, dev, pres);
     }
     lap(SecTextures);
-    VertexInput vi;
+    static thread_local VertexInput vi_reused;
+    VertexInput& vi = vi_reused;
+    vi.Reset();
     vi.copy = true;
     u32 vertex_end = 0; // made once, when a stream has to be copied
     const u32 isize_ = R<u32>(ctx + CtxIndexSize) == 2 ? 2 : 4;
@@ -2401,6 +2475,8 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
         st.depth_read_only = pass.depth_read_only;
     }
     st.blend = R<u32>(ctx + CtxBlendControl);
+    // the write mask names the shader's (logical) channels, which is the order the native targets
+    // keep; shadPS4 moves it to the swapped memory order only because its images hold that order
     st.mask = R<u32>(ctx + CtxRtMask);
     st.dctl = dctl;
     st.refmask = R<u32>(ctx + CtxStencilControl);
@@ -2836,7 +2912,9 @@ Capture& TakeCapture() {
     std::unique_lock lk(capture_mutex);
     if (capture_free.empty()) {
         Timer waited(capture_wait_ns);
+        ++free_waiters;
         capture_free_cv.wait(lk, [] { return !capture_free.empty(); });
+        --free_waiters;
     }
     Capture* c = capture_free.back(); // the one freed last: likeliest still in the caches
     capture_free.pop_back();
@@ -2867,9 +2945,11 @@ void WaitCaptured(u64 n = 0) {
         return;
     }
     Timer waited(capture_wait_ns);
-    for (u64 v; (v = captures_done.load(std::memory_order_acquire)) < n;) {
-        captures_done.wait(v, std::memory_order_acquire);
+    done_waiters.fetch_add(1, std::memory_order_seq_cst);
+    for (u64 v; (v = captures_done.load(std::memory_order_seq_cst)) < n;) {
+        captures_done.wait(v, std::memory_order_seq_cst);
     }
+    done_waiters.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 /// Copies `size` bytes of the engine object at the context's pointer at `field` into `to`, and
@@ -3023,16 +3103,28 @@ void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth)
     EndOp();
 }
 
-__attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u32 stencil,
+/// kClearRenderTarget's hook. With BB_VK_ALONE=1 the clear done here replaces the engine's (its
+/// compute clear would only write shadPS4's images, which nothing shows); BB_VK_ALONE_CLEARS=1:
+/// the engine's runs too, as before.
+__attribute__((sysv_abi)) bool OnClear(u64 ctx, u32 flags, const float* color, u32 stencil,
                                        float depth) {
     if (!drawing || !ctx) {
-        return;
+        clears_to_engine.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    static const bool engine_too = [] {
+        const char* env = std::getenv("BB_VK_ALONE_CLEARS");
+        return env && env[0] == '1';
+    }();
+    const bool replace = alone.load(std::memory_order_relaxed) && !engine_too;
+    if (!replace) {
+        clears_to_engine.fetch_add(1, std::memory_order_relaxed);
     }
     Timer timer(clear_ns);
     if (!capture_thread) {
         std::lock_guard lk(mutex);
         ClearFrom(ctx, flags, color, stencil, depth);
-        return;
+        return replace;
     }
     Capture& c = TakeCapture();
     c.kind = Capture::Kind::Clear;
@@ -3045,6 +3137,7 @@ __attribute__((sysv_abi)) void OnClear(u64 ctx, u32 flags, const float* color, u
     }
     KeepContext(c, ctx, (flags & 1) && color, flags & 6);
     Hand(c);
+    return replace;
 }
 
 /// A pending whole copy from `t`, which a clear is about to cover all over, goes by swapping the
@@ -3357,6 +3450,7 @@ __attribute__((sysv_abi)) bool OnCopy(u64 ctx, const u32* src, const u32* dst, c
         copies_replaced.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
+    copies_to_engine.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -3482,6 +3576,16 @@ void Report() {
                     (unsigned long long)no_context.load(), keys,
                     (unsigned long long)modules_made.load(), (unsigned long long)modules_failed.load(),
                     (unsigned long long)unknown_programs.load());
+        // what shadPS4's command processor still does (to replace before running without it)
+        std::printf("Native Vulkan: shadPS4 command packets: %s\n", BbPm4::Report(5.0).c_str());
+        std::printf("Native Vulkan: CPU per thread (%% of one core): %s\n", BbCpu::Report().c_str());
+        std::printf("Native Vulkan: shadPS4 command processor %s\n", BbPm4::TimeReport(5.0).c_str());
+        std::printf("Native Vulkan: shadPS4 command processor loop: %s\n", BbPm4::PhaseReport(5.0).c_str());
+        std::printf("Native Vulkan: shadPS4 compute dispatches: %s; engine clears left to it %.0f/s, "
+                    "copies %.0f/s\n",
+                    BbPm4::DispatchReport(5.0).c_str(),
+                    (clears_to_engine.exchange(0, std::memory_order_relaxed)) / 5.0,
+                    (copies_to_engine.exchange(0, std::memory_order_relaxed)) / 5.0);
         std::printf("Native Vulkan: %zu target images (%.0f MiB); %llu made, %llu made again at a "
                     "new size or format, %llu failed, %llu unusable target handles; %llu binds passed over "
                     "a target the game wrote over, %llu targets drawn to again after that\n",
@@ -3653,7 +3757,7 @@ void Report() {
                     const u64 v = section_ns[i].load();
                     char b[64];
                     std::snprintf(b, sizeof(b), "%s%s %.1f", i ? ", " : "", DrawSectionNames[i],
-                                  n ? (v - last_sec[i]) / 1e3 / n : 0.0);
+                                  n ? (v - last_sec[i]) * TscNs() / 1e3 / n : 0.0);
                     secs += b;
                     last_sec[i] = v;
                 }
@@ -3696,8 +3800,8 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
     }
     std::printf("Native Vulkan: on (shadPS4 still draws too); %zu translated shaders from %s\n",
                 shaders.size(), shader_root.string().c_str());
-    BbHook::PassThrough(image, size, BbHook::ClearFunction, BbHook::ClearPrologue,
-                        reinterpret_cast<u64>(&OnClear), "Native Vulkan", "kClearRenderTarget");
+    BbHook::Replace(image, size, BbHook::ClearFunction, BbHook::ClearPrologue,
+                    reinterpret_cast<u64>(&OnClear), "Native Vulkan", "kClearRenderTarget");
     BbHook::Replace(image, size, BbHook::CopyFunction, BbHook::CopyPrologue,
                     reinterpret_cast<u64>(&OnCopy), "Native Vulkan", "kCopyTexture");
     std::fflush(stdout);
@@ -3783,6 +3887,7 @@ void SubmitNow() {
 
 /// Turns the game's captures into batches, in order.
 void CaptureThread() {
+    BbCpu::Register("bb:NativeCapture");
 #ifdef _WIN32
     SetThreadDescription(GetCurrentThread(), L"bb:VkCapture");
 #endif
@@ -3818,13 +3923,22 @@ void CaptureThread() {
             }
             capturing = nullptr;
         }
+        // the game's thread is woken in batches (one wake per freed capture was ~6% of this
+        // thread in the adventure hub, and the game woke and waited again for each draw), and
+        // the count of captures done is notified only to a waiter
+        bool wake = false;
         {
             std::lock_guard lk(capture_mutex);
             capture_free.push_back(c);
+            wake = free_waiters && (capture_free.size() >= 32 || capture_queue.empty());
         }
-        capture_free_cv.notify_one();
-        captures_done.fetch_add(1, std::memory_order_release);
-        captures_done.notify_all();
+        if (wake) {
+            capture_free_cv.notify_all();
+        }
+        captures_done.fetch_add(1, std::memory_order_seq_cst);
+        if (done_waiters.load(std::memory_order_seq_cst)) {
+            captures_done.notify_all();
+        }
     }
 }
 } // namespace
@@ -3909,7 +4023,7 @@ void NoteHitch() {
                             Gpu::LastGpuNs() / 1e6);
                 std::string spent;
                 for (int i = 0; i < SecCount; ++i) {
-                    const double ms = (sections[i] - last_sections[i]) / 1e6;
+                    const double ms = (sections[i] - last_sections[i]) * TscNs() / 1e6;
                     if (ms >= 0.5) {
                         char b[64];
                         std::snprintf(b, sizeof(b), " %s %.1f ms", DrawSectionNames[i], ms);
@@ -3983,6 +4097,14 @@ void RenderDocCapture(bool after_submit) {
         std::printf("Native Vulkan: RenderDoc capture started\n");
     }
     was_down = down;
+    // lab (scripted runs): a file logs/rd_trigger asks for RenderDoc's own whole-frame capture of
+    // the next frame (as its F12 key does) and is removed
+    std::error_code ec;
+    if (fs::exists("logs/rd_trigger", ec)) {
+        fs::remove("logs/rd_trigger", ec);
+        api->TriggerCapture();
+        std::printf("Native Vulkan: RenderDoc frame capture requested (logs/rd_trigger)\n");
+    }
 }
 #else
 void RenderDocCapture(bool) {}
@@ -3999,7 +4121,9 @@ void RunSubmit(const SubmitPacket& sp) {
     RenderDocCapture(true);
     {
         std::lock_guard rl(recorded_mutex);
-        submits_recorded.fetch_add(1, std::memory_order_release);
+        const u64 k = submits_recorded.load(std::memory_order_relaxed) + 1;
+        submit_values[k % SubmitValueRing].store(Gpu::Submitted(), std::memory_order_relaxed);
+        submits_recorded.store(k, std::memory_order_release);
     }
     recorded_cv.notify_all();
 }
@@ -4084,6 +4208,7 @@ void Flush() {
 }
 
 void RecorderThread() {
+    BbCpu::Register("bb:NativeRecorder");
 #ifdef _WIN32
     SetThreadDescription(GetCurrentThread(), L"bb:VkRecorder");
 #endif
@@ -4156,6 +4281,37 @@ void StartRecorder() {
 
 bool DrawsAlone() {
     return alone.load(std::memory_order_relaxed);
+}
+
+bool Drawing() {
+    return drawing;
+}
+
+std::uint64_t SubmissionsQueued() {
+    return submits_queued.load(std::memory_order_acquire);
+}
+
+bool WaitSubmissionDone(std::uint64_t k, std::uint64_t timeout_ns) {
+    if (k == 0) {
+        return true;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout_ns);
+    u64 value;
+    {
+        std::unique_lock rl(recorded_mutex);
+        if (!recorded_cv.wait_until(rl, deadline, [k] {
+                return submits_recorded.load(std::memory_order_acquire) >= k;
+            })) {
+            return false;
+        }
+        value = submit_values[k % SubmitValueRing].load(std::memory_order_relaxed);
+    }
+    const auto left = deadline - std::chrono::steady_clock::now();
+    return Gpu::WaitDone(value, u64(std::max<s64>(0, std::chrono::duration_cast<std::chrono::nanoseconds>(left).count())));
+}
+
+bool GpuTimeline() {
+    return Gpu::HasTimeline();
 }
 
 bool Display(std::uint64_t address, std::uint32_t wanted, std::uint64_t* image,

@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_wait_trace.h"
 
-#ifdef _WIN32
-// SacredFire (Windows): BB_WAIT_TRACE needs backtrace() (glibc); off on Windows.
-namespace BbWaitTrace {
-bool Enabled() { return false; }
-Scope::Scope() {}
-Scope::~Scope() {}
-void Report(double) {}
-} // namespace BbWaitTrace
-#else
-
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -20,9 +10,14 @@ void Report(double) {}
 #include <mutex>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <pthread.h>
+#endif
 
 namespace BbWaitTrace {
 namespace {
@@ -45,6 +40,39 @@ struct Total {
 std::mutex mutex;
 std::map<Key, Total> totals;
 
+#ifdef _WIN32
+int CaptureStack(void** frames, int count) {
+    return RtlCaptureStackBackTrace(0, DWORD(count), frames, nullptr);
+}
+
+/// "sacredfire.exe+0x1ca380": module and offset, for llvm-symbolizer (--adjust-vma with the
+/// image base) on the build's executable.
+std::string Describe(void* address) {
+    HMODULE module = nullptr;
+    char text[300];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCSTR>(address), &module)) {
+        std::snprintf(text, sizeof(text), "%p", address);
+        return text;
+    }
+    char path[MAX_PATH] = "?";
+    GetModuleFileNameA(module, path, MAX_PATH);
+    const char* file = std::strrchr(path, '\\');
+    file = file ? file + 1 : path;
+    std::snprintf(text, sizeof(text), "%s+%#llx", file,
+                  (unsigned long long)(static_cast<char*>(address) - reinterpret_cast<char*>(module)));
+    return text;
+}
+
+void ThreadName(std::array<char, 16>& out) {
+    std::snprintf(out.data(), out.size(), "tid %lu", (unsigned long)GetCurrentThreadId());
+}
+#else
+int CaptureStack(void** frames, int count) {
+    return backtrace(frames, count);
+}
+
 std::string Describe(void* address) {
     Dl_info info{};
     if (!dladdr(address, &info)) {
@@ -66,6 +94,11 @@ std::string Describe(void* address) {
     }
     return text;
 }
+
+void ThreadName(std::array<char, 16>& out) {
+    pthread_getname_np(pthread_self(), out.data(), out.size());
+}
+#endif
 } // namespace
 
 bool Enabled() {
@@ -80,7 +113,7 @@ Scope::Scope() {
     if (!Enabled()) {
         return;
     }
-    depth = backtrace(frames, int(std::size(frames)));
+    depth = CaptureStack(frames, int(std::size(frames)));
     start = std::chrono::steady_clock::now();
 }
 
@@ -95,7 +128,7 @@ Scope::~Scope() {
     for (int i = 0; i < Kept && Skip + i < depth; ++i) {
         key.frames[i] = frames[Skip + i];
     }
-    pthread_getname_np(pthread_self(), key.thread.data(), key.thread.size());
+    ThreadName(key.thread);
     std::scoped_lock lk{mutex};
     auto& total = totals[key];
     total.ns += ns;
@@ -133,4 +166,3 @@ void Report(double window_s) {
     }
 }
 } // namespace BbWaitTrace
-#endif // _WIN32

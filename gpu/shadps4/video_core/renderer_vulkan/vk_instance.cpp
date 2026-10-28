@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_native_memory.h"
 
 #include <vk_mem_alloc.h>
 
@@ -446,9 +447,11 @@ bool Instance::CreateDevice() {
     // bbport: the buffer cache keeps the game's memory in sparse buffers bound on this queue
     // (vkQueueBindSparse at every submission). Without them the first submission loses the
     // device (Mesa on Gen9 Intel, issue #97): stop as an unsupported GPU instead of code 23.
+    // lab BB_VK_NATIVE_ONLY: no buffer cache (no Rasterizer), so no sparse buffers either.
     if (const auto base = physical_device.getFeatures();
-        !base.sparseBinding || !base.sparseResidencyBuffer ||
-        !(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
+        !BbMem::NativeOnly() &&
+        (!base.sparseBinding || !base.sparseResidencyBuffer ||
+         !(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding))) {
         StopUnsupportedFeature(properties.deviceName.data(),
                                "sparse buffers (sparseBinding, sparseResidencyBuffer)");
     }

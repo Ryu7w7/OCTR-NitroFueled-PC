@@ -27,6 +27,7 @@
 #include "bbport_gnm_hooks.h"
 #include "bbport_engine_probe.h"
 #include "bbport_native_vk.h"
+#include "bbport_native_signals.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -94,6 +95,10 @@ static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
 static std::atomic<u64> stale_idle_signals{0};
 
 static void ResetSubmissionLock(Platform::InterruptId irq) {
+    // lab BB_VK_OWN_SIGNALS: shadPS4's processor is always idle then; BbSignals releases the lock
+    if (BbSignals::On()) {
+        return;
+    }
     std::unique_lock lock{m_wait_idle};
     if (submission_lock != 0 && liverpool && !liverpool->IsGpuIdleNow()) {
         const u64 n = stale_idle_signals.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -115,7 +120,14 @@ bool SubmitLockOnDecode() {
         const char* env = std::getenv("BB_SUBMIT_LOCK");
         return !(env && std::string_view{env} == "gpu");
     }();
-    return on && Vulkan::Rasterizer::HonestLabels();
+    // lab BB_VK_OWN_SIGNALS: BbSignals writes the labels and retires frames once the GPU has run
+    // them, as honest labels do, so frames may overlap the same way (BB_VK_FRAME_OVERLAP=0: the
+    // submission lock instead)
+    static const bool own_overlap = [] {
+        const char* env = std::getenv("BB_VK_FRAME_OVERLAP");
+        return !(env && env[0] == '0');
+    }();
+    return on && (Vulkan::Rasterizer::HonestLabels() || (own_overlap && BbSignals::On()));
 }
 
 void ReleaseSubmissionLock() {
@@ -176,6 +188,12 @@ static void WatchOverlapLeak() {
     }
     if (!BbHeapSites::Counting()) {
         BbHeapSites::InstallCounters();
+        // lab: no counters in this game (BbHeapSites needs another game's libc table): the heap
+        // asking the system for more memory is the sign left
+        if (!BbHeapSites::Counting() && runtime_heap_growths() != 0) {
+            overlap_off = true;
+            std::printf("Gnm: the game's heap grew: frames no longer overlap (BB_SUBMIT_AHEAD 0)\n");
+        }
         return;
     }
     static u64 frames = 0;
@@ -2355,6 +2373,16 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
         DebugState.PauseGuestThreads();
     }
 
+    // lab BB_VK_OWN_SIGNALS: the native renderer runs what the command buffers signal; shadPS4's
+    // command processor gets none (the init sequences only set registers)
+    if (BbSignals::Decide()) {
+        send_init_packet = false;
+        for (u32 cbpair = 0; cbpair < count; ++cbpair) {
+            BbSignals::Submit(std::span{dcb_gpu_addrs[cbpair], dcb_sizes_in_bytes[cbpair] >> 2});
+        }
+        return ORBIS_OK;
+    }
+
     if (send_init_packet) {
         if (sdk_version < Common::ElfInfo::FW_200) {
             liverpool->SubmitGfx(InitSequence, {});
@@ -2558,7 +2586,21 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
         submits_this_frame = 0;
         WatchOverlapLeak();
         ++frames_submitted;
-        liverpool->SubmitDone(u64(frames_submitted));
+        if (BbSignals::On()) {
+            BbSignals::FrameDone(u64(frames_submitted));
+        } else {
+            liverpool->SubmitDone(u64(frames_submitted));
+        }
+    } else if (BbSignals::On()) {
+        // lab BB_VK_OWN_SIGNALS: the lock goes once the GPU has finished this frame's native work
+        // and its labels are written (BbSignals runs ReleaseSubmissionLock then)
+        WaitGpuIdle();
+        {
+            std::scoped_lock idle_lock{m_wait_idle};
+            submission_lock = true;
+        }
+        ++frames_submitted;
+        BbSignals::FrameDone(u64(frames_submitted));
     } else {
         WaitGpuIdle();
         {
