@@ -494,10 +494,11 @@ bool Init(const Vulkan::Instance& vulkan, const std::string& cache_path) {
                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    // AUTO takes a TRANSFER_SRC buffer the CPU writes for staging and puts it in system memory;
+    // PREFER_DEVICE puts it in video memory the CPU can write when it fits (else system memory).
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    aci.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT; // video memory the CPU can write, if it fits
     VmaAllocationInfo info{};
     if (vmaCreateBuffer(vulkan.GetAllocator(), &bci, &aci, &ring, &ring_allocation, &info) !=
         VK_SUCCESS) {
