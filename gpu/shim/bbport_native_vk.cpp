@@ -1332,6 +1332,27 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             zero_binding = true;
         } else {
             used[binding] = true;
+            // lab: BB_VK_LOG_SHADER also names the inputs a matching vertex shader did find
+            static const char* log_inputs = std::getenv("BB_VK_LOG_SHADER");
+            if (log_inputs && *log_inputs) {
+                std::string list = log_inputs;
+                bool wanted = false;
+                for (std::size_t at = 0; at <= list.size() && !wanted;) {
+                    const std::size_t end = std::min(list.find(',', at), list.size());
+                    wanted = end > at && vs.name.find(list.substr(at, end - at)) != std::string::npos;
+                    at = end + 1;
+                }
+                static std::mutex found_mutex;
+                static std::unordered_set<u64> found_logged;
+                std::lock_guard fl(found_mutex);
+                const u64 fkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
+                if (wanted && found_logged.size() < 400 && found_logged.insert(fkey).second) {
+                    std::printf("Native Vulkan: vertex input found: %s location %u (usage %u index %u) "
+                                "slot %d offset %u format %s\n",
+                                vs.name.c_str(), sem, usage, uidx, binding, offset,
+                                vk::to_string(format).c_str());
+                }
+            }
         }
         vi.attributes.push_back({.location = sem, .binding = u32(binding), .format = format,
                                  .offset = offset});
