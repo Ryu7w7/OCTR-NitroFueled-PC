@@ -1167,7 +1167,7 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             const Tex::Info info = Tex::Describe(tsharp);
             const u64 key = std::hash<std::string>{}(s.name) ^ (u64(slot) << 56) ^ info.base;
             std::lock_guard ll(log_mutex);
-            if (logged.size() < 400 && logged.insert(key).second) {
+            if (s.name.rfind("Gui", 0) != 0 && logged.size() < 3000 && logged.insert(key).second) {
                 std::printf("Native Vulkan: bind %s slot %u: %llx %ux%u dfmt %u nfmt %u dst_sel %03o "
                             "levels %u -> %s, vk format %s, swizzle code %o\n",
                             s.name.c_str(), slot, (unsigned long long)info.base, info.width, info.height,
@@ -1313,6 +1313,17 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
         }
         if (binding < 0) {
             missing_attributes.fetch_add(1, std::memory_order_relaxed); // the port feeds zeros
+            // lab: which vertex shader input found no element (each shader and input once): a
+            // blend weight read as zero changes what a material looks like
+            static std::mutex missing_mutex;
+            static std::unordered_set<u64> missing_logged;
+            std::lock_guard ml(missing_mutex);
+            const u64 mkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
+            if (missing_logged.size() < 300 && missing_logged.insert(mkey).second) {
+                std::printf("Native Vulkan: vertex input missing: %s location %u (usage %u index %u)%s\n",
+                            vs.name.c_str(), sem, usage, uidx,
+                            usage == 0xff ? " - not in the shader header" : " - no vertex format element");
+            }
             binding = ZeroBinding;
             format = vk::Format::eR32G32B32A32Sfloat;
             offset = 0;
