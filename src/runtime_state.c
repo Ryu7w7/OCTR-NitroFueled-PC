@@ -72,8 +72,18 @@ static uintptr_t race_clock(uintptr_t base) {
     uint16_t generation;
     if (!read_game(pointer_at(generations+0x20)+index*2, &generation, sizeof generation) ||
         generation != (index | 0x8000)) return 0;
-    uintptr_t clock = pointer_at(pointer_at(pool+0x20)+index*8);
-    return pointer_at(clock) == base+0x2592f98 ? clock : 0;
+    uintptr_t entity = pointer_at(pointer_at(pool+0x20)+index*8);
+    uintptr_t components = pointer_at(entity+0x18), entries = pointer_at(components+0x20);
+    int count = int_at(components+0xc, -1);
+    if (count < 0 || count > 256) return 0;
+    /* The handle resolves the clock entity; getRaceClockTime then calls getComponent (0x3dbf90). */
+    for (int i = 0; i < count; i++) {
+        uintptr_t clock = pointer_at(entries+i*8);
+        unsigned char flags;
+        if (pointer_at(clock) == base+0x2592f98 && read_game(clock+0x20, &flags, 1) && !(flags & 0x10))
+            return clock;
+    }
+    return 0;
 }
 
 void runtime_state_game(char *out, size_t size) {
@@ -131,10 +141,11 @@ void runtime_state_game(char *out, size_t size) {
             }
         }
     }
-    if (finished) {
-        float finish;
-        if (read_game(racer+0x6c, &finish, sizeof finish)) seconds = finish;
-    }
+    /* _endOfRaceTime is an engine timestamp, not a floating-point race duration. */
+    if (finished) seconds = -1;
+    unsigned char paused = 0;
+    if (!finished && read_game(pointer_at(base+0x2ab4100)+0x28, &paused, 1) && paused == 1)
+        phase = "Paused";
     char lap_text[48] = "", time_text[48] = "";
     if (race >= 1 && race <= 6 && lap >= 0 && laps > 0 && laps <= 99 && lap <= laps+1)
         snprintf(lap_text, sizeof lap_text, "lap=%d\nlaps=%d\n", lap < 1 ? 1 : lap > laps ? laps : lap, laps);

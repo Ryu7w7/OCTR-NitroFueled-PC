@@ -148,13 +148,17 @@ static void test_game_snapshot(void) {
     CHECK(strstr(body, "lap=2\nlaps=3\n") && !strstr(body, "race_seconds="));
 
     unsigned char pool[0x30] = {0}, generations[0x28] = {0}, clock[0x50] = {0};
-    unsigned char timer[0x20] = {0}, data[0x10] = {0}, time[0x24] = {0};
+    unsigned char timer[0x20] = {0}, data[0x10] = {0}, time[0x30] = {0};
     uint16_t generation = 0x8000;
-    void *clocks[] = {clock};
+    unsigned char entity[0x20] = {0}, components[0x28] = {0};
+    void *entities[] = {entity}, *clocks[] = {clock};
+    put_pointer(entity+0x18, components);
+    put_int(components+0xc, 1);
+    put_pointer(components+0x20, clocks);
     put_int(image+0x2a92888, 0x8000);
     put_pointer(image+0x2a92880, pool);
     put_pointer(pool+0x28, generations);
-    put_pointer(pool+0x20, clocks);
+    put_pointer(pool+0x20, entities);
     put_int(generations+0xc, 1);
     put_pointer(generations+0x20, &generation);
     put_pointer(clock, image+0x2592f98);
@@ -166,6 +170,10 @@ static void test_game_snapshot(void) {
     timer[0x14] = 1;
     runtime_state_game(body, sizeof body);
     CHECK(strstr(body, "race_seconds=83\n"));
+    time[0x28] = 1;
+    runtime_state_game(body, sizeof body);
+    CHECK(strstr(body, "phase=Paused\n") && strstr(body, "race_seconds=83\n"));
+    time[0x28] = 0;
     timer[0x15] = 1;
     put_int(timer+0x10, 43*8192);
     runtime_state_game(body, sizeof body);
@@ -181,10 +189,9 @@ static void test_game_snapshot(void) {
     runtime_state_game(body, sizeof body);
     CHECK(strstr(body, "race_seconds=12\n") && !strstr(body, "lap="));
     racer[0x8c] = 1;
-    float finish = 90.5f;
-    memcpy(racer+0x6c, &finish, sizeof finish);
+    put_int(racer+0x6c, 723615); /* engine timestamp, not floating-point race seconds */
     runtime_state_game(body, sizeof body);
-    CHECK(strstr(body, "phase=Finished\n") && strstr(body, "race_seconds=90\n"));
+    CHECK(strstr(body, "phase=Finished\n") && !strstr(body, "race_seconds="));
     entries[1] = (void *)(uintptr_t)0xdead0000;
     runtime_state_game(body, sizeof body); /* unmapped guest object must not crash */
     CHECK(strstr(body, "phase=Menus / loading\n"));
