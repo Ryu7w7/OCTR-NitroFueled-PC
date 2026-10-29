@@ -4,8 +4,8 @@
 
 The Options menu (ui/Octane_Options_Menu.igz) has a fifth tab, Language Select, that the game
 hides in this region. The port shows it again and opens its own settings menu when it is chosen
-(gpu/shim/bbport_graphics_tab.cpp); this script renames it "Graphics" in the menu's four text
-tables (ui/Octane_Options_Menu_{en,fr,mx,pt}.lng).
+(gpu/shim/bbport_graphics_tab.cpp); this script renames it "Graphics" in the menu's available USA/EU text
+tables (ui/Octane_Options_Menu_*.lng).
 
 The game loads archives/update.pak, update2.pak, ... until one is missing, each overriding the
 files of the ones before; the 1.21 update's own menu files are in update.pak/update2.pak. The
@@ -21,6 +21,7 @@ graphics_tab setting is off or the files are not found.
 usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
 """
 import argparse
+from contextlib import ExitStack
 import lzma
 import struct
 import sys
@@ -32,11 +33,12 @@ ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak')
 OUTPUT = 'archives/update3.pak'
 # The tab's label is the string before this placeable name in each text table.
 ANCHOR = b'Comp__Menu_ButtonWithIcon005_behaviors_0'
-LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráficos'}
+LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráficos',
+          'es': 'Gráficos', 'de': 'Grafik', 'it': 'Grafica', 'ar': 'Graphics'}
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 18  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 19  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -217,7 +219,11 @@ QUIT_KEY = b'Comp__Menu_ButtonWithIcon_behaviors_0\0'
 QUIT_LABELS = {'en': ('Quit Game', 'Close the game and return to the desktop.'),
                'fr': ('Quitter', 'Fermer le jeu et revenir au bureau.'),
                'mx': ('Salir', 'Cerrar el juego y volver al escritorio.'),
-               'pt': ('Sair', 'Fechar o jogo e voltar para a area de trabalho.')}
+               'pt': ('Sair', 'Fechar o jogo e voltar para a area de trabalho.'),
+               'es': ('Salir', 'Cerrar el juego y volver al escritorio.'),
+               'de': ('Beenden', 'Spiel beenden und zum Desktop zurückkehren.'),
+               'it': ('Esci', 'Chiudi il gioco e torna al desktop.'),
+               'ar': ('Quit Game', 'Close the game and return to the desktop.')}
 QUIT_LEVEL = (b'Octane/Octane_OnlineLobby/Octane_OnlineLobby\0',
               b'Octane/Octane_BbportQuit0/Octane_BbportQuit0\0')
 
@@ -354,47 +360,55 @@ OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
 
 
 def build(game, dest, dump):
-    found = {}  # logical name (lower case) -> (archive, index, archive name)
-    archives = []
-    for name in ARCHIVES:
-        path = game / 'archives' / name
-        if not path.is_file():
-            continue
-        archive = Archive(path)
-        archives.append(archive)
-        for i in range(len(archive.names)):
-            logical = archive.logical(i)
-            low = logical.lower()
-            if any(d in low for d in DUMP):
-                target = dump / name / logical
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(i))
-            if (low in CHANGES or low in OPTIONAL) and low not in found:
-                found[low] = (archive, i, name)
-    if not set(CHANGES) <= set(found):
-        missing = ', '.join(sorted(set(CHANGES) - set(found)))
-        raise ValueError(f'not found: {missing}')
-    files = []
-    quit_files = []
-    for low, (archive, i, name) in found.items():
-        full, logical = archive.names[i]
-        entry = (full, logical, archive.infos[i][1] & ~0xFF)
-        if low in CHANGES:
-            files.append(entry + (CHANGES[low](archive.read(i)),))
+    with ExitStack() as stack:
+        found = {}  # logical name (lower case) -> (archive, index, archive name)
+        archives = []
+        for name in ARCHIVES:
+            path = game / 'archives' / name
+            if not path.is_file():
+                continue
+            archive = Archive(path)
+            stack.callback(archive.f.close)
+            archives.append(archive)
+            for i in range(len(archive.names)):
+                logical = archive.logical(i)
+                low = logical.lower()
+                if any(d in low for d in DUMP):
+                    target = dump / name / logical
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(i))
+                if (low in CHANGES or low in OPTIONAL) and low not in found:
+                    found[low] = (archive, i, name)
+        # Each edition ships a different language set; the graph/scripts and English are required.
+        required = {name for name in CHANGES if not name.endswith('.lng')}
+        required.add('ui/octane_options_menu_en.lng')
+        if not required <= set(found):
+            missing = ', '.join(sorted(required - set(found)))
+            raise ValueError(f'not found: {missing}')
+        files = []
+        for low in sorted(set(CHANGES) & set(found)):
+            archive, i, name = found[low]
+            full, logical = archive.names[i]
+            files.append((full, logical, archive.infos[i][1] & ~0xFF, CHANGES[low](archive.read(i))))
             print(f'Graphics tab: {logical} from {name}')
-        else:
+        # Quit is all-or-nothing for the languages present in this edition, after the Graphics files.
+        quit_required = {name for name in OPTIONAL if not name.endswith('.lng')}
+        quit_required.update(f'ui/octane_mainmenu_{lang}.lng' for lang in LABELS
+                             if f'ui/octane_options_menu_{lang}.lng' in found)
+        if quit_required <= set(found):
             try:
-                quit_files.append(entry + (OPTIONAL[low](archive.read(i)),))
+                quit_files = []
+                for low in sorted(quit_required):
+                    archive, i, _name = found[low]
+                    full, logical = archive.names[i]
+                    quit_files.append((full, logical, archive.infos[i][1] & ~0xFF,
+                                       OPTIONAL[low](archive.read(i))))
+                files += quit_files
+                print('Graphics tab: Quit Game button in the main menu')
             except (ValueError, KeyError, IndexError, struct.error, ImportError) as error:
-                # Only the button is left out: the Graphics tab does not depend on it.
                 print(f'Graphics tab: no Quit Game button ({type(error).__name__}: {error})')
-                quit_files = None
-                break
-    if quit_files and len(quit_files) == len(OPTIONAL):
-        files += quit_files
-        print('Graphics tab: Quit Game button in the main menu')
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    write_archive(dest, files, archives[0])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_archive(dest, files, archives[0])
 
 
 def enabled(settings):

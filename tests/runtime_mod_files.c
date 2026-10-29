@@ -25,6 +25,22 @@ static void content(const char *path,const char *expected) {
 }
 int main(int argc,char **argv) {
     assert(argc==4);runtime_file_configure(argv[1],argv[2]);
+    if (!strncmp(argv[3],"menus-",6)) {
+        int skip=!strcmp(argv[3],"menus-on");
+        for (size_t i=0;i<2;++i) {
+            const char *path=i ? "/app0/openinglogo.bk2" : "/app0/octane_intro_logo_atvi.bk2";
+            if (skip) assert(do_open(path,0,0)==-ENOENT);
+            else content(path,"INTRO");
+        }
+        content("/app0/race.bk2","RACE");
+        assert(do_open("/app0/archives/update3.pak",0,0)==-ENOENT);
+        runtime_graphics_tab_ready=1;
+        content("/app0/archives/update3.pak","MENUS");
+        char own[1024];snprintf(own,sizeof(own),"%s/archives/update3.pak",argv[1]);
+        FILE *f=fopen(own,"w");assert(f);assert(fputs("OWN",f)>=0);assert(!fclose(f));
+        content("/app0/archives/update3.pak","OWN");
+        return 0;
+    }
     if (!strcmp(argv[3],"broken")) { assert(do_open("/app0/data.txt",0,0)==-EIO);return 0; }
     int enabled=!strcmp(argv[3],"enabled");
     content("/app0/data.txt",enabled ? "MOD" : "SOURCE");
