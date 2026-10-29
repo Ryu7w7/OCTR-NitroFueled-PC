@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <vector>
 
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+
 namespace BbHeapSites {
 namespace {
 using u32 = std::uint32_t;
@@ -225,6 +227,15 @@ void InstallWrappers(bool counters) {
         return;
     }
     auto* slots = reinterpret_cast<u64*>(LibcBase);
+    // lab: LibcBase is another game's libc.prx table; in CTR nothing is mapped there (reading
+    // it crashed at the first sceGnmSubmitDone of the frame-overlap mode): not installed
+    static const bool mapped = runtime_memory_is_mapped(LibcBase, SlotPosixMemalign + 8) != 0;
+    if (!mapped) {
+        done = true;
+        std::printf("Heap sites: no libc malloc table at %#llx in this game; not installed\n",
+                    (unsigned long long)LibcBase);
+        return;
+    }
     if (slots[SlotMalloc / 8] == 0) {
         return; // libc.prx has not set up the game's malloc yet: tried again later
     }

@@ -18,6 +18,12 @@ namespace VideoCore {
 struct UffdImpl;
 struct SignalImpl;
 
+/// lab: a page manager owner other than the Rasterizer (the native renderer alone: BB_VK_NATIVE_ONLY).
+struct PageOwner {
+    bool (*on_write_fault)(VAddr addr);
+    bool (*is_mapped)(VAddr addr, u64 size);
+};
+
 class PageManager {
     // PAGE_SIZE and PAGE_BITS conflicts with machine/param.h definitions on freebsd!
     // Use the same page size as the tracker.
@@ -30,6 +36,7 @@ class PageManager {
 
 public:
     explicit PageManager(Vulkan::Rasterizer* rasterizer);
+    explicit PageManager(const PageOwner* owner);
     ~PageManager();
 
     /// bbport: the guest code behind write faults on tracked pages over the last window (frame

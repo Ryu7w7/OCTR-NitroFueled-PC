@@ -135,9 +135,11 @@ void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
 }
+extern void (*runtime_thread_started_hook)(const char *name);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    if (runtime_thread_started_hook) runtime_thread_started_hook(t->name);
 }
 static GuestThread *find_thread(void *handle) {
     GuestThread *found=NULL;
@@ -281,10 +283,13 @@ static void set_host_name(const char *name) {
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
 #endif
+/* bbport lab: the GPU side counts (and can sample) each guest thread by name (BbCpu). */
+void (*runtime_thread_started_hook)(const char *name) = 0;
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    if (runtime_thread_started_hook) runtime_thread_started_hook(t->name);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_kernel_thread_exit();
     runtime_thread_keys_cleanup();

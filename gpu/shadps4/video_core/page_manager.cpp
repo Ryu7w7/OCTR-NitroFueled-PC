@@ -106,6 +106,16 @@ std::array<ImageFaultSite, 256> image_fault_sites;
 
 void NoteFaultSite(void* context, VAddr address) {
     current_fault_rip = 0;
+    // lab: a diagnostic (the "Write fault sites" lines), BB_FAULT_SITES=1: it reads the stack
+    // through a system call at every fault, ~14% of the game's render thread while a menu video
+    // rewrote watched texture pages
+    static const bool on = [] {
+        const char* env = std::getenv("BB_FAULT_SITES");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return;
+    }
     const u64 rip = u64(Common::GetRip(context));
     const bool guest_code = rip >= GuestImage && rip < GuestImageEnd;
     u64 caller = 0;
@@ -273,6 +283,14 @@ struct PageManager::Impl {
     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / PAGES_PER_LOCK;
     inline static Vulkan::Rasterizer* rasterizer;
+    inline static const PageOwner* owner = nullptr; // lab: when there is no Rasterizer
+
+    static bool IsGpuThread() {
+        return rasterizer && rasterizer->IsGpuSideThread();
+    }
+    static bool Mapped(VAddr addr, u64 size) {
+        return rasterizer ? rasterizer->IsMapped(addr, size) : owner->is_mapped(addr, size);
+    }
 
     Impl() = default;
     virtual ~Impl() = default;
@@ -291,13 +309,13 @@ struct PageManager::Impl {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         NoteFaultSite(context, addr);
         // bbport: the draw recording thread handles its faults inline too (vk_draw_pipe.h).
-        const auto is_gpu_thread = rasterizer->IsGpuSideThread();
+        const auto is_gpu_thread = IsGpuThread();
         if (is_gpu_thread) {
             BbStats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
         }
         if (Common::IsWriteError(context)) {
             BbStats::Timer timer{BbStats::t_write_faults};
-            const bool handled = rasterizer->OnWriteFault(
+            const bool handled = !rasterizer ? owner->on_write_fault(addr) : rasterizer->OnWriteFault(
                 addr, is_gpu_thread,
                 u64(Common::GetRip(context)));
             current_fault_rip = 0;
@@ -305,7 +323,7 @@ struct PageManager::Impl {
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
             BbStats::Timer timer{BbStats::t_read_faults};
-            return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
+            return rasterizer && rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
         return false;
     }
@@ -340,7 +358,7 @@ struct PageManager::Impl {
         // Iterate requested pages
         const u64 aligned_addr = page << PM_PAGE_BITS;
         const u64 aligned_end = page_end << PM_PAGE_BITS;
-        if (!rasterizer->IsMapped(aligned_addr, aligned_end - aligned_addr)) {
+        if (!Mapped(aligned_addr, aligned_end - aligned_addr)) {
             LOG_WARNING(Render,
                         "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
                         aligned_addr, aligned_end);
@@ -591,7 +609,11 @@ public:
             const auto ptid = msg.arg.pagefault.feat.ptid;
             {
                 BbStats::Timer timer{BbStats::t_write_faults};
-                rasterizer->OnWriteFault(addr, rasterizer->IsGpuSideThreadId(ptid));
+                if (rasterizer) {
+                    rasterizer->OnWriteFault(addr, rasterizer->IsGpuSideThreadId(ptid));
+                } else {
+                    owner->on_write_fault(addr);
+                }
             }
             // Protect() clears with DONTWAKE (it may run for pages nobody waits on).
             uffdio_range wake{};
@@ -652,6 +674,12 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
     LOG_INFO(Config, "Memory tracking method: signals");
 #endif
     impl = std::make_unique<SignalImpl>(rasterizer_);
+}
+
+PageManager::PageManager(const PageOwner* owner_) {
+    // lab: signals only (userfaultfd's handler thread would do as well; not needed yet)
+    Impl::owner = owner_;
+    impl = std::make_unique<SignalImpl>(nullptr);
 }
 
 PageManager::~PageManager() = default;

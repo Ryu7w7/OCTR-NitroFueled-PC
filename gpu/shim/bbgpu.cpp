@@ -1,5 +1,8 @@
 #include "bbport_write_log.h"
 #include "bbport_gnm_hooks.h"
+#include "bbport_engine_probe.h"
+#include "bbport_native_vk.h"
+#include "bbport_native_memory.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
@@ -116,7 +119,11 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
     });
 }
 void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
-    if (rasterizer) rasterizer->InvalidateMemory(address, size);
+    if (rasterizer) {
+        rasterizer->InvalidateMemory(address, size);
+    } else {
+        BbMem::NoteWrite(address, size); // lab BB_VK_NATIVE_ONLY: decoded video frames
+    }
 }
 namespace {
 // bbport: the mapped region of the last lookup, per thread, valid for the mapping table generation
@@ -345,6 +352,8 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
 
 extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
     BbGnmHooks::PatchImage(image, size);
+    BbEngineProbe::PatchImage(image, size);
+    BbNativeVk::PatchImage(image, size);
 }
 
 extern "C" unsigned bbgpu_symbol_count(void) {

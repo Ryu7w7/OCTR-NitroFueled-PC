@@ -16,6 +16,8 @@
 #include "bbport_timeline.h"
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_pm4_census.h"
+#include "bbport_native_vk.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -133,6 +135,7 @@ void Liverpool::Process(std::stop_token stoken) {
 #endif
 
     while (!stoken.stop_requested()) {
+        BbPm4::PhaseLap(BbPm4::LabelsWait); // lab: where this thread's time goes
         // BB_HONEST_LABELS: fences (and GPU idle) wait for work not submitted yet. Submitted once
         // this thread has had nothing to do for 0.2 ms: the guest may be waiting for them.
         // BB_PIPE_SIGNALS: signals may still be on their way to the recording thread (tasks).
@@ -157,6 +160,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
             }
         }
+        BbPm4::PhaseLap(BbPm4::IdleWait);
         {
             const auto idle_start = std::chrono::steady_clock::now();
             BbTimeline::Note(BbTimeline::DecoderIdleBegin);
@@ -193,11 +197,13 @@ void Liverpool::Process(std::stop_token stoken) {
             break;
         }
 
+        BbPm4::PhaseLap(BbPm4::FrameStart);
         VideoCore::StartCapture();
 
         curr_qid = -1;
 
         while (num_submits || num_commands) {
+            BbPm4::PhaseLap(BbPm4::Commands);
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -216,7 +222,9 @@ void Liverpool::Process(std::stop_token stoken) {
                 last_decoded = task.address();
                 BbTimeline::Note(BbTimeline::DecodeBegin, curr_qid, decoded_total);
             }
+            BbPm4::PhaseLap(BbPm4::Decode);
             task.resume();
+            BbPm4::PhaseLap(BbPm4::AfterDecode);
 
             if (task.done()) {
                 task.destroy();
@@ -243,7 +251,9 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
+        BbPm4::PhaseLap(BbPm4::SubmitEnd);
         if (submit_done) {
+            BbPm4::PhaseLap(BbPm4::EndFlush);
             VideoCore::EndCapture();
             if (rasterizer && rasterizer->PipeSignals()) {
                 // BB_PIPE_SIGNALS: the frame's cache work runs on the recording thread after the
@@ -256,12 +266,14 @@ void Liverpool::Process(std::stop_token stoken) {
                     },
                     &none, 0);
             } else if (rasterizer) {
-                rasterizer->OnSubmit();
+                rasterizer->OnSubmit(); // lab: timed inside (BbPm4 phases "on submit: ...")
+                BbPm4::PhaseLap(BbPm4::OsFlush);
                 rasterizer->Flush();
             }
             submit_done = false;
         }
         // BB_SUBMIT_LOCK=decode: a frame ended after its submissions were all decoded.
+        BbPm4::PhaseLap(BbPm4::EndFrames);
         SignalDecodedFrames();
 
         // bbport: the guest takes GPU idle (sceGnmSubmitDone) as its work being done and frees
@@ -274,7 +286,9 @@ void Liverpool::Process(std::stop_token stoken) {
         // BB_PIPE_SIGNALS: the recording thread does both in order (a task below) instead.
         const bool pipe_signals = rasterizer && rasterizer->PipeSignals();
         if (rasterizer && !pipe_signals) {
+            BbPm4::PhaseLap(BbPm4::EndDrain);
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonSubmissionEnd);
+            BbPm4::PhaseLap(BbPm4::EndDeferred);
             rasterizer->WaitDeferredSignals();
         }
         // GPU idle only if nothing was submitted meanwhile: the drain and the deferred fences take
@@ -322,6 +336,7 @@ void Liverpool::Process(std::stop_token stoken) {
             rasterizer->SignalAfterGpu([this, generation] { SignalGpuIdle(generation); });
             continue;
         }
+        BbPm4::PhaseLap(BbPm4::EndIdle);
         bool idle;
         {
             std::scoped_lock lk{submit_mutex};
@@ -337,6 +352,25 @@ void Liverpool::Process(std::stop_token stoken) {
 }
 
 namespace {
+bool IsDrawOpcode(PM4ItOpcode op); // below
+
+/// lab: draw packets are skipped while the native renderer draws alone (BB_VK_ALONE=1).
+bool SkipAloneDraws() {
+    static const bool allowed = [] {
+        const char* env = std::getenv("BB_VK_ALONE_DRAWS");
+        return !(env && env[0] == '1');
+    }();
+    if (!allowed || !BbNativeVk::DrawsAlone()) { // alone only once the native renderer is up
+        return false;
+    }
+    static const bool logged = [] {
+        std::printf("GPU: draw packets skipped at decode (the native renderer draws alone; "
+                    "BB_VK_ALONE_DRAWS=1 prepares them again)\n");
+        return true;
+    }();
+    return logged;
+}
+
 /// bbport: packets the GPU command thread handles while the draw recording thread may still
 /// work on earlier draws (register state, draws it hands over, nested buffers). Every other
 /// packet first waits for that thread to run dry (Rasterizer::DrainDrawPipe).
@@ -718,6 +752,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        BbPm4::Count(BbPm4::ConstantEngine, static_cast<u32>(opcode));
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
         case PM4ItOpcode::Nop: {
@@ -1158,6 +1193,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     const std::size_t dcb_dwords = dcb.size();
     while (!dcb.empty()) {
+        BbPm4::Lap(BbPm4::Graphics, 0); // lab: time between packets
         ProcessCommands();
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
@@ -1198,7 +1234,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            BbPm4::Count(BbPm4::Graphics, static_cast<u32>(opcode));
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
+            // lab: the native renderer draws the frame alone (BB_VK_ALONE=1) and takes its draws
+            // from the engine; shadPS4 dropped its own draws only at the end of Rasterizer::Draw,
+            // after preparing them on its draw pipeline, and this thread spin-waited for that
+            // pipeline at every submission end. BB_VK_ALONE_DRAWS=1: prepared and dropped again.
+            if (IsDrawOpcode(opcode) && SkipAloneDraws()) {
+                dcb = NextPacket(dcb, count + 1);
+                continue;
+            }
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
                 !(opcode == PM4ItOpcode::DmaData &&
@@ -1844,6 +1889,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         CheckSubmittedCopy(*copy, seq); // diagnostic
     }
 
+    BbPm4::Lap(BbPm4::Graphics, -1); // lab: the queue is done (idle time is nobody's)
     FIBER_EXIT;
 }
 
@@ -1906,6 +1952,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        BbPm4::Count(BbPm4::Compute, static_cast<u32>(opcode));
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
