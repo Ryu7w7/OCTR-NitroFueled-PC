@@ -4433,14 +4433,15 @@ const char* PerfReportsText() {
 
 void PerfReportsPopup() {
     App& a = g_app;
-    static bool asked = false;
+    // Shown once per launcher start, after any other question: on the first start of a new folder
+    // the settings import opened in the same frame and replaced it, so it never came back.
+    static bool shown = false;
     const std::string v = a.game.Get("perf_reports");
-    if (!asked && v != "1" && v != "0" && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
-        asked = true;
+    if (!shown && v != "1" && v != "0" && !a.game_running && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
         ImGui::OpenPopup("perf_reports");
-    }
     if (!ImGui::BeginPopupModal("perf_reports", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         return;
+    shown = true;
     ImGui::TextUnformatted(T("¿Nos ayudas a mejorar OCTR?", "Help us improve OCTR?"));
     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
     ImGui::TextColored(kGrey, "%s", PerfReportsText());
@@ -6800,9 +6801,9 @@ void Frame() {
     SaveConfirmations();
     NickPopup();
     JoinServerPopup();
+    ImportPopup();  // before the diagnostic's question, which waits for it
     PerfReportsPopup();
     ShaderProgressPopup();
-    ImportPopup();
     if (a.confirm_clear_cache) {
         ImGui::OpenPopup("clear_cache");
         a.confirm_clear_cache = false;

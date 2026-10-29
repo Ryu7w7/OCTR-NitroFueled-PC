@@ -24,6 +24,19 @@ static void **initialize_type;
 static unsigned char **network;
 static _Thread_local int customized_selector;
 static int private_speed_selected;
+/* Every pick in the selector (set by runtime_room_mode.c; NULL in the unit test, which links this
+ * file alone): in a private match the host's choice goes to RyuNET for the players who join, and
+ * a player picking a mode stops following another host's room. */
+void (*runtime_online_mode_chosen)(int speed, int private_room);
+
+/* A joining player takes the room's mode from its host (runtime_room_mode.c): Speed or not,
+ * whatever this player picked in the selector. Their own choice stays for their own room. */
+void runtime_online_mode_adopt(int speed) {
+    runtime_speed_mode_set(speed != 0);
+    printf("Native Online mode: %s (the host's private room)\n", speed ? "Speed Mode" : "Normal Mode");
+}
+
+int runtime_online_mode_private_speed(void) { return private_speed_selected; }
 
 static void ABI set_season(void *manager, int mode) {
     /* Evaluated on each level load; retain the incoming theme for normal races. */
@@ -35,6 +48,9 @@ static int is_private(void) {
     private_state(&yes, &no);
     return yes != 0;
 }
+
+/* The game's own private-match flag (0 before the selector hook is installed). */
+int runtime_online_mode_in_private(void) { return private_state ? is_private() : 0; }
 
 static void ABI select_mode(void *sender, int index) {
     if (!customized_selector) {
@@ -56,6 +72,7 @@ static void ABI select_mode(void *sender, int index) {
      */
     const int speed = index == 1 && private;
     if (private) private_speed_selected = speed;
+    if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed, private);
     runtime_speed_mode_set(speed);
     printf("Native Online mode: %s\n", speed ? "Speed Mode" : index == 2 ? "Battle Mode" : "Normal Mode");
     original_choice(sender, index == 2 ? 1 : 0);

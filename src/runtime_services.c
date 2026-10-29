@@ -585,6 +585,7 @@ static void write_active_session(const char *session_id) {
 
 static void remove_active_session(void) {
     private_room_active(0);
+    runtime_room_mode_left(); /* stop following the host's room mode */
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
     const char *my_name = runtime_np_get_online_name();
@@ -1208,6 +1209,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         if (sid[0]) {
             record_session_member(sid);
             private_room_active(1);
+            runtime_room_mode_joined(sid); /* the host's mode (Speed) from RyuNET */
         }
         invite_session_joined(req->path);
         char resp[160];
@@ -1247,6 +1249,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         snprintf(sid, sizeof(sid), "cusa13795-session-%s", (my_name && *my_name) ? my_name : "host");
         write_active_session(sid);
         private_room_active(1);
+        runtime_room_mode_hosting(); /* the room's mode to RyuNET for the players who join */
         char resp[256];
         snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid);
         runtime_net_trace("webapi: created session -> %s", resp);
@@ -1264,6 +1267,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         if (sid[0]) {
             record_session_member(sid);
             private_room_active(1);
+            runtime_room_mode_joined(sid);
         }
         invite_session_joined(req->path);
         return strdup("{\"sessionId\":\"cusa13795-session\"}");

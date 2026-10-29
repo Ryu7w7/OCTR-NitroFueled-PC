@@ -28,14 +28,12 @@ EXTRA_ITEM_ASSETS = {
     CRATE_SPAWNER,
     'maps/Octane/T241_Assembly_Lane/T241_Assembly_Lane.igz',
 }
-# PUBLIC_SPEED_STEP_4: these legacy guards disable public-entry graph callbacks
-# in the Speed archive view. Once isolated public queues are validated, preserve
-# those graphs in the public Speed view (or remove this branch for both views).
-# Do not remove the guard as a substitute for server queue separation.
-PUBLIC_BUTTONS = (
-    'vsc/UI/Octane_Lobby_Main/Octane_Lobby_Main_MatchmakingButton.igz',
-    'vsc/UI/Octane_Online_Lobby/Octane_Online_Lobby_StartMatchMakingButton.igz',
-)
+# PUBLIC_SPEED_STEP_4: the Speed view used to strip the callbacks of the two public matchmaking
+# buttons (Octane_Lobby_Main_MatchmakingButton, Octane_Online_Lobby_StartMatchMakingButton). The
+# online menus are read once, in the private room, so after a Speed race the host could not start
+# a public search until going back to the title screen (OCTR v0.7 test). Public races stay Normal
+# without them: the Game Mode selector (runtime_online_mode.c) greys Speed out outside a private
+# room and turns it off on every public pick.
 
 
 def move_crates(blob, kind, tiger_gate=False, spawner=False):
@@ -113,17 +111,6 @@ def hide_hud(blob, root_name):
 
 def hide_wumpa_hud(blob):
     return hide_hud(blob, 'Octane_RacerHud_WumpaCount_asset_root')
-
-
-def block_public_button(blob):
-    igz = Igz(blob)
-    lists = [off for off, typ in igz.objects() if typ == 'igVscDelegatorList']
-    if len(lists) != 1 or igz.u32(lists[0] + 0x0c) != 2:
-        raise ValueError('unexpected matchmaking button script')
-    result = bytearray(blob)
-    at = igz.sections[1][1] + lists[0] + 0x0c
-    result[at:at + 4] = b'\0' * 4
-    return bytes(result)
 
 
 def nested_track_ranges(outer, workdir):
@@ -223,7 +210,7 @@ def prepare(game, output, base_patches):
         earlier.data.close()
         earlier._file.close()
     for pak in sorted((game / 'archives').glob('*.pak')):
-        if pak.name not in ('update.pak', 'juicedomain_onlinemenus.pak', *HUD_ARCHIVES) \
+        if pak.name not in ('update.pak', *HUD_ARCHIVES) \
                 and not re.match(r'^t\d{3}_.+\.pak$', pak.name, re.I):
             continue
         archive = Archive(pak)
@@ -258,10 +245,6 @@ def prepare(game, output, base_patches):
                     original = archive.extract(item)
                     selected[item['index']] = hide_hud(original, 'Octane_PowerUp_asset_root')
                     normal[item['index']] = original
-                elif path in PUBLIC_BUTTONS:
-                    original = archive.extract(item)
-                    selected[item['index']] = block_public_button(original)
-                    normal[item['index']] = original
             if selected:
                 if selected.keys() != normal.keys() or any(len(selected[i]) != len(normal[i]) for i in selected):
                     raise ValueError(f'Speed and normal asset layouts differ: {pak.name}')
@@ -271,7 +254,7 @@ def prepare(game, output, base_patches):
             archive._file.close()
     # The newest update is applied after per-track PAKs; duplicate track assets in
     # the base PAKs remain harmless, but the update entry is the one the game loads.
-    if len(tracks | nested_tracks) != 40 or 'juicedomain_onlinemenus.pak' not in entries:
+    if len(tracks | nested_tracks) != 40:
         raise ValueError(f'Speed test resources incomplete: {len(tracks | nested_tracks)}/40 tracks, '
                          f'{sorted(entries)}')
     normal_view, speed_view = current.copy(), current.copy()

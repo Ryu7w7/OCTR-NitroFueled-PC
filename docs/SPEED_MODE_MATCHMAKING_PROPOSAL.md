@@ -105,10 +105,10 @@ activate Speed assets in a public race. Keep Adventure, Arcade, Normal public
 races and Battle on their normal asset views.
 
 `scripts/speed_mode.py` already prepares paired normal/Speed archive views with
-matching offsets. `PUBLIC_SPEED_STEP_4` marks the legacy public-button guards:
-the Speed view currently strips callbacks from two public-entry graphs. Preserve
-those callbacks for the supported public Speed path once queue isolation works,
-then regenerate the overlays. Seasonal ghost/Golden Wumpa suppression already
+matching offsets. `PUBLIC_SPEED_STEP_4`: the Speed view no longer strips the
+callbacks of the two public-entry graphs (OCTR v0.7). The online menus were read
+once in the private room, which left public matchmaking blocked after a Speed race
+until the title screen; the Game Mode selector keeps public races Normal. Seasonal ghost/Golden Wumpa suppression already
 uses the shared active-race predicate; enabling confirmed public Speed there
 will cover both assets and seasonal mode. Keep the incoming theme intact for
 Normal/Battle, Adventure and Arcade.
