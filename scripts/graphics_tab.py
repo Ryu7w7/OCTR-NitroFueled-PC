@@ -36,7 +36,7 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 15  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 16  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -123,11 +123,11 @@ def relabel(text, label):
     while text[j] == 0:
         j -= 1
     start = text.rfind(b'\0', 0, j) + 1
-    room = k - start  # the old label and its padding
-    new = label.encode('utf-8') + b'\0'
-    if len(new) > room:
-        raise ValueError('label too long')
-    return text[:start] + new.ljust(room, b'\0') + text[k:]
+    # The new label takes the old one's bytes, padded with spaces: the string table is read one
+    # NUL-terminated string after another, so extra NULs would be empty strings that shift every
+    # later one (OCTR v0.7: the first tab, Gameplay, last in the table, showed "Crash Cove").
+    # Its terminator and alignment padding stay as they were, as in quit_labels.
+    return text[:start] + same_length(text[start:j + 1], label) + text[j + 1:]
 
 
 def write_archive(dest, files, template):

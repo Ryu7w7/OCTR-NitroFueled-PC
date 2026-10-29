@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <algorithm>
@@ -303,8 +304,15 @@ void Relabel(void* tab) {
         std::printf("Graphics tab: label: no navigation item\n");
         return;
     }
-    SetStringField(item + 0xe8, "Graphics");
-    SetText(*reinterpret_cast<u64*>(item + 0xf0), "Graphics");
+    // In the game's language (run.py's BB_LANGUAGE, PS4 language ids), as scripts/graphics_tab.py
+    // writes it in the four text tables of the USA edition.
+    const char* language = std::getenv("BB_LANGUAGE");
+    const int id = language ? std::atoi(language) : 1;
+    const char* label = (id == 3 || id == 20 || id == 7 || id == 17) ? "Gráficos"
+                        : (id == 2 || id == 22)                       ? "Graphismes"
+                                                                      : "Graphics";
+    SetStringField(item + 0xe8, label);
+    SetText(*reinterpret_cast<u64*>(item + 0xf0), label);
     std::printf("Graphics tab: labelled\n");
     std::fflush(stdout);
 }
