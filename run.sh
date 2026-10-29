@@ -105,6 +105,18 @@ if [[ -z ${BB_MOD_SESSION:-} ]]; then
     if [[ -n ${BB_MOD_SESSION:-} ]]; then mod_session_owner=1; fi
 fi
 original_game=$game
+# The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py, as in
+# run.py): an extra archive the runtime serves as archives/update3.pak. USA 1.21 only.
+unset BB_GRAPHICS_TAB_ARCHIVE
+if [[ $title_id == CUSA13795 && $app_version == 01.21 ]]; then
+    while IFS= read -r line; do
+        case $line in
+            archives/update3.pak=*) export BB_GRAPHICS_TAB_ARCHIVE=${line#archives/update3.pak=} ;;
+            ?*) echo "$line" ;;
+        esac
+    done < <("$PYTHON" scripts/graphics_tab.py "$game" --out "$out" --settings "$BB_CONFIG" ||
+             echo "Graphics tab: off (scripts/graphics_tab.py stopped)")
+fi
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
     --enabled "${BB_MODS_ENABLED:-1}")

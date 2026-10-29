@@ -2968,11 +2968,11 @@ void SettingsTab() {
              T("Sin los logos de Activision y Beenox al arrancar el juego.",
                "Skips the Activision and Beenox logo videos when the game starts."));
     GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
-               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
-               "Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
-               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+             T("El antialiasing 2x de la PS4: bordes más limpios en la vegetación. En NVIDIA ya no dibuja "
+               "líneas punteadas en el cielo; en otras gráficas puede que sí. Cuesta algo de "
+               "rendimiento en gráficas modestas. Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing: cleaner foliage edges. On NVIDIA it no longer draws dotted "
+               "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
                "Needs a restart."));
     {
         // temporal=off|fsr1|fsr3|dlss (bbport.ini): one upscaler at a time.

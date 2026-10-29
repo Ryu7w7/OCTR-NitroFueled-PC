@@ -32,6 +32,10 @@
 #endif
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c): run.py starts the game again
+// runtime_file.c: the relabelled menus (update3.pak, scripts/graphics_tab.py) reach the game
+// only when every hook below is in: a tab or a Quit Game button without its hook would open a
+// menu or a map that does not exist.
+extern "C" int runtime_graphics_tab_ready;
 
 namespace BbOverlay {
 void OpenMenu(); // bbport_overlay.h (Vulkan headers)
@@ -330,9 +334,6 @@ bool IsA(void* event, u64 meta_global) {
 std::mutex rows_mutex;
 std::vector<u64> rows; ///< the language items, in the order the list filled them
 
-/// The 16:9 picture (output_res) to go back to when ultrawide is turned off.
-int wide_return = BbSettings::OutputDefault;
-
 const char* OnOff(bool on) {
     return on ? "On" : "Off";
 }
@@ -350,36 +351,14 @@ std::string Row(std::size_t row, bool change) {
     const std::size_t index = kSetting[row];
     switch (index) {
     case 0: {
-        // 16:9: the render size (render_res); then the ultrawide pictures (output_res 4..6,
-        // aspect 21:9 or 32:9), which pick the aspect too.
-        constexpr int Wide = BbSettings::OutputCount - 4; // 2560x1080, 3440x1440, 5120x1440
-        const int count = BbSettings::RenderResCount + Wide;
-        int k = v.aspect_ratio.load() != 0 && v.output_res.load() >= 4
-                    ? BbSettings::RenderResCount + v.output_res.load() - 4
-                    : (v.render_res.load() < 0 ? 2 : v.render_res.load());
+        // OCTR v0.7: the internal resolution (render_res). Ultrawide has its own row (case 6):
+        // with it on, the monitor's size decides (bbport_settings.cpp RenderSizeNeedsRestart).
+        int k = v.render_res.load() < 0 ? 2 : v.render_res.load();
         if (change) {
-            k = (k + 1) % count;
-            if (k < BbSettings::RenderResCount) {
-                v.render_res = k;
-                if (v.aspect_ratio.load() != 0) {
-                    v.aspect_ratio = 0;
-                    v.output_res = wide_return; // the 16:9 picture from before ultrawide
-                }
-            } else {
-                if (v.output_res.load() < 4) {
-                    wide_return = v.output_res.load();
-                }
-                v.output_res = 4 + (k - BbSettings::RenderResCount);
-                v.aspect_ratio = v.output_res.load() == 6 ? 2 : 1;
-            }
+            k = (k + 1) % BbSettings::RenderResCount;
+            v.render_res = k;
         }
-        if (k < BbSettings::RenderResCount) {
-            std::snprintf(text, sizeof(text), "Resolution: %dp", BbSettings::RenderResHeights[k]);
-        } else {
-            const int o = 4 + (k - BbSettings::RenderResCount);
-            std::snprintf(text, sizeof(text), "Resolution: %dx%d", BbSettings::OutputWidths[o],
-                          BbSettings::OutputHeights[o]);
-        }
+        std::snprintf(text, sizeof(text), "Resolution: %dp", BbSettings::RenderResHeights[k]);
         return text;
     }
     case 1: {
@@ -432,25 +411,17 @@ std::string Row(std::size_t row, bool change) {
         return text;
     }
     case 6: {
-        // bbport.ini aspect_ratio: 16:9 (off), 21:9 or 32:9; the ultrawide support does the rest.
-        int aspect = std::clamp(v.aspect_ratio.load(), 0, 2);
-        if (change) {
-            aspect = (aspect + 1) % 3;
-            v.aspect_ratio = aspect;
+        // OCTR v0.7: this port's ultrawide (the game drawn at the monitor's own size), offered
+        // only on a monitor wider than 16:9, as in the settings menu.
+        if (!BbSettings::UltrawideAvailable()) {
+            return "Ultrawide: -";
         }
+        bool on = v.ultrawide.load() == 1;
         if (change) {
-            // The picture follows: 3440x1440 for 21:9, 5120x1440 for 32:9, the 16:9 one back.
-            if (aspect == 0) {
-                v.output_res = wide_return;
-            } else {
-                if (v.output_res.load() < 4) {
-                    wide_return = v.output_res.load();
-                }
-                v.output_res = aspect == 2 ? 6 : 5;
-            }
+            on = !on;
+            BbSettings::SetUltrawide(on);
         }
-        static const char* names[] = {"Off", "21:9", "32:9"};
-        std::snprintf(text, sizeof(text), "Ultrawide: %s", names[aspect]);
+        std::snprintf(text, sizeof(text), "Ultrawide: %s", OnOff(on));
         return text;
     }
     default:
@@ -466,8 +437,7 @@ bool NeedsRestart() {
         restart |= v.game_patches[g] != v.startup_game_patches[g];
     }
     restart |= v.render_res != v.startup_render_res || v.temporal != v.startup_temporal ||
-               v.dlss_quality != v.startup_dlss_quality || v.aspect_ratio != v.startup_aspect_ratio ||
-               v.output_res != v.startup_output_res;
+               v.dlss_quality != v.startup_dlss_quality || v.output_res != v.startup_output_res;
     return restart;
 }
 
@@ -700,9 +670,15 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
     if (!BbSettings::Get().graphics_tab) {
         return;
     }
-    if (Open2 + sizeof(Open2Prologue) > size ||
+    // All five functions are checked before any is changed (OCTR v0.7): another edition or
+    // update gets none of the hooks, and the menus stay the game's own.
+    if (StringPool + 8 > size ||
         std::memcmp(base + RegionQueryCall, RegionQueryCode, sizeof(RegionQueryCode)) ||
-        std::memcmp(base + Open2, Open2Prologue, sizeof(Open2Prologue))) {
+        std::memcmp(base + Open2, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + Hide, PlaceablePrologue, sizeof(PlaceablePrologue)) ||
+        std::memcmp(base + Show, PlaceablePrologue, sizeof(PlaceablePrologue)) ||
+        std::memcmp(base + LanguageItemEvent, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue))) {
         std::printf("Graphics tab: unexpected game code, off\n");
         return;
     }
@@ -714,26 +690,24 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
     image = base;
     open2_original = Detour(stubs, Open2, Open2Prologue, sizeof(Open2Prologue),
                             reinterpret_cast<const void*>(&Open2Hook));
-    if (!std::memcmp(base + Hide, PlaceablePrologue, sizeof(PlaceablePrologue)) &&
-        !std::memcmp(base + Show, PlaceablePrologue, sizeof(PlaceablePrologue))) {
-        hide_original = Detour(stubs + 64, Hide, PlaceablePrologue, sizeof(PlaceablePrologue),
-                               reinterpret_cast<const void*>(&HideHook));
-        show_original = Detour(stubs + 128, Show, PlaceablePrologue, sizeof(PlaceablePrologue),
-                               reinterpret_cast<const void*>(&ShowHook));
-    }
-    if (!std::memcmp(base + LanguageItemEvent, Open2Prologue, sizeof(Open2Prologue))) {
-        language_item_original = Detour(stubs + 192, LanguageItemEvent, Open2Prologue,
-                                        sizeof(Open2Prologue),
-                                        reinterpret_cast<const void*>(&LanguageItemHook));
-    }
-    if (!std::memcmp(base + LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue))) {
-        load_map_original = Detour(stubs + 256, LoadMap2, PlaceablePrologue,
-                                   sizeof(PlaceablePrologue),
-                                   reinterpret_cast<const void*>(&LoadMapHook));
-    }
+    hide_original = Detour(stubs + 64, Hide, PlaceablePrologue, sizeof(PlaceablePrologue),
+                           reinterpret_cast<const void*>(&HideHook));
+    show_original = Detour(stubs + 128, Show, PlaceablePrologue, sizeof(PlaceablePrologue),
+                           reinterpret_cast<const void*>(&ShowHook));
+    language_item_original = Detour(stubs + 192, LanguageItemEvent, Open2Prologue,
+                                    sizeof(Open2Prologue),
+                                    reinterpret_cast<const void*>(&LanguageItemHook));
+    load_map_original = Detour(stubs + 256, LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue),
+                               reinterpret_cast<const void*>(&LoadMapHook));
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), stubs, 320);
 #endif
+    if (!open2_original || !hide_original || !show_original || !language_item_original ||
+        !load_map_original) {
+        std::printf("Graphics tab: unexpected game code, the menus stay as they are\n");
+        return;
+    }
+    runtime_graphics_tab_ready = 1;
     std::printf("Graphics tab: on (Options menu, fifth tab)\n");
 }
 

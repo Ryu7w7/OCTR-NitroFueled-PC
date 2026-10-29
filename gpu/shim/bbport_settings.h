@@ -124,11 +124,13 @@ struct Values {
     /// Experimental (STATUS.md, issue #2). Applies at once. BB_ASYNC_PIPELINES overrides it.
     std::atomic<bool> async_pipelines{false};
     /// SacredFire: the game's 2x MSAA (G-buffer and forward passes; foliage's alpha edges need
-    /// it). On by default: the dotted lines single-sample colour over the 2x depth buffer drew on
-    /// NVIDIA (GitHub issues #16/#18) are fixed by truncating coverage in mixed-sample pipelines
-    /// (vk_graphics_pipeline.cpp, VK_NV_coverage_reduction_mode). Read once at start;
+    /// it). The dotted lines single-sample colour over the 2x depth buffer drew on NVIDIA (GitHub
+    /// issues #16/#18) are fixed by truncating coverage in mixed-sample pipelines
+    /// (vk_graphics_pipeline.cpp, VK_NV_coverage_reduction_mode; AMD has
+    /// VK_AMD_mixed_attachment_samples). Still off by default (v0.7): it costs frames on weak GPUs
+    /// and GPUs with neither extension (Intel) would draw the lines again. Read once at start;
     /// BB_NO_MSAA=1/0 overrides it. AmdGpu::BbNoMsaa() is the switch the renderer reads.
-    std::atomic<bool> msaa{true};
+    std::atomic<bool> msaa{false};
     /// The game's Options menu gets a "Graphics" tab (the hidden Language Select tab, relabelled
     /// by scripts/graphics_tab.py) with the port's settings. Read once at start.
     std::atomic<bool> graphics_tab{true};

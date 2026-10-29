@@ -155,6 +155,22 @@ void runtime_file_configure(const char *app0,const char *user) {
     }
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
+/* The Options menu's Graphics tab and the main menu's Quit Game (PR #117): their relabelled menu
+ * files are an extra archive, archives/update3.pak (scripts/graphics_tab.py, path in
+ * BB_GRAPHICS_TAB_ARCHIVE), which the game loads after update2.pak. Served here instead of a copy
+ * of the game folder, and only when the engine hooks are in (gpu/shim/bbport_graphics_tab.cpp
+ * sets the flag) and the game has no update3.pak of its own. */
+int runtime_graphics_tab_ready;
+static void graphics_tab_archive(const char *guest,char *out,size_t size) {
+    if (!__atomic_load_n(&runtime_graphics_tab_ready,__ATOMIC_ACQUIRE) ||
+        strcasecmp(guest,"/app0/archives/update3.pak")) return;
+    const char *archive=getenv("BB_GRAPHICS_TAB_ARCHIVE");
+    struct stat s;
+    if (!archive || !*archive || !stat(out,&s) || stat(archive,&s)) return;
+    if ((size_t)snprintf(out,size,"%s",archive)>=size) return;
+    static int logged;
+    if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) printf("Runtime: Graphics tab menus from %s\n",archive);
+}
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
@@ -176,6 +192,7 @@ static int translate(const char *guest,char *out,size_t size) {
         int redirected=mod_file_translate(buffer,out,size);
         if (redirected<0) result=-redirected;
     }
+    if (!result) graphics_tab_archive(buffer,out,size);
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;

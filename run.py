@@ -774,15 +774,22 @@ def main():
     original_game = game.resolve()
     import mod_file_paths
     mod_file_paths.configure(env)
-    # The Options menu's Graphics tab (scripts/graphics_tab.py): relabelled menu files.
-    replace = []
-    for line in run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
-                           capture=True).stdout.splitlines():
-        if line.startswith('archives/') and '=' in line:
-            replace += ['--replace', line.strip()]
-        elif line.strip():
-            say(line.strip())
-    game = Path(run_python('scripts/mods.py', game, '--out', out, *replace,
+    # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py): an
+    # extra archive of relabelled menus, served by the runtime as archives/update3.pak (no copy of
+    # the game folder). USA 1.21 only: the engine hooks are that executable's
+    # (gpu/shim/bbport_graphics_tab.cpp), and without them the runtime leaves the menus alone.
+    env.pop('BB_GRAPHICS_TAB_ARCHIVE', None)
+    if (title_id, app_version) == ('CUSA13795', '01.21'):
+        result = run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
+                            capture=True, check=False)
+        for line in result.stdout.splitlines():
+            if line.startswith('archives/update3.pak='):
+                env['BB_GRAPHICS_TAB_ARCHIVE'] = line.partition('=')[2].strip()
+            elif line.strip():
+                say(line.strip())
+        if result.returncode:
+            say(f'Graphics tab: off (scripts/graphics_tab.py stopped with code {result.returncode})')
+    game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).stdout.strip())
