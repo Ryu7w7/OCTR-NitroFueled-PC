@@ -2132,6 +2132,12 @@ void OpenMenu() {
     open_request = true;
 }
 
+void QuitGame() {
+    SDL_Event quit{};
+    quit.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&quit);
+}
+
 bool MenuOpen() {
     return menu_open;
 }

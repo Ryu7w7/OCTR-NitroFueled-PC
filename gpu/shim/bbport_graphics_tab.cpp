@@ -35,6 +35,7 @@ extern "C" void runtime_restart(void); // bb-probe (probe.c): run.py starts the 
 
 namespace BbOverlay {
 void OpenMenu(); // bbport_overlay.h (Vulkan headers)
+void QuitGame();
 }
 
 namespace BbGraphicsTab {
@@ -61,6 +62,11 @@ constexpr char Project[] = "Octane_Options_LanguageSelect";
 /// fifth tab's placeable (ui/Octane_Options_Menu.igz, 1.21 update) has the position (40, 420)
 /// at +0x60, which no other placeable there has.
 constexpr u64 Hide = 0x26f6b0, Show = 0x26f740;
+/// CLoadMapNodes::loadMap2_VSC (same prologue): the main menu's Quit Game button (Wireless) asks
+/// for this map (scripts/graphics_tab.py renames its Octane_OnlineLobby): the game quits instead.
+/// Its first pin is the map name, read with 0x478290 (out string, context, pin, default 0x1df8d10).
+constexpr u64 LoadMap2 = 0x11345b0, StringPin = 0x478290, StringPinDefault = 0x1df8d10;
+constexpr char QuitMap[] = "Octane_BbportQuit0";
 constexpr u8 PlaceablePrologue[13] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41,
                                       0x56, 0x53, 0x48, 0x83, 0xec, 0x18};
 constexpr float TabPosition[2] = {40.0f, 420.0f};
@@ -579,8 +585,51 @@ u64 PS4_SYSV_ABI LanguageItemHook(void* self, void* event, void* a2, void* a3, v
     return result;
 }
 
+VscFn load_map_original = nullptr;
+using StringPinFn = void PS4_SYSV_ABI (*)(char**, void*, void*, const void*);
+
+u64 PS4_SYSV_ABI LoadMapHook(void* context, void* args, void* a2, void* a3, void* a4, void* a5) {
+    void** pins = nullptr;
+    void* pin = nullptr;
+    char* map = nullptr;
+    if (args && SafeRead(static_cast<u8*>(args) + 0x10, &pins, sizeof(pins)) && pins &&
+        SafeRead(pins, &pin, sizeof(pin)) && pin) {
+        reinterpret_cast<StringPinFn>(image + StringPin)(&map, context, pin, image + StringPinDefault);
+    }
+    const bool quit = map && std::strstr(map, QuitMap);
+    std::printf("Graphics tab: load map %s%s\n", map ? map : "(none)", quit ? " -> quit" : "");
+    std::fflush(stdout);
+    DropString(map);
+    if (quit) {
+        BbOverlay::QuitGame();
+        return 0;
+    }
+    return load_map_original(context, args, a2, a3, a4, a5);
+}
+
+/// The main menu's Quit Game button: its navigation item's text (_itemText, +0xe8).
+bool IsQuitButton(void* object) {
+    const u64 item = object ? NavItem(reinterpret_cast<u64>(object)) : 0;
+    u64 text = 0;
+    char label[16] = {};
+    if (!item || !SafeRead(reinterpret_cast<void*>(item + 0xe8), &text, 8) || !text ||
+        !SafeRead(reinterpret_cast<void*>(text), label, sizeof(label) - 1)) {
+        return false;
+    }
+    for (const char* name : {"Quit Game", "Quitter", "Salir", "Sair"}) {
+        if (!std::strncmp(label, name, std::strlen(name))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 u64 PS4_SYSV_ABI HideHook(void* context, void* args, void* a2, void* a3, void* a4, void* a5) {
     void* object = Input(context, args);
+    if (IsQuitButton(object)) {
+        std::printf("Graphics tab: Quit Game button kept shown\n");
+        return 0;
+    }
     if (IsTab(object, "hide")) {
         Relabel(object);
         return 0; // stays shown
@@ -677,8 +726,13 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
                                         sizeof(Open2Prologue),
                                         reinterpret_cast<const void*>(&LanguageItemHook));
     }
+    if (!std::memcmp(base + LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue))) {
+        load_map_original = Detour(stubs + 256, LoadMap2, PlaceablePrologue,
+                                   sizeof(PlaceablePrologue),
+                                   reinterpret_cast<const void*>(&LoadMapHook));
+    }
 #ifdef _WIN32
-    FlushInstructionCache(GetCurrentProcess(), stubs, 256);
+    FlushInstructionCache(GetCurrentProcess(), stubs, 320);
 #endif
     std::printf("Graphics tab: on (Options menu, fifth tab)\n");
 }
