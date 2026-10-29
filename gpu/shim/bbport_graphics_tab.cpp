@@ -330,9 +330,6 @@ bool IsA(void* event, u64 meta_global) {
 std::mutex rows_mutex;
 std::vector<u64> rows; ///< the language items, in the order the list filled them
 
-/// The 16:9 picture (output_res) to go back to when ultrawide is turned off.
-int wide_return = BbSettings::OutputDefault;
-
 const char* OnOff(bool on) {
     return on ? "On" : "Off";
 }
@@ -350,36 +347,13 @@ std::string Row(std::size_t row, bool change) {
     const std::size_t index = kSetting[row];
     switch (index) {
     case 0: {
-        // 16:9: the render size (render_res); then the ultrawide pictures (output_res 4..6,
-        // aspect 21:9 or 32:9), which pick the aspect too.
-        constexpr int Wide = BbSettings::OutputCount - 4; // 2560x1080, 3440x1440, 5120x1440
-        const int count = BbSettings::RenderResCount + Wide;
-        int k = v.aspect_ratio.load() != 0 && v.output_res.load() >= 4
-                    ? BbSettings::RenderResCount + v.output_res.load() - 4
-                    : (v.render_res.load() < 0 ? 2 : v.render_res.load());
+        // The render size (render_res); the ultrawide picture is the Ultrawide row's.
+        int k = v.render_res.load() < 0 ? 2 : v.render_res.load();
         if (change) {
-            k = (k + 1) % count;
-            if (k < BbSettings::RenderResCount) {
-                v.render_res = k;
-                if (v.aspect_ratio.load() != 0) {
-                    v.aspect_ratio = 0;
-                    v.output_res = wide_return; // the 16:9 picture from before ultrawide
-                }
-            } else {
-                if (v.output_res.load() < 4) {
-                    wide_return = v.output_res.load();
-                }
-                v.output_res = 4 + (k - BbSettings::RenderResCount);
-                v.aspect_ratio = v.output_res.load() == 6 ? 2 : 1;
-            }
+            k = (k + 1) % BbSettings::RenderResCount;
+            v.render_res = k;
         }
-        if (k < BbSettings::RenderResCount) {
-            std::snprintf(text, sizeof(text), "Resolution: %dp", BbSettings::RenderResHeights[k]);
-        } else {
-            const int o = 4 + (k - BbSettings::RenderResCount);
-            std::snprintf(text, sizeof(text), "Resolution: %dx%d", BbSettings::OutputWidths[o],
-                          BbSettings::OutputHeights[o]);
-        }
+        std::snprintf(text, sizeof(text), "Resolution: %dp", BbSettings::RenderResHeights[k]);
         return text;
     }
     case 1: {
@@ -432,25 +406,17 @@ std::string Row(std::size_t row, bool change) {
         return text;
     }
     case 6: {
-        // bbport.ini aspect_ratio: 16:9 (off), 21:9 or 32:9; the ultrawide support does the rest.
-        int aspect = std::clamp(v.aspect_ratio.load(), 0, 2);
-        if (change) {
-            aspect = (aspect + 1) % 3;
-            v.aspect_ratio = aspect;
+        // bbport.ini ultrawide: the port's own ultrawide support, at the monitor's size; only
+        // offered on a monitor wider than 16:9.
+        if (!BbSettings::UltrawideAvailable()) {
+            return "Ultrawide: No wide monitor";
         }
+        bool on = v.ultrawide.load() == 1;
         if (change) {
-            // The picture follows: 3440x1440 for 21:9, 5120x1440 for 32:9, the 16:9 one back.
-            if (aspect == 0) {
-                v.output_res = wide_return;
-            } else {
-                if (v.output_res.load() < 4) {
-                    wide_return = v.output_res.load();
-                }
-                v.output_res = aspect == 2 ? 6 : 5;
-            }
+            on = !on;
+            BbSettings::SetUltrawide(on);
         }
-        static const char* names[] = {"Off", "21:9", "32:9"};
-        std::snprintf(text, sizeof(text), "Ultrawide: %s", names[aspect]);
+        std::snprintf(text, sizeof(text), "Ultrawide: %s", OnOff(on));
         return text;
     }
     default:
@@ -466,7 +432,7 @@ bool NeedsRestart() {
         restart |= v.game_patches[g] != v.startup_game_patches[g];
     }
     restart |= v.render_res != v.startup_render_res || v.temporal != v.startup_temporal ||
-               v.dlss_quality != v.startup_dlss_quality || v.aspect_ratio != v.startup_aspect_ratio ||
+               v.dlss_quality != v.startup_dlss_quality || (v.ultrawide.load() == 1) != v.startup_ultrawide ||
                v.output_res != v.startup_output_res;
     return restart;
 }
