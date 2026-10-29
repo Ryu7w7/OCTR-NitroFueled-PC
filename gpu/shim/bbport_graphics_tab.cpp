@@ -88,15 +88,12 @@ std::string last_opened;
 
 bool SafeRead(const void* address, void* out, std::size_t size) {
 #ifdef _WIN32
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(address, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
-        static_cast<const u8*>(address) + size >
-            static_cast<const u8*>(mbi.BaseAddress) + mbi.RegionSize) {
-        return false;
-    }
-    std::memcpy(out, address, size);
-    return true;
+    // ReadProcessMemory on this process: a fault-safe copy for one system call. A VirtualQuery
+    // before each read took about 0.7 ms here (the guest's address space is a few huge regions),
+    // so opening a menu (hundreds of reads in Name) stalled 330-375 ms and each hidden placeable
+    // 20-30 ms (OCTR v0.7 test, measured).
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), address, out, size, &copied) && copied == size;
 #else
     iovec local{out, size}, remote{const_cast<void*>(address), size};
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == ssize_t(size);
