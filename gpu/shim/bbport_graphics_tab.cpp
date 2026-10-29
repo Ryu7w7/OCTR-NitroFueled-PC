@@ -81,6 +81,8 @@ using GetterFn = void PS4_SYSV_ABI (*)(void*, void*, void**);
 using ReleaseFn = void PS4_SYSV_ABI (*)(void*);
 
 u8* image = nullptr;
+// EU 1.21 moves the later functions by 16 bytes and this read-only default by 64.
+u64 code_shift = 0, string_pin_default = StringPinDefault;
 VscFn open2_original = nullptr, hide_original = nullptr, show_original = nullptr;
 std::atomic<int> open_logged{0}, placeable_logged{0};
 std::mutex last_mutex;
@@ -109,7 +111,7 @@ void* Input(void* context, void* args) {
         SafeRead(pins, &pin, sizeof(pin)) && pin) {
         reinterpret_cast<GetterFn>(image + PinGetter)(context, pin, &object);
         if (object) {
-            reinterpret_cast<ReleaseFn>(image + Release)(object);
+            reinterpret_cast<ReleaseFn>(image + (Release - code_shift))(object);
         }
     }
     return object;
@@ -267,12 +269,12 @@ void* Pool() {
 }
 
 char* GameString(const char* text) {
-    return reinterpret_cast<InternFn>(image + Intern)(Pool(), text);
+    return reinterpret_cast<InternFn>(image + (Intern - code_shift))(Pool(), text);
 }
 
 void DropString(char* string) {
     if (string) {
-        reinterpret_cast<UnrefFn>(image + Unref)(Pool(), string - 0x10);
+        reinterpret_cast<UnrefFn>(image + (Unref - code_shift))(Pool(), string - 0x10);
     }
 }
 
@@ -302,11 +304,13 @@ void Relabel(void* tab) {
         return;
     }
     // In the game's language (run.py's BB_LANGUAGE, PS4 language ids), as scripts/graphics_tab.py
-    // writes it in the four text tables of the USA edition.
+    // writes it in the available USA/EU text tables.
     const char* language = std::getenv("BB_LANGUAGE");
     const int id = language ? std::atoi(language) : 1;
     const char* label = (id == 3 || id == 20 || id == 7 || id == 17) ? "Gráficos"
                         : (id == 2 || id == 22)                       ? "Graphismes"
+                        : id == 4                                    ? "Grafik"
+                        : id == 5                                    ? "Grafica"
                                                                       : "Graphics";
     SetStringField(item + 0xe8, label);
     SetText(*reinterpret_cast<u64*>(item + 0xf0), label);
@@ -577,7 +581,7 @@ u64 PS4_SYSV_ABI LoadMapHook(void* context, void* args, void* a2, void* a3, void
     char* map = nullptr;
     if (args && SafeRead(static_cast<u8*>(args) + 0x10, &pins, sizeof(pins)) && pins &&
         SafeRead(pins, &pin, sizeof(pin)) && pin) {
-        reinterpret_cast<StringPinFn>(image + StringPin)(&map, context, pin, image + StringPinDefault);
+        reinterpret_cast<StringPinFn>(image + StringPin)(&map, context, pin, image + string_pin_default);
     }
     const bool quit = map && std::strstr(map, QuitMap);
     std::printf("Graphics tab: load map %s%s\n", map ? map : "(none)", quit ? " -> quit" : "");
@@ -681,15 +685,36 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
     if (!BbSettings::Get().graphics_tab) {
         return;
     }
-    // All five functions are checked before any is changed (OCTR v0.7): another edition or
-    // update gets none of the hooks, and the menus stay the game's own.
-    if (StringPool + 8 > size ||
-        std::memcmp(base + RegionQueryCall, RegionQueryCode, sizeof(RegionQueryCode)) ||
-        std::memcmp(base + Open2, Open2Prologue, sizeof(Open2Prologue)) ||
+    // Recognize both 1.21 layouts before installing anything; helpers must match too.
+    if (StringPool + 8 > size) {
+        std::printf("Graphics tab: image too small, off\n");
+        return;
+    }
+    u64 shift;
+    if (!std::memcmp(base + RegionQueryCall, RegionQueryCode, sizeof(RegionQueryCode))) {
+        shift = 0;
+    } else if (!std::memcmp(base + RegionQueryCall - 0x10, RegionQueryCode, sizeof(RegionQueryCode))) {
+        shift = 0x10;
+    } else {
+        std::printf("Graphics tab: unknown region query, off\n");
+        return;
+    }
+    const u64 pin_default = shift ? 0x1df8cd0 : StringPinDefault;
+    const u8* default_lea = base + LoadMap2 - shift + 0x3e;
+    s32 displacement;
+    std::memcpy(&displacement, default_lea + 3, sizeof(displacement));
+    if (std::memcmp(base + Open2 - shift, Open2Prologue, sizeof(Open2Prologue)) ||
         std::memcmp(base + Hide, PlaceablePrologue, sizeof(PlaceablePrologue)) ||
         std::memcmp(base + Show, PlaceablePrologue, sizeof(PlaceablePrologue)) ||
-        std::memcmp(base + LanguageItemEvent, Open2Prologue, sizeof(Open2Prologue)) ||
-        std::memcmp(base + LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue))) {
+        std::memcmp(base + LanguageItemEvent - shift, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + LoadMap2 - shift, PlaceablePrologue, sizeof(PlaceablePrologue)) ||
+        std::memcmp(base + PinGetter, "\x48\x89\xf8\x48\x85\xf6\x74\x12", 8) ||
+        std::memcmp(base + StringPin, "\x55\x48\x89\xe5\x53\x50\x48\x89\xf0", 9) ||
+        std::memcmp(base + Release - shift, "\x48\x85\xff\x74\x05\xe9", 6) ||
+        std::memcmp(base + Intern - shift, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + Unref - shift, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(default_lea, "\x48\x8d\x0d", 3) ||
+        LoadMap2 - shift + 0x45 + displacement != pin_default) {
         std::printf("Graphics tab: unexpected game code, off\n");
         return;
     }
@@ -699,16 +724,18 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
         return;
     }
     image = base;
-    open2_original = Detour(stubs, Open2, Open2Prologue, sizeof(Open2Prologue),
+    code_shift = shift;
+    string_pin_default = pin_default;
+    open2_original = Detour(stubs, Open2 - shift, Open2Prologue, sizeof(Open2Prologue),
                             reinterpret_cast<const void*>(&Open2Hook));
     hide_original = Detour(stubs + 64, Hide, PlaceablePrologue, sizeof(PlaceablePrologue),
                            reinterpret_cast<const void*>(&HideHook));
     show_original = Detour(stubs + 128, Show, PlaceablePrologue, sizeof(PlaceablePrologue),
                            reinterpret_cast<const void*>(&ShowHook));
-    language_item_original = Detour(stubs + 192, LanguageItemEvent, Open2Prologue,
+    language_item_original = Detour(stubs + 192, LanguageItemEvent - shift, Open2Prologue,
                                     sizeof(Open2Prologue),
                                     reinterpret_cast<const void*>(&LanguageItemHook));
-    load_map_original = Detour(stubs + 256, LoadMap2, PlaceablePrologue, sizeof(PlaceablePrologue),
+    load_map_original = Detour(stubs + 256, LoadMap2 - shift, PlaceablePrologue, sizeof(PlaceablePrologue),
                                reinterpret_cast<const void*>(&LoadMapHook));
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), stubs, 320);
@@ -719,7 +746,7 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
         return;
     }
     runtime_graphics_tab_ready = 1;
-    std::printf("Graphics tab: on (Options menu, fifth tab)\n");
+    std::printf("Graphics tab: on (Options menu, fifth tab; %s 1.21)\n", shift ? "EU" : "USA");
 }
 
 } // namespace BbGraphicsTab

@@ -106,9 +106,9 @@ if [[ -z ${BB_MOD_SESSION:-} ]]; then
 fi
 original_game=$game
 # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py, as in
-# run.py): an extra archive the runtime serves as archives/update3.pak. USA 1.21 only.
+# run.py): an extra archive the runtime serves as archives/update3.pak. USA/EU 1.21.
 unset BB_GRAPHICS_TAB_ARCHIVE
-if [[ $title_id == CUSA13795 && $app_version == 01.21 ]]; then
+if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
     while IFS= read -r line; do
         case $line in
             archives/update3.pak=*) export BB_GRAPHICS_TAB_ARCHIVE=${line#archives/update3.pak=} ;;
@@ -183,7 +183,7 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
 fi
 unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
-    if [[ $title_id == CUSA13795 ]]; then
+    if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
         speed_bases=()
         IFS='|' read -r -a speed_existing <<< "${BB_ARCHIVE_PATCHES:-}"
         for speed_patch in "${speed_existing[@]}"; do

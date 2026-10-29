@@ -16,28 +16,34 @@ from patches import load_segments
 
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
 LABEL_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect_en.lng'
-GRAPH_SHA256 = '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47'
-# The same asset after a 21:9 or 32:9 layout (widescreen.py): scripts/widescreen_data's
-# nitro-mod.json patched_sha256 for update2.pak's ui/Octane_Lobby_ModeSelect.igz #1549, identical
-# for both layouts. The native selector only adds option-list entries at fixed offsets, so it
-# still applies cleanly on top of the layout's own menu/HUD fix to the same graph.
-GRAPH_WIDESCREEN_SHA256 = 'a23cd1ef8903e50161c2d667e59f85a51fdccecdd913a21d54461f5e693966e3'
+GRAPH_SHA256 = {
+    '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
+    'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
+    # The same asset after a 21:9 or 32:9 layout (widescreen.py): the patched_sha256 of
+    # scripts/widescreen_data's nitro-mod.json (USA) and eu/assets.json (EU), identical for every
+    # layout of an edition. The layouts change two byte runs away from the option lists rebuild()
+    # edits, so the selector goes on top of their version.
+    'a23cd1ef8903e50161c2d667e59f85a51fdccecdd913a21d54461f5e693966e3',  # USA 1.21, widescreen
+    'e488136a8c56e367e49e07bdfa42bf7d4c88360893ef135a7ee83eb1e0afa5fc',  # EU 1.21, widescreen
+}
 # Native selector's selected-index event adapter, including its RIP-relative LEA.
 HOOK_PATTERN = re.compile(bytes.fromhex(
-    '55 48 89 e5 41 57 41 56 53 50 48 8d 05 97 a1 87 01'), re.DOTALL)
+    '55 48 89 e5 41 57 41 56 53 50 48 8d 05') + b'[\x97\xa7]' +
+    bytes.fromhex('a1 87 01'), re.DOTALL)
 
 
 def hook_site(elf):
     hits = [v + m.start() for v, off, size in load_segments(elf)
-            for m in HOOK_PATTERN.finditer(elf[off:off + size])]
-    if hits != [0x1277e00]:
+            for m in HOOK_PATTERN.finditer(elf[off:off + size])
+            if v + m.start() + 17 + struct.unpack_from('<i', m.group(), 13)[0] == 0x2af1fa8]
+    if len(hits) != 1 or hits[0] not in (0x1277e00, 0x1277df0):
         raise ValueError('native Online selector adapter is not uniquely recognized')
     return hits[0]
 
 
 def rebuild(blob):
-    if hashlib.sha256(blob).hexdigest() not in (GRAPH_SHA256, GRAPH_WIDESCREEN_SHA256):
-        raise ValueError('native Online mode selector is not the supported USA 1.21 asset')
+    if hashlib.sha256(blob).hexdigest() not in GRAPH_SHA256:
+        raise ValueError('native Online mode selector is not the supported USA/EU 1.21 asset')
     g = Igz(blob)
     # The native selector consumes the same option/availability lists as other selectors.
     for lst, raw, tag in (

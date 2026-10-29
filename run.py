@@ -776,10 +776,10 @@ def main():
     mod_file_paths.configure(env)
     # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py): an
     # extra archive of relabelled menus, served by the runtime as archives/update3.pak (no copy of
-    # the game folder). USA 1.21 only: the engine hooks are that executable's
+    # the game folder). USA/EU 1.21: the engine validates the region's hooks
     # (gpu/shim/bbport_graphics_tab.cpp), and without them the runtime leaves the menus alone.
     env.pop('BB_GRAPHICS_TAB_ARCHIVE', None)
-    if (title_id, app_version) == ('CUSA13795', '01.21'):
+    if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
         result = run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
                             capture=True, check=False)
         for line in result.stdout.splitlines():
@@ -875,7 +875,7 @@ def main():
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
-                if title_id == 'CUSA13795':
+                if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
                     base = [Path(p) for p in archives.split('|') if p]
                     if env.get('BB_ONLINE') == '1':
                         base, env['BB_ONLINE_MODE_HOOK'] = online_mode.prepare(
