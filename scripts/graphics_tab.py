@@ -36,7 +36,7 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 17  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 18  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -292,16 +292,65 @@ def show_quit(data):
             data[base + key + 0x18:base + key + 0x1c] != b'\0' * 4):
         raise ValueError('Octane_MainMenu.igz: unexpected Wireless keyframe')
     data[base + key + 0x18:base + key + 0x1c] = struct.pack('<f', 1.0)
-    if data.count(QUIT_LEVEL[0]) != 1:
-        raise ValueError('Octane_MainMenu.igz: Wireless level not found')
-    return bytes(data.replace(QUIT_LEVEL[0], QUIT_LEVEL[1]))
+    return own_quit_level(bytes(data), wireless)
 
 
-# The Quit Game button is OFF (OCTR v0.7.1). show_quit renames the main menu's one
-# "Octane/Octane_OnlineLobby/Octane_OnlineLobby" string, and the Online button uses that same
-# string: in v0.7, Online loaded the quit map and closed the game. It needs a level string of its
-# own before it can come back. The functions above stay for that.
-OPTIONAL = {}
+def own_quit_level(blob, wireless):
+    """Only the Wireless button's level becomes the quit map (OCTR v0.7.1).
+
+    The file keeps each string once: the Online button's script behavior and Wireless's both hold
+    the index of the one "Octane/Octane_OnlineLobby/Octane_OnlineLobby". v0.7 renamed that string,
+    so Online loaded the quit map and closed the game. Now a new string is added to the table and
+    only Wireless's behavior (the igGuiVscBehavior in the placeable's behavior list) points to it;
+    Online's still names its lobby."""
+    import bisect
+    sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/ (also with python -I)
+    from igz_file import Igz
+    igz = Igz(blob)
+    online = QUIT_LEVEL[0][:-1].decode()
+    if igz.strings.count(online) != 1:
+        raise ValueError('Octane_MainMenu.igz: online lobby level not found')
+    k = igz.strings.index(online)
+    objects = igz.objects()
+    starts = [o for o, _ in objects]
+
+    def owner(off):
+        return objects[bisect.bisect_right(starts, off) - 1]
+
+    def referrers(target):
+        return [s for s in igz.sites['ROFS'] if igz.u64(s) & 0x0FFFFFFFFFFFFFFF == target]
+
+    mine, others = [], 0
+    for site in igz.sites['RSTT']:
+        if igz.u64(site) != k:
+            continue
+        behavior, kind = owner(site)
+        lists = [owner(s)[0] for s in referrers(behavior) if owner(s)[1] == 'igGuiBehaviorList']
+        placeables = {owner(s)[0] for lst in lists for s in referrers(lst)
+                      if owner(s)[1] == 'igGuiPlaceable'}
+        if kind == 'igGuiVscBehavior' and placeables == {wireless}:
+            mine.append(site)
+        else:
+            others += 1
+    if len(mine) != 1 or others < 1:
+        raise ValueError(f'Octane_MainMenu.igz: Wireless level references {len(mine)}, others {others}')
+    igz.set_u64(mine[0], igz.string_index(QUIT_LEVEL[1][:-1].decode()))
+    out = igz.build()
+    check = Igz(out)
+    if (check.strings[check.u64(mine[0])] != QUIT_LEVEL[1][:-1].decode() or
+            sum(check.u64(s) == k for s in check.sites['RSTT']) != others):
+        raise ValueError('Octane_MainMenu.igz: Wireless level not separated')
+    return out
+
+
+# Optional: built when found (an older game without the 1.21 menu keeps the rest).
+OPTIONAL = {f'ui/octane_mainmenu_{lang}.lng': quit_labels(*labels)
+            for lang, labels in QUIT_LABELS.items()}
+OPTIONAL['ui/octane_mainmenu.igz'] = show_quit
+# The main menu's root script handles Wireless by name (hidden off the Switch): the name matches
+# nothing now, as with the Graphics tab.
+OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
+    b'Comp__Menu_ButtonWithIcon', b'Comp__Menu_ButtonWithIcoX')
 
 
 def build(game, dest, dump):
@@ -336,8 +385,9 @@ def build(game, dest, dump):
         else:
             try:
                 quit_files.append(entry + (OPTIONAL[low](archive.read(i)),))
-            except ValueError as error:
-                print(f'Graphics tab: no Quit Game button ({error})')
+            except (ValueError, KeyError, IndexError, struct.error, ImportError) as error:
+                # Only the button is left out: the Graphics tab does not depend on it.
+                print(f'Graphics tab: no Quit Game button ({type(error).__name__}: {error})')
                 quit_files = None
                 break
     if quit_files and len(quit_files) == len(OPTIONAL):
