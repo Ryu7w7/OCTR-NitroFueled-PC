@@ -158,6 +158,10 @@ struct Values {
     std::atomic<int> ultrawide{-1};
     std::atomic<bool> ultrawide_ask{false};
     std::atomic<int> ultrawide_w{0}, ultrawide_h{0};
+    /// The launcher's Aspect ratio (bbport.ini widescreen_layout off / 21x9 / 32x9 and
+    /// widescreen_output WxH; scripts/widescreen.py at start): 0 16:9, 1 21:9, 2 32:9.
+    std::atomic<int> widescreen{0};
+    std::atomic<int> widescreen_w{0}, widescreen_h{0};
     /// The desktop size of the game's monitor (window.cpp), for the ultrawide choice.
     std::atomic<int> display_w{0}, display_h{0};
     /// SacredFire: the upscaler (Temporal: off, FSR 1, FSR 3, DLSS).
@@ -188,6 +192,7 @@ struct Values {
     int startup_render_res = -1;
     bool startup_ultrawide = false;
     int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
+    int startup_widescreen = 0;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
