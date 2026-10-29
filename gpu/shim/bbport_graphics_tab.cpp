@@ -362,7 +362,7 @@ std::string Row(std::size_t row, bool change) {
             t = (t + 1) % BbSettings::TemporalCount;
             v.temporal = t;
         }
-        static const char* names[] = {"Off", "FSR 1", "FSR 3", "DLSS", "FSR 4"};
+        static const char* names[] = {"Off", "FSR 1", "FSR 3", "DLSS"};
         std::snprintf(text, sizeof(text), "Upscaling: %s",
                       names[unsigned(t) < std::size(names) ? t : 0]);
         return text;
