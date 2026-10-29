@@ -64,6 +64,8 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+// OpenMenu (a game thread): opened on the window thread.
+std::atomic<bool> open_request{false};
 // SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
 std::atomic<bool> ultrawide_prompt{false};
 bool ultrawide_prompt_checked = false;
@@ -2008,6 +2010,12 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
 }
 
 void UpdateTextInput(SDL_Window* window) {
+    if (open_request.exchange(false)) {
+        std::scoped_lock lock{imgui_mutex};
+        if (initialized) {
+            SetOpen(true);
+        }
+    }
     bool want = false;
     {
         std::scoped_lock lock{imgui_mutex};
@@ -2146,6 +2154,16 @@ void Notify(const std::string& title, const std::string& name, const std::string
     if (notices.size() < 16) {
         notices.push_back(std::move(n));
     }
+}
+
+void OpenMenu() {
+    open_request = true;
+}
+
+void QuitGame() {
+    SDL_Event quit{};
+    quit.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&quit);
 }
 
 bool MenuOpen() {

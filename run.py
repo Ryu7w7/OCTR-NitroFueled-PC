@@ -774,7 +774,15 @@ def main():
     original_game = game.resolve()
     import mod_file_paths
     mod_file_paths.configure(env)
-    game = Path(run_python('scripts/mods.py', game, '--out', out,
+    # The Options menu's Graphics tab (scripts/graphics_tab.py): relabelled menu files.
+    replace = []
+    for line in run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
+                           capture=True).stdout.splitlines():
+        if line.startswith('archives/') and '=' in line:
+            replace += ['--replace', line.strip()]
+        elif line.strip():
+            say(line.strip())
+    game = Path(run_python('scripts/mods.py', game, '--out', out, *replace,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).stdout.strip())

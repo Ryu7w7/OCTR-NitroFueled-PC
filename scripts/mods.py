@@ -174,7 +174,7 @@ def expand(directory):
         directory.mkdir(exist_ok=True)
 
 
-def build_overlay(game, out, mods, replacements=None):
+def build_overlay(game, out, mods, replacements=None, extra=()):
     game = Path(game).resolve(strict=True)
     replacements = list(replacements or [])
     owners = {}
@@ -188,6 +188,10 @@ def build_overlay(game, out, mods, replacements=None):
             replacements.append((relative, source))
             count += 1
         print(f'Mods: {name}: {count} files', file=sys.stderr)
+    # Port-generated replacements (--replace), whether mods are on or off; mods win over them.
+    for relative, source in extra:
+        if relative.as_posix().casefold() not in owners:
+            replacements.insert(0, (relative, source))
     if not replacements:
         return game
     out = Path(out).resolve()
@@ -229,7 +233,14 @@ def main():
     parser.add_argument('--mods-dir', required=True, type=Path)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--enabled', choices=('0', '1'), default='1')
+    parser.add_argument('--replace', action='append', default=[], metavar='GAME_PATH=FILE',
+                        help='a file the port generated (scripts/graphics_tab.py) in place of a game file')
     args = parser.parse_args()
+    extra = []
+    for item in args.replace:
+        relative, _, source = item.partition('=')
+        if relative and Path(source).is_file():
+            extra.append((Path(relative), Path(source).resolve()))
     layers = []
     if args.enabled == '1':
         # shadPS4's loose overlay convention, beside the original game.
@@ -242,7 +253,7 @@ def main():
         else:
             for name in selected(args.mods_dir, args.config):
                 layers.append((name, args.mods_dir / name))
-    print(build_overlay(args.game, args.out, layers))
+    print(build_overlay(args.game, args.out, layers, extra))
 
 
 if __name__ == '__main__':

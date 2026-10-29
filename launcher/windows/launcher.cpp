@@ -2964,6 +2964,9 @@ void SettingsTab() {
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
     WidescreenSettings();
+    GameFlag("skip_intro", T("Saltar los vídeos de inicio", "Skip intro videos"), false,
+             T("Sin los logos de Activision y Beenox al arrancar el juego.",
+               "Skips the Activision and Beenox logo videos when the game starts."));
     GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
              T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
                "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
