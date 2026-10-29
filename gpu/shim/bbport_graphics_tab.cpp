@@ -338,8 +338,8 @@ const char* OnOff(bool on) {
 std::string Row(std::size_t row, bool change) {
     auto& v = BbSettings::Get();
     char text[96];
-    // The page's rows, top to bottom: Resolution, Ultrawide, Upscaling, Upscale Quality,
-    // FPS Unlock, Motion blur, FPS limit (the cases below; 6 is Ultrawide).
+    // The page's rows, top to bottom: Resolution, Aspect Ratio, Upscaling, Upscale Quality,
+    // FPS Unlock, Motion blur, FPS limit (the cases below; 6 is Aspect Ratio).
     static constexpr std::size_t kSetting[] = {0, 6, 1, 2, 3, 4, 5};
     if (row >= std::size(kSetting)) {
         return "";
@@ -347,7 +347,7 @@ std::string Row(std::size_t row, bool change) {
     const std::size_t index = kSetting[row];
     switch (index) {
     case 0: {
-        // The render size (render_res); the ultrawide picture is the Ultrawide row's.
+        // The render size (render_res); the shape is the Aspect Ratio row's.
         int k = v.render_res.load() < 0 ? 2 : v.render_res.load();
         if (change) {
             k = (k + 1) % BbSettings::RenderResCount;
@@ -406,17 +406,25 @@ std::string Row(std::size_t row, bool change) {
         return text;
     }
     case 6: {
-        // bbport.ini ultrawide: the port's own ultrawide support, at the monitor's size; only
-        // offered on a monitor wider than 16:9.
-        if (!BbSettings::UltrawideAvailable()) {
-            return "Ultrawide: No wide monitor";
-        }
-        bool on = v.ultrawide.load() == 1;
+        // The launcher's Aspect ratio (bbport.ini widescreen_layout): 16:9, 21:9 or 32:9, at
+        // start. A wide layout turns the monitor-size ultrawide off and keeps a screen size that
+        // fits it (3440x1440 / 2560x1080 for 21:9, else 5120x1440), as the launcher does.
+        int layout = std::clamp(v.widescreen.load(), 0, 2);
         if (change) {
-            on = !on;
-            BbSettings::SetUltrawide(on);
+            layout = (layout + 1) % 3;
+            v.widescreen = layout;
+            if (layout != 0) {
+                v.ultrawide = 0;
+                const int w = v.widescreen_w.load(), h = v.widescreen_h.load();
+                const bool wide = (w == 3440 && h == 1440) || (w == 2560 && h == 1080);
+                if (w <= 0 || wide != (layout == 1)) {
+                    v.widescreen_w = layout == 1 ? 3440 : 5120;
+                    v.widescreen_h = 1440;
+                }
+            }
         }
-        std::snprintf(text, sizeof(text), "Ultrawide: %s", OnOff(on));
+        static const char* names[] = {"16:9", "21:9", "32:9"};
+        std::snprintf(text, sizeof(text), "Aspect Ratio: %s", names[layout]);
         return text;
     }
     default:
@@ -433,6 +441,7 @@ bool NeedsRestart() {
     }
     restart |= v.render_res != v.startup_render_res || v.temporal != v.startup_temporal ||
                v.dlss_quality != v.startup_dlss_quality || (v.ultrawide.load() == 1) != v.startup_ultrawide ||
+               v.widescreen != v.startup_widescreen ||
                v.output_res != v.startup_output_res;
     return restart;
 }
