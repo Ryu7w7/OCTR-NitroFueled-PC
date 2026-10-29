@@ -2,6 +2,7 @@
 #include "../src/runtime_file.c"
 #include <assert.h>
 void runtime_cinematic_video(int delta) { (void)delta; }
+int runtime_private_room_active(void) { return 0; }
 int32_t *runtime_errno(void) { static int32_t value;return &value; }
 int runtime_guest_errno(int value) { return value; }
 void runtime_memory_note_write(uintptr_t address,uint64_t size) { (void)address;(void)size; }

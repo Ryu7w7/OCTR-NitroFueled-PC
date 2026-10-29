@@ -92,6 +92,28 @@ typedef struct {
 } VSocket;
 
 static VSocket g_sockets[MAX_VIRTUAL_SOCKETS];
+static uint64_t now_ms(void);
+static int tunnel_server(struct sockaddr_in *out);
+/* The WebAPI invitation session can remain active in Arcade. A private race
+ * with another player has game UDP traffic to that peer before track assets
+ * load; Arcade has only server traffic. Let old peer activity expire when the
+ * player leaves the lobby. */
+static uint64_t g_last_game_peer_ms;
+
+int runtime_net_private_lobby_active(void) {
+    const uint64_t last = __atomic_load_n(&g_last_game_peer_ms, __ATOMIC_ACQUIRE);
+    const uint64_t now = now_ms();
+    return last && now >= last && now - last < 5000;
+}
+
+static void note_game_peer(const VSocket *vs, const struct sockaddr_in *peer) {
+    struct sockaddr_in server;
+    if (!vs->tunnel || !peer || !tunnel_server(&server) ||
+        peer->sin_addr.s_addr == server.sin_addr.s_addr) return;
+    const uint64_t now = now_ms();
+    const uint64_t old = __atomic_exchange_n(&g_last_game_peer_ms, now, __ATOMIC_RELEASE);
+    if (!old || now - old >= 5000) runtime_net_trace("Speed: game peer active");
+}
 
 static int vsocket_alloc(SOCKET s, int is_stream, const char *name) {
     for (int i = 0; i < MAX_VIRTUAL_SOCKETS; i++) {
@@ -656,6 +678,7 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
         runtime_net_trace("sceNetSendto(fd=%d) failed: win err %d", s, err);
         return -1;
     }
+    note_game_peer(vs, to ? &sin : NULL);
     if (to && vs->tunnel) {
         tunnel_copy(vs, msg, len, &sin);
         ping_after_send(vs, &sin);
@@ -803,6 +826,8 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
         memcpy(&out->sin_addr, &sin.sin_addr, sizeof(out->sin_addr));
         memset(out->sin_zero, 0, sizeof(out->sin_zero));
     }
+
+    if (tunnel) note_game_peer(vs, &sin);
     if (fromlen) *fromlen = sizeof(OrbisNetSockaddrIn);
 
     runtime_net_trace("sceNetRecvfrom(fd=%d, len=%d, from=%s:%u)", s, ret, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));
