@@ -40,6 +40,7 @@
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
 
+#include "video_core/renderer_vulkan/bb_hud_scale.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifdef _WIN32
@@ -471,6 +472,20 @@ VkShaderModule MakeModule(const Vulkan::Instance& inst, const std::vector<u32>& 
     return result == vk::Result::eSuccess ? VkShaderModule(module) : VK_NULL_HANDLE;
 }
 
+/// The OrbShdr hash of the GCN program gcn/<name>.bin (shadPS4's pgm_hash, which OCTR's shader
+/// changes name programs by); 0 when there is none.
+u64 GuestProgramHash(const std::string& name) {
+    std::ifstream f(shader_root / "gcn" / (name + ".bin"), std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::size_t at = bytes.find("OrbShdr");
+    if (at == std::string::npos || at + 24 > bytes.size()) {
+        return 0;
+    }
+    u64 hash = 0;
+    std::memcpy(&hash, bytes.data() + at + 16, sizeof(hash));
+    return hash;
+}
+
 /// spirv/<name>.spv as a VkShaderModule on the presenter's device (once per shader), its
 /// descriptors moved to the stage's set, and the stage's descriptor set layout.
 void LoadModule(ShaderInfo& s) {
@@ -525,6 +540,16 @@ void LoadModule(ShaderInfo& s) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
         std::printf("Native Vulkan: %s.spv missing or damaged\n", s.name.c_str());
         return;
+    }
+    // OCTR's shader changes, as shadPS4's pipeline cache makes them (bb_hud_scale.h): the HUD of
+    // the 21:9 and 32:9 layouts (BB_HUD_SCALE) and no motion blur (BB_NO_MOTION_BLUR); they name
+    // the guest program by its OrbShdr hash, which the dumped GCN program carries
+    if (!s.native && (!BbHud::Entries().empty() || BbBlur::Enabled())) {
+        if (const u64 pgm = GuestProgramHash(s.name)) {
+            if (auto changed = BbHud::ForModule(pgm, 0, s.code)) {
+                s.code = std::move(*changed);
+            }
+        }
     }
     slow_load.prepared = LoadClock::now();
     s.module = MakeModule(*inst, s.code);

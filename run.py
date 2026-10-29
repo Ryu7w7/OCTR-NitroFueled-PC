@@ -41,10 +41,18 @@ import button_prompts  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
 import online_mode  # noqa: E402
+import perf_report  # noqa: E402
+import native_shaders  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
+PERF = None  # the performance diagnostic's collector (scripts/perf_report.py), fed the game's lines
+# Vulkan's start-up, from the game's lines: when its window opened, whether the GPU was opened
+# ("GPU: <name>, <n> MiB VRAM"), the layers installed. A player's game sat on a black window between
+# the two (an overlay's Vulkan layer or a driver hanging): see watch_vulkan_start.
+VULKAN_START = {'window': 0.0, 'ready': False, 'layers': ''}
+VULKAN_START_SECONDS = 20
 
 
 def fail(message, code=1):
@@ -97,6 +105,18 @@ def emit(text):
             LOG.flush()
         except Exception:
             pass
+    if PERF:
+        try:
+            PERF.feed(text)
+        except Exception:
+            pass
+    for line in text.splitlines():
+        if line.startswith('Window: ') and not VULKAN_START['window']:
+            VULKAN_START['window'] = time.time()
+        elif line.startswith('GPU: ') and ' MiB VRAM' in line:
+            VULKAN_START['ready'] = True
+        elif line.startswith('Vulkan: starting'):
+            VULKAN_START['layers'] = line.partition('layers installed: ')[2].strip()
 
 
 def say(message):
@@ -315,7 +335,7 @@ HTTPS_PORT = 443      # the server's nginx: /ryunet/ by HTTPS (tests point it el
 HTTPS_FAILED = set()  # servers whose HTTPS failed this run: their next requests go to the port
 
 
-def ryunet_json(host, port, target, timeout, method='GET', headers=None):
+def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=None):
     """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
     By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
     filter on the way cannot rewrite it, and networks that only let 80/443 out reach it. Then by
@@ -349,8 +369,10 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None):
     failure = OSError(f'{host}: no answer')
     for url, secure in urls:
         name = url.split('/')[2]
-        request = urllib.request.Request(url, method=method, data=b'' if method == 'POST' else None,
-                                         headers=headers(method, target) if headers else {})
+        request = urllib.request.Request(url, method=method,
+                                         data=body if body is not None else (b'' if method == 'POST' else None),
+                                         headers={**(headers(method, target) if headers else {}),
+                                                  **({'Content-Type': 'application/json'} if body is not None else {})})
         try:
             with opener.open(request, timeout=timeout) as reply:
                 if 'json' not in (reply.headers.get('Content-Type') or ''):
@@ -573,6 +595,68 @@ def setup_online(env, config, data):
         rules_file.write_text(json.dumps(items, sort_keys=True), encoding='utf-8')
         env['BB_ITEM_RULES'] = str(rules_file)
         say(f'Item rules from the server: {items.get("name") or "custom"}')
+
+
+def finish_perf_report(env, config, data, version, title_id, code):
+    """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
+    RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
+    launcher). Never stops anything: a failure is one line in the log."""
+    if not PERF:
+        return
+    try:
+        report = PERF.report({
+            'octr': version[:40],
+            'edition': title_id,
+            'renderer': 'native' if env.get('BB_VK_NATIVE_ONLY') == '1' else 'shadps4',
+            'online': env.get('BB_ONLINE') == '1',
+            'settings': perf_report.settings_of(config),
+            'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
+        })
+        if not report.get('overall'):
+            return  # nothing was drawn (a start that stopped early): nothing to say
+        path = perf_report.keep(report, data / 'perf')
+        if perf_report.consent(config) != '1':
+            return
+        host = env.get('BB_ONLINE_SERVER') or perf_report.settings_value(config, 'online_server') or 'octr.ryu7w7.xyz'
+        port = env.get('BB_ONLINE_HTTP_PORT', '8080')
+        if ':' in host and not host.startswith('['):
+            host, _, p = host.partition(':')
+            port = p if p.isdigit() else port
+        ryunet_json(host, port, '/ryunet/perf', 4, method='POST',
+                    body=json.dumps(report, separators=(',', ':')).encode())
+        say(f'Performance report sent (anonymous; a copy: {path.name} in perf/)')
+    except Exception as error:  # no network, an old server: the report stays local
+        say(f'Performance report not sent ({type(error).__name__}); a copy stays in perf/')
+
+
+def watch_vulkan_start(process, env):
+    """Waits for the game; True when Vulkan never finished starting (no GPU opened
+    VULKAN_START_SECONDS after the window) and the game was closed to start again without the
+    overlay layers. Once without them, a hang is only reported."""
+    reported = False
+    while True:
+        try:
+            process.wait(timeout=1)
+            return False
+        except subprocess.TimeoutExpired:
+            pass
+        opened = VULKAN_START['window']
+        if not opened or VULKAN_START['ready'] or time.time() - opened < VULKAN_START_SECONDS:
+            continue
+        layers = VULKAN_START['layers'] or 'not listed'
+        if not env.get('VK_LOADER_LAYERS_DISABLE'):
+            say(f'--- Vulkan did not finish starting in {VULKAN_START_SECONDS} s (black window). Usually a '
+                f'program that hooks into games (an overlay or recorder: OBS, RivaTuner/Afterburner, Overwolf, '
+                f'Discord, ...) or a broken driver. Starting again without the overlay layers '
+                f'(installed: {layers}).')
+            process.kill()
+            process.wait()
+            return True
+        if not reported:
+            reported = True
+            say('--- Vulkan still did not start without the overlay layers: the graphics driver is the likely '
+                'cause. Reinstall the latest driver for your GPU (on a laptop, the one from its maker too), '
+                'and close overlay and recording programs.')
 
 
 def pump(stream):
@@ -818,6 +902,31 @@ def main():
                 break
         say(f'SacredFire {version or "unknown version"}')
         update_notice(env, version)
+        # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
+        # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
+        # Anything that stops it starts the game with shadPS4's Vulkan, as before.
+        if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
+            if not native_shaders.supported(title_id, app_version):
+                say(f'Native Vulkan: only the USA 1.21 game (CUSA13795) for now; this is {title_id} '
+                    f'{app_version}, so the game starts with Vulkan (shadPS4)')
+            else:
+                shaders = native_shaders.shader_dir(data, title_id, app_version)
+                if not native_shaders.ready(shaders):
+                    say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
+                    # "@progress" lines: the launchers show a window with a progress bar meanwhile
+                    last = [-1]
+
+                    def progress(percent, stage):
+                        if percent != last[0]:
+                            last[0] = percent
+                            emit(f'@progress native-shaders {percent} {stage}\n')
+                    built = native_shaders.build(PORT, game, shaders, say, progress=progress)
+                    emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
+                if native_shaders.ready(shaders):
+                    env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
+                    say('Graphics engine: native Vulkan (experimental)')
+                else:
+                    say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
         # The GPU library builds its path table when it loads: the user directory must exist.
         user_dir.mkdir(parents=True, exist_ok=True)
         env['BB_GPU_USER_DIR'] = str(user_dir)
@@ -830,6 +939,8 @@ def main():
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
+        global PERF
+        PERF = perf_report.Collector()
         while True:
             if not first:  # the in-game menu may have changed render_res
                 settings, layout_patches = apply_layout()
@@ -857,6 +968,9 @@ def main():
             if plan and plan.get('output') and not ini_has(settings, 'ultrawide_frontend=0'):
                 env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
                                                     capture=True).stdout.strip()
+            # Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too
+            # (objects moving on their own: the crowd, plants; bb_motion_blur.h)
+            env['BB_NO_MOTION_BLUR'] = '1' if ini_has(config, 'patch_no_motion_blur=1') else '0'
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
             elif ini_has(config, 'patch_60fps=1'):
@@ -869,11 +983,19 @@ def main():
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, creationflags=no_console())
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+            VULKAN_START.update(window=0.0, ready=False)
             reader.start()
+            hung = watch_vulkan_start(process, env)
             code = process.wait()
             reader.join(timeout=5)
+            if hung:
+                # the loader's own switch: no implicit layer this time (the system is not changed)
+                env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
+                continue
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
+                finish_perf_report(env, config, data, version, title_id, code)
                 if code == UNSUPPORTED_GPU_CODE:
                     say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
                         'sparse buffers; the STOP line above says which). Update the graphics driver; if it '

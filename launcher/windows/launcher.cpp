@@ -707,6 +707,10 @@ struct App {
     std::deque<std::string> log;
     std::string last_status;
     std::atomic<bool> game_running{false};
+    // The native renderer's shaders being built before the game starts (run.py's "@progress"
+    // lines): percent, -1 when no build is on; its stage (extract, export, translate, compile).
+    std::atomic<int> shader_percent{-1};
+    std::string shader_stage;
     DWORD exit_code = 0;
     bool show_exit = false, stopped = false;
 
@@ -1411,7 +1415,33 @@ bool ListHas(const std::string& csv, const std::string& name) {
     return false;
 }
 
+/// run.py's "@progress native-shaders ..." lines: the launcher comes back to show the shader build
+/// (ShaderProgressPopup) and goes away again when the game starts. Not shown in the log.
+bool ShaderProgressLine(const std::string& line) {
+    static const std::string prefix = "@progress native-shaders ";
+    if (line.compare(0, prefix.size(), prefix) != 0) return line.rfind("@progress ", 0) == 0;
+    App& a = g_app;
+    const std::string rest = line.substr(prefix.size());
+    if (rest.rfind("done", 0) == 0) {
+        a.shader_percent = -1;
+        if (a.hwnd) ShowWindowAsync(a.hwnd, a.launcher.Flag("hide_on_play", false) ? SW_HIDE : SW_MINIMIZE);
+        return true;
+    }
+    const size_t space = rest.find(' ');
+    const int percent = std::clamp(std::atoi(rest.substr(0, space).c_str()), 0, 100);
+    {
+        std::scoped_lock lock{a.mutex};
+        a.shader_stage = space == std::string::npos ? "" : Trim(rest.substr(space + 1));
+    }
+    if (a.shader_percent.exchange(percent) < 0 && a.hwnd) {
+        ShowWindowAsync(a.hwnd, SW_RESTORE);
+        SetForegroundWindow(a.hwnd);
+    }
+    return true;
+}
+
 void AddLog(const std::string& line) {
+    if (ShaderProgressLine(line)) return;
     std::scoped_lock lock{g_app.mutex};
     g_app.log.push_back(line);
     while (g_app.log.size() > 2000) g_app.log.pop_front();
@@ -2460,6 +2490,8 @@ void HelpMarker(const char* text) {
     }
 }
 
+const char* PerfReportsText();  // the performance diagnostic's explanation (PerfReportsPopup)
+
 void GameFlag(const char* key, const char* label, bool fallback, const char* help = nullptr) {
     bool v = g_app.game.Flag(key, fallback);
     if (ImGui::Checkbox(label, &v)) {
@@ -2882,6 +2914,21 @@ void SettingsTab() {
 
     ImGui::SeparatorText(T("Rendimiento", "Performance"));
     {
+        // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
+        // shaders from the player's game the first time)
+        static constexpr Choice kRenderer[] = {{"Vulkan (shadPS4)", "Vulkan (shadPS4)", "shadps4"},
+                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"}};
+        if (GameChoiceCombo(T("Motor gráfico", "Graphics engine"), "renderer", kRenderer, "shadps4", 16.0f)) SaveGameIni();
+        HelpMarker(T("Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la "
+                     "emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara "
+                     "sus shaders a partir de tu copia del juego (unos minutos). Con el nativo no hay FSR 3 ni DLSS "
+                     "(FSR 1 sí). Si algo va mal, vuelve a Vulkan (shadPS4).",
+                     "Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
+                     "emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it "
+                     "builds its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 or "
+                     "DLSS (FSR 1 works). If something goes wrong, go back to Vulkan (shadPS4)."));
+    }
+    {
         int limit = a.game.Int("fps_limit", 60);
         auto name = [](int v) -> std::string {
             if (v == 0) return T("Sin límite", "No limit");
@@ -2930,10 +2977,21 @@ void SettingsTab() {
                                                {"AMD FSR 1", "AMD FSR 1", "fsr1"},
                                                {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
                                                {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
-        if (GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal, temporal.c_str(), 16.0f)) {
+        static constexpr Choice kTemporalNative[] = {{"Desactivado", "Off", "off"},
+                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"}};
+        const bool native = a.game.Get("renderer") == "native";
+        const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
+                                                     temporal == "off" ? "off" : "fsr1", 16.0f)
+                                   : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal,
+                                                     temporal.c_str(), 16.0f);
+        if (picked) {
             a.game.Erase("fsr1");
             a.game.Erase("fsr3");
             SaveGameIni();
+        }
+        if (native && (temporal == "fsr3" || temporal == "dlss")) {
+            ImGui::TextColored(kGrey, "%s", T("FSR 3 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
+                                              "FSR 3 and DLSS do not work with the native engine: FSR 1 is used."));
         }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
@@ -2990,6 +3048,8 @@ void SettingsTab() {
                "del juego (Insert o L3+R3), pestaña Sala.",
                "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
                "(Insert or L3+R3), Room tab."));
+    GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
+             PerfReportsText());
     {
         std::scoped_lock lock{a.mutex};
         const std::string current = a.launcher.Get("display");
@@ -3801,7 +3861,8 @@ bool ModCard(const PatchInfo& p) {
         description = T("Ejecuta el juego a 60 FPS. La versión 2.0 también elimina el vsync de doble búfer.",
                         "Runs the game at 60 FPS. Version 2.0 also removes double-buffer vsync.");
     if (p.ini_key && std::strcmp(p.ini_key,"patch_no_motion_blur")==0)
-        description = T("Desactiva el desenfoque de movimiento de la cámara.","Turns off the camera motion blur effect.");
+        description = T("Desactiva el desenfoque de movimiento: el de la cámara y el de los objetos que se mueven (público, plantas).",
+                        "Turns off the motion blur: the camera's and that of moving objects (crowd, plants).");
     const bool unlock = p.ini_key && std::strcmp(p.ini_key,"patch_unlock_all")==0;
     if (unlock) description = T("Desbloquea el contenido que el juego concede al cumplir sus condiciones, con el interruptor de las demos E3/PAX.",
                                "Unlocks what the game normally grants for meeting its unlock conditions, using the same switch as the E3/PAX demos.");
@@ -4352,6 +4413,91 @@ void NickPopup() {
     if (ImGui::Button(T("Cancelar", "Cancel"))) {
         a.game.Load(GameIni());  // drop what was typed: every other setting is already saved
         SyncOnlineBuffers();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+/// The anonymous performance diagnostic (bbport.ini perf_reports, scripts/perf_report.py): asked
+/// once, while it is neither 1 nor 0. A plain question, no alarm: what is sent and what is not.
+const char* PerfReportsText() {
+    return T("Al cerrar el juego, OCTR puede enviar un resumen anónimo de cómo le fue a tu PC: tarjeta "
+             "gráfica, procesador y memoria, los ajustes gráficos y los FPS de cada pista. Nada personal: ni "
+             "tu apodo, ni tus partidas, ni tus amigos, y tu IP no se guarda. Sirve para saber en qué PCs "
+             "hay que mejorar el juego. Siempre queda una copia en la carpeta perf.",
+             "When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, "
+             "processor and memory, the graphics settings and the FPS of each track. Nothing personal: not "
+             "your nickname, your races or your friends, and your IP is not stored. It shows which PCs the "
+             "game needs to improve on. A copy always stays in the perf folder.");
+}
+
+void PerfReportsPopup() {
+    App& a = g_app;
+    static bool asked = false;
+    const std::string v = a.game.Get("perf_reports");
+    if (!asked && v != "1" && v != "0" && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+        asked = true;
+        ImGui::OpenPopup("perf_reports");
+    }
+    if (!ImGui::BeginPopupModal("perf_reports", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ImGui::TextUnformatted(T("¿Nos ayudas a mejorar OCTR?", "Help us improve OCTR?"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextColored(kGrey, "%s", PerfReportsText());
+    ImGui::TextColored(kGrey, "%s", T("Puedes cambiarlo cuando quieras en Ajustes.", "You can change it any time in Settings."));
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button(T("Sí, enviar datos anónimos", "Yes, send anonymous data"))) {
+        a.game.Set("perf_reports", "1");
+        SaveGameIni();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("No, gracias", "No, thanks"))) {
+        a.game.Set("perf_reports", "0");
+        SaveGameIni();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+/// While run.py builds the native renderer's shaders (the first start with it, ~4 minutes).
+void ShaderProgressPopup() {
+    App& a = g_app;
+    const int percent = a.shader_percent.load();
+    if (percent >= 0 && !ImGui::IsPopupOpen("native_shaders")) ImGui::OpenPopup("native_shaders");
+    if (!ImGui::BeginPopupModal("native_shaders", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    if (percent < 0 || !a.game_running) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    std::string stage;
+    {
+        std::scoped_lock lock{a.mutex};
+        stage = a.shader_stage;
+    }
+    const char* step = stage == "extract"     ? T("Leyendo los shaders del juego...", "Reading the game's shaders...")
+                       : stage == "export"    ? T("Preparando los programas...", "Preparing the programs...")
+                       : stage == "translate" ? T("Traduciendo los shaders...", "Translating the shaders...")
+                       : stage == "compile"   ? T("Compilando los shaders...", "Compiling the shaders...")
+                                              : T("Terminando...", "Finishing...");
+    ImGui::TextUnformatted(T("Compilando shaders del motor nativo", "Compiling the native engine's shaders"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+    ImGui::TextColored(kGrey, "%s", T("Solo la primera vez: se preparan a partir de tu copia del juego y tardan unos "
+                                      "minutos. El juego se abre solo al terminar.",
+                                      "Only the first time: they are built from your copy of the game and take a few "
+                                      "minutes. The game opens by itself when they are done."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    char overlay[16];
+    std::snprintf(overlay, sizeof overlay, "%d %%", percent);
+    ImGui::ProgressBar(percent / 100.0f, ImVec2(ImGui::GetFontSize() * 26.0f, 0.0f), overlay);
+    ImGui::TextColored(kGrey, "%s", step);
+    ImGui::Spacing();
+    if (ImGui::Button(T("Cancelar", "Cancel"))) {
+        StopGame();
+        a.shader_percent = -1;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -6654,6 +6800,8 @@ void Frame() {
     SaveConfirmations();
     NickPopup();
     JoinServerPopup();
+    PerfReportsPopup();
+    ShaderProgressPopup();
     ImportPopup();
     if (a.confirm_clear_cache) {
         ImGui::OpenPopup("clear_cache");

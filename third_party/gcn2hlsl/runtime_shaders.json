@@ -1,0 +1,531 @@
+[
+ {
+  "eboot_offset": 28451344,
+  "entry": {
+   "name": "Rt_06414427fa62da56_ps",
+   "effect": "Runtime",
+   "hash": 104940583,
+   "kind": "ps",
+   "size": 380,
+   "gnm": {
+    "shader_size": 380,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 51134170,
+     "pgm_hi": 0,
+     "rsrc1": 2883777,
+     "rsrc2": 28,
+     "z_format": 0,
+     "col_format": 4,
+     "input_ena": 2,
+     "input_addr": 2,
+     "in_control": 1,
+     "baryc_cntl": 0,
+     "db_shader_control": 16,
+     "cb_shader_mask": 15
+    },
+    "slots": [
+     {
+      "usage": 0,
+      "api": 0,
+      "reg": 0,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 0,
+      "reg": 8,
+      "flags": 0
+     },
+     {
+      "usage": 27,
+      "api": 1,
+      "reg": 12,
+      "flags": 0
+     },
+     {
+      "usage": 0,
+      "api": 1,
+      "reg": 16,
+      "flags": 3
+     },
+     {
+      "usage": 0,
+      "api": 2,
+      "reg": 24,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 1,
+      "reg": 32,
+      "flags": 0
+     },
+     {
+      "usage": 1,
+      "api": 2,
+      "reg": 36,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 15,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28485568,
+  "entry": {
+   "name": "Rt_09baa8a35ea69dcc_vs",
+   "effect": "Runtime",
+   "hash": 163227811,
+   "kind": "vs",
+   "size": 292,
+   "gnm": {
+    "shader_size": 292,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 51134165,
+     "pgm_hi": 0,
+     "rsrc1": 2883779,
+     "rsrc2": 16,
+     "vs_out_config": 12,
+     "pos_format": 4,
+     "cl_vs_out_cntl": 0
+    },
+    "slots": [
+     {
+      "usage": 18,
+      "api": 0,
+      "reg": 0,
+      "flags": 0
+     },
+     {
+      "usage": 23,
+      "api": 0,
+      "reg": 2,
+      "flags": 0
+     },
+     {
+      "usage": 2,
+      "api": 0,
+      "reg": 4,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 0,
+      "vgpr": 4,
+      "size": 4
+     },
+     {
+      "sem": 1,
+      "vgpr": 8,
+      "size": 2
+     }
+    ],
+    "exports": [
+     {
+      "sem": 15,
+      "out": 0
+     },
+     {
+      "sem": 16,
+      "out": 1
+     },
+     {
+      "sem": 17,
+      "out": 2
+     },
+     {
+      "sem": 18,
+      "out": 3
+     },
+     {
+      "sem": 19,
+      "out": 4
+     },
+     {
+      "sem": 20,
+      "out": 5
+     },
+     {
+      "sem": 21,
+      "out": 6
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28491020,
+  "entry": {
+   "name": "Rt_3c0efb6e370b0c10_ps",
+   "effect": "Runtime",
+   "hash": 1007614830,
+   "kind": "ps",
+   "size": 172,
+   "gnm": {
+    "shader_size": 172,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 51134127,
+     "pgm_hi": 0,
+     "rsrc1": 2883650,
+     "rsrc2": 24,
+     "z_format": 0,
+     "col_format": 4,
+     "input_ena": 2,
+     "input_addr": 2,
+     "in_control": 2,
+     "baryc_cntl": 0,
+     "db_shader_control": 16,
+     "cb_shader_mask": 15
+    },
+    "slots": [
+     {
+      "usage": 0,
+      "api": 0,
+      "reg": 0,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 0,
+      "reg": 8,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 15,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 16,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28488888,
+  "entry": {
+   "name": "Rt_68992888de7632ba_ps",
+   "effect": "Runtime",
+   "hash": 1754867848,
+   "kind": "ps",
+   "size": 428,
+   "gnm": {
+    "shader_size": 428,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 51134163,
+     "pgm_hi": 0,
+     "rsrc1": 2883653,
+     "rsrc2": 24,
+     "z_format": 0,
+     "col_format": 4,
+     "input_ena": 2,
+     "input_addr": 2,
+     "in_control": 7,
+     "baryc_cntl": 0,
+     "db_shader_control": 16,
+     "cb_shader_mask": 15
+    },
+    "slots": [
+     {
+      "usage": 0,
+      "api": 0,
+      "reg": 0,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 0,
+      "reg": 8,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 15,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 16,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 17,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 18,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 19,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 20,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     },
+     {
+      "sem": 21,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28448080,
+  "entry": {
+   "name": "Rt_6d0ae01fb1b6a3de_ps",
+   "effect": "Runtime",
+   "hash": 1829429279,
+   "kind": "ps",
+   "size": 292,
+   "gnm": {
+    "shader_size": 292,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 52260331,
+     "pgm_hi": 0,
+     "rsrc1": 2883777,
+     "rsrc2": 28,
+     "z_format": 0,
+     "col_format": 4,
+     "input_ena": 2,
+     "input_addr": 2,
+     "in_control": 1,
+     "baryc_cntl": 0,
+     "db_shader_control": 16,
+     "cb_shader_mask": 15
+    },
+    "slots": [
+     {
+      "usage": 0,
+      "api": 0,
+      "reg": 0,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 0,
+      "reg": 8,
+      "flags": 0
+     },
+     {
+      "usage": 27,
+      "api": 1,
+      "reg": 12,
+      "flags": 0
+     },
+     {
+      "usage": 0,
+      "api": 1,
+      "reg": 16,
+      "flags": 3
+     },
+     {
+      "usage": 0,
+      "api": 2,
+      "reg": 24,
+      "flags": 3
+     },
+     {
+      "usage": 1,
+      "api": 1,
+      "reg": 32,
+      "flags": 0
+     },
+     {
+      "usage": 1,
+      "api": 2,
+      "reg": 36,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 15,
+      "default": 0,
+      "flat": 0,
+      "linear": 0,
+      "custom": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28447492,
+  "entry": {
+   "name": "Rt_74033caa94e14117_vs",
+   "effect": "Runtime",
+   "hash": 1946369194,
+   "kind": "vs",
+   "size": 180,
+   "gnm": {
+    "shader_size": 180,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 52260333,
+     "pgm_hi": 0,
+     "rsrc1": 2883714,
+     "rsrc2": 16,
+     "vs_out_config": 0,
+     "pos_format": 4,
+     "cl_vs_out_cntl": 0
+    },
+    "slots": [
+     {
+      "usage": 18,
+      "api": 0,
+      "reg": 0,
+      "flags": 0
+     },
+     {
+      "usage": 23,
+      "api": 0,
+      "reg": 2,
+      "flags": 0
+     },
+     {
+      "usage": 2,
+      "api": 0,
+      "reg": 4,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 0,
+      "vgpr": 4,
+      "size": 4
+     },
+     {
+      "sem": 1,
+      "vgpr": 8,
+      "size": 4
+     }
+    ],
+    "exports": [
+     {
+      "sem": 15,
+      "out": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "eboot_offset": 28488216,
+  "entry": {
+   "name": "Rt_e0a8516c3b36cb92_vs",
+   "effect": "Runtime",
+   "hash": 3769127276,
+   "kind": "vs",
+   "size": 196,
+   "gnm": {
+    "shader_size": 196,
+    "uses_srt": 0,
+    "regs": {
+     "pgm_lo": 51134126,
+     "pgm_hi": 0,
+     "rsrc1": 2883715,
+     "rsrc2": 16,
+     "vs_out_config": 2,
+     "pos_format": 4,
+     "cl_vs_out_cntl": 0
+    },
+    "slots": [
+     {
+      "usage": 18,
+      "api": 0,
+      "reg": 0,
+      "flags": 0
+     },
+     {
+      "usage": 23,
+      "api": 0,
+      "reg": 2,
+      "flags": 0
+     },
+     {
+      "usage": 2,
+      "api": 0,
+      "reg": 4,
+      "flags": 0
+     }
+    ],
+    "inputs": [
+     {
+      "sem": 0,
+      "vgpr": 4,
+      "size": 4
+     },
+     {
+      "sem": 1,
+      "vgpr": 8,
+      "size": 2
+     },
+     {
+      "sem": 2,
+      "vgpr": 12,
+      "size": 4
+     }
+    ],
+    "exports": [
+     {
+      "sem": 15,
+      "out": 0
+     },
+     {
+      "sem": 16,
+      "out": 1
+     }
+    ]
+   }
+  }
+ }
+]

@@ -114,6 +114,9 @@ WIDESCREEN_OUTPUTS = {"21x9": [("3440 x 1440", "3440x1440"), ("2560 x 1080", "25
 # bbport.ini temporal: one upscaler at a time (the game reads it). DLSS is Windows-only (its
 # NVIDIA library is a Windows DLL); there "dlss" falls back to FSR 3, so it is not offered here.
 UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
+# bbport.ini renderer: run.py sets the native renderer up and builds its shaders from the player's
+# game the first time (scripts/native_shaders.py); it has no FSR 3 (run.py uses FSR 1 instead).
+RENDERERS = [("Vulkan (shadPS4)", "shadps4"), ("Native Vulkan (experimental)", "native")]
 # Settings the game reads from bbport.ini itself (gpu/shim/bbport_settings.cpp), with the
 # game's defaults: the launcher shows and writes them, the in-game menu changes the same keys.
 GAME_FLAGS = {"async_pipelines": "0", "msaa": "0", "borderless": "0"}
@@ -267,6 +270,13 @@ def load_ini():
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
     return values, lines
+
+
+def perf_reports_text():
+    return tr("When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, "
+              "processor and memory, the graphics settings and the FPS of each track. Nothing personal: not "
+              "your nickname, your races or your friends, and your IP is not stored. It shows which PCs the "
+              "game needs to improve on. A copy always stays in the perf folder.")
 
 
 def save_ini(values, lines):
@@ -937,6 +947,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.build()
         self.connect("close-request", self.on_close)
         GLib.timeout_add_seconds(1, self.tick)
+        GLib.timeout_add_seconds(2, lambda: self.ask_perf_reports() and False)
 
     def build(self):
         install_css()
@@ -1098,7 +1109,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.user_row.add_suffix(flat_button("folder-symbolic", tr("Open in the file manager"),
                                              lambda _b: open_folder(self, self.user_dir())))
         game.add(self.user_row)
-        self.language_title = GAME_TITLE[0]
+        # The chosen game's edition from the start: built for the USA list first, an EU language
+        # (Italian, German...) showed as English, and that English was then kept and saved
+        # (issue #111).
+        self.language_title = set_game_title(self.game_dir()) if self.settings["game_dir"] else GAME_TITLE[0]
         self.language_row = combo_row(tr("Game language"), tr("The languages of your edition of the game"),
                                       languages_for(self.language_title),
                                       language_for(self.language_title, self.settings["language"]))
@@ -1212,6 +1226,14 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(performance)
 
         screen = Adw.PreferencesGroup(title=tr("Display"))
+        self.renderer_row = combo_row(
+            tr("Graphics engine"),
+            tr("Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
+               "emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it builds "
+               "its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 (FSR 1 works). "
+               "If something goes wrong, go back to Vulkan (shadPS4)."),
+            RENDERERS, self.ini.get("renderer", "shadps4"))
+        screen.add(self.renderer_row)
         self.fullscreen_row = Adw.SwitchRow(title=tr("Fullscreen"), active=self.settings["fullscreen"])
         screen.add(self.fullscreen_row)
         self.borderless_row = Adw.SwitchRow(title=tr("Borderless window"),
@@ -1279,6 +1301,9 @@ class LauncherWindow(Adw.ApplicationWindow):
                         "(Insert or L3+R3), Room tab."),
             active=self.ini.get("show_ping") == "1")
         screen.add(self.ping_row)
+        self.perf_row = Adw.SwitchRow(title=tr("Send anonymous performance data"), subtitle=perf_reports_text(),
+                                      active=self.ini.get("perf_reports") == "1")
+        screen.add(self.perf_row)
         page.add(screen)
 
         sound = Adw.PreferencesGroup(title=tr("Sound"))
@@ -1560,12 +1585,15 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini, self.ini_lines = load_ini()
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
         self.ini["show_ping"] = "1" if self.ping_row.get_active() else "0"
+        if self.perf_row.get_active() or self.ini.get("perf_reports") in ("0", "1"):
+            self.ini["perf_reports"] = "1" if self.perf_row.get_active() else "0"  # unasked stays unasked
         self.ini["split_auto"] = "1" if self.split_auto_row.get_active() else "0"
         self.ini["button_prompts"] = combo_value(self.button_prompts_row)
         self.ini["async_pipelines"] = "1" if self.async_row.get_active() else "0"
         self.ini["msaa"] = "1" if self.msaa_row.get_active() else "0"
         self.ini["borderless"] = "1" if self.borderless_row.get_active() else "0"
         self.ini["temporal"] = combo_value(self.upscaler_row)
+        self.ini["renderer"] = combo_value(self.renderer_row)
         self.ini["fsr1"] = self.ini["fsr3"] = None  # older keys: temporal decides
         self.ini["fsr3_sharpness"] = f"{self.sharpness_row.get_value():.2f}"
         self.ini["volume"] = str(int(self.volume_scale.get_value()))
@@ -1589,6 +1617,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.fill_patches()
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
         self.ping_row.set_active(self.ini.get("show_ping") == "1")
+        self.perf_row.set_active(self.ini.get("perf_reports") == "1")
         self.split_auto_row.set_active(self.ini.get("split_auto") != "0")
         prompts = self.ini.get("button_prompts", "playstation")
         self.button_prompts_row.set_selected(self.button_prompts_row.values.index(prompts)
@@ -1596,6 +1625,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.async_row.set_active(self.ini.get("async_pipelines") == "1")
         self.msaa_row.set_active(self.ini.get("msaa") == "1")
         self.borderless_row.set_active(self.ini.get("borderless") == "1")
+        renderer = self.ini.get("renderer", "shadps4")
+        if renderer in self.renderer_row.values:
+            self.renderer_row.set_selected(self.renderer_row.values.index(renderer))
         temporal = self.ini.get("temporal", "off")
         if temporal in self.upscaler_row.values:
             self.upscaler_row.set_selected(self.upscaler_row.values.index(temporal))
@@ -2611,6 +2643,36 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.fill_trophies()
         self.confirm(tr("Lock every trophy again?"), tr("A copy is kept just in case."), tr("Reset"), reset)
 
+    def ask_perf_reports(self):
+        """The anonymous performance diagnostic (bbport.ini perf_reports, scripts/perf_report.py):
+        asked once, while it is neither 1 nor 0. A plain question, no alarm."""
+        if load_ini()[0].get("perf_reports") in ("0", "1"):
+            return
+
+        def answer(_dialog, response):
+            if response not in ("yes", "no"):
+                return
+            self.ini, self.ini_lines = load_ini()
+            self.ini["perf_reports"] = "1" if response == "yes" else "0"
+            save_ini(self.ini, self.ini_lines)
+            self.perf_row.set_active(response == "yes")
+
+        heading = tr("Help us improve OCTR?")
+        body = perf_reports_text() + "\n\n" + tr("You can change it any time in Settings.")
+        if hasattr(Adw, "AlertDialog"):
+            dialog = Adw.AlertDialog(heading=heading, body=body)
+        else:
+            dialog = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
+        dialog.add_response("no", tr("No, thanks"))
+        dialog.add_response("yes", tr("Yes, send anonymous data"))
+        dialog.set_response_appearance("yes", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_close_response("")  # Escape asks again next time
+        dialog.connect("response", answer)
+        if hasattr(Adw, "AlertDialog"):
+            dialog.present(self)
+        else:
+            dialog.present()
+
     def inform(self, heading, body):
         """A message with a single OK."""
         if hasattr(Adw, "AlertDialog"):
@@ -3091,9 +3153,60 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         if line is None:
             return
-        self.append_log(line + "\n")
-        self.note_issue_line(line)
+        if line.startswith("@progress "):
+            self.shader_progress(line)  # not shown in the log
+        else:
+            self.append_log(line + "\n")
+            self.note_issue_line(line)
         self.read_line()
+
+    def shader_progress(self, line):
+        """run.sh's "@progress native-shaders <percent> <stage>" lines (scripts/native_shaders.py):
+        a window with a progress bar while the native engine's shaders are built, the first time."""
+        parts = line.split()
+        if len(parts) < 3 or parts[1] != "native-shaders":
+            return
+        if parts[2] == "done":
+            if getattr(self, "shader_window", None):
+                self.shader_window.destroy()
+                self.shader_window = None
+            if self.settings.get("hide_on_play"):
+                self.set_visible(False)
+            return
+        try:
+            percent = max(0, min(100, int(parts[2])))
+        except ValueError:
+            return
+        stage = parts[3] if len(parts) > 3 else ""
+        if not getattr(self, "shader_window", None):
+            if not self.get_visible():
+                self.set_visible(True)
+            self.present()
+            window = Gtk.Window(transient_for=self, modal=True, title=tr("Compiling the native engine's shaders"),
+                                default_width=460, deletable=False)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=18, margin_bottom=18,
+                          margin_start=18, margin_end=18)
+            heading = Gtk.Label(label=tr("Compiling the native engine's shaders"), xalign=0)
+            heading.add_css_class("title-4")
+            note = Gtk.Label(label=tr("Only the first time: they are built from your copy of the game and take a few "
+                                      "minutes. The game opens by itself when they are done."),
+                             wrap=True, xalign=0)
+            note.add_css_class("dim-label")
+            self.shader_bar = Gtk.ProgressBar(show_text=True)
+            self.shader_step = Gtk.Label(xalign=0)
+            self.shader_step.add_css_class("dim-label")
+            cancel = Gtk.Button(label=tr("Cancel"), halign=Gtk.Align.END)
+            cancel.connect("clicked", lambda _b: self.stop_game())
+            for widget in (heading, note, self.shader_bar, self.shader_step, cancel):
+                box.append(widget)
+            window.set_child(box)
+            window.present()
+            self.shader_window = window
+        steps = {"extract": tr("Reading the game's shaders..."), "export": tr("Preparing the programs..."),
+                 "translate": tr("Translating the shaders..."), "compile": tr("Compiling the shaders...")}
+        self.shader_bar.set_fraction(percent / 100)
+        self.shader_bar.set_text(f"{percent} %")
+        self.shader_step.set_label(steps.get(stage, tr("Finishing...")))
 
     def stop_game(self):
         if not self.process:
@@ -3119,6 +3232,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         except GLib.Error:
             pass
         status = process.get_exit_status() if process.get_if_exited() else -1
+        if getattr(self, "shader_window", None):  # cancelled or failed while building the shaders
+            self.shader_window.destroy()
+            self.shader_window = None
         self.process = None
         self.game_started = 0
         self.party = None

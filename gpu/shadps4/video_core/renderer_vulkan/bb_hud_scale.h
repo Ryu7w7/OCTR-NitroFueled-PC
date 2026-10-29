@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "video_core/renderer_vulkan/bb_motion_blur.h"
+
 namespace BbHud {
 
 struct Entry {
@@ -104,7 +106,8 @@ inline std::optional<std::vector<std::uint32_t>> Scale(std::span<const std::uint
     return out;
 }
 
-// The SPIR-V to make the module of this shader from: scaled when BB_HUD_SCALE names it.
+// The SPIR-V to make the module of this shader from: scaled when BB_HUD_SCALE names it (and the
+// motion blur shaders without their blur with BB_NO_MOTION_BLUR, bb_motion_blur.h).
 inline std::optional<std::vector<std::uint32_t>> ForModule(std::uint64_t pgm_hash, std::size_t perm,
                                                            std::span<const std::uint32_t> spv) {
     for (const auto& e : Entries()) {
@@ -116,7 +119,7 @@ inline std::optional<std::vector<std::uint32_t>> ForModule(std::uint64_t pgm_has
         }
         return scaled;
     }
-    return std::nullopt;
+    return BbBlur::ForModule(pgm_hash, spv); // with the motion blur patch: no blur shader either
 }
 
 } // namespace BbHud

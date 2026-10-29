@@ -252,6 +252,13 @@ if [[ -f $BB_CONFIG ]] && grep -qx 'patch_60fps=1' "$BB_CONFIG"; then
     export BB_VBLANK_HZ=${BB_VBLANK_HZ:-480}
     echo "60 FPS patch on: virtual vblank ${BB_VBLANK_HZ} Hz"
 fi
+# Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too (objects
+# moving on their own: the crowd, plants; bb_motion_blur.h), as run.py.
+if [[ -f $BB_CONFIG ]] && grep -qx 'patch_no_motion_blur=1' "$BB_CONFIG"; then
+    export BB_NO_MOTION_BLUR=1
+else
+    export BB_NO_MOTION_BLUR=0
+fi
 # Background upload of the game's GPU memory into VRAM ahead of use (BufferCache::Preupload):
 # 1 = only memory already in VRAM that the game rewrote (no new VRAM), 2 = all of it (~3 GB more
 # VRAM), 0 = off. BB_GUEST_GPU_MEMORY=1 puts guest direct memory in GPU-visible dma-buf chunks
@@ -332,6 +339,17 @@ if [[ -z ${BB_VBLANK_HZ:-} ]]; then
     case $fps in uncap) export BB_VBLANK_HZ=480 ;; 90) export BB_VBLANK_HZ=90 ;; *) export BB_VBLANK_HZ=60 ;; esac
 fi
 echo "SacredFire ${version:-unknown version}"
+# The graphics engine (bbport.ini renderer), as run.py: the native Vulkan renderer is experimental;
+# its shaders are built from this game the first time (scripts/native_shaders.py, a few minutes;
+# "@progress" lines for the launcher's window). Anything that stops it leaves shadPS4's Vulkan.
+if [[ -z ${BB_NATIVE_VK:-} && -f $BB_CONFIG ]] && grep -qx 'renderer=native' "$BB_CONFIG"; then
+    native_env=$(mktemp "$out/native-env.XXXXXX")
+    temporal=$(sed -n 's/^temporal=//p' "$BB_CONFIG" | tail -n 1)
+    "$PYTHON" scripts/native_shaders.py --data "$data" --game "$game" --title-id "$title_id" \
+        --app-version "$app_version" --temporal "$temporal" --env-file "$native_env" || true
+    while IFS= read -r -d '' setting; do export "$setting"; done < "$native_env"
+    rm -f "$native_env"
+fi
 # The user directory (saves, shader cache) must exist and be named to the GPU library before the
 # game starts: its path table is built when the library loads (before the port hands it the
 # directory), and a missing directory makes it fall back to ~/.local/share/shadPS4, which the
@@ -353,4 +371,16 @@ if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     fi
     exit "$mod_status"
 fi
-exec "$probe" "${probe_args[@]}"
+# The game's output reaches the launcher through scripts/perf_report.py (each line passed on as it
+# comes), which keeps the anonymous performance report's data; the report is made when the game
+# ends (and sent only with bbport.ini perf_reports=1, asked once by the launcher). BB_PERF_LOG=0:
+# the game is started as before.
+if [[ ${BB_PERF_LOG:-1} == 0 ]]; then exec "$probe" "${probe_args[@]}"; fi
+perf_state=$(mktemp "$out/perf-state.XXXXXX")
+set +e
+"$probe" "${probe_args[@]}" 2>&1 | "$PYTHON" -u scripts/perf_report.py --tee "$perf_state"
+status=${PIPESTATUS[0]}
+set -e
+"$PYTHON" scripts/perf_report.py --finish "$perf_state" --code "$status" --config "$BB_CONFIG" \
+    --data "$data" --octr "${version:-}" --edition "$title_id" || true
+exit "$status"

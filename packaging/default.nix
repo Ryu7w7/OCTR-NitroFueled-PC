@@ -9,11 +9,13 @@
 let
   lib = pkgs.lib;
   root = ./..;
-  assetDirs = [ "scripts" "patches" "launcher" "shaders" ];
+  assetDirs = [ "scripts" "patches" "launcher" "shaders" "third_party/gcn2hlsl" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
     "out/VERSION" "tools" "tools/gen_import_names.py"
+    # the native Vulkan engine's shaders are built on the player's PC (scripts/native_shaders.py)
+    "tools/shaders" "tools/shaders/build_spirv.py" "third_party"
   ] ++ assetDirs;
   src = builtins.path {
     name = "bbport-src";
@@ -128,6 +130,9 @@ pkgs.stdenv.mkDerivation {
     if [ -d shaders ]; then cp -r shaders $d/; fi
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
     install -Dm755 tools/gen_import_names.py $d/tools/gen_import_names.py
+    # The native Vulkan engine's shader build: its translator and driver script (DXC: BB_DXC below).
+    install -Dm644 tools/shaders/build_spirv.py $d/tools/shaders/build_spirv.py
+    mkdir -p $d/third_party && cp -r third_party/gcn2hlsl $d/third_party/
     install -m755 out/sacredfire $d/bin/sacredfire
     install -m755 out/bb-gpu-capabilities $d/bin/bb-gpu-capabilities
     install -Dm755 out/gpu/libbbgpu.so $d/bin/gpu/libbbgpu.so
@@ -155,6 +160,7 @@ pkgs.stdenv.mkDerivation {
       ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py ${python}/bin/python3 $out/share/sacredfire/launcher/sacredfire_launcher.py" \
       --set BB_PREBUILT 1 \
       --set PYTHON ${pkgs.python3}/bin/python3 \
+      --set BB_DXC ${pkgs.directx-shader-compiler}/bin/dxc \
       --set BB_BUNDLED_VK_DRIVER_FILES ${icds} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.util-linux pkgs.procps
                                           pkgs.gawk pkgs.gnused pkgs.gnugrep ]} \
@@ -164,6 +170,7 @@ pkgs.stdenv.mkDerivation {
       ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py ${pkgs.bash}/bin/bash $out/share/sacredfire/run.sh" \
       --set BB_PREBUILT 1 \
       --set PYTHON ${pkgs.python3}/bin/python3 \
+      --set BB_DXC ${pkgs.directx-shader-compiler}/bin/dxc \
       --set BB_BUNDLED_VK_DRIVER_FILES ${icds} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.procps ]} \
       --run 'export BB_DATA_DIR=''${BB_DATA_DIR:-''${XDG_DATA_HOME:-$HOME/.local/share}/sacredfire}; mkdir -p "$BB_DATA_DIR"'

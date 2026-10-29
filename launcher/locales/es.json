@@ -396,5 +396,21 @@
  "A copy is kept just in case.": "Se guarda una copia por si acaso.",
  "Reset": "Reiniciar",
  "{}: this is the mods folder (or holds it); add the mod's own folder": "{}: es la carpeta de mods (o la contiene); añade la carpeta del propio mod",
- "{}: already in the mods folder": "{}: ya está en la carpeta de mods"
+ "{}: already in the mods folder": "{}: ya está en la carpeta de mods",
+ "Send anonymous performance data": "Enviar datos anónimos de rendimiento",
+ "Help us improve OCTR?": "¿Nos ayudas a mejorar OCTR?",
+ "You can change it any time in Settings.": "Puedes cambiarlo cuando quieras en Ajustes.",
+ "No, thanks": "No, gracias",
+ "Yes, send anonymous data": "Sí, enviar datos anónimos",
+ "When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, processor and memory, the graphics settings and the FPS of each track. Nothing personal: not your nickname, your races or your friends, and your IP is not stored. It shows which PCs the game needs to improve on. A copy always stays in the perf folder.": "Al cerrar el juego, OCTR puede enviar un resumen anónimo de cómo le fue a tu PC: tarjeta gráfica, procesador y memoria, los ajustes gráficos y los FPS de cada pista. Nada personal: ni tu apodo, ni tus partidas, ni tus amigos, y tu IP no se guarda. Sirve para saber en qué PCs hay que mejorar el juego. Siempre queda una copia en la carpeta perf.",
+ "Graphics engine": "Motor gráfico",
+ "Native Vulkan (experimental)": "Vulkan nativo (experimental)",
+ "Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it builds its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 (FSR 1 works). If something goes wrong, go back to Vulkan (shadPS4).": "Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara sus shaders a partir de tu copia del juego (unos minutos). Con el nativo no hay FSR 3 (FSR 1 sí). Si algo va mal, vuelve a Vulkan (shadPS4).",
+ "Compiling the native engine's shaders": "Compilando shaders del motor nativo",
+ "Only the first time: they are built from your copy of the game and take a few minutes. The game opens by itself when they are done.": "Solo la primera vez: se preparan a partir de tu copia del juego y tardan unos minutos. El juego se abre solo al terminar.",
+ "Reading the game's shaders...": "Leyendo los shaders del juego...",
+ "Preparing the programs...": "Preparando los programas...",
+ "Translating the shaders...": "Traduciendo los shaders...",
+ "Compiling the shaders...": "Compilando los shaders...",
+ "Finishing...": "Terminando..."
 }

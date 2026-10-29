@@ -126,6 +126,15 @@ def third_party(dlls, python=None, dlss=False):
                   f'  home:    {field("URL")}',
                   f'  source:  https://packages.msys2.org/packages/{package}',
                   f'  files:   {", ".join(packages[package]["dlls"])}', '']
+    lines += ['DirectX Shader Compiler (dxc.exe, dxcompiler.dll), in bin\\dxc\\ (the native Vulkan',
+              '  renderer compiles its shaders with it on your PC)',
+              '  license: University of Illinois/NCSA (LLVM) and MIT (bin\\dxc\\LICENSE-LLVM.txt,',
+              '           bin\\dxc\\LICENCE-MIT.txt)',
+              '  home:    https://github.com/microsoft/DirectXShaderCompiler', '',
+              'gcn2hlsl and its modules, in third_party\\gcn2hlsl\\ (the native renderer\'s shader',
+              '  translator, from the D3D11 port by FrankHUN88453, with SacredFire changes)',
+              '  license: MIT (third_party\\gcn2hlsl\\LICENSE)',
+              '  home:    https://github.com/straightarrows/CTR-NitroFueled-PC-d3d11', '']
     if python:
         lines += [f'{python}, in python\\',
                   '  license: PSF-2.0 (python\\LICENSE.txt; also covers the bundled OpenSSL, libffi,',
@@ -204,6 +213,10 @@ def main():
     p.add_argument('--version', default='')
     p.add_argument('--dist', type=Path, default=ROOT / 'dist')
     p.add_argument('--dlss-sdk', type=Path, help='NVIDIA DLSS SDK folder: bundle DLSS')
+    # DXC (github.com/microsoft/DirectXShaderCompiler releases, dxc_*.zip unpacked): the native
+    # renderer's shaders are compiled with it on the player's PC (scripts/native_shaders.py)
+    p.add_argument('--dxc-dir', type=Path, default=ROOT.parent / 'OCTR-vulkan-lab-tools' / 'dxc',
+                   help='an unpacked DXC release (bin/x64/dxc.exe): bundle it for the native renderer')
     a = p.parse_args()
     dlss_files = []
     if a.dlss_sdk:
@@ -257,6 +270,21 @@ def main():
         shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
+    # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its
+    # driver script and DXC. Only dxc.exe and dxcompiler.dll: SPIR-V needs no dxil.dll.
+    (folder / 'tools' / 'shaders').mkdir()
+    shutil.copy2(ROOT / 'tools' / 'shaders' / 'build_spirv.py', folder / 'tools' / 'shaders')
+    shutil.copytree(ROOT / 'third_party' / 'gcn2hlsl', folder / 'third_party' / 'gcn2hlsl',
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    dxc_bin = a.dxc_dir / 'bin' / 'x64'
+    if not (dxc_bin / 'dxc.exe').is_file():
+        sys.exit(f'{dxc_bin / "dxc.exe"} not found: give --dxc-dir an unpacked DXC release')
+    (folder / 'bin' / 'dxc').mkdir()
+    for f in ('dxc.exe', 'dxcompiler.dll'):
+        shutil.copy2(dxc_bin / f, folder / 'bin' / 'dxc')
+    for f in ('LICENSE-LLVM.txt', 'LICENCE-MIT.txt'):
+        if (a.dxc_dir / f).is_file():
+            shutil.copy2(a.dxc_dir / f, folder / 'bin' / 'dxc')
     for patch in (ROOT / 'patches').glob('*.xml'):
         shutil.copy2(patch, folder / 'patches')
     # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.

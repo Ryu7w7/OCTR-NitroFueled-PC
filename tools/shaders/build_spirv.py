@@ -142,8 +142,10 @@ def main(argv):
     results, errors = {}, Counter()
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count()) as pool:
         jobs = [pool.submit(dxc_one, dxc, hlsl_dir, spv_dir, n, kinds[n]) for n in names]
-        for j in concurrent.futures.as_completed(jobs):
+        for done, j in enumerate(concurrent.futures.as_completed(jobs), 1):
             name, ok, err = j.result()
+            if done % 100 == 0 or done == len(jobs):
+                print(f"compiled {done}/{len(jobs)}", flush=True)
             results[name] = {"ok": ok, "error": err} if not ok else {"ok": True}
             if not ok:
                 errors[err.split("error: ")[-1][:100]] += 1
