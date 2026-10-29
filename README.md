@@ -39,6 +39,11 @@ start prepares the game's shaders for your GPU from your own dump (a few seconds
 [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
 compile them; the few the recipe lacks are compiled when first seen and cached.
 
+Time Trial on recognized USA/EU 1.21 executables credits every challenge beaten by a finish:
+N. Tropy, Oxide, Velo and developer times, even with no ghost selected. Times must be strictly
+faster; existing progress is kept. Rewards still require completing their required tracks.
+Other executable layouts keep the game's original progression.
+
 | Release | What it brought |
 |---|---|
 | [v0.7](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7) | Native Vulkan engine as an experimental choice in the launcher (straightarrows), with a shader build window; Speed Mode for private rooms, synced to the players who join (n0buholic); loading screens about half as long (liblzma decoding, n0buholic, and a RAM cache); motion blur off by default; older GPUs start again; opt-in anonymous performance reports; foldable friends list; in-game Graphics menu, Quit Game, Skip intro and the MSAA sky lines fixed on NVIDIA (immaculatevibes2025) |
