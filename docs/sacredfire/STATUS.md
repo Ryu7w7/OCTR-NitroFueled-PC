@@ -15,6 +15,7 @@ Updated 2026-10-09.
 | Adventure mode | plays after the sampler fix (user tried it; not played to the end) |
 | Split screen | works: a second gamepad on port 2 joins (user-confirmed) |
 | Game patches | 60 FPS and motion-blur-off switch from the menu; motion blur off confirmed working |
+| EU 1.21 private Speed Mode | startup, hook installation, and 40-track overlay preparation validated for CUSA14876 and CUSA13795; live EU lobby/multiplayer verification pending ([notes](21-eu-speed-mode.md)) |
 
 ## How to run
 

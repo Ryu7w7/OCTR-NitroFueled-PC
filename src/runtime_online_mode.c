@@ -137,19 +137,24 @@ static void jump_to(unsigned char *code, const void *target) {
 int runtime_online_mode_start(unsigned char *image, size_t size) {
     const char *setting = getenv("BB_ONLINE_MODE_HOOK");
     if (!setting || !*setting) return 1;
-    /* These sites belong to the supported USA 1.21 executable; fail before guest entry. */
-    if (strcmp(setting, "1277e00") || size < 0x2af1fb0) return 0;
-    static const unsigned char prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+    /* USA/EU 1.21 share globals and layouts; these EU functions start 16 bytes earlier. */
+    size_t shift;
+    if (!strcmp(setting, "1277e00")) shift = 0;
+    else if (!strcmp(setting, "1277df0")) shift = 0x10;
+    else return 0;
+    if (size < 0x2af1fb0) return 0;
+    unsigned char prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x53,0x50,0x48,0x8d,0x05,0x97,0xa1,0x87,0x01};
     static const unsigned char season_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x54,0x53,0x48,0x83,0xec,0x20};
-    if (memcmp(image + 0x1277e00, prefix, sizeof prefix) ||
-        memcmp(image + 0xfb7710, season_prefix, sizeof season_prefix) ||
-        memcmp(image + 0x125d570, "\x55\x48\x89\xe5\x41\x57\x41\x56", 8) ||
-        memcmp(image + 0xf50350, "\x55\x48\x89\xe5\x41\x57\x41\x56", 8)) return 0;
+    prefix[13] += (unsigned char)shift;
+    if (memcmp(image + (0x1277e00 - shift), prefix, sizeof prefix) ||
+        memcmp(image + (0xfb7710 - shift), season_prefix, sizeof season_prefix) ||
+        memcmp(image + (0x125d570 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56", 8) ||
+        memcmp(image + (0xf50350 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56", 8)) return 0;
     uintptr_t handler;
     memcpy(&handler, image + 0x2773b40, sizeof handler);
-    if (handler != (uintptr_t)(image + 0x1277c70)) return 0;
+    if (handler != (uintptr_t)(image + (0x1277c70 - shift))) return 0;
 #ifdef _WIN32
     /* Executable from the start: write_code() puts back the protection it found, and a
      * PAGE_READWRITE trampoline crashed the first call to the original season setter (code 3). */
@@ -165,24 +170,24 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     trampoline[10] = 0x48; trampoline[11] = 0xb8;
     const uintptr_t global = (uintptr_t)(image + 0x2af1fa8);
     memcpy(trampoline + 12, &global, sizeof global);
-    jump_to(trampoline + 20, image + 0x1277e11);
+    jump_to(trampoline + 20, image + (0x1277e11 - shift));
     memcpy(trampoline + 64, season_prefix, sizeof season_prefix);
-    jump_to(trampoline + 64 + sizeof season_prefix, image + 0xfb771f);
+    jump_to(trampoline + 64 + sizeof season_prefix, image + (0xfb771f - shift));
     if (!write_code(trampoline, trampoline, 64 + sizeof season_prefix + 14)) return 0;
     original_choice = (EmitChoice)trampoline;
     original_season = (SetSeason)(trampoline + 64);
-    original_event = (EventHandler)(image + 0x1277c70);
-    base_event = (EventHandler)(image + 0x125d570);
-    private_state = (PrivateState)(image + 0xf50350);
+    original_event = (EventHandler)(image + (0x1277c70 - shift));
+    base_event = (EventHandler)(image + (0x125d570 - shift));
+    private_state = (PrivateState)(image + (0xf50350 - shift));
     initialize_type = (void **)(image + 0x2a21ee8);
     network = (unsigned char **)(image + 0x2acb3d8);
     unsigned char jump[14];
     jump_to(jump, (void *)select_mode);
     const EventHandler replacement = selector_event;
-    if (!write_code(image + 0x1277e00, jump, sizeof jump) ||
+    if (!write_code(image + (0x1277e00 - shift), jump, sizeof jump) ||
         !write_code(image + 0x2773b40, &replacement, sizeof replacement)) return 0;
     jump_to(jump, (void *)set_season);
-    if (!write_code(image + 0xfb7710, jump, sizeof jump)) return 0;
+    if (!write_code(image + (0xfb7710 - shift), jump, sizeof jump)) return 0;
     puts("Native Online mode: Normal Mode / Speed Mode / Battle Mode selector installed");
     return 1;
 }

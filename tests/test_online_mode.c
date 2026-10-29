@@ -30,22 +30,24 @@ static void stub(unsigned char *at, void *function) {
     memcpy(at + 15, &function, 8);
     memcpy(at + 23, "\xff\xe0", 2);
 }
-int main(void) {
+static void test_region(size_t shift) {
+    speed = -1; private = 1; base_calls = 0;
     const size_t size = 0x3000000;
     unsigned char *image = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     unsetenv("BB_ONLINE_MODE_HOOK");
     assert(runtime_online_mode_start(image, size));
-    setenv("BB_ONLINE_MODE_HOOK", "1277e00", 1);
+    setenv("BB_ONLINE_MODE_HOOK", shift ? "1277df0" : "1277e00", 1);
     assert(!runtime_online_mode_start(image, size));
-    memcpy(image + 0x1277e00, "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x8d\x05\x97\xa1\x87\x01", 17);
+    memcpy(image + (0x1277e00 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x8d\x05\x97\xa1\x87\x01", 17);
+    image[0x1277e00 - shift + 13] += (unsigned char)shift;
     /* Record the remapped index and relocated LEA result, then undo the prologue. */
-    memcpy(image + 0x1277e11, "\x89\x37\x48\x89\x47\x08\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d\xc3", 17);
-    stub(image + 0x125d570, (void *)base_event);
-    stub(image + 0xf50350, (void *)private_state);
-    stub(image + 0x1277c70, (void *)original_handler);
-    void *handler = image + 0x1277c70;
+    memcpy(image + (0x1277e11 - shift), "\x89\x37\x48\x89\x47\x08\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d\xc3", 17);
+    stub(image + (0x125d570 - shift), (void *)base_event);
+    stub(image + (0xf50350 - shift), (void *)private_state);
+    stub(image + (0x1277c70 - shift), (void *)original_handler);
+    void *handler = image + (0x1277c70 - shift);
     memcpy(image + 0x2773b40, &handler, 8);
     unsigned char state[0x148] = {0};
     void *ptr = state;
@@ -54,11 +56,17 @@ int main(void) {
     memcpy(image + 0x2a21ee8, &ptr, 8);
     /* Missing/mismatched seasonal code must reject installation before any writes. */
     assert(!runtime_online_mode_start(image, size));
-    memcpy(image + 0xfb7710, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x83\xec\x20", 15);
-    memcpy(image + 0xfb771f, "\x89\x37\x48\x83\xc4\x20\x5b\x41\x5c\x41\x5e\x41\x5f\x5d\xc3", 15);
+    memcpy(image + (0xfb7710 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x83\xec\x20", 15);
+    memcpy(image + (0xfb771f - shift), "\x89\x37\x48\x83\xc4\x20\x5b\x41\x5c\x41\x5e\x41\x5f\x5d\xc3", 15);
+    assert(!runtime_online_mode_start(image, 0x2af1fa8));
+    setenv("BB_ONLINE_MODE_HOOK", "unsupported", 1);
+    assert(!runtime_online_mode_start(image, size));
+    setenv("BB_ONLINE_MODE_HOOK", shift ? "1277e00" : "1277df0", 1);
+    assert(!runtime_online_mode_start(image, size));
+    setenv("BB_ONLINE_MODE_HOOK", shift ? "1277df0" : "1277e00", 1);
     assert(runtime_online_mode_start(image, size));
-    void (ABI *season)(void *, int) = (void (ABI *)(void *, int))(image + 0xfb7710);
-    choice = (void (ABI *)(void *, int))(image + 0x1277e00);
+    void (ABI *season)(void *, int) = (void (ABI *)(void *, int))(image + (0xfb7710 - shift));
+    choice = (void (ABI *)(void *, int))(image + (0x1277e00 - shift));
     uintptr_t result[2] = {0};
     unsigned char self[0x1d0] = {0}, options[40] = {0}, flags[40] = {0}, items[3] = {1,1,1};
     ptr = options; memcpy(self + 0x1a8, &ptr, 8);
@@ -111,4 +119,9 @@ int main(void) {
         season(&applied, theme); assert(applied == theme);
     }
     munmap(image, size);
+}
+
+int main(void) {
+    test_region(0);
+    test_region(0x10);
 }

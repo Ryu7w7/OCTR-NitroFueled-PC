@@ -16,23 +16,28 @@ from patches import load_segments
 
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
 LABEL_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect_en.lng'
-GRAPH_SHA256 = '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47'
+GRAPH_SHA256 = {
+    '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
+    'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
+}
 # Native selector's selected-index event adapter, including its RIP-relative LEA.
 HOOK_PATTERN = re.compile(bytes.fromhex(
-    '55 48 89 e5 41 57 41 56 53 50 48 8d 05 97 a1 87 01'), re.DOTALL)
+    '55 48 89 e5 41 57 41 56 53 50 48 8d 05') + b'[\x97\xa7]' +
+    bytes.fromhex('a1 87 01'), re.DOTALL)
 
 
 def hook_site(elf):
     hits = [v + m.start() for v, off, size in load_segments(elf)
-            for m in HOOK_PATTERN.finditer(elf[off:off + size])]
-    if hits != [0x1277e00]:
+            for m in HOOK_PATTERN.finditer(elf[off:off + size])
+            if v + m.start() + 17 + struct.unpack_from('<i', m.group(), 13)[0] == 0x2af1fa8]
+    if len(hits) != 1 or hits[0] not in (0x1277e00, 0x1277df0):
         raise ValueError('native Online selector adapter is not uniquely recognized')
     return hits[0]
 
 
 def rebuild(blob):
-    if hashlib.sha256(blob).hexdigest() != GRAPH_SHA256:
-        raise ValueError('native Online mode selector is not the supported USA 1.21 asset')
+    if hashlib.sha256(blob).hexdigest() not in GRAPH_SHA256:
+        raise ValueError('native Online mode selector is not the supported USA/EU 1.21 asset')
     g = Igz(blob)
     # The native selector consumes the same option/availability lists as other selectors.
     for lst, raw, tag in (

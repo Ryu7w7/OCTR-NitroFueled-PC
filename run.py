@@ -875,7 +875,7 @@ def main():
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
-                if title_id == 'CUSA13795':
+                if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
                     base = [Path(p) for p in archives.split('|') if p]
                     if env.get('BB_ONLINE') == '1':
                         base, env['BB_ONLINE_MODE_HOOK'] = online_mode.prepare(

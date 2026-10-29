@@ -183,7 +183,7 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
 fi
 unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
-    if [[ $title_id == CUSA13795 ]]; then
+    if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
         speed_bases=()
         IFS='|' read -r -a speed_existing <<< "${BB_ARCHIVE_PATCHES:-}"
         for speed_patch in "${speed_existing[@]}"; do
