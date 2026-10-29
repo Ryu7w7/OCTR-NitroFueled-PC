@@ -310,6 +310,21 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         StopUnsupportedVulkan("the Vulkan loader (vulkan-1)", available_version);
     }
 
+    // SacredFire: the layers Windows/Linux have installed (overlays add theirs, and the loader
+    // starts the implicit ones with every Vulkan program); run.py names them if start-up hangs.
+    {
+        std::string installed;
+        if (auto [lr, list] = vk::enumerateInstanceLayerProperties(); lr == vk::Result::eSuccess) {
+            for (const auto& layer : list) {
+                installed += installed.empty() ? "" : ", ";
+                installed += layer.layerName.data();
+            }
+        }
+        std::printf("Vulkan: starting (loader %u.%u.%u); layers installed: %s\n",
+                    VK_API_VERSION_MAJOR(available_version), VK_API_VERSION_MINOR(available_version),
+                    VK_API_VERSION_PATCH(available_version), installed.empty() ? "none" : installed.c_str());
+        std::fflush(stdout);
+    }
     const auto layers = GetInstanceLayers(enable_validation, enable_crash_diagnostic);
     auto extensions = GetLayerExtensions(GetInstanceExtensions(window_type, true), layers);
     // SacredFire: the instance extensions NVIDIA's DLSS needs (when its bridge is present).
@@ -443,6 +458,8 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     };
 
     auto [instance_result, instance] = vk::createInstanceUnique(instance_ci_chain.get());
+    std::printf("Vulkan: instance created (%s)\n", vk::to_string(instance_result).c_str());
+    std::fflush(stdout);
     ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
                vk::to_string(instance_result));
 

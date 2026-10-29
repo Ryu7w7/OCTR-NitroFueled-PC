@@ -810,7 +810,7 @@ void Render(const Pass& pass) {
     });
     rendering = true;
     open_pass = pass;
-    open_area = {w, h};
+    open_area = vk::Extent2D{w, h};
     ++stats.passes;
     if (tracing) {
         std::string a;

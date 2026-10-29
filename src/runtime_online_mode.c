@@ -134,7 +134,9 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     memcpy(&handler, image + 0x2773b40, sizeof handler);
     if (handler != (uintptr_t)(image + 0x1277c70)) return 0;
 #ifdef _WIN32
-    unsigned char *trampoline = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    /* Executable from the start: write_code() puts back the protection it found, and a
+     * PAGE_READWRITE trampoline crashed the first call to the original season setter (code 3). */
+    unsigned char *trampoline = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 #else
     unsigned char *trampoline = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
