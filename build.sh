@@ -123,7 +123,7 @@ echo "Version: $version (out/VERSION)"
 if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -o out/online-mode-test
     out/online-mode-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_lzma.c $(pkg-config --cflags --libs liblzma) -o out/lzma-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_lzma.c $(pkg-config --cflags --libs liblzma) -o out/lzma-test
     out/lzma-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test

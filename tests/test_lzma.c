@@ -1,6 +1,20 @@
 #define _GNU_SOURCE
 #include "../src/runtime_lzma.c"
 #include <assert.h>
+#ifdef _WIN32
+/* the same checks on Windows: an executable mapping and the environment */
+static void *map_rwx(size_t size) { return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); }
+static void unmap(void *p, size_t size) { (void)size; VirtualFree(p, 0, MEM_RELEASE); }
+#define MAP_RWX_FAILED NULL
+#define setenv(name, value, overwrite) _putenv_s(name, value)
+#define unsetenv(name) _putenv_s(name, "")
+#else
+static void *map_rwx(size_t size) {
+    return mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+}
+static void unmap(void *p, size_t size) { munmap(p, size); }
+#define MAP_RWX_FAILED MAP_FAILED
+#endif
 
 int main(void) {
     unsigned char plain[32768], encoded[65536], output[32770];
@@ -29,9 +43,8 @@ int main(void) {
 
     /* Execute the patched call and fallback, not merely inspect the written jump bytes. */
     const size_t size = 0x1586000, entry = 0x1584ed0, call = 0x14f46ca;
-    unsigned char *image = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(image != MAP_FAILED);
+    unsigned char *image = map_rwx(size);
+    assert(image != MAP_RWX_FAILED);
     /* Worker registration is signature-gated and leaves smaller hosts untouched. */
     const size_t workers = 0x14e6548;
     const unsigned char worker_code[] = {
@@ -40,8 +53,12 @@ int main(void) {
     expand_decode_workers(image, size, 12);
     assert(image[workers] == 0);
     memcpy(image + workers, worker_code, sizeof(worker_code));
-    expand_decode_workers(image, size, 8);
+    expand_decode_workers(image, size, 4);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
+    setenv("BB_LZMA_WORKERS", "4", 1); /* the player's opt-out keeps the game's four */
+    expand_decode_workers(image, size, 16);
+    assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
+    unsetenv("BB_LZMA_WORKERS");
     expand_decode_workers(image, workers, 12);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
     expand_decode_workers(image, size, 12);
@@ -57,6 +74,7 @@ int main(void) {
     runtime_lzma_patch(image, size);
     assert(!original_decode);
     unsetenv("BB_NATIVE_LZMA");
+    setenv("BB_LZMA_CACHE_MB", "64", 1);
     runtime_lzma_patch(image, size);
     assert(original_decode);
     memcpy(image + call - 4, "\x48\x83\xec\x08", 4);
@@ -69,12 +87,37 @@ int main(void) {
     assert(!memcmp(output, plain, sizeof(plain)));
     assert(in_size == encoded_size && out_size == sizeof(plain));
     assert(atomic_load(&decoded_blocks) == 1);
+    /* the same block again: copied from the RAM cache, byte for byte, without decoding */
+    memset(output, 0, sizeof(output));
+    assert(run(properties, output, &out_size, encoded, &in_size, &status) == 0);
+    assert(!memcmp(output, plain, sizeof(plain)));
+    assert(atomic_load(&decoded_blocks) == 1 && atomic_load(&cached_blocks) == 1);
+    /* a different block of the same size is not mistaken for it */
+    encoded[encoded_size - 1] ^= 1;
+    memset(output, 0, sizeof(output));
+    run(properties, output, &out_size, encoded, &in_size, &status);
+    assert(atomic_load(&cached_blocks) == 1);
+    encoded[encoded_size - 1] ^= 1;
     properties[0] = 8;
     assert(run(properties, output, &out_size, encoded, &in_size, &status) == 77);
-    assert(atomic_load(&fallback_blocks) == 1);
+    assert(atomic_load(&fallback_blocks) == 2); /* the corrupted block above, then this one */
+    /* A full cache drops its oldest blocks: 3000 distinct 32 KiB blocks into 64 MiB (2048 fit). */
+    static unsigned char block[32768], back[32768];
+    for (unsigned i = 0; i < 3000; ++i) {
+        memset(block, (int)(i & 0xff), sizeof(block));
+        memcpy(block, &i, sizeof(i));
+        cache_put(1000 + i, ~(uint64_t)i, block, sizeof(block));
+        assert(cache_bytes <= cache_budget);
+    }
+    assert(atomic_load(&cache_evicted) >= 3000 - 2048 && cache_ring_count <= 2048);
+    assert(!cache_get(1000, ~(uint64_t)0, sizeof(back), back)); /* the oldest went */
+    const unsigned last = 2999;
+    assert(cache_get(1000 + last, ~(uint64_t)last, sizeof(back), back));
+    assert(!memcmp(back, &last, sizeof(last)) && back[sizeof(back) - 1] == (last & 0xff));
+    assert(!cache_get(1000 + last, ~(uint64_t)last, 16384, back)); /* the size is part of the key */
     runtime_lzma_report();
-    munmap(image, size);
-    munmap((void *)original_decode, 4096);
+    unmap(image, size);
+    unmap((void *)original_decode, 4096);
     puts("LZMA tests passed: markers, bounds, corruption, signature, opt-out, native hook and fallback");
     return 0;
 }

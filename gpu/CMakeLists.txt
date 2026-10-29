@@ -248,7 +248,9 @@ if (WIN32)
     target_compile_options(sacredfire PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror
         -Wno-unknown-warning-option -Wno-unused-but-set-global>)
     target_include_directories(sacredfire PRIVATE .. ../src)
-    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 onecore bcrypt ws2_32 -pthread)
+    # liblzma (MSYS2 mingw-w64-clang-x86_64-xz), static: the archive decoder (src/runtime_lzma.c)
+    find_library(BB_LIBLZMA NAMES liblzma.a REQUIRED)
+    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
     target_link_options(sacredfire PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
