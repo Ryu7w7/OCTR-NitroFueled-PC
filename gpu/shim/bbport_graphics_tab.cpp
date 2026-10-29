@@ -583,7 +583,7 @@ u64 PS4_SYSV_ABI LoadMapHook(void* context, void* args, void* a2, void* a3, void
 }
 
 /// The main menu's Quit Game button: its navigation item's text (_itemText, +0xe8).
-bool IsQuitButton(void* object) {
+[[maybe_unused]] bool IsQuitButton(void* object) { // the Quit Game button, off since v0.7.1
     const u64 item = object ? NavItem(reinterpret_cast<u64>(object)) : 0;
     u64 text = 0;
     char label[16] = {};
@@ -601,10 +601,8 @@ bool IsQuitButton(void* object) {
 
 u64 PS4_SYSV_ABI HideHook(void* context, void* args, void* a2, void* a3, void* a4, void* a5) {
     void* object = Input(context, args);
-    if (IsQuitButton(object)) {
-        std::printf("Graphics tab: Quit Game button kept shown\n");
-        return 0;
-    }
+    // OCTR v0.7.1: no Quit Game button (scripts/graphics_tab.py), so no placeable is kept shown
+    // for it: its label test ("Salir", "Sair"...) also matched the game's own buttons.
     if (IsTab(object, "hide")) {
         Relabel(object);
         return 0; // stays shown

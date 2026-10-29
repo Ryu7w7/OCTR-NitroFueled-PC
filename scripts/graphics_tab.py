@@ -36,7 +36,7 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 16  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 17  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -297,14 +297,11 @@ def show_quit(data):
     return bytes(data.replace(QUIT_LEVEL[0], QUIT_LEVEL[1]))
 
 
-# Optional: built when found (an older game without the 1.21 menu keeps the rest).
-OPTIONAL = {f'ui/octane_mainmenu_{lang}.lng': quit_labels(*labels)
-            for lang, labels in QUIT_LABELS.items()}
-OPTIONAL['ui/octane_mainmenu.igz'] = show_quit
-# The main menu's root script handles Wireless by name (hidden off the Switch): the name matches
-# nothing now, as with the Graphics tab.
-OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
-    b'Comp__Menu_ButtonWithIcon', b'Comp__Menu_ButtonWithIcoX')
+# The Quit Game button is OFF (OCTR v0.7.1). show_quit renames the main menu's one
+# "Octane/Octane_OnlineLobby/Octane_OnlineLobby" string, and the Online button uses that same
+# string: in v0.7, Online loaded the quit map and closed the game. It needs a level string of its
+# own before it can come back. The functions above stay for that.
+OPTIONAL = {}
 
 
 def build(game, dest, dump):
