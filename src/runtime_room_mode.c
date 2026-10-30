@@ -137,6 +137,7 @@ void runtime_room_mode_joined(const char *session_id) {
 
 /* Leaving the host's room (or picking, or hosting): this player's own choice again. */
 void runtime_room_mode_left(void) {
+    runtime_online_mode_leave_cup();
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
 }

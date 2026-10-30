@@ -598,6 +598,7 @@ static ssize_t read_self_memory(void *out, uintptr_t address, size_t size) {
 /* ucontext gregs of IsaRegs.gpr (x86 numbering). */
 static const int isa_gregs[16]={REG_RAX,REG_RCX,REG_RDX,REG_RBX,REG_RSP,REG_RBP,REG_RSI,REG_RDI,
                                 REG_R8,REG_R9,REG_R10,REG_R11,REG_R12,REG_R13,REG_R14,REG_R15};
+static void dump_frames(ucontext_t *uc);
 static void fault(int sig, siginfo_t *info, void *context) {
     if (sig == SIGTRAP && isa_table) {
         /* An int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
@@ -644,6 +645,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    /* Native code has frame pointers but no host unwind metadata. */
+    if (rip - (uintptr_t)image < 0x10000000) dump_frames(uc);
     /* RIP in no mapping at all (zero, or a pointer like 0xffffffff): nothing there to name, and
      * the unwinder cannot start from it. An indirect call leaves its return address at RSP; a
      * jump or return may leave something else, so the first stack slots that point into code

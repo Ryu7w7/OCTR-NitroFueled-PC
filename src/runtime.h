@@ -99,7 +99,9 @@ int runtime_online_mode_start(unsigned char *image, size_t size);
 /* The private room's mode through RyuNET (runtime_room_mode.c): the host publishes its choice,
  * a player who joins takes it, also when joining by invitation (no selector seen). */
 void runtime_online_mode_adopt(int speed);
+void runtime_online_mode_leave_cup(void);
 int runtime_online_mode_private_speed(void);
+int runtime_online_mode_private_cup(void);
 int runtime_online_mode_in_private(void);
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
