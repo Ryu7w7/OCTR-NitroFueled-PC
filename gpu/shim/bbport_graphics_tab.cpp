@@ -424,25 +424,27 @@ std::string Row(std::size_t row, bool change) {
         return text;
     }
     case 6: {
-        // The launcher's Aspect ratio (bbport.ini widescreen_layout): 16:9, 21:9 or 32:9, at
-        // start. A wide layout turns the monitor-size ultrawide off and keeps a screen size that
-        // fits it (3440x1440 / 2560x1080 for 21:9, else 5120x1440), as the launcher does.
-        int layout = std::clamp(v.widescreen.load(), 0, 2);
+        // The same display shape as the launcher, applied by scripts/aspect_ratio.py at start.
+        int ratio = std::clamp(v.aspect_ratio.load(), 0, BbSettings::AspectRatioCount - 1);
         if (change) {
-            layout = (layout + 1) % 3;
-            v.widescreen = layout;
-            if (layout != 0) {
+            ratio = (ratio + 1) % BbSettings::AspectRatioCount;
+            v.aspect_ratio = ratio;
+            if (ratio != BbSettings::Aspect16x9) {
                 v.ultrawide = 0;
-                const int w = v.widescreen_w.load(), h = v.widescreen_h.load();
+                const int w = v.aspect_w.load(), h = v.aspect_h.load();
+                const bool tall = (w == 1920 && h == 1200) || (w == 1280 && h == 800) ||
+                                  (w == 2560 && h == 1600);
                 const bool wide = (w == 3440 && h == 1440) || (w == 2560 && h == 1080);
-                if (w <= 0 || wide != (layout == 1)) {
-                    v.widescreen_w = layout == 1 ? 3440 : 5120;
-                    v.widescreen_h = 1440;
+                const bool super = (w == 5120 && h == 1440) || (w == 3840 && h == 1080) ||
+                                   (w == 2560 && h == 720) || (w == 7680 && h == 2160);
+                if (!((ratio == BbSettings::Aspect16x10 && tall) ||
+                      (ratio == BbSettings::Aspect21x9 && wide) || (ratio == BbSettings::Aspect32x9 && super))) {
+                    v.aspect_w = ratio == BbSettings::Aspect16x10 ? 1920 : ratio == BbSettings::Aspect21x9 ? 3440 : 5120;
+                    v.aspect_h = ratio == BbSettings::Aspect16x10 ? 1200 : 1440;
                 }
             }
         }
-        static const char* names[] = {"16:9", "21:9", "32:9"};
-        std::snprintf(text, sizeof(text), "Aspect Ratio: %s", names[layout]);
+        std::snprintf(text, sizeof(text), "Aspect Ratio: %s", BbSettings::AspectRatioNames[ratio]);
         return text;
     }
     default:
@@ -458,7 +460,7 @@ bool NeedsRestart() {
         restart |= v.game_patches[g] != v.startup_game_patches[g];
     }
     restart |= v.render_res != v.startup_render_res || v.temporal != v.startup_temporal ||
-               v.dlss_quality != v.startup_dlss_quality || v.widescreen != v.startup_widescreen ||
+               v.dlss_quality != v.startup_dlss_quality || v.aspect_ratio != v.startup_aspect_ratio ||
                v.output_res != v.startup_output_res;
     return restart;
 }

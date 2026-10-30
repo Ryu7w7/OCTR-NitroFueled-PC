@@ -104,13 +104,16 @@ RENDER_RESOLUTIONS = [("Game default (the PS4 Pro switches decide)", ""),
                       ("1440p (2560 x 1440, PS4 Pro)", "1440"),
                       ("1620p (2880 x 1620)", "1620"),
                       ("4K (3840 x 2160)", "2160")]
-# bbport.ini widescreen_layout / widescreen_output: the corrected 21:9 and 32:9 layouts (menus,
-# backgrounds and a centered HUD, scripts/widescreen.py, by tcosi), for each of their screen sizes.
-WIDESCREEN_LAYOUTS = [("16:9", "off"), ("21:9 (corrected menus and HUD)", "21x9"),
-                      ("32:9 (corrected menus and HUD)", "32x9")]
-WIDESCREEN_OUTPUTS = {"21x9": [("3440 x 1440", "3440x1440"), ("2560 x 1080", "2560x1080")],
-                      "32x9": [("5120 x 1440", "5120x1440"), ("3840 x 1080", "3840x1080"),
-                               ("2560 x 720", "2560x720"), ("7680 x 2160", "7680x2160")]}
+# bbport.ini aspect_ratio / aspect_output: the display shape and its screen sizes.
+# scripts/aspect_ratio.py prepares 16:10; widescreen.py keeps the corrected 21:9/32:9 layouts.
+ASPECT_RATIOS = [("16:9", "16x9"), ("16:10 (experimental)", "16x10"),
+                 ("21:9 (corrected menus and HUD)", "21x9"),
+                 ("32:9 (corrected menus and HUD)", "32x9")]
+ASPECT_OUTPUTS = {"16x10": [("1920 x 1200", "1920x1200"), ("1280 x 800", "1280x800"),
+                           ("2560 x 1600", "2560x1600")],
+                  "21x9": [("3440 x 1440", "3440x1440"), ("2560 x 1080", "2560x1080")],
+                  "32x9": [("5120 x 1440", "5120x1440"), ("3840 x 1080", "3840x1080"),
+                           ("2560 x 720", "2560x720"), ("7680 x 2160", "7680x2160")]}
 # bbport.ini temporal: one upscaler at a time (the game reads it). DLSS is Windows-only (its
 # NVIDIA library is a Windows DLL); there "dlss" falls back to FSR 3, so it is not offered here.
 UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
@@ -1259,9 +1262,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.render_res_row)
         self.layout_row = combo_row(
             tr("Aspect ratio"),
-            tr("21:9 and 32:9 correct the menus, backgrounds and HUD for that screen. Online or offline, with the 1.21 "
-               "update, USA or Europe (otherwise the game starts at 16:9); no FSR. The internal resolution picks the variant."),
-            WIDESCREEN_LAYOUTS, self.ini.get("widescreen_layout", "off"))
+            tr("16:10 is experimental and keeps the original menus and HUD. 21:9 and 32:9 include menu and HUD corrections. "
+               "USA or Europe 1.21; otherwise the game starts at 16:9. No FSR or DLSS. Requires a restart."),
+            ASPECT_RATIOS, self.ini.get("aspect_ratio", self.ini.get("widescreen_layout", "16x9")))
         screen.add(self.layout_row)
         self.layout_output_row = Adw.ComboRow(title=tr("Screen size"))
         self.layout_output_row.values = []
@@ -1472,8 +1475,9 @@ class LauncherWindow(Adw.ApplicationWindow):
     def update_layout(self, output=None):
         """The screen sizes of the chosen layout (none for 16:9)."""
         layout = combo_value(self.layout_row)
-        choices = WIDESCREEN_OUTPUTS.get(layout, [])
-        current = output or (combo_value(self.layout_output_row) if self.layout_output_row.values else None)             or self.ini.get("widescreen_output", "")
+        choices = ASPECT_OUTPUTS.get(layout, [])
+        current = (output or (combo_value(self.layout_output_row) if self.layout_output_row.values else None)
+                   or self.ini.get("aspect_output", self.ini.get("widescreen_output", "")))
         values = [v for _l, v in choices]
         self.layout_output_row.set_model(Gtk.StringList.new([label for label, _v in choices]))
         self.layout_output_row.values = values
@@ -1600,9 +1604,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini["fps_limit"] = combo_value(self.fps_limit_row)
         self.ini["render_res"] = combo_value(self.render_res_row) or None  # "": the Pro switches decide
         layout = combo_value(self.layout_row)
-        self.ini["widescreen_layout"] = layout
-        if layout != "off":
-            self.ini["widescreen_output"] = combo_value(self.layout_output_row)
+        self.ini["aspect_ratio"] = layout
+        self.ini["widescreen_layout"] = layout if layout in ("21x9", "32x9") else "off"
+        if layout != "16x9":
+            self.ini["aspect_output"] = combo_value(self.layout_output_row)
+            if layout in ("21x9", "32x9"):
+                self.ini["widescreen_output"] = self.ini["aspect_output"]
             self.ini["ultrawide"] = "0"  # the layout sets the size (the in-game ultrawide would not correct the menus)
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
@@ -1642,9 +1649,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         res = self.ini.get("render_res", "")
         self.render_res_row.set_selected(self.render_res_row.values.index(res) if res in self.render_res_row.values else 0)
         self.update_render_res()
-        layout = self.ini.get("widescreen_layout", "off")
+        layout = self.ini.get("aspect_ratio", self.ini.get("widescreen_layout", "16x9"))
         self.layout_row.set_selected(self.layout_row.values.index(layout) if layout in self.layout_row.values else 0)
-        self.update_layout(self.ini.get("widescreen_output", ""))
+        self.update_layout(self.ini.get("aspect_output", self.ini.get("widescreen_output", "")))
 
     def environment(self):
         return game_environment(self.settings)

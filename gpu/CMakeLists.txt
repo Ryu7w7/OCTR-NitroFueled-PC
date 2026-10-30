@@ -316,6 +316,10 @@ target_include_directories(ui-composition-test PRIVATE ..)
 add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp)
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
+add_executable(aspect-settings-test EXCLUDE_FROM_ALL ../tests/test_aspect_settings.cpp
+    shim/bbport_settings.cpp shim/bbport_menu_es.cpp)
+target_compile_options(aspect-settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(aspect-settings-test PRIVATE .. shim)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)

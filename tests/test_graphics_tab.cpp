@@ -53,6 +53,24 @@ static void check(std::vector<u8> image, u64 shift) {
 
 int main(int argc, char** argv) {
     using namespace BbGraphicsTab;
+    auto& settings = BbSettings::Get();
+    settings.aspect_ratio = BbSettings::Aspect16x9;
+    settings.startup_aspect_ratio = BbSettings::Aspect16x9;
+    settings.ultrawide = 1;
+    assert(Row(1, false) == "Aspect Ratio: 16:9");
+    assert(Row(1, true) == "Aspect Ratio: 16:10");
+    assert(settings.aspect_w == 1920 && settings.aspect_h == 1200 && settings.ultrawide == 0);
+    assert(NeedsRestart());
+    assert(Row(1, true) == "Aspect Ratio: 21:9");
+    assert(settings.aspect_w == 3440 && settings.aspect_h == 1440);
+    assert(Row(1, true) == "Aspect Ratio: 32:9");
+    assert(settings.aspect_w == 5120 && settings.aspect_h == 1440);
+    assert(Row(1, true) == "Aspect Ratio: 16:9");
+    assert(!NeedsRestart());
+    settings.aspect_w = 2560;
+    settings.aspect_h = 1600;
+    assert(Row(1, true) == "Aspect Ratio: 16:10");
+    assert(settings.aspect_w == 2560 && settings.aspect_h == 1600);
     assert(std::strcmp(TabLabel(21), "ﺍﻟﺮﺳﻮﻣﻴﺎﺕ") == 0);
     assert(std::strcmp(TabLabel(1), "Graphics") == 0);
     assert(std::strcmp(TabLabel(2), "Graphismes") == 0);
