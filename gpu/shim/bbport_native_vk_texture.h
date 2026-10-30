@@ -100,7 +100,7 @@ Info Describe(const std::uint32_t* tsharp);
 const Texture* Get(const std::uint32_t* tsharp);
 
 /// The sampler for an S# (4 dwords); `compare`: a depth comparison sampler.
-VkSampler Sampler(const std::uint32_t ss[4], bool compare);
+VkSampler Sampler(const std::uint32_t ss[4], bool compare, bool depth);
 
 Stats GetStats();
 } // namespace BbNativeVk::Tex

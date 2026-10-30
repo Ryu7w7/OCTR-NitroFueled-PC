@@ -4,7 +4,8 @@
 // yz direction): the direction is the sum of four taps around the pixel; unless it is the
 // neutral value, 16 taps along it (offsets -1/2 .. 7/16 of it) are averaged with the pixel,
 // each counted only where the fur buffer has coverage. Same interface and arithmetic as the
-// translation.
+// translation, but every read is at mip level 0 (both inputs are single-level render targets):
+// no derivatives, so pixels without fur leave at once instead of keeping their quads running.
 
 cbuffer CB0 : register(b0) { float4 cb[1]; }; // zw: texel size
 cbuffer CTRSwizzle : register(b13) { uint4 ctr_swz[8]; uint4 ctr_vin[8]; float4 ctr_scale; float4 ctr_tscale[8]; };
@@ -29,11 +30,11 @@ float4 main(PSIn IN) : SV_Target0 {
     const float2 h = 0.5f * cb[0].zw;
     const uint sw1 = ctr_swz[0].y, sw0 = ctr_swz[0].x;
     // the fur direction, from four taps around the pixel
-    float2 dir = Swz(t1.Sample(sm1, float2(uv.x + h.x, uv.y - h.y)), sw1).yz;
-    dir += Swz(t1.Sample(sm1, float2(uv.x + h.x, uv.y + h.y)), sw1).yz;
-    dir += Swz(t1.Sample(sm1, float2(uv.x - h.x, uv.y + h.y)), sw1).yz;
-    dir += Swz(t1.Sample(sm1, float2(uv.x - h.x, uv.y - h.y)), sw1).yz;
-    const float4 color = Swz(t0.Sample(sm0, uv), sw0);
+    float2 dir = Swz(t1.SampleLevel(sm1, float2(uv.x + h.x, uv.y - h.y), 0), sw1).yz;
+    dir += Swz(t1.SampleLevel(sm1, float2(uv.x + h.x, uv.y + h.y), 0), sw1).yz;
+    dir += Swz(t1.SampleLevel(sm1, float2(uv.x - h.x, uv.y + h.y), 0), sw1).yz;
+    dir += Swz(t1.SampleLevel(sm1, float2(uv.x - h.x, uv.y - h.y), 0), sw1).yz;
+    const float4 color = Swz(t0.SampleLevel(sm0, uv, 0), sw0);
     const float neutral = asfloat(0x3ffefeffu); // four times the encoded zero direction
     if (dir.x == neutral && dir.y == neutral) {
         return color;
@@ -43,8 +44,8 @@ float4 main(PSIn IN) : SV_Target0 {
     float count = 1.0f;
     [unroll] for (int i = 0; i < 16; ++i) {
         const float2 p = mad(d, float(i - 8) * 0.0625f, uv);
-        if (Swz(t1.Sample(sm1, p), sw1).x > 0.0f) {
-            sum += i == 8 ? color : Swz(t0.Sample(sm0, p), sw0);
+        if (Swz(t1.SampleLevel(sm1, p, 0), sw1).x > 0.0f) {
+            sum += i == 8 ? color : Swz(t0.SampleLevel(sm0, p, 0), sw0);
             count += 1.0f;
         }
     }

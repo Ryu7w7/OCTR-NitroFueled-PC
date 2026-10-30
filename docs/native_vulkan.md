@@ -19,6 +19,7 @@ From the portable folder:
 | `Run native vulkan.bat` | The native renderer draws beside shadPS4, which still draws the picture |
 | `Run native vulkan - show its picture.bat` | Both draw; you see the native one |
 | `Run native vulkan - alone.bat` | **The real mode**: shadPS4 skips every draw, only the native renderer draws |
+| `Run native vulkan - alone (2 frames ahead).bat` | As alone, with `BB_FRAMES_AHEAD=2` |
 
 Each run writes `logs/<time>.log`, `.frames.csv` (every frame's time) and, with
 `BB_VK_PASS_TRACE=1`, `.trace.txt` (GPU time of every pass and draw for one submission in 1000).
@@ -33,24 +34,41 @@ Each run writes `logs/<time>.log`, `.frames.csv` (every frame's time) and, with
 | `BB_VK_SHADERS=<dir>` | Where translated SPIR-V, pipeline caches and native shaders live |
 | `BB_VK_PASS_TRACE=1` | Per-pass and per-draw GPU timing into the trace file |
 | `BB_VK_CAPTURE_THREAD=0` | Capture draws on the game's thread (old behaviour) |
+| `BB_VK_DEFER_SIGNALS=0` | Alone mode: the game's thread waits for the capture thread at each submit, instead of the GPU labels waiting for it (`Run native vulkan - alone (wait at submit).bat`) |
+| `BB_VK_SUBMITS_AHEAD=N` | With deferred labels: how many submissions the game may run ahead of the capture thread (1). With no bound, frames came in bursts (40/17/2.5 ms) |
+| `BB_ANISO=N` | Forced anisotropy, as shadPS4's (16; 0 or 1 keeps the game's filters) |
+| `BB_VK_PREP_WORKERS=N` | Threads that work out each draw's shaders, vertex layout and indices ahead of the capture thread (2; 0: the capture thread does it all) |
+| `BB_VK_DECODE_DRAWS=1` | Alone mode: shadPS4 decodes the draw state and draws again (by default it passes over them) |
+| `BB_FRAMES_AHEAD=N` | shadPS4's: how many frames its recording thread may run ahead of the GPU at a flip (1). `Run native vulkan - alone (2 frames ahead).bat` tries 2 |
 | `BB_VK_RECORD_THREAD`, `BB_VK_SYNC_PIPELINES=1`, `BB_VK_DEFER_COPIES=0`, `BB_VK_VERTEX_COPY=0`, `BB_VK_FULL_BARRIERS`, `BB_VK_RESIDENT`, `BB_VK_TEXTURE_MB`, `BB_VK_NATIVE_SHADERS`, `BB_VK_DRAW` | Comparison and debugging switches; see `gpu/shim/bbport_native_vk.cpp` |
 
 ## How it works
 
 Code: `gpu/shim/bbport_native_vk*.cpp`.
 
-Three threads per frame:
+Threads per frame:
 
 1. **Game's render thread** (engine hooks). At each draw it copies what the engine overwrites
    once the call returns: the context, render target and buffer descriptors, the texture
    descriptors (T#s), and the vertex, pixel and geometry shader constants. About 2 µs per draw.
    Anything reached through an engine object pointer must be copied here; it is rewritten in
    place (Bink videos, Crash's fur shells).
-2. **Capture thread**: resolves shaders, textures, vertex layouts, pipelines and index data into
-   a batch. At each submit the game's thread waits for it, so guest memory is read before the
-   GPU-side reuse point.
-3. **Recorder thread**: upload ring, layouts, render passes, descriptor sets, command buffers,
+2. **Prep workers** (2): the part of a draw that does not depend on the draws before it, ahead
+   of the capture thread, in any order: shaders, vertex layout, and the indices (copied, and the
+   highest one found). A draw's batch keeps its capture until it is recorded, so the recorder
+   uploads the constants and indices from the capture itself, with no second copy.
+3. **Capture thread**: in order, resolves shaders, textures, vertex layouts, pipelines and index data into
+   a batch. Guest memory must be read before the game reuses it, which it does once it sees the
+   submission's end-of-pipe label. In alone mode those labels (written by shadPS4's command
+   processor, `liverpool.cpp`) wait for the capture thread, so the game's thread goes on with
+   the next frame at each submit; otherwise the game's thread waits for it at each submit. Before
+   this, the game's thread waited about 3.5 ms per race frame there, which matched the GPU's
+   idle time.
+4. **Recorder thread**: upload ring, layouts, render passes, descriptor sets, command buffers,
    submission.
+
+In alone mode shadPS4's command processor passes over the draw state (context registers,
+graphics shader registers) and the draws, and still runs fences, flips, copies and compute.
 
 Also:
 
@@ -62,6 +80,9 @@ Also:
 - **Texture copies** (the engine's `kCopyTexture`) are deferred until something needs them:
   - copies whose destination is never read are never made;
   - a whole copy whose source is then cleared becomes an image swap.
+- **Samplers** get shadPS4's forced anisotropy and no more: mipmapped samplers with a bilinear
+  min filter, not depth reads, and the game's mip filter kept (it used to make point-mip
+  samplers trilinear too).
 - **Shaders**: about 3,200 translated from the game's PS4 shaders, plus four written for the PC
   (`gpu/shim/native_shaders/`): fur, fur blur, the standard G-buffer pass, the blended track
   shader.
@@ -84,8 +105,12 @@ Also:
    without blending, the copy could become a swap. A feedback-loop layout
    (`VK_EXT_attachment_feedback_loop_layout`) could also remove it where the shader reads only
    its own pixel.
-2. **GPU bubbles**: about 10% idle. Check submission boundaries, pipeline-not-ready skips, and
-   waits on texture uploads.
+2. **GPU bubbles**: about 10–15% idle. In alone mode, shadPS4's recording thread waits at each
+   flip until the GPU finishes the frame before (`BB_FRAMES_AHEAD=1`, `PrepareFrame`): about
+   20% of a race and 80–90% of the title screen (`BB_WAIT_TRACE=1`, which now works on Windows
+   too). Labels queued on that thread wait with it, so the game waits too, then the GPU
+   waits for the game. Try `BB_FRAMES_AHEAD=2`. Also check submission boundaries,
+   pipeline-not-ready skips and waits on texture uploads.
 3. **Shared power budget**: the 6800U shares power between CPU and GPU, and the renderer's extra
    threads may lower GPU clocks. Compare GPU clocks against stock shadPS4 in a race.
 4. **More PC shaders** for the heaviest translated shaders (`shaders.py`-style per-shader GPU
