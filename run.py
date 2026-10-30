@@ -880,6 +880,8 @@ def main():
                     if env.get('BB_ONLINE') == '1':
                         base, env['BB_ONLINE_MODE_HOOK'] = online_mode.prepare(
                             game, out / 'online-mode', out / 'eboot.elf', base)
+                        env['BB_MOD_FILE_MAP'] = str((out / 'online-mode/cup-files.map').resolve())
+                        env.setdefault('BB_MOD_SOURCE_GAME', str(game))
                     try:
                         normal_patches, speed_patches, track_count = speed_mode.prepare(
                             game, out / 'speed-mode', base)
