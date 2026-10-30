@@ -17,7 +17,8 @@ import sys
 import time
 from pathlib import Path
 
-GENERATION = 3  # 2: quad-uniform branches in pixel shaders (AMD fur); 3: channel order in the views
+GENERATION = 4  # 2: quad-uniform branches in pixel shaders (AMD fur); 3: channel order in the views;
+#                 4: scalar buffer loads that overwrite their own offset (lit smoke, tiled lights)
 # The editions whose engine the renderer knows (gpu/shim/bbport_native_vk.cpp, bbport_hook.h): USA
 # and EU 1.21, the same engine structures with the two hooked functions 0x10 apart.
 SUPPORTED = {('CUSA13795', '01.21'), ('CUSA14876', '01.21')}

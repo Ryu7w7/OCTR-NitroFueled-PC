@@ -806,8 +806,18 @@ class Translator:
             else:
                 # SGPR offsets are in bytes
                 o = self.S(f["offset"])
+                # the load reads its offset before writing: one of its destinations may be that
+                # register (s_buffer_load_dwordx4 s[0:3], ..., s0 in a light loop), which the
+                # first load of the split would overwrite for the rest (lit smoke and liquids
+                # read their lights' radius and position from anywhere)
+                overlap = d <= f["offset"] < d + cnt
+                if overlap:
+                    self.emit(f"{{ uint o_ = {o};")
+                    o = "o_"
                 for k in range(cnt):
                     self.write_s(d + k, f"cbload{slot}(({o} >> 2) + {k}u)")
+                if overlap:
+                    self.emit("}")
             return
         if not t or t[0] != "P":
             raise Unsupported(f"s_load from untracked base {t}")
