@@ -1,4 +1,4 @@
-"""Native Normal Mode / Speed Mode / Battle Mode options for the shared online mode selector.
+"""Native NORMAL / ITEMLESS / BATTLE options for the shared online mode selector.
 
 The runtime keeps Speed disabled in public matchmaking until server queues support it.
 """
@@ -242,7 +242,7 @@ def rebuild(blob):
     g = Igz(blob)
     add_race_type(g)
     # The native selector consumes the same option/availability lists as other selectors.
-    set_options(g, 0x1880, 0x18a8, ('NORMAL MODE', 'SPEED MODE', 'BATTLE MODE'))
+    set_options(g, 0x1880, 0x18a8, ('NORMAL', 'ITEMLESS', 'BATTLE'))
     return g.build()
 
 

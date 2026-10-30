@@ -157,7 +157,7 @@ void (*runtime_online_mode_chosen)(int speed, int private_room);
  * whatever this player picked in the selector. Their own choice stays for their own room. */
 void runtime_online_mode_adopt(int speed) {
     runtime_speed_mode_set(speed != 0);
-    printf("Native Online mode: %s (the host's private room)\n", speed ? "SPEED MODE" : "NORMAL");
+    printf("Native Online mode: %s (the host's private room)\n", speed ? "ITEMLESS" : "NORMAL");
 }
 
 int runtime_online_mode_private_speed(void) { return private_speed_selected; }
@@ -829,7 +829,7 @@ static void refresh_lobby_card(unsigned char *owner) {
     }
     char mode[48];
     snprintf(mode, sizeof mode, "%s RACE - %s", cup_mode ? "CUP" : "SINGLE",
-             runtime_speed_race_active() ? "SPEED MODE" : "NORMAL");
+             runtime_speed_race_active() ? "ITEMLESS" : "NORMAL");
     update_card(owner, name, mode, preview, 0);
 }
 
@@ -1021,7 +1021,7 @@ static void ABI select_mode(void *sender, int index) {
     }
     if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed, private);
     runtime_speed_mode_set(speed);
-    printf("Native Online mode: %s\n", speed ? "SPEED MODE" : index == 2 ? "BATTLE" : "NORMAL");
+    printf("Native Online mode: %s\n", speed ? "ITEMLESS" : index == 2 ? "BATTLE" : "NORMAL");
     original_choice(sender, index == 2 ? 1 : 0);
 }
 
@@ -1409,6 +1409,6 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + 0x9b1fc0, jump, sizeof jump)) return 0;
     jump_to(jump, private_race_timer_done);
     if (!write_code(image + (0xeac310 - shift), jump, sizeof jump)) return 0;
-    puts("Native Online mode: NORMAL / SPEED MODE / BATTLE selector installed");
+    puts("Native Online mode: NORMAL / ITEMLESS / BATTLE selector installed");
     return 1;
 }

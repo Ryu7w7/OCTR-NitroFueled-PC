@@ -557,7 +557,7 @@ static void test_region(size_t shift) {
     assert(*(void **)(image_asset + 0x20) == image_handle && *(unsigned *)image_handle == 11);
     speed = 1;
     card_event(NULL, &event, card);
-    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - SPEED MODE"));
+    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - ITEMLESS"));
     assert(*(unsigned *)image_handle == 11); /* Repeated updates retain one reference. */
     /* A later native binding overwrites the card, with no input event afterward. */
     free_string(NULL, *(char **)(card_name + 0x30) - 16);
@@ -572,7 +572,7 @@ static void test_region(size_t shift) {
     card_update(NULL, card, 0.25f);
     assert(lobby_updates == 1);
     assert(!strcmp(*(char **)(card_name + 0x30), "WUMPA CUP"));
-    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - SPEED MODE"));
+    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - ITEMLESS"));
     assert(*(void **)(image_asset + 0x20) == image_handle && *(unsigned *)image_handle == 11);
     *(unsigned *)(card_name + 12) = *(unsigned *)(card_mode + 12) = 0;
     card_update(NULL, card, 0.25f);
@@ -652,7 +652,7 @@ static void test_region(size_t shift) {
     gui_update(project_object, gui_event);
     assert(gui_updates == 1 && *(void **)(gui_event + 0x20) == image_handle);
     assert(!strcmp(*(char **)(card_name + 0x30), "WUMPA CUP"));
-    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - SPEED MODE"));
+    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - ITEMLESS"));
     assert(received_mode == 1); /* GUI CUP must not turn the lobby into Relic Race. */
     free_string(NULL, *(char **)(gui_event + 0x18) - 16);
     assert(*(int *)(selected_list + 12) == 4);
