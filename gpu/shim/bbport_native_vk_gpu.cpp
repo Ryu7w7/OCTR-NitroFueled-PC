@@ -34,7 +34,7 @@ using u64 = std::uint64_t;
 // without resizable BAR has a ~256 MiB device-local host-visible heap, so a 256 MiB ring lands in
 // system memory and every draw's vertices cross PCIe; a smaller one can sit in video memory.
 u64 RingSize = 256ull << 20;
-constexpr u32 MaxMarks = 1024;         // timestamps per command buffer
+constexpr u32 MaxMarks = 8192;         // timestamps per command buffer (a traced race frame times ~1300 draws)
 
 /// One timed piece of a command buffer: from its timestamp to the next one.
 struct Label {
@@ -228,10 +228,16 @@ LayoutUse UseOf(vk::ImageLayout layout) {
         return {S::eNone, {}, {}};
     case vk::ImageLayout::eColorAttachmentOptimal:
         return {S::eColorAttachmentOutput, A::eColorAttachmentRead, A::eColorAttachmentWrite};
+    case vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT:
+        return {S::eColorAttachmentOutput | S::eFragmentShader,
+                A::eColorAttachmentRead | A::eShaderSampledRead, A::eColorAttachmentWrite};
     case vk::ImageLayout::eDepthStencilAttachmentOptimal:
         return {tests, A::eDepthStencilAttachmentRead, A::eDepthStencilAttachmentWrite};
     case vk::ImageLayout::eDepthStencilReadOnlyOptimal:
         return {tests | shaders, A::eDepthStencilAttachmentRead | A::eShaderSampledRead, {}};
+    case vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal:
+        return {tests | shaders, A::eDepthStencilAttachmentRead | A::eShaderSampledRead,
+                A::eDepthStencilAttachmentWrite};
     case vk::ImageLayout::eShaderReadOnlyOptimal:
         return {shaders, A::eShaderSampledRead, {}};
     case vk::ImageLayout::eTransferSrcOptimal:
@@ -283,6 +289,17 @@ void FlushClear(Image& image) {
     Mark(image.depth ? Work::ClearDepth : Work::ClearColor, image.width, image.height, image.format);
     Barrier();
     ++stats.recorded_clears;
+    if (tracing) {
+        const auto& f = image.clear_value.color.float32;
+        const auto& ds = image.clear_value.depthStencil;
+        if (image.depth) {
+            Trace("  clear %s (recorded, depth %g / stencil %u)\n", Describe(&image).c_str(), ds.depth,
+                  ds.stencil);
+        } else {
+            Trace("  clear %s (recorded, %g %g %g %g)\n", Describe(&image).c_str(), f[0], f[1], f[2],
+                  f[3]);
+        }
+    }
     const vk::ImageSubresourceRange range{aspects, 0, 1, 0, 1};
     if (image.depth) {
         Cmd().clearDepthStencilImage(image.image, vk::ImageLayout::eTransferDstOptimal,
@@ -726,7 +743,8 @@ void Barrier() {
 void Render(const Pass& pass) {
     if (rendering && std::equal(std::begin(pass.color), std::end(pass.color),
                                 std::begin(open_pass.color)) &&
-        pass.depth == open_pass.depth && pass.depth_read_only == open_pass.depth_read_only) {
+        pass.depth == open_pass.depth && pass.depth_read_only == open_pass.depth_read_only &&
+        pass.stencil_written == open_pass.stencil_written && pass.feedback == open_pass.feedback) {
         return;
     }
     end_kind = "next pass";
@@ -760,9 +778,12 @@ void Render(const Pass& pass) {
     for (u32 i = 0; i < 8; ++i) {
         if (Image* c = pass.color[i]) {
             const bool clear = bool(load_clear(*c, true));
-            Transition(*c, vk::ImageLayout::eColorAttachmentOptimal);
+            const vk::ImageLayout l = (pass.feedback >> i) & 1
+                                          ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
+                                          : vk::ImageLayout::eColorAttachmentOptimal;
+            Transition(*c, l);
             colors[i] = {.imageView = c->attach,
-                         .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                         .imageLayout = l,
                          .loadOp = clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
                          .storeOp = vk::AttachmentStoreOp::eStore,
                          .clearValue = c->clear_value};
@@ -771,8 +792,10 @@ void Render(const Pass& pass) {
     }
     vk::RenderingAttachmentInfo depth{}, stencil{};
     if (Image* d = pass.depth) {
-        const vk::ImageLayout l = pass.depth_read_only ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-                                                       : vk::ImageLayout::eDepthStencilAttachmentOptimal;
+        const vk::ImageLayout l =
+            !pass.depth_read_only  ? vk::ImageLayout::eDepthStencilAttachmentOptimal
+            : pass.stencil_written ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
+                                   : vk::ImageLayout::eDepthStencilReadOnlyOptimal;
         const vk::ImageAspectFlags cleared = load_clear(*d, !pass.depth_read_only);
         Transition(*d, l);
         const auto op = [&](vk::ImageAspectFlagBits aspect) {
@@ -787,6 +810,9 @@ void Render(const Pass& pass) {
         if (d->stencil) {
             stencil = depth;
             stencil.loadOp = op(vk::ImageAspectFlagBits::eStencil);
+            if (pass.stencil_written) {
+                stencil.storeOp = vk::AttachmentStoreOp::eStore;
+            }
         }
     }
     {
@@ -814,13 +840,23 @@ void Render(const Pass& pass) {
     ++stats.passes;
     if (tracing) {
         std::string a;
+        char v[96];
         for (u32 i = 0; i < count; ++i) {
+            const auto& f = colors[i].clearValue.color.float32;
+            std::snprintf(v, sizeof v, " (clear %g %g %g %g)", f[0], f[1], f[2], f[3]);
             a += " c" + std::to_string(i) + "=" + Describe(pass.color[i]) +
-                 (colors[i].loadOp == vk::AttachmentLoadOp::eClear ? " (clear)" : "");
+                 (colors[i].loadOp == vk::AttachmentLoadOp::eClear ? v : "") +
+                 ((pass.feedback >> i) & 1 ? " (read in place)" : "");
         }
         if (pass.depth) {
-            a += " d=" + Describe(pass.depth) + (pass.depth_read_only ? " (read-only)" : "") +
-                 (depth.loadOp == vk::AttachmentLoadOp::eClear ? " (clear)" : "");
+            const bool zc = depth.loadOp == vk::AttachmentLoadOp::eClear,
+                       sc = pass.depth->stencil && stencil.loadOp == vk::AttachmentLoadOp::eClear;
+            const auto& ds = depth.clearValue.depthStencil;
+            std::snprintf(v, sizeof v, " (clear%s%s %g / %u)", zc ? " depth" : "", sc ? " stencil" : "",
+                          ds.depth, ds.stencil);
+            a += " d=" + Describe(pass.depth) +
+                 (!pass.depth_read_only ? "" : pass.stencil_written ? " (depth read-only)" : " (read-only)") +
+                 (zc || sc ? v : "");
         }
         Trace("  pass%s\n", a.c_str());
         trace_draws = 0;

@@ -111,7 +111,13 @@ struct ShaderInfo {
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     bool load_tried = false;
     bool native = false; // a shader written for the PC (native/) in place of the translation
+    bool reads_own_pixel = false; // a pixel shader sampling its targets' copies at its own pixel
 };
+
+/// Pixel shaders that sample copies of their own targets only at their own pixel (the reflection
+/// blends' screen passes): with VK_EXT_attachment_feedback_loop_layout they read the target in
+/// place and the copy is not made (ReadInPlace).
+constexpr const char* OwnPixelPasses[] = {"ReflectionBlend_1c2a0b3d_ps", "ReflectionBlend_d76f31c6_ps"};
 
 /// A Vulkan image standing in for an engine render or depth target (or a texture copy's
 /// destination), keyed by its GPU address. Same size as the engine's for now.
@@ -414,6 +420,9 @@ bool LoadIndex() {
             cur->hash = key;
             cur->name = name;
             cur->kind = kind;
+            for (const char* p : OwnPixelPasses) {
+                cur->reads_own_pixel = cur->reads_own_pixel || name == p;
+            }
         } else if (cur && tag == 'T') {
             int slot = 0, dims = 0;
             is >> slot >> dims;
@@ -517,14 +526,29 @@ void LoadModule(ShaderInfo& s) {
         }
     } slow_load{s};
     // a shader written for the PC in place of the translation, where there is one
-    // (BB_VK_NATIVE_SHADERS=0: the translations)
+    // (BB_VK_NATIVE_SHADERS=0: the translations; BB_VK_NATIVE_SKIP=Name,...: the translations of
+    // the shaders whose names start with one of these)
     static const bool native_shaders = [] {
         const char* env = std::getenv("BB_VK_NATIVE_SHADERS");
         return !(env && env[0] == '0');
     }();
+    static const std::vector<std::string> native_skip = [] {
+        std::vector<std::string> names;
+        const char* env = std::getenv("BB_VK_NATIVE_SKIP");
+        for (std::string rest = env ? env : ""; !rest.empty();) {
+            const std::size_t comma = rest.find(',');
+            if (comma) {
+                names.push_back(rest.substr(0, comma));
+            }
+            rest = comma == std::string::npos ? "" : rest.substr(comma + 1);
+        }
+        return names;
+    }();
+    const bool skipped = std::any_of(native_skip.begin(), native_skip.end(),
+                                     [&](const std::string& n) { return s.name.rfind(n, 0) == 0; });
     fs::path path = shader_root / "native" / (s.name + ".spv");
     std::error_code ec;
-    s.native = native_shaders && fs::exists(path, ec);
+    s.native = native_shaders && !skipped && fs::exists(path, ec);
     if (s.native) {
         std::printf("Native Vulkan: %s: the PC shader in place of the translation\n", s.name.c_str());
     } else {
@@ -832,6 +856,8 @@ struct DrawPacket {
     };
     bool indexed = false;
     bool writes_depth = false; // depth or stencil written (else the attachment is only read)
+    bool writes_z = false;     // depth values written (writes_depth without it: stencil only)
+    const Target* twin = nullptr; // a depth copy's destination, sampled as the depth target instead
     Ref ib;
     vk::IndexType ib_type = vk::IndexType::eUint32;
     u32 count = 0;
@@ -970,10 +996,15 @@ const Capture* capturing = nullptr;       // the capture being turned into a bat
 void Flush();
 // deferred copies (RunCopy)
 bool defer_copies = true;
+bool feedback_loops = false; // ReadInPlace (BB_VK_FEEDBACK=0: off), with the layout extension on
+std::vector<const Gpu::Image*> stale_copies; // copy destinations a ReadInPlace left unmade
 std::vector<CopyPacket> pending_copies; // recorder side; at most one per destination
-std::atomic<u64> copies_dropped{0}, copies_swapped{0};
+std::atomic<u64> copies_dropped{0}, copies_swapped{0}, copies_in_place{0}, copies_twinned{0}, stale_reads{0};
 void BeforeRead(const Gpu::Image* img);
 void BeforeWrite(const Gpu::Image* img);
+void BeforeStencilWrite(const Gpu::Image* img);
+void ReadInPlace(DrawPacket& d);
+void Covered(const Gpu::Image* img);
 void FlushCopiesFrom(const Gpu::Image* img);
 bool DropCopyInto(const Gpu::Image* img);
 void StartRecorder();
@@ -1044,6 +1075,16 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
 }
 
 /// The image for the target at `base`, made again when its size or format changes.
+/// Whole depth -> color copies whose destination still holds what the depth target holds (the
+/// capture thread): destination, depth target. A draw sampling the destination that writes
+/// neither depth nor stencil samples the depth target instead (bound read-only), and the copy is
+/// left unmade (the recorder's DropTwinCopy). Forgotten when either is written.
+std::vector<std::pair<const Target*, Target*>> depth_twins;
+
+void ForgetTwin(const Target* t) {
+    std::erase_if(depth_twins, [t](const auto& e) { return e.first == t || e.second == t; });
+}
+
 Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 comp_swap,
                    const char* what) {
     const Vulkan::Instance* inst = instance.load();
@@ -1065,6 +1106,7 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     }
     if (slot) {
         Tex::UnwatchTarget(&slot->written_over);
+        ForgetTwin(slot.get());
         targets_remade.fetch_add(1, std::memory_order_relaxed);
         if (drawing) {
             // work queued before still draws to the old image: it goes after that work
@@ -1096,7 +1138,13 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
         .tiling = vk::ImageTiling::eOptimal,
         .usage = U::eSampled | U::eTransferDst | U::eTransferSrc |
                  (depth ? vk::ImageUsageFlags{U::eDepthStencilAttachment}
-                        : vk::ImageUsageFlags{U::eColorAttachment}),
+                        : vk::ImageUsageFlags{U::eColorAttachment}) |
+                 // the formats the reflection blends read in place (ReadInPlace); targets trade
+                 // images (SwapForClear), so any of them may be the one
+                 (feedback_loops && (format == vk::Format::eR8G8B8A8Unorm ||
+                                     format == vk::Format::eR8G8Unorm)
+                      ? vk::ImageUsageFlags{U::eAttachmentFeedbackLoopEXT}
+                      : vk::ImageUsageFlags{}),
         .sharingMode = vk::SharingMode::eExclusive,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
@@ -1379,7 +1427,9 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             ss[2] = (k & 0x30) << 22 | (k & 0xc0) << 18 | (k & 0xf) << 20;
         }
         sampler_binds.fetch_add(1, std::memory_order_relaxed);
-        res.samplers[slot] = Tex::Sampler(ss, compare);
+        // a depth target read through this slot (the translator pairs t# and s# by number)
+        const bool depth = res.slots[slot].target && res.slots[slot].target->img.depth;
+        res.samplers[slot] = Tex::Sampler(ss, compare, depth);
         if (!res.samplers[slot]) {
             sampler_misses.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1860,6 +1910,9 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
         .stencilAttachmentFormat = s.stencil ? s.depth : vk::Format::eUndefined};
     const vk::GraphicsPipelineCreateInfo info{
         .pNext = &rendering,
+        .flags = feedback_loops && s.ps && s.ps->reads_own_pixel
+                     ? vk::PipelineCreateFlags{vk::PipelineCreateFlagBits::eColorAttachmentFeedbackLoopEXT}
+                     : vk::PipelineCreateFlags{},
         .stageCount = u32(stages.size()),
         .pStages = stages.data(),
         .pVertexInputState = &vertex_input,
@@ -2323,7 +2376,18 @@ VkDescriptorSet AllocateKept(VkDescriptorSetLayout layout) {
 
 /// A stage's descriptor set for what it samples (bindings b# 0.., t# 64.., s# 128..): the
 /// cached one, else written now and kept.
-vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Target* depth_ro) {
+/// `t` is one of the pass's targets read in place (its feedback loop).
+bool InPlace(const Gpu::Pass& pass, const Target* t) {
+    for (u32 c = 0; pass.feedback && c < 8; ++c) {
+        if (((pass.feedback >> c) & 1) && pass.color[c] == &t->img) {
+            return true;
+        }
+    }
+    return false;
+}
+
+vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Target* depth_ro,
+                           const Gpu::Pass* pass = nullptr) {
     if (const u64 g = set_generation.load(std::memory_order_acquire); g != set_cache_generation) {
         DropSets();
         set_cache_generation = g;
@@ -2356,7 +2420,11 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                     if (const Target* t = res.slots[slot].target) {
                         ii.imageView = b.arrayed ? t->view_array : t->view;
                         if (t == depth_ro) {
-                            ii.imageLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+                            ii.imageLayout = pass && pass->stencil_written
+                                                 ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
+                                                 : vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+                        } else if (pass && InPlace(*pass, t)) {
+                            ii.imageLayout = vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT;
                         }
                     } else if (const Tex::Texture* tex = res.slots[slot].texture;
                                tex && (b.arrayed || tex->slices == 1)) {
@@ -2379,7 +2447,7 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                 const u32 slot = b.binding + i - 128;
                 VkSampler smp = slot < 16 ? res.samplers[slot] : VK_NULL_HANDLE;
                 if (!smp) {
-                    smp = Tex::Sampler(default_ss, false); // samplers cannot be null
+                    smp = Tex::Sampler(default_ss, false, false); // samplers cannot be null
                 }
                 images.push_back({.sampler = smp});
                 key.push_back(u64(smp));
@@ -2565,11 +2633,35 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
     pass.depth = depth_target ? &depth_target->img : nullptr;
     const Target* depth_ro = nullptr;
+    // a depth copy's destination that still holds the depth: the depth target itself, its depth
+    // read-only (its stencil may still be written), when the draw writes no depth
+    const bool swrite = depth_target && depth_target->img.stencil && (dctl & 1) &&
+                        ((R<u32>(ctx + CtxStencilControl) >> 16) & 0xff);
+    const Target* twin = nullptr;
     for (StageRes* res : {&vres, &pres}) {
         for (Slot& slot : res->slots) {
             Target* t = slot.target;
             if (!t) {
                 continue;
+            }
+            if (depth_target && !depth_twins.empty()) {
+                for (const auto& [dst, src] : depth_twins) {
+                    if (dst == t && (zwrite || src != depth_target)) {
+                        static std::atomic<int> told{0};
+                        if (told.fetch_add(1, std::memory_order_relaxed) < 6) {
+                            std::printf("Native Vulkan: depth copy %s sampled by %s not read from "
+                                        "the depth target: depth write %d, other depth target %d\n",
+                                        Gpu::Describe(&t->img).c_str(),
+                                        ps ? ps->name.c_str() : "-", zwrite, src != depth_target);
+                        }
+                        break;
+                    }
+                    if (dst == t) {
+                        twin = t;
+                        slot.target = t = depth_target;
+                        break;
+                    }
+                }
             }
             if (std::find(colors, colors + 8, t) != colors + 8) {
                 color_feedback.fetch_add(1, std::memory_order_relaxed);
@@ -2580,15 +2672,22 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
                     depth_dropped.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     pass.depth_read_only = true;
+                    pass.stencil_written = swrite;
                     depth_ro = t;
                     depth_read_only.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
     }
+    for (int i = 0; i < 8; ++i) {
+        if (colors[i]) {
+            ForgetTwin(colors[i]); // drawn to
+        }
+    }
     if (!pass.depth) {
         depth_ro = nullptr;
         pass.depth_read_only = false;
+        pass.stencil_written = false;
     }
 
     // pipeline
@@ -2606,7 +2705,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     if (pass.depth) {
         st.depth = pass.depth->format;
         st.stencil = pass.depth->stencil;
-        st.depth_read_only = pass.depth_read_only;
+        st.depth_read_only = pass.depth_read_only && !pass.stencil_written; // no depth write either way
     }
     st.blend = R<u32>(ctx + CtxBlendControl);
     // the write mask names the shader's (logical) channels, which is the order the native targets
@@ -2817,9 +2916,14 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     d.depth_ro = depth_ro;
     // depth writes need the depth test on (DB_DEPTH_CONTROL Z_ENABLE, Z_WRITE_ENABLE), stencil
     // writes the stencil test and a write mask
-    d.writes_depth = pass.depth && !pass.depth_read_only &&
-                     ((((dctl >> 1) & 1) && ((dctl >> 2) & 1)) ||
-                      (st.stencil && (dctl & 1) && ((st.refmask >> 16) & 0xff)));
+    d.writes_z = pass.depth && !pass.depth_read_only && ((dctl >> 1) & 1) && ((dctl >> 2) & 1);
+    d.writes_depth = d.writes_z ||
+                     (pass.depth && (!pass.depth_read_only || pass.stencil_written) && st.stencil &&
+                      (dctl & 1) && ((st.refmask >> 16) & 0xff));
+    d.twin = twin;
+    if (d.writes_z) {
+        ForgetTwin(depth_target); // the copies took the depth only: stencil writes keep them
+    }
     d.layout = layout;
     d.pipeline = pipeline;
     lap(SecPacket);
@@ -2860,6 +2964,54 @@ bool ToRing(Ref& r) {
     return true;
 }
 
+/// A pixel shader that samples copies of its own targets at its own pixel reads the targets
+/// themselves instead (a feedback loop), and the copies are not made. Their destinations then
+/// hold something older until a whole copy or clear covers them: a read before that is counted
+/// (stale_reads), which would show a destination something else reads too.
+void ReadInPlace(DrawPacket& d) {
+    for (Slot& slot : d.res[1].slots) {
+        Target* const b = slot.target;
+        if (!b) {
+            continue;
+        }
+        const auto it = std::find_if(pending_copies.begin(), pending_copies.end(),
+                                     [&](const CopyPacket& q) { return q.dst == b; });
+        if (it == pending_copies.end()) {
+            continue;
+        }
+        const CopyPacket p = *it;
+        Target* const a = p.src;
+        u32 at = 8;
+        for (u32 c = 0; c < 8; ++c) {
+            if (d.pass.color[c] == &a->img) {
+                at = c;
+            }
+        }
+        if (at == 8 || p.from_depth || p.sx || p.dx || p.s_top || p.d_top ||
+            p.w != a->img.width || p.h != a->img.height || b->img.width != a->img.width ||
+            b->img.height != a->img.height || b->img.format != a->img.format ||
+            b->comp_swap != a->comp_swap ||
+            !(a->img.format == vk::Format::eR8G8B8A8Unorm || a->img.format == vk::Format::eR8G8Unorm)) {
+            continue;
+        }
+        pending_copies.erase(it);
+        for (Slot& other : d.res[1].slots) {
+            if (other.target == b) {
+                other.target = a;
+            }
+        }
+        d.pass.feedback |= u8(1u << at);
+        if (std::find(stale_copies.begin(), stale_copies.end(), &b->img) == stale_copies.end()) {
+            stale_copies.push_back(&b->img);
+        }
+        copies_in_place.fetch_add(1, std::memory_order_relaxed);
+        if (Gpu::Tracing()) {
+            Gpu::Trace("  read %s in place (copy to %s not made)\n", Gpu::Describe(&a->img).c_str(),
+                       Gpu::Describe(&b->img).c_str());
+        }
+    }
+}
+
 /// Records a captured draw (the recorder thread).
 void RecordDraw(DrawPacket& d) {
     if (!d.pipeline) {
@@ -2867,6 +3019,20 @@ void RecordDraw(DrawPacket& d) {
     }
     lap.Start();
     // pending copies this draw reads or writes over are made first (before the ring is used)
+    if (feedback_loops && d.ps && d.ps->reads_own_pixel && !pending_copies.empty()) {
+        ReadInPlace(d);
+    }
+    if (d.twin && DropCopyInto(&d.twin->img)) {
+        // sampled as the depth target instead: the copy's destination misses it
+        copies_twinned.fetch_add(1, std::memory_order_relaxed);
+        if (std::find(stale_copies.begin(), stale_copies.end(), &d.twin->img) == stale_copies.end()) {
+            stale_copies.push_back(&d.twin->img);
+        }
+        if (Gpu::Tracing()) {
+            Gpu::Trace("  %s read as the depth target (copy not made)\n",
+                       Gpu::Describe(&d.twin->img).c_str());
+        }
+    }
     if (!pending_copies.empty()) {
         for (const StageRes* res : {&d.res[0], &d.res[1]}) {
             for (const Slot& slot : res->slots) {
@@ -2882,8 +3048,10 @@ void RecordDraw(DrawPacket& d) {
         }
         if (d.pass.depth) {
             // a depth attachment only tested against is read
-            if (d.writes_depth) {
+            if (d.writes_z) {
                 BeforeWrite(d.pass.depth);
+            } else if (d.writes_depth) {
+                BeforeStencilWrite(d.pass.depth);
             } else {
                 BeforeRead(d.pass.depth);
             }
@@ -2911,7 +3079,7 @@ void RecordDraw(DrawPacket& d) {
     // layouts of the sampled targets, then the pass
     for (const StageRes* res : {&d.res[0], &d.res[1]}) {
         for (const Slot& slot : res->slots) {
-            if (slot.target && slot.target != d.depth_ro) {
+            if (slot.target && slot.target != d.depth_ro && !InPlace(d.pass, slot.target)) {
                 Gpu::Use(const_cast<Target*>(slot.target)->img, vk::ImageLayout::eShaderReadOnlyOptimal);
             }
         }
@@ -2937,9 +3105,9 @@ void RecordDraw(DrawPacket& d) {
     lap(SecPass);
     const ShaderInfo* ps = d.ps;
     const ShaderInfo* gs = d.gs;
-    const vk::DescriptorSet vset = StageSet(*d.vs, d.res[0], d.depth_ro);
+    const vk::DescriptorSet vset = StageSet(*d.vs, d.res[0], d.depth_ro, &d.pass);
     // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
-    const vk::DescriptorSet pset = ps   ? StageSet(*ps, d.res[1], d.depth_ro)
+    const vk::DescriptorSet pset = ps   ? StageSet(*ps, d.res[1], d.depth_ro, &d.pass)
                                    : gs ? Gpu::AllocateSet(empty_set_layout)
                                         : vk::DescriptorSet{};
     const vk::DescriptorSet gset = gs ? StageSet(*gs, d.res[2], nullptr) : vk::DescriptorSet{};
@@ -3213,6 +3381,7 @@ void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth)
     if (flags & 6) {
         if (const u64 dh = Q(ctx + CtxDepthTarget)) {
             if (Target* d = DepthTarget(dh)) {
+                ForgetTwin(d);
                 ClearPacket& c = Push(Op::Clear, open_batch->clears);
                 c.target = d;
                 c.depth = flags & 2;
@@ -3226,6 +3395,7 @@ void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth)
         for (int i = 0; i < 8; ++i) {
             if (const u64 h = Q(ctx + CtxColorTargets + i * 8)) {
                 if (Target* t = ColorTarget(h)) {
+                    ForgetTwin(t);
                     ClearPacket& c = Push(Op::Clear, open_batch->clears);
                     c.target = t;
                     c.color = true;
@@ -3317,7 +3487,12 @@ bool SwapForClear(Target* t) {
 
 void RunClear(const ClearPacket& c) {
     const bool whole = c.color || (c.depth && (c.stencil || !c.target->img.stencil));
-    if (!(whole && !pending_copies.empty() && SwapForClear(c.target))) {
+    if (whole) {
+        Covered(&c.target->img);
+    }
+    if (!c.color && !c.depth) {
+        BeforeStencilWrite(&c.target->img);
+    } else if (!(whole && !pending_copies.empty() && SwapForClear(c.target))) {
         BeforeWrite(&c.target->img);
     }
     if (c.color) {
@@ -3415,6 +3590,11 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     CopyPacket& c = Push(Op::Copy, open_batch->copies);
     c = CopyPacket{.src = &st, .dst = dt, .from_depth = from_depth, .sx = sx, .dx = dx, .w = w,
                    .h = h, .src_bytes = src_bytes, .s_top = s_top, .d_top = d_top};
+    ForgetTwin(dt);
+    if (from_depth && feedback_loops && !sx && !dx && !s_top && !d_top && w == sw && h == sh &&
+        dw == sw && dh == sh) {
+        depth_twins.emplace_back(dt, &st);
+    }
     EndOp();
     return true;
 }
@@ -3531,10 +3711,44 @@ void BeforeWrite(const Gpu::Image* img) {
     }
 }
 
+/// The stencil of depth image `img` is about to be written, its depth kept: pending depth copies
+/// from it into color images (which take the depth only) can wait, so a later whole copy into
+/// the same destination can still drop them.
+void BeforeStencilWrite(const Gpu::Image* img) {
+    if (pending_copies.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < pending_copies.size();) {
+        const CopyPacket& p = pending_copies[i];
+        if (&p.src->img == img && !(p.from_depth && !p.dst->img.depth)) {
+            const CopyPacket c = p;
+            pending_copies.erase(pending_copies.begin() + i);
+            DoCopy(c);
+        } else {
+            ++i;
+        }
+    }
+    FlushCopiesInto(img);
+}
+
 /// `img` is about to be read.
 void BeforeRead(const Gpu::Image* img) {
     if (!pending_copies.empty()) {
         FlushCopiesInto(img);
+    }
+    if (!stale_copies.empty() &&
+        std::find(stale_copies.begin(), stale_copies.end(), img) != stale_copies.end() &&
+        stale_reads.fetch_add(1, std::memory_order_relaxed) < 4) {
+        std::printf("Native Vulkan: %s read after a copy into it was left unmade (read in place)\n",
+                    Gpu::Describe(img).c_str());
+    }
+}
+
+/// `img` is wholly written: it no longer misses a copy left unmade.
+void Covered(const Gpu::Image* img) {
+    if (const auto it = std::find(stale_copies.begin(), stale_copies.end(), img);
+        it != stale_copies.end()) {
+        stale_copies.erase(it);
     }
 }
 
@@ -3555,6 +3769,9 @@ void RunCopy(const CopyPacket& c) {
     BeforeRead(&c.src->img);
     FlushCopiesFrom(&c.dst->img); // copies reading the destination's present contents go first
     const bool whole = c.dx == 0 && c.d_top == 0 && c.w >= c.dst->img.width && c.h >= c.dst->img.height;
+    if (whole) {
+        Covered(&c.dst->img);
+    }
     if (!whole || !DropCopyInto(&c.dst->img)) {
         FlushCopiesInto(&c.dst->img);
     }
@@ -3647,6 +3864,9 @@ void StartTextures() {
             force_copy = !(fc && fc[0] == '0');
             const char* dc = std::getenv("BB_VK_DEFER_COPIES");
             defer_copies = !(dc && dc[0] == '0');
+            const char* fb = std::getenv("BB_VK_FEEDBACK");
+            feedback_loops = defer_copies && !(fb && fb[0] == '0') && inst->IsFeedbackLoopLayoutEnabled();
+            std::printf("Native Vulkan: feedback loops %s\n", feedback_loops ? "on" : "off");
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
             if (drawing) {
@@ -3852,7 +4072,7 @@ void Report() {
             std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; game's thread "
                         "%.0f ms in draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms "
                         "submits, of it %.0f ms waiting for the capture thread (%.0f ms busy); GPU "
-                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed, %llu swapped instead; not done: %s\n",
+                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed, %llu swapped instead, %llu read in place, %llu read from the depth target (%llu stale reads); not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
@@ -3862,7 +4082,10 @@ void Report() {
                         (unsigned long long)draw_copies.load(),
                         (unsigned long long)copies_replaced.load(),
                         (unsigned long long)copies_dropped.load(),
-                        (unsigned long long)copies_swapped.load(), reasons.c_str());
+                        (unsigned long long)copies_swapped.load(),
+                        (unsigned long long)copies_in_place.load(),
+                        (unsigned long long)copies_twinned.load(),
+                        (unsigned long long)stale_reads.load(), reasons.c_str());
             {
                 std::size_t queued = 0;
                 {

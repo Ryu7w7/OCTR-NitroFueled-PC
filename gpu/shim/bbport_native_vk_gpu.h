@@ -38,11 +38,14 @@ struct Image {
     bool discard = false; // the next layout change may drop the contents (all of them are cleared)
 };
 
-/// Attachments of a rendering pass. `depth_read_only`: the depth image is also sampled.
+/// Attachments of a rendering pass. `depth_read_only`: the depth image is also sampled;
+/// `stencil_written`: its stencil still written meanwhile (the depth aspect alone read-only).
 struct Pass {
     Image* color[8]{};
     Image* depth = nullptr;
     bool depth_read_only = false;
+    bool stencil_written = false;
+    std::uint8_t feedback = 0; // color attachments (bits) the draws also sample (feedback loop layout)
 };
 
 /// Ring memory for one submission.
