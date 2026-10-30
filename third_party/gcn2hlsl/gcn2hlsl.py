@@ -59,7 +59,6 @@ class Translator:
         self.depth_out = False
         self.lane_spills = set()
         self.uses_quad = False
-        self.uses_swizzle = False
         self.uses_vin = False  # vertex inputs converted per the runtime vertex format (b13)
         # render scale (supersampling): pixel positions / texel coordinates are converted between
         # the game's 1080p units and the scaled render targets (b13 ctr_scale, ctr_tscale)
@@ -807,8 +806,18 @@ class Translator:
             else:
                 # SGPR offsets are in bytes
                 o = self.S(f["offset"])
+                # the load reads its offset before writing: one of its destinations may be that
+                # register (s_buffer_load_dwordx4 s[0:3], ..., s0 in a light loop), which the
+                # first load of the split would overwrite for the rest (lit smoke and liquids
+                # read their lights' radius and position from anywhere)
+                overlap = d <= f["offset"] < d + cnt
+                if overlap:
+                    self.emit(f"{{ uint o_ = {o};")
+                    o = "o_"
                 for k in range(cnt):
                     self.write_s(d + k, f"cbload{slot}(({o} >> 2) + {k}u)")
+                if overlap:
+                    self.emit("}")
             return
         if not t or t[0] != "P":
             raise Unsupported(f"s_load from untracked base {t}")
@@ -946,11 +955,10 @@ class Translator:
         comps = [k for k in range(4) if (f["dmask"] >> k) & 1]
         dst = f["vdata"]
 
-        def store(expr, ncomp=4, swizzle=True):
-            if swizzle:
-                # channel order of the bound view (RT component swap + T# dst_sel), supplied by the runtime
-                expr = f"ctr_swizzle({expr}, ctr_swz[{slot >> 2}][{slot & 3}])"
-                self.uses_swizzle = True
+        def store(expr, ncomp=4):
+            # the channel order (RT component swap + T# dst_sel) is the bound view's: the runtime
+            # makes views in that order, as the PS4 sampler applies dst_sel for free (selecting
+            # channels here took 3-5x the original's instructions)
             self.emit(f"{{ float4 r_ = {expr};")
             for j, c in enumerate(comps):
                 self.emit(f"    {'if (ex) ' if self.exec_written else ''}{self.V(dst + j)} = asuint(r_.{'xyzw'[c]});")
@@ -974,12 +982,12 @@ class Translator:
             self.cube_bad.add(slot)
             c = f"float{dims}({', '.join(av(k) for k in range(dims))})"
             return store(f"float4(t{slot}.CalculateLevelOfDetail(sm{ss[1]}, {c}), "
-                         f"t{slot}.CalculateLevelOfDetailUnclamped(sm{ss[1]}, {c}), 0, 0)", swizzle=False)
+                         f"t{slot}.CalculateLevelOfDetailUnclamped(sm{ss[1]}, {c}), 0, 0)")
         if n == "image_get_resinfo":
             self.uses_scale = True
             self.textures[slot] = (dims, "load")
             self.cube_bad.add(slot)
-            return store(f"texinfo{slot}(int({self.V(a)}))", swizzle=False)
+            return store(f"texinfo{slot}(int({self.V(a)}))")
         if not (n.startswith("image_sample") or n.startswith("image_gather4")):
             raise Unsupported(n)
         ss = self.tags.get(f["ssamp"])
@@ -1049,13 +1057,13 @@ class Translator:
             ch = "Red" if not comps else ["Red", "Green", "Blue", "Alpha"][comps[0]]
             comps[:] = [0, 1, 2, 3]
             if cmp_ is not None:
-                return store(f"{tex}.GatherCmp{ch}({sm}, {coord}, {cmp_})", swizzle=False)
-            return store(f"{tex}.Gather{ch}({sm}, {coord})", swizzle=False)
+                return store(f"{tex}.GatherCmp{ch}({sm}, {coord}, {cmp_})")
+            return store(f"{tex}.Gather{ch}({sm}, {coord})")
         if cmp_ is not None:
             if lod is not None and lod != "0.0f":
                 raise Unsupported("compare with explicit lod")
             fn = "SampleCmpLevelZero" if lod is not None or self.kind != "ps" else "SampleCmp"
-            return store(f"{tex}.{fn}({sm}, {coord}, {cmp_}).xxxx", swizzle=False)
+            return store(f"{tex}.{fn}({sm}, {coord}, {cmp_}).xxxx")
         if grads is not None:
             gx = f"float{dims}({grads[0]}, {grads[1]}{', 0' if dims == 3 else ''})"
             gy = f"float{dims}({grads[2]}, {grads[3]}{', 0' if dims == 3 else ''})"
@@ -1181,10 +1189,57 @@ class Translator:
         raise Unsupported("s_cbranch_join")
 
     # ------------------------------------------------------------ program
+    # texture reads that take no implicit derivatives: safe inside per-lane control flow
+    _NO_DERIV = re.compile(r"\.(SampleLevel|SampleGrad|SampleCmpLevelZero|Load|Gather\w*)\(")
+    _SETS_EX = re.compile(r"(?<![\w.])ex = ")
+
+    @classmethod
+    def group_guards(cls, body):
+        """Runs of `if (ex) x;` writes become one `if (ex) { ... }`: one masked block instead of
+        a select per write (where ex varies across lanes, every guarded write compiled to a
+        v_cndmask). Texture reads without implicit derivatives join the run, guarded with it."""
+        out, i, n = [], 0, len(body)
+        while i < n:
+            run, ind, j = [], None, i
+            while j < n:
+                line = body[j]
+                pre = line[:len(line) - len(line.lstrip())]
+                if ind is not None and pre != ind:
+                    break
+                s = line.lstrip()
+                if s.startswith("if (ex) ") and "{" not in s and not cls._SETS_EX.search(s):
+                    run.append(s[8:])
+                    ind, j = pre, j + 1
+                    continue
+                if s.startswith("{ float4 r_ = ") and s.endswith(";") and cls._NO_DERIV.search(s) and \
+                        not re.search(r"\.(Sample|SampleBias|SampleCmp)\(|ddx|ddy|quad_", s):
+                    k, inner = j + 1, []
+                    while k < n and body[k].startswith(pre + "    if (ex) ") and "{" not in body[k]:
+                        inner.append(body[k].lstrip()[8:])
+                        k += 1
+                    if inner and k < n and body[k] == pre + "}" and \
+                            not any(cls._SETS_EX.search(x) for x in inner):
+                        run += [s] + ["    " + x for x in inner] + ["}"]
+                        ind, j = pre, k + 1
+                        continue
+                break
+            if sum(1 for x in run if not x.startswith("    ") and x != "}") >= 2:
+                out.append(ind + "if (ex) {")
+                out += [ind + "    " + x for x in run]
+                out.append(ind + "}")
+                i = j
+            elif run:
+                out += body[i:j]
+                i = j
+            else:
+                out.append(body[i])
+                i += 1
+        return out
+
     def translate(self):
         body_start = len(self.lines)
         self.emit_range(0, len(self.insts))
-        body = self.lines[body_start:]
+        body = self.group_guards(self.lines[body_start:]) if self.exec_written else self.lines[body_start:]
         self.lines = self.lines[:body_start]
         return self.assemble(body)
 
@@ -1199,16 +1254,12 @@ class Translator:
             out.append(f"{ty}<float4> t{slot} : register(t{slot});")
             if use == "load" or any("texinfo" in l for l in body):
                 pass
-        if self.uses_swizzle or self.uses_vin or self.uses_scale:
+        if self.uses_vin or self.uses_scale:
             out.append("cbuffer CTRSwizzle : register(b13) { uint4 ctr_swz[8]; uint4 ctr_vin[8]; "
                        "float4 ctr_scale; float4 ctr_tscale[8]; };")
         if self.uses_vin:
             out.append("uint ctr_in(float x, uint sem) { uint m = ctr_vin[sem >> 2][sem & 3u]; uint u = asuint(x); "
                        "return m == 1u ? asuint(float(u)) : m == 2u ? asuint(float(int(u))) : u; }")
-        if self.uses_swizzle:
-            out.append("float ctr_sel(float4 v, uint c) { return c == 0u ? 0.0f : c == 1u ? 1.0f : v[c - 2u]; }")
-            out.append("float4 ctr_swizzle(float4 v, uint s) { return s == 0u ? v : float4(ctr_sel(v, s & 7u), "
-                       "ctr_sel(v, (s >> 3) & 7u), ctr_sel(v, (s >> 6) & 7u), ctr_sel(v, (s >> 9) & 7u)); }")
         for slot, kind in sorted(self.samplers.items()):
             ty = "SamplerComparisonState" if kind == "cmp" else "SamplerState"
             out.append(f"{ty} sm{slot} : register(s{slot});")
@@ -1286,7 +1337,7 @@ class Translator:
         """the translated program as a helper function (GS copy shader)"""
         body_start = len(self.lines)
         self.emit_range(0, len(self.insts))
-        body = self.lines[body_start:]
+        body = self.group_guards(self.lines[body_start:]) if self.exec_written else self.lines[body_start:]
         self.lines = self.lines[:body_start]
         out = [header + " {", "    VSOut o = (VSOut)0;"] + self.decls()
         out.append("    v0 = 0u;" if 0 in self.vregs else "")
