@@ -1253,23 +1253,23 @@ bool TakePooled(const PoolKey& key, Pooled* out) {
     return false;
 }
 
-bool Destroy(Texture* t) {
+void Destroy(Texture* t, std::vector<VkImageView>& destroyed) {
     const vk::Device dev = instance->GetDevice();
     if (PoolOn() && t->image && t->view && t->view_array && !t->broken.load() &&
         t->bytes <= PoolBudget / 4) {
         std::lock_guard lk(pool_mutex);
-        // the oldest entries go first to make room (their views destroyed: sets dropped)
-        bool destroyed = false;
+        // the oldest entries go first to make room (their views destroyed)
         while (!pool.empty() && pool_bytes + t->bytes > PoolBudget) {
             const Pooled old = pool.front();
             pool.erase(pool.begin());
             pool_bytes -= old.bytes;
             if (old.view && old.view != old.view_array) {
                 dev.destroyImageView(old.view);
+                destroyed.push_back(old.view);
             }
             dev.destroyImageView(old.view_array);
+            destroyed.push_back(old.view_array);
             vmaDestroyImage(instance->GetAllocator(), old.image, old.allocation);
-            destroyed = true;
         }
         pool.push_back(Pooled{{t->format, t->width, t->height, t->levels, t->slices,
                                t->first_level, t->cube},
@@ -1277,20 +1277,20 @@ bool Destroy(Texture* t) {
         pool_bytes += t->bytes;
         pool_kept.fetch_add(1, std::memory_order_relaxed);
         delete t;
-        return destroyed;
+        return;
     }
-    const bool views = t->view || t->view_array;
     if (t->view && t->view != t->view_array) {
         dev.destroyImageView(t->view);
+        destroyed.push_back(t->view);
     }
     if (t->view_array) {
         dev.destroyImageView(t->view_array);
+        destroyed.push_back(t->view_array);
     }
     if (t->image) {
         vmaDestroyImage(instance->GetAllocator(), t->image, t->allocation);
     }
     delete t;
-    return views;
 }
 
 namespace {
