@@ -17,9 +17,19 @@ from prepare import parse_self
 
 
 class GraphicsTabTests(unittest.TestCase):
+    def test_arabic_menu_labels_are_localized_and_fit_original_slots(self):
+        import unicodedata
+        self.assertEqual(unicodedata.normalize('NFKC', graphics_tab.LABELS['ar']), 'الرسوميات')
+        label, hint = graphics_tab.QUIT_LABELS['ar']
+        self.assertEqual(unicodedata.normalize('NFKC', label), 'خروج')
+        self.assertEqual(unicodedata.normalize('NFKC', hint), 'إغلاق اللعبة والعودة إلى سطح المكتب.')
+        self.assertLessEqual(len(graphics_tab.LABELS['ar'].encode()), 34)
+        self.assertLessEqual(len(label.encode()) + 1, 16)
+        self.assertLessEqual(len(hint.encode()), 191)
+
     def test_labels_preserve_string_positions(self):
         for label in graphics_tab.LABELS.values():
-            original = b'prefix\0Language selection padding\0\0' + graphics_tab.ANCHOR + b'\0Gameplay\0'
+            original = b'prefix\0' + b'Language selection padding'.ljust(34, b' ') + b'\0\0' + graphics_tab.ANCHOR + b'\0Gameplay\0'
             changed = graphics_tab.relabel(original, label)
             self.assertEqual(len(changed), len(original))
             self.assertEqual(changed.count(b'\0'), original.count(b'\0'))
