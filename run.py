@@ -887,12 +887,12 @@ def main():
                             game, out / 'speed-mode', base)
                     except (ValueError, OSError, KeyError, IndexError) as error:
                         # a damaged game file stops Speed Mode only: online plays as before
-                        say(f'Speed Mode (Experimental) not available: {error}')
+                        say(f'ITEMLESS (Experimental) not available: {error}')
                         archives = '|'.join(map(str, base))
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
-                        say(f'Speed Mode (Experimental): {track_count} tracks prepared for private rooms')
+                        say(f'ITEMLESS (Experimental): {track_count} tracks prepared for private rooms')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:

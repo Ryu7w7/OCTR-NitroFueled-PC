@@ -324,7 +324,7 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         self.assertEqual(new.u32(0x18b4), 3)
         options = new.u64(0x18a0)
         self.assertEqual([new.string_at(options + i * 8) for i in range(3)],
-                         ['NORMAL MODE', 'SPEED MODE', 'BATTLE MODE'])
+                         ['NORMAL', 'ITEMLESS', 'BATTLE'])
         available = new.u64(0x18c8)
         self.assertEqual(new.data[available:available + 3], bytes((1, 1, 1)))
         for lst in (0x1880, 0x18a8):

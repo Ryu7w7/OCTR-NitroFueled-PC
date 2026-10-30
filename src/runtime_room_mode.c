@@ -53,7 +53,7 @@ static void *publish(void *arg) {
     snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me, speed ? "speed" : "normal");
     const int status = runtime_ryunet_request("POST", target, body, sizeof body);
     printf("Native Online mode: this private room is %s for the players who join (RyuNET %d)\n",
-           speed ? "Speed Mode" : "Normal Mode", status);
+           speed ? "ITEMLESS" : "NORMAL", status);
     fflush(stdout);
     return NULL;
 }
