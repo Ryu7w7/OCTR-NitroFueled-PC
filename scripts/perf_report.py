@@ -25,7 +25,7 @@ REPORT_VERSION = 1
 KEEP = 10
 # bbport.ini keys that change performance; nothing else of the file is read into the report.
 SETTINGS = ('render_res', 'output_res', 'upscaler', 'temporal', 'fps_limit', 'present_mode', 'preset',
-            'msaa', 'live_resolution', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
+            'msaa', 'live_resolution', 'aspect_ratio', 'aspect_output', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
             'patch_60fps', 'patch_no_motion_blur', 'patch_pro_1080p', 'async_pipelines', 'model_lod')
 EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 75: 'restart'}
 

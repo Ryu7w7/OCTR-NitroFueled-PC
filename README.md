@@ -454,9 +454,15 @@ recompiler, [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.s
 and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch)). Import
 names from shadPS4's aerolib list.
 
+### Aspect ratio
+
+Display settings offer 16:9 (default), experimental 16:10, 21:9 and 32:9. The in-game
+Graphics page offers the same choices after a restart. 16:10 supports 1280x800, 1920x1200
+and 2560x1600 through its own display/camera preparation, with the original menus and HUD.
+See [aspect ratio settings and 16:10 verification](docs/sacredfire/23-aspect-ratios.md).
+
 ### Corrected widescreen layouts (Windows)
 
-Display settings include Resolution followed by Aspect ratio (16:9 default, 21:9, 32:9).
-The corrected layouts include menu/background/HUD asset fixes and centered-HUD shaders.
+The 21:9 and 32:9 layouts include menu/background/HUD asset fixes and centered-HUD shaders.
 The initial integration is for the tested USA 1.21 game and official v0.5.3 Windows engine, offline.
 See [setup, verification and limitations](docs/sacredfire/18-widescreen-layouts.md).
