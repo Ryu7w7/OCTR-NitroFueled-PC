@@ -3,6 +3,7 @@ import argparse
 import lzma
 import re
 import struct
+import sys
 import tempfile
 import zlib
 from pathlib import Path
@@ -295,7 +296,12 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--base', action='append', default=[], type=Path)
     args = parser.parse_args()
-    normal, speed, count = prepare(args.game, args.out, args.base)
+    try:
+        normal, speed, count = prepare(args.game, args.out, args.base)
+    except (ValueError, OSError, KeyError, IndexError) as error:
+        # run.sh then starts without Speed Mode (a damaged game file must not stop the game)
+        print(f'Speed Mode (Experimental) not available: {error}', file=sys.stderr)
+        sys.exit(2)
     print('Speed Mode (Experimental): private overlays prepared for', count, 'tracks')
     print('archive_patches=' + '|'.join(map(str, normal)))
     print('private_archive_patches=' + '|'.join(map(str, speed)))
