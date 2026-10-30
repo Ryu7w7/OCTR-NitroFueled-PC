@@ -220,8 +220,11 @@ void Scan(const u32* p, std::size_t n, Group& g, int depth) {
         case PM4ItOpcode::DrawIndexAuto:
         case PM4ItOpcode::DrawIndexOffset2:
         case PM4ItOpcode::IndexBase:
+            break;
         case PM4ItOpcode::EventWrite: {
-            // occlusion query results (the sun's glow and lens flares): as shadPS4 answers them
+            // occlusion query results (the sun's glow and lens flares): as shadPS4 answers them.
+            // Only this packet: read as one, a DrawIndex2 of 41337 indices (0xA179) looks like a
+            // ZPASS_DONE dump to its index buffer (Hyper Spaceway's dark sheet of triangles)
             const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
             if (event->event_index.Value() == EventIndex::ZpassDone &&
                 event->event_type.Value() == EventType::PixelPipeStatDump && len >= 4) {

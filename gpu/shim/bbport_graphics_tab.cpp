@@ -297,6 +297,15 @@ void SetText(u64 placeable, const char* text) {
 /// The tab's label: its navigation item (CGuiBehaviorNavigationItem: _itemText +0xe8,
 /// _textPlaceable +0xf0, from the game's field tables) gets "Graphics" (the text table has none
 /// for it in this region, so the button keeps its template's "Crash Cove").
+const char* TabLabel(int id) {
+    return (id == 3 || id == 20 || id == 7 || id == 17) ? "Gráficos"
+         : (id == 2 || id == 22)                       ? "Graphismes"
+         : id == 4                                    ? "Grafik"
+         : id == 5                                    ? "Grafica"
+         : id == 21                                   ? "ﺍﻟﺮﺳﻮﻣﻴﺎﺕ"
+                                                       : "Graphics";
+}
+
 void Relabel(void* tab) {
     const u64 item = NavItem(reinterpret_cast<u64>(tab));
     if (!item) {
@@ -307,11 +316,7 @@ void Relabel(void* tab) {
     // writes it in the available USA/EU text tables.
     const char* language = std::getenv("BB_LANGUAGE");
     const int id = language ? std::atoi(language) : 1;
-    const char* label = (id == 3 || id == 20 || id == 7 || id == 17) ? "Gráficos"
-                        : (id == 2 || id == 22)                       ? "Graphismes"
-                        : id == 4                                    ? "Grafik"
-                        : id == 5                                    ? "Grafica"
-                                                                      : "Graphics";
+    const char* label = TabLabel(id);
     SetStringField(item + 0xe8, label);
     SetText(*reinterpret_cast<u64*>(item + 0xf0), label);
     std::printf("Graphics tab: labelled\n");

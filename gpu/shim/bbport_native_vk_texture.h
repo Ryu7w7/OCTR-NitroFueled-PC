@@ -85,9 +85,10 @@ void UnwatchTarget(std::atomic<bool>* written);
 
 /// Frees a retired texture's image, views and the texture itself.
 /// Once the GPU is done with it. Its image and views go back to a pool for the next texture of
-/// the same shape (a video's next frame) when there is room: true only when views were destroyed
-/// (cached descriptor sets may then name a handle the driver hands out again).
-bool Destroy(Texture* texture);
+/// the same shape (a video's next frame) when there is room. The views it destroys (its own, or
+/// older pooled ones making room) are added to `destroyed`: cached descriptor sets naming them
+/// must go, the driver may hand the handles out again.
+void Destroy(Texture* texture, std::vector<VkImageView>& destroyed);
 
 /// Base address of the image a T# (8 dwords) describes.
 std::uint64_t TSharpBase(const std::uint32_t* tsharp);

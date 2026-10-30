@@ -201,7 +201,11 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             speed_bases=()
             for speed_patch in "${speed_existing[@]}"; do speed_bases+=(--base "$speed_patch"); done
         fi
-        speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}") || exit 1
+        # a damaged game file stops Speed Mode only (speed_mode.py says why): online plays as before
+        if ! speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}"); then
+            speed_joined=$(IFS='|'; echo "${speed_existing[*]}")
+            speed_result="archive_patches=$speed_joined"
+        fi
         while IFS='=' read -r key value; do
             case $key in
                 archive_patches) export BB_ARCHIVE_PATCHES=$value ;;

@@ -53,6 +53,9 @@ static void check(std::vector<u8> image, u64 shift) {
 
 int main(int argc, char** argv) {
     using namespace BbGraphicsTab;
+    assert(std::strcmp(TabLabel(21), "ﺍﻟﺮﺳﻮﻣﻴﺎﺕ") == 0);
+    assert(std::strcmp(TabLabel(1), "Graphics") == 0);
+    assert(std::strcmp(TabLabel(2), "Graphismes") == 0);
     if (argc == 3) {
         std::ifstream input(argv[1], std::ios::binary);
         assert(input);

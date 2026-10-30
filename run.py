@@ -880,10 +880,17 @@ def main():
                     if env.get('BB_ONLINE') == '1':
                         base, env['BB_ONLINE_MODE_HOOK'] = online_mode.prepare(
                             game, out / 'online-mode', out / 'eboot.elf', base)
-                    normal_patches, speed_patches, track_count = speed_mode.prepare(game, out / 'speed-mode', base)
-                    archives = '|'.join(map(str, normal_patches))
-                    env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
-                    say(f'Speed Mode (Experimental): {track_count} tracks prepared for private rooms')
+                    try:
+                        normal_patches, speed_patches, track_count = speed_mode.prepare(
+                            game, out / 'speed-mode', base)
+                    except (ValueError, OSError, KeyError, IndexError) as error:
+                        # a damaged game file stops Speed Mode only: online plays as before
+                        say(f'Speed Mode (Experimental) not available: {error}')
+                        archives = '|'.join(map(str, base))
+                    else:
+                        archives = '|'.join(map(str, normal_patches))
+                        env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
+                        say(f'Speed Mode (Experimental): {track_count} tracks prepared for private rooms')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:
