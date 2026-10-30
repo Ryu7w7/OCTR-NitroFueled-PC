@@ -17,9 +17,10 @@ import sys
 import time
 from pathlib import Path
 
-GENERATION = 1
-# The only edition whose engine structures the renderer knows (gpu/shim/bbport_native_vk.cpp).
-SUPPORTED = {('CUSA13795', '01.21')}
+GENERATION = 2  # 2: quad-uniform branches in pixel shaders (AMD fur)
+# The editions whose engine the renderer knows (gpu/shim/bbport_native_vk.cpp, bbport_hook.h): USA
+# and EU 1.21, the same engine structures with the two hooked functions 0x10 apart.
+SUPPORTED = {('CUSA13795', '01.21'), ('CUSA14876', '01.21')}
 # Pixel shaders compiled without DXC's optimizations: NVIDIA 610.88's shader compiler crashed on the
 # fur pipeline built from the -O3 one (native/ takes the place of spirv/ in the renderer).
 UNOPTIMIZED = ('Fur_3e704240_ps',)
@@ -183,7 +184,7 @@ def main(argv=None):
     a = parser.parse_args(argv)
     say = lambda text: print(text, flush=True)  # noqa: E731
     if not supported(a.title_id, a.app_version):
-        say(f'Native Vulkan: only the USA 1.21 game (CUSA13795) for now; this is {a.title_id} '
+        say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {a.title_id} '
             f'{a.app_version}, so the game starts with Vulkan (shadPS4)')
         return 0
     folder = shader_dir(a.data, a.title_id, a.app_version)

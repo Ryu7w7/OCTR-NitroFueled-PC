@@ -3953,6 +3953,13 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::printf("Native Vulkan: image too small for the 1.21 layout: off\n");
         return;
     }
+    // USA or EU 1.21: the hooked functions move, the engine globals and structures do not.
+    const u64 shift = BbHook::EditionShift(image, size);
+    if (shift == BbHook::UnknownEdition) {
+        std::printf("Native Vulkan: not a USA or EU 1.21 executable: off\n");
+        std::fflush(stdout);
+        return;
+    }
     const char* dir = std::getenv("BB_VK_SHADERS");
     shader_root = dir ? fs::path(dir) : fs::path();
     if (!dir || !LoadIndex()) {
@@ -3962,11 +3969,11 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::fflush(stdout);
         return;
     }
-    std::printf("Native Vulkan: on (shadPS4 still draws too); %zu translated shaders from %s\n",
-                shaders.size(), shader_root.string().c_str());
-    BbHook::Replace(image, size, BbHook::ClearFunction, BbHook::ClearPrologue,
+    std::printf("Native Vulkan: on (%s 1.21; shadPS4 still draws too); %zu translated shaders from %s\n",
+                shift ? "EU" : "USA", shaders.size(), shader_root.string().c_str());
+    BbHook::Replace(image, size, BbHook::ClearFunction - shift, BbHook::ClearPrologue,
                     reinterpret_cast<u64>(&OnClear), "Native Vulkan", "kClearRenderTarget");
-    BbHook::Replace(image, size, BbHook::CopyFunction, BbHook::CopyPrologue,
+    BbHook::Replace(image, size, BbHook::CopyFunction - shift, BbHook::CopyPrologue,
                     reinterpret_cast<u64>(&OnCopy), "Native Vulkan", "kCopyTexture");
     std::fflush(stdout);
     enabled = true;

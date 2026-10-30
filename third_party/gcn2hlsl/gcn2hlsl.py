@@ -392,7 +392,11 @@ class Translator:
                         self.emit("}")
                         k = e
                         continue
-                self.emit(f"if (!({c})) {{")
+                # A GCN branch skips a block only when no lane needs it, and a pixel quad runs it
+                # together (image samples take their LOD from all four): per lane, a quad
+                # neighbour left out of the block gave AMD undefined derivatives (fur holes and
+                # specks); the lanes that did not need it stay masked by `ex` inside.
+                self.emit(f"if (quad_any(!({c}))) {{" if self.kind == "ps" else f"if (!({c})) {{")
                 self.ind += 1
                 self.emit_range(k + 1, t, loop)
                 self.ind -= 1
@@ -1449,6 +1453,11 @@ float quad_swizzle(float v, uint perm, uint lane) {
     if ((src ^ lane) & 1u) r += (lane & 1u) ? -dx : dx;
     if ((src ^ lane) & 2u) r += (lane & 2u) ? -dy : dy;
     return r;
+}
+bool quad_any(bool c) {
+    float v = c ? 1.0 : 0.0;
+    float r = (v != 0.0 || ddx_fine(v) != 0.0) ? 1.0 : 0.0;
+    return r != 0.0 || ddy_fine(r) != 0.0;
 }
 """
 

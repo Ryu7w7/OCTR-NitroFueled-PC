@@ -922,7 +922,7 @@ def main():
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
         if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
             if not native_shaders.supported(title_id, app_version):
-                say(f'Native Vulkan: only the USA 1.21 game (CUSA13795) for now; this is {title_id} '
+                say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
                     f'{app_version}, so the game starts with Vulkan (shadPS4)')
             else:
                 shaders = native_shaders.shader_dir(data, title_id, app_version)

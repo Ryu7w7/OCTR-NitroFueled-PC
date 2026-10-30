@@ -16,6 +16,7 @@
 
 #include "common/types.h"
 #include "core/libraries/gnmdriver/gnmdriver.h"
+#include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -30,10 +31,10 @@ namespace BbSignals {
 namespace {
 using namespace AmdGpu;
 
-enum Kind : u8 { Eop, Eos, Release, Write, Wait, Flip, Dma, Retire, KindCount };
+enum Kind : u8 { Eop, Eos, Release, Write, Wait, Flip, Dma, Retire, Zpass, KindCount };
 const char* const kind_names[KindCount] = {"EOP labels", "EOS labels", "release labels",
                                            "writes", "memory waits", "flips", "DMA",
-                                           "frames retired"};
+                                           "frames retired", "occlusion results"};
 
 struct Op {
     Kind kind;
@@ -219,8 +220,16 @@ void Scan(const u32* p, std::size_t n, Group& g, int depth) {
         case PM4ItOpcode::DrawIndexAuto:
         case PM4ItOpcode::DrawIndexOffset2:
         case PM4ItOpcode::IndexBase:
+        case PM4ItOpcode::EventWrite: {
+            // occlusion query results (the sun's glow and lens flares): as shadPS4 answers them
+            const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+            if (event->event_index.Value() == EventIndex::ZpassDone &&
+                event->event_type.Value() == EventType::PixelPipeStatDump && len >= 4) {
+                Keep(g, Zpass, p + i, len);
+            }
+            break; // else cache flushes and pipeline events
+        }
         case PM4ItOpcode::IndexBufferSize:
-        case PM4ItOpcode::EventWrite:   // cache flushes and pipeline events
         case PM4ItOpcode::AcquireMem:   // cache coherence
         case PM4ItOpcode::PfpSyncMe:
         case PM4ItOpcode::IncrementDeCounter:
@@ -357,6 +366,20 @@ void RunOp(const Group& g, const Op& op) {
         Libraries::GnmDriver::NoteFramesRetired(g.frame);
         Libraries::GnmDriver::ReleaseSubmissionLock();
         break;
+    case Zpass: {
+        // No real query: every dump reads as a valid count that grew by a full screen since the
+        // last one, so whatever the game measures counts as visible (liverpool.cpp does the same;
+        // without it the results are never written and the sun has no glow or flares).
+        static constexpr u64 ValidMask = 0x8000000000000000ULL, Step = 0x2FFFFFFULL;
+        static u64 pixel_counter = 0;
+        static const s32 pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+        u64* results = reinterpret_cast<const PM4CmdEventWrite*>(packet)->Address<u64*>();
+        for (s32 n = 0; n < pairs; ++n, results += 2) {
+            StoreLabel(results, pixel_counter | ValidMask, 8);
+        }
+        pixel_counter += Step;
+        break;
+    }
     case KindCount:
         break;
     }
