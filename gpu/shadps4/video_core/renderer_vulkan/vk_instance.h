@@ -176,6 +176,11 @@ public:
         return attachment_feedback_loop;
     }
 
+    /// bbport: VK_EXT_attachment_feedback_loop_layout is on (without its dynamic state)
+    bool IsFeedbackLoopLayoutEnabled() const {
+        return feedback_loop_layout;
+    }
+
     /// Returns true when VK_EXT_custom_border_color is supported
     bool IsCustomBorderColorSupported() const {
         return custom_border_color;
@@ -623,6 +628,7 @@ private:
     bool buffer_marker{};
     bool device_fault{};
     bool attachment_feedback_loop{};
+    bool feedback_loop_layout{}; // bbport: VK_EXT_attachment_feedback_loop_layout alone
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
