@@ -29,16 +29,22 @@ GpuProfiler::GpuProfiler(const Instance& instance, Scheduler& scheduler_)
     for (auto& k : keys) {
         k.reserve(SliceQueries);
     }
-    std::printf("GPU profile: on (timestamp period %.2f ns)\n", period_ns);
+    const char* per_draw = std::getenv("BB_GPU_PROFILE_DRAWS");
+    draws = per_draw && per_draw[0] == '1';
+    std::printf("GPU profile: on (timestamp period %.2f ns)%s\n", period_ns,
+                draws ? ", each draw timed" : "");
 }
 
-void GpuProfiler::WriteTimestamp(u64 key) {
+void GpuProfiler::WriteTimestamp(u64 key, bool in_pass) {
     if (used[slice] + 1 >= SliceQueries) {
         return; // the frame's slice is full: the rest of the frame goes to the last label
     }
     // Outside render passes: radv_CmdWriteTimestamp2 crashed inside some. Marks sit where a
-    // pass, dispatch or submission ends anyway.
-    scheduler.EndRendering();
+    // pass, dispatch or submission ends anyway. Draw marks (BB_GPU_PROFILE_DRAWS) stay inside,
+    // as the native renderer's do.
+    if (!in_pass) {
+        scheduler.EndRendering();
+    }
     const u32 query = slice * SliceQueries + used[slice]++;
     keys[slice].push_back(key);
     current = key;
