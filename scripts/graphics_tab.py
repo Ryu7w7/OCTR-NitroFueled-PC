@@ -34,11 +34,11 @@ OUTPUT = 'archives/update3.pak'
 # The tab's label is the string before this placeable name in each text table.
 ANCHOR = b'Comp__Menu_ButtonWithIcon005_behaviors_0'
 LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráficos',
-          'es': 'Gráficos', 'de': 'Grafik', 'it': 'Grafica', 'ar': 'Graphics'}
+          'es': 'Gráficos', 'de': 'Grafik', 'it': 'Grafica', 'ar': 'ﺍﻟﺮﺳﻮﻣﻴﺎﺕ'}
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 19  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 20  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -223,7 +223,8 @@ QUIT_LABELS = {'en': ('Quit Game', 'Close the game and return to the desktop.'),
                'es': ('Salir', 'Cerrar el juego y volver al escritorio.'),
                'de': ('Beenden', 'Spiel beenden und zum Desktop zurückkehren.'),
                'it': ('Esci', 'Chiudi il gioco e torna al desktop.'),
-               'ar': ('Quit Game', 'Close the game and return to the desktop.')}
+               # Arabic presentation forms in logical order, as in the original tables.
+               'ar': ('ﺧﺮﻭﺝ', 'ﺇﻏﻼﻕ ﺍﻟﻠﻌﺒﺔ ﻭﺍﻟﻌﻮﺩﺓ ﺇﻟﻰ ﺳﻄﺢ ﺍﻟﻤﻜﺘﺐ.')}
 QUIT_LEVEL = (b'Octane/Octane_OnlineLobby/Octane_OnlineLobby\0',
               b'Octane/Octane_BbportQuit0/Octane_BbportQuit0\0')
 
