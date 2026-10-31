@@ -56,6 +56,19 @@ class PackagedVulkanTests(unittest.TestCase):
                 self.assertEqual(self.env, before)
                 del self.env[key]
 
+    def test_host_nvidia_environment_override_is_configured(self):
+        driver = self.library("libGLX_nvidia.so.580.1")
+        (self.libs / "libGLX_nvidia.so.0").symlink_to(driver.name)
+        manifest = self.manifest()
+        for key in ("VK_ICD_FILENAMES", "VK_DRIVER_FILES"):
+            with self.subTest(key=key):
+                self.env[key] = str(manifest)
+                self.assertIn("host NVIDIA", self.configure())
+                self.assertIn("nvidia_icd.json", self.env["VK_DRIVER_FILES"])
+                self.assertNotIn("VK_ICD_FILENAMES", self.env)
+                self.assertTrue(Path(self.env["LD_LIBRARY_PATH"].split(":")[0]).is_dir())
+                del self.env["VK_DRIVER_FILES"]
+
     def test_host_nvidia_and_compiler_are_exposed_without_host_libc(self):
         driver = self.library("libGLX_nvidia.so.580.1")
         (self.libs / "libGLX_nvidia.so.0").symlink_to(driver.name)

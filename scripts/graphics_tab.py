@@ -39,7 +39,7 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 37  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 48  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -271,6 +271,8 @@ CHANGES['ui/octane_options_menu.igz'] = show_tab
 CHANGES['vsc/ui/octane_options_menu/octane_options_menu_root.igz'] = rename(
     b'Comp__Menu_ButtonWithIcon005', b'Comp__Menu_ButtonWithIcon00X')
 CHANGES['ui/octane_options_languageselect.igz'] = graphics_page
+from gameplay_camera import gameplay_page
+CHANGES['ui/octane_options_menu_page.igz'] = gameplay_page
 
 
 # ---- The main menu's Quit Game button --------------------------------------------------------
@@ -482,12 +484,8 @@ def build(game, dest, dump):
 
 
 def enabled(settings):
-    if not settings or not Path(settings).is_file():
-        return True
-    for line in Path(settings).read_text(encoding='utf-8', errors='replace').splitlines():
-        key, _, value = line.partition('=')
-        if key.strip() == 'graphics_tab':
-            return value.strip() != '0'
+    # The Gameplay camera selector is a native feature; it must not depend on a
+    # launcher checkbox or an external patch setting.
     return True
 
 
