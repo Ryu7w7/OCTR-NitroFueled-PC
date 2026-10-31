@@ -392,6 +392,8 @@ std::string Row(std::size_t row, int change) {
         int t = v.temporal.load();
         if (change) {
             t = (t + change + BbSettings::TemporalCount) % BbSettings::TemporalCount;
+            if (t == BbSettings::TemporalFsr4 && !BbSettings::Fsr4Available())
+                t = (t + change + BbSettings::TemporalCount) % BbSettings::TemporalCount;
             v.temporal = t;
         }
         static const char* names[] = {"Off", "FSR 1", "FSR 3", "DLSS", "FSR 4"};

@@ -45,6 +45,17 @@ public:
     /// cannot run (Problem() says why; missing assets or device features are permanent).
     bool Record(const Frame& frame);
 
+    /// Builds the backend for (preset, output size) now, off the frame path: file reads
+    /// plus the driver's pipeline compiles, which stall a frame for seconds. Only safe
+    /// from a worker thread while no FSR 4 frame is in flight (nothing built yet); the
+    /// caller must join before Record. False with Problem() set (Fatal() when permanent).
+    /// True immediately when that backend is already built.
+    bool Preload(int preset, u32 ow, u32 oh);
+
+    /// Drops a built backend on the frame path (for a stale background build after a
+    /// live size change). Never call with FSR 4 frames in flight.
+    void Discard();
+
     /// Why the last Record failed, or null.
     [[nodiscard]] const char* Problem() const noexcept;
     /// Assets or device features are missing: FSR 4 will not run in this session.

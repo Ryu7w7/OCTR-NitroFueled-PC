@@ -382,6 +382,30 @@ struct Fsr4Upscaler::Impl {
         problem.clear();
         return true;
     }
+
+    /// Off-frame-path backend build for CtrFsr3's background preload: file reads plus
+    /// the driver's pipeline compiles. Only while nothing is built (no scheduler contact
+    /// then); rebuilds stay on the frame path. Not thread-safe with Record.
+    bool Preload(int wanted, u32 ow, u32 oh) {
+        if (fatal) {
+            return false;
+        }
+        if (!instance.IsFsr4Int8Supported()) {
+            Fail("the GPU lacks INT8 dot product / compute derivative support", true);
+            return false;
+        }
+        wanted = std::clamp(wanted, 0, 4);
+        if (context_ok && wanted == model && ow == out_width && oh == out_height) {
+            return true;
+        }
+        if (context_ok || backend_ok) {
+            return false;
+        }
+        if (!CreateBackend(wanted, ow, oh)) {
+            return false;
+        }
+        return true;
+    }
 };
 
 Fsr4Upscaler::Fsr4Upscaler(const Instance& instance, Scheduler& scheduler)
@@ -391,6 +415,14 @@ Fsr4Upscaler::~Fsr4Upscaler() = default;
 
 bool Fsr4Upscaler::Record(const Frame& frame) {
     return impl->Record(frame);
+}
+
+bool Fsr4Upscaler::Preload(int preset, u32 ow, u32 oh) {
+    return impl->Preload(preset, ow, oh);
+}
+
+void Fsr4Upscaler::Discard() {
+    impl->Destroy(false);
 }
 
 const char* Fsr4Upscaler::Problem() const noexcept {

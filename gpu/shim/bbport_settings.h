@@ -74,12 +74,15 @@ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 /// SacredFire: controller ports for split screen (bbport.ini port.1..4: SDL GUID or part of the
 /// gamepad name; the runtime re-reads the file when the menu saves it).
 constexpr int ControllerPorts = 4;
-/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss): FSR 1 (spatial, the
+/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss|fsr4): FSR 1 (spatial, the
 /// display pass's stretch) or temporal upscaling/AA of the finished frame (vk_ctr_fsr3; FSR 3
-/// where DLSS cannot run).
+/// where DLSS or FSR 4 cannot run).
 enum Temporal : int { TemporalOff = 0, TemporalFsr1 = 1, TemporalFsr3 = 2, TemporalDlss = 3,
-                      TemporalCount = 4 };
-inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss"};
+                      TemporalFsr4 = 4, TemporalCount = 5 };
+inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss", "fsr4"};
+/// v0.7.4: FSR 4 (temporal=fsr4) is offered only when its model files are there (fsr4_shaders
+/// next to the package, or BB_FSR4_DIR) and the GPU has INT8 dot products.
+bool Fsr4Available();
 /// bbport.ini dlss_quality: auto (render_res decides the render size) or one of NVIDIA's modes,
 /// which set the render size from dlss_output (scripts/patches.py render_plan; at start).
 inline constexpr const char* DlssQualityNames[] = {"auto", "dlaa", "quality", "balanced",
