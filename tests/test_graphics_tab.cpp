@@ -13,7 +13,8 @@ void QuitGame() {}
 }
 namespace BbSettings {
 Values& Get() { static Values values; return values; }
-void Save() {}
+int saves = 0;
+void Save() { ++saves; }
 bool RenderSizeNeedsRestart() { return false; }
 bool ResolutionNeedsRestart() { return false; }
 bool UltrawideAvailable() { return false; }
@@ -23,7 +24,7 @@ bool Fsr4Available() { return true; }
 
 static void check(std::vector<u8> image, u64 shift) {
     using namespace BbGraphicsTab;
-    const u64 sites[] = {Open2 - shift, Hide, Show, LanguageItemEvent - shift, LoadMap2 - shift};
+    const u64 sites[] = {Open2 - shift, Hide, Show, LanguageItemEvent - shift, LoadMap2 - shift, CameraSet - shift, CameraInit - shift};
     runtime_graphics_tab_ready = 0;
     // Invalid helper code must leave all detour sites unchanged.
     const auto original = image;
@@ -37,10 +38,6 @@ static void check(std::vector<u8> image, u64 shift) {
     PatchImage(image.data(), image.size());
     assert(!runtime_graphics_tab_ready);
     image = original;
-    BbSettings::Get().graphics_tab = false;
-    PatchImage(image.data(), image.size());
-    assert(!runtime_graphics_tab_ready && image == original);
-    BbSettings::Get().graphics_tab = true;
     PatchImage(image.data(), 16);
     assert(!runtime_graphics_tab_ready && image == original);
     PatchImage(image.data(), image.size());
@@ -95,11 +92,11 @@ static void controls_test() {
     v.fps_limit = 30; Row(6, -1); assert(v.fps_limit == 0);
     Row(6, 1); assert(v.fps_limit == 30);
     unsigned char item[0x38] = {}, list_item[0x80] = {};
-    rows.assign(8, 0); rows[7] = reinterpret_cast<u64>(item);
-    list_items.assign(8, 0); list_items[7] = reinterpret_cast<u64>(list_item);
+    rows.assign(9, 0); rows[8] = reinterpret_cast<u64>(item);
+    list_items.assign(9, 0); list_items[8] = reinterpret_cast<u64>(list_item);
     *reinterpret_cast<u32*>(list_item+0x18) = 0xf;
-    ShowRow(rows[7], false); assert(list_item[0x18] == 7);
-    ShowRow(rows[7], true); assert(list_item[0x18] == 15);
+    ShowRow(rows[8], false); assert(list_item[0x18] == 7);
+    ShowRow(rows[8], true); assert(list_item[0x18] == 15);
     std::vector<u8> memory(0x2a21dc0);
     image = memory.data();
     *reinterpret_cast<u64*>(image+InputEventMeta) = 123;
@@ -173,8 +170,39 @@ static void controls_test() {
     assert(*reinterpret_cast<u32*>(scroll+0xc) == 0);
 }
 
+static u64 PS4_SYSV_ABI selector_set(void* self, int value, void*, bool) {
+    *reinterpret_cast<int*>(static_cast<u8*>(self) + 0x1a0) = value;
+    return 1;
+}
+static void camera_test() {
+    using namespace BbGraphicsTab;
+    image = static_cast<u8*>(AllocateCode(CameraCompare + 4096));
+    assert(image);
+    alignas(8) u8 selector[0x1d0] = {};
+    *reinterpret_cast<u32*>(selector + 0x1c8) = CameraOption;
+    camera_set_original = selector_set;
+    const int index = CameraPatchIndex();
+    assert(index >= 0);
+    for (int value : {1, 0, 1}) {
+        const int before = BbSettings::saves;
+        assert(CameraSetHook(selector, value, nullptr, false) == 1);
+        assert(image[CameraCompare + 14] == value);
+        assert(BbSettings::Get().game_patches[index] == bool(value));
+        assert(BbSettings::saves == before + 1);
+    }
+    const int before = BbSettings::saves;
+    assert(CameraSetHook(selector, 2, nullptr, false) == 0);
+    assert(BbSettings::saves == before && image[CameraCompare + 14] == 1);
+    *reinterpret_cast<u32*>(selector + 0x1c8) = 9; // The original boost-bar selector.
+    assert(CameraSetHook(selector, 0, nullptr, false) == 1);
+    assert(BbSettings::saves == before && image[CameraCompare + 14] == 1);
+    munmap(image, CameraCompare + 4096);
+    image = nullptr;
+}
+
 int main(int argc, char** argv) {
     controls_test();
+    camera_test();
     using namespace BbGraphicsTab;
     auto& settings = BbSettings::Get();
     // controls_test changed other rows: start from their saved values.
@@ -216,8 +244,10 @@ int main(int argc, char** argv) {
         const auto put = [&](u64 at, const void* bytes, std::size_t n) {
             std::memcpy(image.data() + at, bytes, n);
         };
+        put(CameraCompare, CameraCode, sizeof(CameraCode));
+        put(SelectorRefresh - shift, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53", 11);
         put(RegionQueryCall - shift, RegionQueryCode, sizeof(RegionQueryCode));
-        for (u64 site : {Open2 - shift, LanguageItemEvent - shift, Intern - shift, Unref - shift})
+        for (u64 site : {Open2 - shift, LanguageItemEvent - shift, Intern - shift, Unref - shift, CameraSet - shift, CameraInit - shift})
             put(site, Open2Prologue, sizeof(Open2Prologue));
         for (u64 site : {Hide, Show, LoadMap2 - shift})
             put(site, PlaceablePrologue, sizeof(PlaceablePrologue));

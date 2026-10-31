@@ -55,6 +55,45 @@ PYTHON=prepare_test
             self.assertEqual(result.stdout, expected)
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_gameplay_camera_native_row(self):
+        from gameplay_camera import CAMERA_OPTION, gameplay_page
+        game = Path(os.environ['BB_TEST_GAME'])
+        archive = graphics_tab.Archive(game / 'archives/update2.pak')
+        try:
+            i = next(i for i in range(len(archive.names))
+                     if archive.logical(i).lower() == 'ui/octane_options_menu_page.igz')
+            original = archive.read(i)
+        finally:
+            archive.f.close()
+        changed = gameplay_page(original)
+        g = Igz(changed)
+        from widescreen_startup import IGZ
+        for tag in ('ROOT', 'ONAM'):
+            self.assertEqual(g.fixup(tag), Igz(original).fixup(tag))
+        self.assertEqual([(o['ptr'], o.get('name')) for o in IGZ(changed).objects
+                          if o['ptr'] < len(Igz(original).data)],
+                         [(o['ptr'], o.get('name')) for o in IGZ(original).objects])
+        selectors = [p for p, kind in g.objects()
+                     if kind == 'CGuiBehaviorOctaneGlobalOptionSelector'
+                     and g.u32(p + 0x1c8) == CAMERA_OPTION]
+        self.assertEqual(len(selectors), 1)
+        selector = selectors[0]
+        self.assertEqual(g.data[selector + 0x1cc], 0)
+        self.assertEqual(g.u64(selector + 0x148), 0)
+        options = g.u64(selector + 0x1c0)
+        self.assertEqual(g.u32(options + 0x10), 2)
+        data = g.u64(options + 0x20)
+        self.assertEqual([g.string_at(data + 8*i) for i in range(2)], ['Near', 'Far'])
+        row = g.u64(0x1b10 + 0x50)
+        self.assertEqual(g.u64(row + 0x40), 0x1b10)
+        self.assertEqual(g.u64(selector + 0x110), 0x2b50)
+        self.assertEqual(g.u64(selector + 0x118), 0x1c90)
+        self.assertEqual(g.u64(0x2ca8 + 0x118), row)
+        self.assertEqual(g.u64(0x3a48 + 0x110), row)
+        for p in (0x2fd0, 0x3398, 0x3cb8):
+            self.assertEqual(g.data[p:p+0xe8], Igz(original).data[p:p+0xe8])
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
     def test_real_graphics_and_quit_archive(self):
         game = Path(os.environ['BB_TEST_GAME'])
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
@@ -95,6 +134,15 @@ class GraphicsHookTests(unittest.TestCase):
         subprocess.run(['c++', '-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-pthread',
                         '-I' + str(ROOT / 'gpu/shadps4'), str(ROOT / 'tests/test_graphics_tab.cpp'),
                         '-o', str(cls.exe)], check=True, capture_output=True)
+
+    def test_camera_ini_round_trip(self):
+        exe = Path(self.tmp.name) / 'camera-settings-test'
+        subprocess.run(['c++', '-std=c++20', '-O2', '-pthread', '-I' + str(ROOT),
+                        str(ROOT / 'tests/test_camera_settings.cpp'),
+                        str(ROOT / 'gpu/shim/bbport_settings.cpp'),
+                        str(ROOT / 'gpu/shim/bbport_menu_es.cpp'), '-o', str(exe)],
+                       check=True, capture_output=True)
+        subprocess.run([str(exe)], check=True, capture_output=True)
 
     def test_synthetic_regions_and_rejection(self):
         subprocess.run([str(self.exe)], check=True, capture_output=True)

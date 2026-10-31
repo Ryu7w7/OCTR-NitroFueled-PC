@@ -366,10 +366,18 @@ const char* OnOff(bool on) {
     return on ? "On" : "Off";
 }
 
+int CameraPatchIndex();
+
 /// Native selector value; its title and arrow sprites are separate placeables.
 std::string Row(std::size_t row, int change) {
     auto& v = BbSettings::Get();
     char text[96];
+    if (row == 7) {
+        const int index = CameraPatchIndex();
+        auto& camera = v.game_patches[index];
+        if (change) camera = change > 0;
+        return camera.load() ? "Far" : "Near";
+    }
     // The page's rows, top to bottom: Resolution, Aspect Ratio, Upscaling, Upscale Quality,
     // FPS Unlock, Motion blur, FPS limit (the cases below; 6 is Aspect Ratio).
     static constexpr std::size_t kSetting[] = {0, 6, 1, 2, 3, 4, 5};
@@ -482,6 +490,7 @@ std::string Description(std::size_t index) {
         "Unlock the game's frame rate. Restart to apply.",
         "Enable or disable motion blur. Restart to apply.",
         "Limit the number of frames rendered per second.",
+        "Choose the default camera distance used when a race starts.",
         "Restart the game to apply your saved graphics settings.",
     };
 
@@ -612,16 +621,23 @@ NativeControls Controls(u64 item) {
     return {};
 }
 
+bool CameraItem(u64 item) {
+    const auto c = Controls(item);
+    u32 option = 0;
+    return c.selector && SafeRead(reinterpret_cast<void*>(c.selector + 0x1c8), &option, 4) &&
+           option == 0x42424341u;
+}
+
 void UpdateWidgets(u64 item, std::size_t index) {
     const auto controls = Controls(item);
     if (!controls.selector || !controls.button) return;
     const bool setting = index < std::size(Titles);
     ShowVisual(controls.selector, setting);
-    ShowVisual(controls.button, index == 7);
+    ShowVisual(controls.button, index == 8);
     if (setting) {
         SetText(FindNativeChild(controls.selector, "[NameText]"), Titles[index]);
         SetText(FindNativeChild(controls.selector, "[ItemText]"), Row(index, 0).c_str());
-    } else if (index == 7) {
+    } else if (index == 8) {
         SetText(FindNativeChild(controls.button, "[LevelListName]"), "RESTART TO APPLY");
         SetText(FindNativeChild(controls.button, "LevelListName_focused"), "RESTART TO APPLY");
     }
@@ -638,10 +654,14 @@ void PlaceDescription(u64 text, u64 canvas) {
 }
 
 void UpdateDescription(u64 item, std::size_t index) {
+    // The camera row is appended by the archive and its list index is not stable.
+    // Identify it by the native option id so its help text is never lost when the
+    // game's list inserts the row in a different position.
+    if (index >= 7 && index != 8) index = 7;
     u64 placeable = 0;
     SafeRead(reinterpret_cast<void*>(item+0x10), &placeable, 8);
     // Walk this instance's ancestors; never retain a UI pointer across project closes.
-    for (int depth = 0; placeable && depth < 12; ++depth) {
+    for (int depth = 0; placeable && depth < 64; ++depth) {
         u64 table = 0, data = 0, parent = 0;
         u32 count = 0;
         if (SafeRead(reinterpret_cast<void*>(placeable+0x48), &table, 8) && table &&
@@ -651,14 +671,29 @@ void UpdateDescription(u64 item, std::size_t index) {
             std::string name;
             if (SafeRead(reinterpret_cast<void*>(data+8*(count-1)), &child, 8) && child &&
                 SafeRead(reinterpret_cast<void*>(child+0x28), &label, 8) &&
-                Identifier(label, name) && name == "BbGraphicsDescription") {
+                Identifier(label, name) && name == "GameplayOptionDescription") {
                 PlaceDescription(child, placeable);
                 SetText(child, Description(index).c_str());
                 return;
             }
         }
+        if (const u64 child = FindNativeChild(placeable, "GameplayOptionDescription")) {
+            PlaceDescription(child, placeable);
+            SetText(child, Description(index).c_str());
+            return;
+        }
         if (!SafeRead(reinterpret_cast<void*>(placeable+0x40), &parent, 8)) break;
         placeable = parent;
+    }
+    // Native selector focus does not always expose the description as the last
+    // child of the language row. Resolve it through the same instance tree used
+    // by the native widgets as a fallback.
+    SafeRead(reinterpret_cast<void*>(item+0x10), &placeable, 8);
+    if (const u64 child = FindNativeChild(reinterpret_cast<u64>(item), "GameplayOptionDescription")) {
+        u64 canvas = 0;
+        SafeRead(reinterpret_cast<void*>(child+0x40), &canvas, 8);
+        PlaceDescription(child, canvas ? canvas : placeable);
+        SetText(child, Description(index).c_str());
     }
 }
 
@@ -667,7 +702,8 @@ bool NeedsRestart() {
     auto& v = BbSettings::Get();
     bool restart = BbSettings::ResolutionNeedsRestart() || BbSettings::RenderSizeNeedsRestart();
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
-        restart |= v.game_patches[g] != v.startup_game_patches[g];
+        if (std::strcmp(BbSettings::GamePatches[g].key, "default_camera_setting") != 0)
+            restart |= v.game_patches[g] != v.startup_game_patches[g];
     }
     restart |= v.render_res != v.startup_render_res || v.temporal != v.startup_temporal ||
                v.dlss_quality != v.startup_dlss_quality || v.aspect_ratio != v.startup_aspect_ratio ||
@@ -675,8 +711,8 @@ bool NeedsRestart() {
     return restart;
 }
 
-constexpr std::size_t SettingRows = 7;  ///< rows 0..6: the settings
-constexpr std::size_t RestartRow = 7;   ///< "RESTART TO APPLY", shown while a change waits
+constexpr std::size_t SettingRows = 8;  ///< rows 0..7: the settings
+constexpr std::size_t RestartRow = 8;   ///< "RESTART TO APPLY", shown while a change waits
 
 /// A row's visibility: its placeable (CGuiBehaviorLanguageItem::_placeable, +0x30) and text
 /// placeable (+0x10), with hidePlaceable/showPlaceable's flags (+0xc: 0x1400 hidden, 0x1000 shown).
@@ -795,7 +831,12 @@ u64 PS4_SYSV_ABI LanguageItemHook(void* self, void* event, void* a2, void* a3, v
             std::scoped_lock lock{rows_mutex};
             index = std::find(rows.begin(), rows.end(), item) - rows.begin();
         }
-        UpdateDescription(item, index);
+        if (index == 7 || CameraItem(item)) {
+            std::scoped_lock lock{rows_mutex};
+            if (!rows.empty()) UpdateDescription(rows[0], 7);
+        } else {
+            UpdateDescription(item, index);
+        }
     }
     if (event && IsA(event, InitEventMeta)) {
         std::size_t index;
@@ -817,7 +858,9 @@ u64 PS4_SYSV_ABI LanguageItemHook(void* self, void* event, void* a2, void* a3, v
                     index, (unsigned long long)controls.selector, (unsigned long long)controls.button,
                     (unsigned long long)FindNativeChild(controls.selector, "[ItemText]"),
                     (unsigned long long)FindNativeChild(controls.selector, "[NameText]"));
-        if (index == 0) UpdateDescription(item, index);
+        // The added native camera row has no language-script description event of
+        // its own, so initialize the shared description panel for every setting row.
+        if (index < SettingRows || index == 7) UpdateDescription(item, index);
         if (index == RestartRow) {
             UpdateRestartRow();
         } else if (index > RestartRow) {
@@ -908,6 +951,91 @@ u64 PS4_SYSV_ABI Open2Hook(void* context, void* args, void* a2, void* a3, void* 
     return open2_original(context, args, a2, a3, a4, a5);
 }
 
+// The Gameplay row is a real CGuiBehaviorOctaneGlobalOptionSelector. Its private
+// option id prevents writes to the native boost-bar/control-scheme profile fields.
+constexpr u32 CameraOption = 0x42424341;
+constexpr u64 CameraSet = 0x127f5e0, CameraInit = 0x127f7a0;
+constexpr u64 SelectorRefresh = 0x125da80;
+constexpr u64 CameraCompare = 0xc89103;
+constexpr u8 CameraCode[] = {0x49,0x8d,0x87,0x70,0x02,0,0,0x41,0x83,0xbf,
+    0x50,0x02,0,0,0,0x48,0x0f,0x44,0xc2,0x48,0x0f,0x44,0xce,
+    0x41,0x80,0xbf,0x54,0x02,0,0,0};
+using SelectorSetFn = u64 PS4_SYSV_ABI (*)(void*, int, void*, bool);
+using SelectorInitFn = void PS4_SYSV_ABI (*)(void*, void*);
+SelectorSetFn camera_set_original = nullptr;
+SelectorInitFn camera_init_original = nullptr;
+
+int CameraPatchIndex() {
+    for (int i = 0; i < BbSettings::GamePatchCount; ++i)
+        if (!std::strcmp(BbSettings::GamePatches[i].key, "default_camera_setting")) return i;
+    return -1;
+}
+
+bool IsCameraSelector(void* self) {
+    return *reinterpret_cast<u32*>(static_cast<u8*>(self) + 0x1c8) == CameraOption;
+}
+
+bool ApplyCamera(bool far, bool live = false) {
+    u8* at = image + CameraCompare + 14;
+#ifdef _WIN32
+    DWORD previous = 0;
+    if (live && !VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &previous)) return false;
+#else
+    const auto page_size = sysconf(_SC_PAGESIZE);
+    void* page = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(at) & ~(page_size - 1));
+    if (live && mprotect(page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC)) return false;
+#endif
+    // The existing Far Camera patch changes this comparison immediate, in both editions.
+    *at = far ? 1 : 0;
+#ifdef _WIN32
+    FlushInstructionCache(GetCurrentProcess(), at, 1);
+    if (live) { DWORD ignored; VirtualProtect(at, 1, previous, &ignored); }
+#else
+    if (live) mprotect(page, page_size, PROT_READ | PROT_EXEC);
+#endif
+    return true;
+}
+
+u64 PS4_SYSV_ABI CameraSetHook(void* self, int value, void* context, bool animate) {
+    if (!IsCameraSelector(self)) return camera_set_original(self, value, context, animate);
+    if (value < 0 || value > 1) return 0;
+    const bool before = image[CameraCompare + 14] != 0;
+    if (!ApplyCamera(value != 0, true)) return 0;
+    const u64 result = camera_set_original(self, value, context, animate);
+    if (*reinterpret_cast<int*>(static_cast<u8*>(self) + 0x1a0) == value) {
+        const int index = CameraPatchIndex();
+        auto& settings = BbSettings::Get();
+        settings.game_patches[index] = value != 0;
+        BbSettings::Save();
+        {
+            std::scoped_lock lock{rows_mutex};
+            if (rows.size() > 7) UpdateDescription(rows[0], 7);
+        }
+        std::printf("Gameplay camera: %s\n", value ? "Far" : "Near");
+    } else {
+        ApplyCamera(before, true);
+    }
+    return result;
+}
+
+void PS4_SYSV_ABI CameraInitHook(void* self, void* context) {
+    camera_init_original(self, context);
+    if (!IsCameraSelector(self)) return;
+    const u64 object = reinterpret_cast<u64>(self);
+    // The initialized selector stores its option title at +0x148.  The archive's
+    // template leaves it null because localization fills it at runtime.
+    SetStringField(object + 0x148, "Default Camera");
+    *reinterpret_cast<int*>(object + 0x190) =
+        BbSettings::Get().game_patches[CameraPatchIndex()].load() ? 1 : 0;
+    using RefreshFn = void PS4_SYSV_ABI (*)(void*);
+    reinterpret_cast<RefreshFn>(image + SelectorRefresh - code_shift)(self);
+    {
+        std::scoped_lock lock{rows_mutex};
+        if (rows.size() > 0) UpdateDescription(rows[0], 7);
+    }
+    std::printf("Gameplay camera: native selector initialized\n");
+}
+
 void* AllocateCode(std::size_t size) {
 #ifdef _WIN32
     return VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
@@ -938,9 +1066,6 @@ VscFn Detour(u8* stub, u64 offset, const u8* prologue, std::size_t size, const v
 } // namespace
 
 void PatchImage(unsigned char* base, std::uint64_t size) {
-    if (!BbSettings::Get().graphics_tab) {
-        return;
-    }
     // Recognize both 1.21 layouts before installing anything; helpers must match too.
     if (StringPool + 8 > size) {
         std::printf("Graphics tab: image too small, off\n");
@@ -976,6 +1101,18 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
         std::printf("Graphics tab: unexpected game code, off\n");
         return;
     }
+    // Accept the comparison either unpatched or already set to Far by patches.py.
+    if (CameraPatchIndex() < 0 ||
+        std::memcmp(base + CameraSet - shift, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + CameraInit - shift, Open2Prologue, sizeof(Open2Prologue)) ||
+        std::memcmp(base + CameraCompare, CameraCode, 14) ||
+        base[CameraCompare + 14] > 1 ||
+        std::memcmp(base + CameraCompare + 15, CameraCode + 15, sizeof(CameraCode) - 15) ||
+        std::memcmp(base + SelectorRefresh - shift,
+                    "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53", 11)) {
+        std::printf("Gameplay camera: unexpected native selector/camera code, menus unchanged\n");
+        return;
+    }
     u8* stubs = static_cast<u8*>(AllocateCode(4096));
     if (!stubs) {
         std::printf("Graphics tab: no code memory, off\n");
@@ -1005,6 +1142,18 @@ void PatchImage(unsigned char* base, std::uint64_t size) {
         std::printf("Graphics tab: unexpected game code, the menus stay as they are\n");
         return;
     }
+    Detour(stubs + 320,
+        CameraSet - shift, Open2Prologue, sizeof(Open2Prologue),
+        reinterpret_cast<const void*>(&CameraSetHook));
+    camera_set_original = reinterpret_cast<SelectorSetFn>(stubs + 320);
+    Detour(stubs + 384,
+        CameraInit - shift, Open2Prologue, sizeof(Open2Prologue),
+        reinterpret_cast<const void*>(&CameraInitHook));
+    camera_init_original = reinterpret_cast<SelectorInitFn>(stubs + 384);
+    ApplyCamera(BbSettings::Get().game_patches[CameraPatchIndex()].load());
+#ifdef _WIN32
+    FlushInstructionCache(GetCurrentProcess(), stubs + 320, 128);
+#endif
     runtime_graphics_tab_ready = 1;
     std::printf("Graphics tab: on (Options menu, fifth tab; %s 1.21)\n", shift ? "EU" : "USA");
 }

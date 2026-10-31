@@ -59,6 +59,7 @@ inline constexpr Effect GamePatches[] = {
     {"patch_no_motion_blur", "Disable motion blur (illusion)", "Без размытия в движении (illusion)", false},
     {"patch_pro_1080p", "1080p in PS4 Pro mode (TroyWarez; with BB_NEO=1)", "1080p в режиме PS4 Pro (TroyWarez; с BB_NEO=1)", false},
     {"patch_unlock_all", "Unlock everything (Camiloop; back up your save)", "Открыть всё (Camiloop; сделайте копию сохранения)", false},
+    {"default_camera_setting", "Default camera: Far (Near when off)", "Камера по умолчанию: дальняя", false},
 };
 inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatches[0]));
 /// SacredFire: bbport.ini render_res, the scene size CTR renders (through its PS4 Pro path above

@@ -4,6 +4,6 @@
 
 namespace BbGraphicsTab {
 /// At load, before the image is made executable: the Options menu's Graphics tab
-/// (bbport_graphics_tab.cpp). Off with graphics_tab=0 in bbport.ini.
+/// (bbport_graphics_tab.cpp). Installed automatically for supported 1.21 builds.
 void PatchImage(unsigned char* image, std::uint64_t size);
 } // namespace BbGraphicsTab

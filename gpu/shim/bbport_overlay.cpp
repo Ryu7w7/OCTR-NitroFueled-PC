@@ -1375,6 +1375,7 @@ void Menu() {
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         const auto& patch = BbSettings::GamePatches[g];
         if (std::strcmp(patch.key, "patch_pro_1080p") == 0) continue; // see Internal resolution
+        if (std::strcmp(patch.key, "default_camera_setting") == 0) continue;
         const bool before = s.game_patches[g];
         Checkbox(BbSettings::MenuText(patch.label, patch.label_ru), s.game_patches[g]);
         if (before != s.game_patches[g]) {
@@ -1561,7 +1562,8 @@ void Menu() {
         restart |= s.effects[e] != s.startup_effects[e];
     }
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
-        restart |= s.game_patches[g] != s.startup_game_patches[g];
+        if (std::strcmp(BbSettings::GamePatches[g].key, "default_camera_setting") != 0)
+            restart |= s.game_patches[g] != s.startup_game_patches[g];
     }
     restart |= BbSettings::RenderSizeNeedsRestart();
     if (restart) {
