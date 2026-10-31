@@ -156,7 +156,7 @@ if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
-# A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py), as run.py: the
+# The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
 settings=$BB_CONFIG layout_patches=()
@@ -167,7 +167,7 @@ while IFS='=' read -r key value; do
         archive_patches) if [[ -n $value ]]; then export BB_ARCHIVE_PATCHES=$value; fi ;;
         env.*) export "${key#env.}=$value" ;;
     esac
-done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CONFIG" \
+done < <("$PYTHON" scripts/aspect_ratio.py "$game" --out "$out" --settings "$BB_CONFIG" \
              --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
 # A mod session (above): the packages' archive entries over those archive patches, and their
 # executable patches checked against each other and the layout, as run.py.

@@ -64,10 +64,10 @@ def say(message):
 
 def selection(settings):
     """(layout, output, internal) from bbport.ini settings, or None for 16:9."""
-    layout = settings.get('widescreen_layout', 'off')
+    layout = settings.get('aspect_ratio', settings.get('widescreen_layout', 'off'))
     if layout not in OUTPUTS:
         return None
-    output = settings.get('widescreen_output', '')
+    output = settings.get('aspect_output', settings.get('widescreen_output', ''))
     if output not in OUTPUTS[layout]:
         output = OUTPUTS[layout][0]
     internal = settings.get('render_res', '1080')

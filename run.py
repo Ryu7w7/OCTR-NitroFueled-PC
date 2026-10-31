@@ -43,7 +43,7 @@ import item_rules  # noqa: E402
 import online_mode  # noqa: E402
 import perf_report  # noqa: E402
 import native_shaders  # noqa: E402
-import widescreen  # noqa: E402
+import aspect_ratio  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
@@ -848,7 +848,7 @@ def main():
         except (OSError, ValueError, KeyError, TypeError) as error:
             say(f"Item rules: {error}; the game's own odds")
         env.setdefault('BB_NEO', '0')
-        # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py): the render
+        # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),
         # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
         layout_saved = {}
@@ -861,13 +861,13 @@ def main():
                 else:
                     env[key] = value
             layout_saved.clear()
-            layout = widescreen.prepare(game, out, config, env, title_id, app_version, base_patches)
-            if mod_packages.ACTIVE and widescreen.selection(widescreen.read_ini(config)) and not layout:
-                raise ValueError('The selected mods cannot use this widescreen layout; see the Widescreen message above.')
+            layout = aspect_ratio.prepare(game, out, config, env, title_id, app_version, base_patches)
+            if mod_packages.ACTIVE and aspect_ratio.selection(aspect_ratio.read_ini(config)) and not layout:
+                raise ValueError('The selected mods cannot use this aspect ratio; see the preparation message above.')
             if layout:
                 layout_saved.update({key: env.get(key) for key in layout['env']})
                 env.update(layout['env'])
-            archives = widescreen.archive_list(base_patches, layout)
+            archives = aspect_ratio.archive_list(base_patches, layout)
             if env.get('BB_MOD_ARCHIVE_PLAN'):
                 from mod_overlays import for_launch
                 builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}

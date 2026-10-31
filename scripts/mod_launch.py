@@ -52,9 +52,9 @@ def overlays(a):
 
 def preflight(a):
     import mod_packages
-    import widescreen
-    if widescreen.selection(widescreen.read_ini(a.config)) and not a.layout_patches:
-        print('Mod launch blocked: the selected mods cannot use this widescreen layout; see the Widescreen message above.',
+    import aspect_ratio
+    if aspect_ratio.selection(aspect_ratio.read_ini(a.config)) and not a.layout_patches:
+        print('Mod launch blocked: the selected mods cannot use this aspect ratio; see the preparation message above.',
               file=sys.stderr)
         return 3
     try:
