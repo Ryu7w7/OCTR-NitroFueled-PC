@@ -2805,10 +2805,20 @@ std::string EffectiveRenderRes() {
 std::string GameTemporal() {
     const Ini& game = g_app.game;
     const std::string value = game.Get("temporal");
-    for (const char* known : {"off", "fsr1", "fsr3", "dlss"})
+    for (const char* known : {"off", "fsr1", "fsr3", "dlss", "fsr4"})
         if (value == known) return value;
     if (game.Flag("fsr3", false)) return "fsr3";
     return game.Flag("fsr1", true) ? "fsr1" : "off";
+}
+
+/// v0.7.4: FSR 4's model files (the fsr4_shaders folder next to the launcher, where sacredfire.exe
+/// looks for them); without them the launcher does not offer it.
+bool Fsr4FilesPresent() {
+    static const bool present = [] {
+        std::error_code ec;
+        return fs::is_regular_file(g_app.root / L"fsr4_shaders" / L"LICENSE-FSR4-v07.txt", ec);
+    }();
+    return present;
 }
 
 /// A combo over a bbport.ini key; true when the player picked another value (already set).
@@ -2975,16 +2985,25 @@ void SettingsTab() {
                "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
                "Needs a restart."));
     {
-        // temporal=off|fsr1|fsr3|dlss (bbport.ini): one upscaler at a time.
+        // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time. FSR 4 only with its
+        // model files (Fsr4FilesPresent).
         static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
                                                {"AMD FSR 1", "AMD FSR 1", "fsr1"},
                                                {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
                                                {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
+        static constexpr Choice kTemporalFsr4[] = {{"Desactivado", "Off", "off"},
+                                                   {"AMD FSR 1", "AMD FSR 1", "fsr1"},
+                                                   {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
+                                                   {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"},
+                                                   {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"}};
         static constexpr Choice kTemporalNative[] = {{"Desactivado", "Off", "off"},
                                                      {"AMD FSR 1", "AMD FSR 1", "fsr1"}};
         const bool native = a.game.Get("renderer") == "native";
+        const bool fsr4 = Fsr4FilesPresent();
         const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
                                                      temporal == "off" ? "off" : "fsr1", 16.0f)
+                            : fsr4 ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
+                                                     temporal.c_str(), 16.0f)
                                    : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal,
                                                      temporal.c_str(), 16.0f);
         if (picked) {
@@ -2992,18 +3011,22 @@ void SettingsTab() {
             a.game.Erase("fsr3");
             SaveGameIni();
         }
-        if (native && (temporal == "fsr3" || temporal == "dlss")) {
-            ImGui::TextColored(kGrey, "%s", T("FSR 3 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
-                                              "FSR 3 and DLSS do not work with the native engine: FSR 1 is used."));
+        if (native && (temporal == "fsr3" || temporal == "dlss" || temporal == "fsr4")) {
+            ImGui::TextColored(kGrey, "%s", T("FSR 3, FSR 4 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
+                                              "FSR 3, FSR 4 and DLSS do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "fsr4" && !fsr4) {
+            ImGui::TextColored(kGrey, "%s", T("Faltan los archivos de FSR 4 (carpeta fsr4_shaders): se usa FSR 3.",
+                                              "FSR 4's files are missing (fsr4_shaders folder): FSR 3 is used."));
         }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
                      "del juego, y a la misma resolución también suavizan los bordes. DLSS necesita una tarjeta NVIDIA "
-                     "RTX (si no, se usa FSR 3). Experimentales: si ves estelas o parpadeos, cambia a FSR 1.",
+                     "RTX y FSR 4 una gráfica con soporte INT8 y sus archivos (si no, se usa FSR 3). Experimentales: "
+                     "si ves estelas o parpadeos, cambia a FSR 1.",
                      "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. FSR 3 and DLSS "
                      "rebuild detail over several frames from the game's depth and motion, and smooth edges even at the "
-                     "same resolution. DLSS needs an NVIDIA RTX card (FSR 3 runs otherwise). Experimental: switch to "
-                     "FSR 1 if you see trails or shimmering."));
+                     "same resolution. DLSS needs an NVIDIA RTX card and FSR 4 a GPU with INT8 support and its files "
+                     "(FSR 3 runs otherwise). Experimental: switch to FSR 1 if you see trails or shimmering."));
     }
     if (temporal == "dlss") {
         static constexpr Choice kQuality[] = {
@@ -3032,10 +3055,10 @@ void SettingsTab() {
                      "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. CNN: the "
                      "older model (preset E), lighter; NVIDIA marks it deprecated."));
     }
-    if (temporal == "fsr3") {
+    if (temporal == "fsr3" || temporal == "fsr4") {
         float sharp = float(std::atof(a.game.Get("fsr3_sharpness", "0.30").c_str()));
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        if (ImGui::SliderFloat(T("Nitidez de FSR 3", "FSR 3 sharpness"), &sharp, 0.0f, 1.0f, "%.2f")) {
+        if (ImGui::SliderFloat(T("Nitidez de FSR", "FSR sharpness"), &sharp, 0.0f, 1.0f, "%.2f")) {
             char text[16];
             std::snprintf(text, sizeof text, "%.2f", sharp);
             a.game.Set("fsr3_sharpness", text);
@@ -6513,6 +6536,11 @@ void ToolsTab() {
                                                  "DLSS: files present (needs an NVIDIA RTX card)")
                                              : T("DLSS: archivos no incluidos (se usa FSR 3)",
                                                  "DLSS: files not included (FSR 3 is used)"));
+        ImGui::TextColored(kGrey, "%s", Fsr4FilesPresent()
+                                            ? T("FSR 4: archivos presentes (necesita una gráfica con soporte INT8)",
+                                                "FSR 4: files present (needs a GPU with INT8 support)")
+                                            : T("FSR 4: archivos no incluidos (carpeta fsr4_shaders)",
+                                                "FSR 4: files not included (fsr4_shaders folder)"));
     }
     ImGui::TextLinkOpenURL(kRepoUrl, kRepoUrl);
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());

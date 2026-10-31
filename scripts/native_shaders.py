@@ -167,8 +167,8 @@ def environment(folder, temporal):
         'BB_VK_COMPILE_THREADS': '1',
         'BB_VK_SHADERS': str(folder),
     }
-    if temporal in ('fsr3', 'dlss'):
-        env['BB_TEMPORAL'] = 'fsr1'  # FSR 3 and DLSS live in shadPS4's rasterizer
+    if temporal in ('fsr3', 'dlss', 'fsr4'):
+        env['BB_TEMPORAL'] = 'fsr1'  # FSR 3, DLSS and FSR 4 live in shadPS4's rasterizer
     return env
 
 

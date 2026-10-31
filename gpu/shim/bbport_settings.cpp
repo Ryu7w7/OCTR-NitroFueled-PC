@@ -341,6 +341,17 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
     }
 }
 
+bool Fsr4Available() {
+    // As vk_fsr4.cpp's AssetDir; the notice comes with every bundle.
+    static const bool assets = [] {
+        const char* dir = std::getenv("BB_FSR4_DIR");
+        std::error_code ec;
+        return std::filesystem::is_regular_file(
+            std::filesystem::path(dir && dir[0] ? dir : "fsr4_shaders") / "LICENSE-FSR4-v07.txt", ec);
+    }();
+    return assets && Get().fsr4_supported;
+}
+
 bool FixedRenderSession() {
     const char* size = std::getenv("BB_RENDER_RES");
     return size && size[0];
