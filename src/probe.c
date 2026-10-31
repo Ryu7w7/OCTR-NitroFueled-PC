@@ -1229,6 +1229,7 @@ int main(int argc, char **argv) {
     runtime_cinematic_start(image);
     runtime_frontend_start(image);
     if (!runtime_online_mode_start(image, size)) fail("native Online mode callback could not be installed");
+    if (!runtime_time_trial_start(image, size)) fail("Time Trial challenge callback could not be installed");
     if (!runtime_itemless_start(image, size)) fail("native Itemless collision callback could not be installed");
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
