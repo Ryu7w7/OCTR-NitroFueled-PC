@@ -2870,48 +2870,72 @@ void RenderResCombo() {
                  "PCs (the picture is output at 1080p)."));
 }
 
-// The corrected 21:9 and 32:9 layouts (scripts/widescreen.py, by tcosi): menus, backgrounds and a
-// centered HUD. bbport.ini widescreen_layout / widescreen_output; the in-game ultrawide (the
-// monitor's size without those corrections) is turned off while one is on.
-void WidescreenSettings() {
+// Aspect ratio is independent of the corrected widescreen layouts: 16:10 prepares the
+// display/camera in scripts/aspect_ratio.py; 21:9/32:9 keep tcosi's menus and HUD.
+void AspectRatioSettings() {
     App& a = g_app;
-    std::string mode = a.game.Get("widescreen_layout", "off");
-    static constexpr Choice layouts[] = {{"16:9", "16:9", "off"}, {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
-    if (mode != "21x9" && mode != "32x9") mode = "off";
+    std::string mode = a.game.Get("aspect_ratio", a.game.Get("widescreen_layout", "16x9"));
+    static constexpr Choice ratios[] = {{"16:9", "16:9", "16x9"},
+                                        {"16:10 (experimental)", "16:10 (experimental)", "16x10"},
+                                        {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
+    if (mode != "16x10" && mode != "21x9" && mode != "32x9") mode = "16x9";
     const char* preview = "16:9";
-    for (const auto& c : layouts) if (mode == c.value) preview = T(c.es, c.en);
+    for (const auto& c : ratios) if (mode == c.value) preview = T(c.es, c.en);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
     if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
-        for (const auto& c : layouts) {
+        for (const auto& c : ratios) {
             if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
                 mode = c.value;
-                a.game.Set("widescreen_layout", mode);
-                if (mode != "off") {
+                a.game.Set("aspect_ratio", mode);
+                a.game.Set("widescreen_layout", mode == "21x9" || mode == "32x9" ? mode : "off");
+                if (mode != "16x9") {
                     a.game.Set("ultrawide", "0");
-                    const std::string output = a.game.Get("widescreen_output");
+                    std::string output = a.game.Get("aspect_output", a.game.Get("widescreen_output"));
+                    const bool tall = output == "1920x1200" || output == "1280x800" || output == "2560x1600";
                     const bool wide = output == "3440x1440" || output == "2560x1080";
-                    if (wide != (mode == "21x9") || output.empty())
-                        a.game.Set("widescreen_output", mode == "21x9" ? "3440x1440" : "5120x1440");
+                    const bool super = output == "5120x1440" || output == "3840x1080" ||
+                                       output == "2560x720" || output == "7680x2160";
+                    if (!((mode == "16x10" && tall) || (mode == "21x9" && wide) || (mode == "32x9" && super)))
+                        output = mode == "16x10" ? "1920x1200" : mode == "21x9" ? "3440x1440" : "5120x1440";
+                    a.game.Set("aspect_output", output);
+                    if (mode == "21x9" || mode == "32x9") a.game.Set("widescreen_output", output);
                 }
                 SaveGameIni();
             }
         }
         ImGui::EndCombo();
     }
-    if (mode == "off") return;
+    if (mode == "16x9") return;
+    static constexpr Choice tall[] = {{"1920 x 1200", "1920 x 1200", "1920x1200"},
+                                      {"1280 x 800", "1280 x 800", "1280x800"},
+                                      {"2560 x 1600", "2560 x 1600", "2560x1600"}};
     static constexpr Choice wide[] = {{"3440 x 1440", "3440 x 1440", "3440x1440"},
                                       {"2560 x 1080", "2560 x 1080", "2560x1080"}};
     static constexpr Choice super[] = {{"5120 x 1440", "5120 x 1440", "5120x1440"},
                                        {"3840 x 1080", "3840 x 1080", "3840x1080"},
                                        {"2560 x 720", "2560 x 720", "2560x720"},
                                        {"7680 x 2160", "7680 x 2160", "7680x2160"}};
+    const std::string output = a.game.Get("aspect_output", a.game.Get("widescreen_output"));
     const char* label = T("Tamaño de pantalla", "Screen size");
-    if (mode == "21x9") {
-        if (GameChoiceCombo(label, "widescreen_output", wide, "3440x1440", 16.0f)) SaveGameIni();
+    bool changed;
+    if (mode == "16x10") {
+        changed = GameChoiceCombo(label, "aspect_output", tall, output.empty() ? "1920x1200" : output.c_str(), 16.0f);
+        ImGui::TextColored(kGrey, "%s", T("16:10 experimental: pantalla y cámara adaptadas; menús y HUD originales. "
+            "Actualización 1.21, USA o Europa. Sin FSR ni DLSS. Requiere reiniciar.",
+            "Experimental 16:10 display and camera; original menus and HUD. USA or Europe 1.21. "
+            "No FSR or DLSS. Requires a restart."));
+    } else if (mode == "21x9") {
+        changed = GameChoiceCombo(label, "aspect_output", wide, output.empty() ? "3440x1440" : output.c_str(), 16.0f);
     } else {
-        if (GameChoiceCombo(label, "widescreen_output", super, "5120x1440", 16.0f)) SaveGameIni();
+        changed = GameChoiceCombo(label, "aspect_output", super, output.empty() ? "5120x1440" : output.c_str(), 16.0f);
     }
-    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
+    if (changed) {
+        a.game.Set("aspect_ratio", mode);
+        a.game.Set("widescreen_layout", mode == "21x9" || mode == "32x9" ? mode : "off");
+        if (mode == "21x9" || mode == "32x9") a.game.Set("widescreen_output", a.game.Get("aspect_output"));
+        SaveGameIni();
+    }
+    if (mode != "16x10") ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
         "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
         "Corrected menus, backgrounds and a centered HUD. Online or offline, with the 1.21 update, USA or Europe "
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
@@ -2973,7 +2997,7 @@ void SettingsTab() {
         ImGui::SameLine();
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
-    WidescreenSettings();
+    AspectRatioSettings();
     GameFlag("skip_intro", T("Saltar los vídeos de inicio", "Skip intro videos"), false,
              T("Sin los logos de Activision y Beenox al arrancar el juego.",
                "Skips the Activision and Beenox logo videos when the game starts."));

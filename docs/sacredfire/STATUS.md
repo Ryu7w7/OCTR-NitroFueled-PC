@@ -17,6 +17,7 @@ Updated 2026-10-09.
 | Game patches | 60 FPS and motion-blur-off switch from the menu; motion blur off confirmed working |
 | EU 1.21 Graphics / Quit Game | region hooks and localized overlay validated against both editions; live menu interaction pending ([notes](22-eu-game-menus.md)) |
 | EU 1.21 private Speed Mode | startup, hook installation, and 40-track overlay preparation validated for CUSA14876 and CUSA13795; live EU lobby/multiplayer verification pending ([notes](21-eu-speed-mode.md)) |
+| 16:10 aspect ratio | separate experimental display/camera support, selected in both launchers and the in-game menu; synthetic USA/EU checks pass, live menu/HUD/video verification pending ([notes](23-aspect-ratios.md)) |
 
 ## How to run
 

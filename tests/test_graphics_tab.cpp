@@ -18,6 +18,7 @@ bool RenderSizeNeedsRestart() { return false; }
 bool ResolutionNeedsRestart() { return false; }
 bool UltrawideAvailable() { return false; }
 void SetUltrawide(bool) {}
+bool Fsr4Available() { return true; }
 }
 
 static void check(std::vector<u8> image, u64 shift) {
@@ -78,13 +79,15 @@ static void controls_test() {
     v.render_res = 0;
     assert(Row(0, -1) == "2160p");
     assert(Row(0, 1) == "480p");
-    v.widescreen = 0;
+    v.aspect_ratio = BbSettings::Aspect16x9;
     assert(Row(1, -1) == "32:9");
-    assert(v.widescreen_w == 5120 && v.widescreen_h == 1440);
+    assert(v.aspect_w == 5120 && v.aspect_h == 1440);
     assert(Row(1, 1) == "16:9");
+    assert(Row(1, 1) == "16:10");
+    assert(v.aspect_w == 1920 && v.aspect_h == 1200);
     assert(Row(1, 1) == "21:9");
-    assert(v.widescreen_w == 3440 && v.widescreen_h == 1440);
-    assert(Description(1).find("21:9") != std::string::npos);
+    assert(v.aspect_w == 3440 && v.aspect_h == 1440);
+    assert(Description(1).find("16:10") != std::string::npos);
     v.temporal = 0;
     Row(2, -1); assert(v.temporal == BbSettings::TemporalCount-1);
     Row(2, 1); assert(v.temporal == 0);
@@ -173,6 +176,31 @@ static void controls_test() {
 int main(int argc, char** argv) {
     controls_test();
     using namespace BbGraphicsTab;
+    auto& settings = BbSettings::Get();
+    // controls_test changed other rows: start from their saved values.
+    settings.startup_render_res = settings.render_res;
+    settings.startup_temporal = settings.temporal;
+    settings.startup_dlss_quality = settings.dlss_quality;
+    settings.startup_output_res = settings.output_res;
+    for (int g = 0; g < BbSettings::GamePatchCount; ++g)
+        settings.startup_game_patches[g] = settings.game_patches[g].load();
+    settings.aspect_ratio = BbSettings::Aspect16x9;
+    settings.startup_aspect_ratio = BbSettings::Aspect16x9;
+    settings.ultrawide = 1;
+    assert(Row(1, 0) == "16:9");
+    assert(Row(1, 1) == "16:10");
+    assert(settings.aspect_w == 1920 && settings.aspect_h == 1200 && settings.ultrawide == 0);
+    assert(NeedsRestart());
+    assert(Row(1, 1) == "21:9");
+    assert(settings.aspect_w == 3440 && settings.aspect_h == 1440);
+    assert(Row(1, 1) == "32:9");
+    assert(settings.aspect_w == 5120 && settings.aspect_h == 1440);
+    assert(Row(1, 1) == "16:9");
+    assert(!NeedsRestart());
+    settings.aspect_w = 2560;
+    settings.aspect_h = 1600;
+    assert(Row(1, 1) == "16:10");
+    assert(settings.aspect_w == 2560 && settings.aspect_h == 1600);
     assert(std::strcmp(TabLabel(21), "ﺍﻟﺮﺳﻮﻣﻴﺎﺕ") == 0);
     assert(std::strcmp(TabLabel(1), "Graphics") == 0);
     assert(std::strcmp(TabLabel(2), "Graphismes") == 0);
