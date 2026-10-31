@@ -106,9 +106,9 @@ if [[ -z ${BB_MOD_SESSION:-} ]]; then
 fi
 original_game=$game
 # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py, as in
-# run.py): an extra archive the runtime serves as archives/update3.pak. USA 1.21 only.
+# run.py): an extra archive the runtime serves as archives/update3.pak. USA/EU 1.21.
 unset BB_GRAPHICS_TAB_ARCHIVE
-if [[ $title_id == CUSA13795 && $app_version == 01.21 ]]; then
+if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
     while IFS= read -r line; do
         case $line in
             archives/update3.pak=*) export BB_GRAPHICS_TAB_ARCHIVE=${line#archives/update3.pak=} ;;
@@ -156,7 +156,7 @@ if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
-# A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py), as run.py: the
+# The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
 settings=$BB_CONFIG layout_patches=()
@@ -167,7 +167,7 @@ while IFS='=' read -r key value; do
         archive_patches) if [[ -n $value ]]; then export BB_ARCHIVE_PATCHES=$value; fi ;;
         env.*) export "${key#env.}=$value" ;;
     esac
-done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CONFIG" \
+done < <("$PYTHON" scripts/aspect_ratio.py "$game" --out "$out" --settings "$BB_CONFIG" \
              --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
 # A mod session (above): the packages' archive entries over those archive patches, and their
 # executable patches checked against each other and the layout, as run.py.
@@ -183,7 +183,7 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
 fi
 unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
-    if [[ $title_id == CUSA13795 ]]; then
+    if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
         speed_bases=()
         IFS='|' read -r -a speed_existing <<< "${BB_ARCHIVE_PATCHES:-}"
         for speed_patch in "${speed_existing[@]}"; do
@@ -196,17 +196,23 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
                 case $key in
                     archive_patches) IFS='|' read -r -a speed_existing <<< "$value" ;;
                     online_mode_hook) export BB_ONLINE_MODE_HOOK=$value ;;
+                    cup_file_map) export BB_MOD_FILE_MAP=$value BB_MOD_SOURCE_GAME=${BB_MOD_SOURCE_GAME:-$game} ;;
+                    known_heroes) export BB_KNOWN_HEROES=$value ;;
                 esac
             done <<< "$mode_result"
             speed_bases=()
             for speed_patch in "${speed_existing[@]}"; do speed_bases+=(--base "$speed_patch"); done
         fi
-        speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}") || exit 1
+        # a damaged game file stops Speed Mode only (speed_mode.py says why): online plays as before
+        if ! speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}"); then
+            speed_joined=$(IFS='|'; echo "${speed_existing[*]}")
+            speed_result="archive_patches=$speed_joined"
+        fi
         while IFS='=' read -r key value; do
             case $key in
                 archive_patches) export BB_ARCHIVE_PATCHES=$value ;;
                 private_archive_patches) export BB_PRIVATE_ARCHIVE_PATCHES=$value ;;
-                'Speed Mode (Experimental): private overlays prepared for '* ) echo "$key" ;;
+                'ITEMLESS (Experimental): private overlays prepared for '* ) echo "$key" ;;
             esac
         done <<< "$speed_result"
     fi

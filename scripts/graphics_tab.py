@@ -4,8 +4,8 @@
 
 The Options menu (ui/Octane_Options_Menu.igz) has a fifth tab, Language Select, that the game
 hides in this region. The port shows it again and opens its own settings menu when it is chosen
-(gpu/shim/bbport_graphics_tab.cpp); this script renames it "Graphics" in the menu's four text
-tables (ui/Octane_Options_Menu_{en,fr,mx,pt}.lng).
+(gpu/shim/bbport_graphics_tab.cpp); this script renames it "Graphics" in the menu's available USA/EU text
+tables (ui/Octane_Options_Menu_*.lng).
 
 The game loads archives/update.pak, update2.pak, ... until one is missing, each overriding the
 files of the ones before; the 1.21 update's own menu files are in update.pak/update2.pak. The
@@ -21,6 +21,7 @@ graphics_tab setting is off or the files are not found.
 usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
 """
 import argparse
+from contextlib import ExitStack
 import lzma
 import struct
 import sys
@@ -28,15 +29,17 @@ import zlib
 from pathlib import Path
 
 # Searched newest first: the first archive that has a file wins.
-ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak')
+ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak',
+            'juicedomain_onlinemenus.pak')
 OUTPUT = 'archives/update3.pak'
 # The tab's label is the string before this placeable name in each text table.
 ANCHOR = b'Comp__Menu_ButtonWithIcon005_behaviors_0'
-LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráficos'}
+LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráficos',
+          'es': 'Gráficos', 'de': 'Grafik', 'it': 'Grafica', 'ar': 'ﺍﻟﺮﺳﻮﻣﻴﺎﺕ'}
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 18  # of this script's output (the cached file is rebuilt when it changes)
+VERSION = 37  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -191,7 +194,72 @@ def show_tab(data):
         if struct.unpack_from('<q', data, base + k + 0x10)[0] != -1 or data[base + k + 0x18:base + k + 0x1c] != b'\0' * 4:
             raise ValueError('Octane_Options_Menu.igz: unexpected keyframe')
         data[base + k + 0x18:base + k + 0x1c] = one
-    return bytes(data)
+    return graphics_entry(bytes(data))
+
+
+def graphics_entry(blob):
+    """Keep Graphics between the last available option and Privacy in every native layout."""
+    from igz_file import Igz, unpack_offsets
+    g = Igz(blob)
+    # The Vec3 track's metafield is a named external, not a local object pointer.
+    g.sites['RNEX'] = g.read_list('RNEX', unpack_offsets)
+    xy = lambda p: struct.unpack_from('<2f', g.data, p)
+    step = tuple(b-a for a, b in zip(xy(0xd90+0x60), xy(0xc70+0x60)))
+    if step != (12.0, 105.0) or g.types[g.u64(0x2870)] != 'igGuiVec3Track':
+        raise ValueError('Options: unexpected button spacing/position track')
+
+    def following(target, previous):
+        struct.pack_into('<2f', g.data, target, *(a+b for a, b in zip(xy(previous), step)))
+
+    following(0x1370+0x60, 0x1490+0x60)  # Full menu: after Extras.
+    following(0x1250+0x60, 0x1370+0x60)  # Privacy must not occupy Graphics' slot.
+    following(0x28d0+0x18, 0x21f0+0x18)  # NX: after Extras.
+    following(0x3070+0x18, 0x28d0+0x18)
+    following(0x2b10+0x18, 0x1cd8+0x18)  # No Extras: after Hints.
+    following(0x3230+0x18, 0x2b10+0x18)
+
+    # The in-race layout had only an alpha track for Language Select. Give it
+    # a position track too, so native layout switching moves Graphics with Controls.
+    start, end = 0x2870, 0x28f8  # Native Vec3 track, keyframe list and keyframe.
+    cloned = g.append(g.data[start:end])
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if start <= site < end:
+                target = cloned + site - start
+                g.add_site(tag, target)
+                if tag == 'ROFS':
+                    value = g.u64(site)
+                    if start <= value < end:
+                        g.set_u64(target, cloned + value - start)
+    key = cloned + 0x28d0 - start + 0x18
+    following(key, 0x42b0+0x18)  # No Extras/Hints: after Controls.
+    following(0x3150+0x18, key)
+    tracks = g.u64(0x2978+0x18)
+    if g.u32(tracks+0xc) != 1 or g.u64(g.u64(tracks+0x20)) != 0x29d0:
+        raise ValueError('Options: unexpected in-race layout tracks')
+    values = g.append(struct.pack('<QQ', 0x29d0, cloned))
+    g.add_site('ROFS', values)
+    g.add_site('ROFS', values+8)
+    g.set_u32(tracks+0xc, 2)
+    g.set_u32(tracks+0x10, 2)
+    g.set_u32(tracks+0x18, 16)
+    g.set_u64(tracks+0x20, values)
+    return g.build()
+
+
+def graphics_page(blob):
+    from igz_file import Igz
+    from widescreen_startup import IGZ
+    g = Igz(blob)
+    roots = [o for o in IGZ(blob).objects if o.get("name") == "Sprite_blank_tga"]
+    if len(roots) != 1:
+        raise ValueError("unexpected Graphics backdrop")
+    from graphics_widgets import add_widgets
+    add_widgets(g)
+    root = roots[0]["ptr"]
+    struct.pack_into("<f", g.data, root+0xe0, 0.0)
+    g.set_u32(root+12, g.u32(root+12) | 0x400)
+    return g.build()
 
 
 # Files changed in update3.pak: logical name -> change.
@@ -202,10 +270,7 @@ CHANGES['ui/octane_options_menu.igz'] = show_tab
 # to one that matches nothing, so the hide does nothing.
 CHANGES['vsc/ui/octane_options_menu/octane_options_menu_root.igz'] = rename(
     b'Comp__Menu_ButtonWithIcon005', b'Comp__Menu_ButtonWithIcon00X')
-# The tab's own script opens the language screen by name: it opens a project that does not exist,
-# which the port's open2_VSC hook takes as the Graphics tab (bbport_graphics_tab.cpp).
-CHANGES['vsc/ui/octane_options_menu/octane_options_menu_languageselectbutton.igz'] = rename(
-    b'Octane_Options_LanguageSelect', b'Octane_Options_BbportSettings')
+CHANGES['ui/octane_options_languageselect.igz'] = graphics_page
 
 
 # ---- The main menu's Quit Game button --------------------------------------------------------
@@ -217,7 +282,12 @@ QUIT_KEY = b'Comp__Menu_ButtonWithIcon_behaviors_0\0'
 QUIT_LABELS = {'en': ('Quit Game', 'Close the game and return to the desktop.'),
                'fr': ('Quitter', 'Fermer le jeu et revenir au bureau.'),
                'mx': ('Salir', 'Cerrar el juego y volver al escritorio.'),
-               'pt': ('Sair', 'Fechar o jogo e voltar para a area de trabalho.')}
+               'pt': ('Sair', 'Fechar o jogo e voltar para a area de trabalho.'),
+               'es': ('Salir', 'Cerrar el juego y volver al escritorio.'),
+               'de': ('Beenden', 'Spiel beenden und zum Desktop zurückkehren.'),
+               'it': ('Esci', 'Chiudi il gioco e torna al desktop.'),
+               # Arabic presentation forms in logical order, as in the original tables.
+               'ar': ('ﺧﺮﻭﺝ', 'ﺇﻏﻼﻕ ﺍﻟﻠﻌﺒﺔ ﻭﺍﻟﻌﻮﺩﺓ ﺇﻟﻰ ﺳﻄﺢ ﺍﻟﻤﻜﺘﺐ.')}
 QUIT_LEVEL = (b'Octane/Octane_OnlineLobby/Octane_OnlineLobby\0',
               b'Octane/Octane_BbportQuit0/Octane_BbportQuit0\0')
 
@@ -353,48 +423,62 @@ OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
     b'Comp__Menu_ButtonWithIcon', b'Comp__Menu_ButtonWithIcoX')
 
 
+# The Ready material also references this texture, normally loaded only in online
+# menus/races. Graphics must be able to open from any frontend screen.
+WIDGET_RESOURCES = {
+    'textures/guistandard_diffuse,textures@!ui!octane!icons!octane_ui_ico_singlerace`tga,101.igz',
+}
+
 def build(game, dest, dump):
-    found = {}  # logical name (lower case) -> (archive, index, archive name)
-    archives = []
-    for name in ARCHIVES:
-        path = game / 'archives' / name
-        if not path.is_file():
-            continue
-        archive = Archive(path)
-        archives.append(archive)
-        for i in range(len(archive.names)):
-            logical = archive.logical(i)
-            low = logical.lower()
-            if any(d in low for d in DUMP):
-                target = dump / name / logical
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.read(i))
-            if (low in CHANGES or low in OPTIONAL) and low not in found:
-                found[low] = (archive, i, name)
-    if not set(CHANGES) <= set(found):
-        missing = ', '.join(sorted(set(CHANGES) - set(found)))
-        raise ValueError(f'not found: {missing}')
-    files = []
-    quit_files = []
-    for low, (archive, i, name) in found.items():
-        full, logical = archive.names[i]
-        entry = (full, logical, archive.infos[i][1] & ~0xFF)
-        if low in CHANGES:
-            files.append(entry + (CHANGES[low](archive.read(i)),))
+    with ExitStack() as stack:
+        found = {}  # logical name (lower case) -> (archive, index, archive name)
+        archives = []
+        for name in ARCHIVES:
+            path = game / 'archives' / name
+            if not path.is_file():
+                continue
+            archive = Archive(path)
+            stack.callback(archive.f.close)
+            archives.append(archive)
+            for i in range(len(archive.names)):
+                logical = archive.logical(i)
+                low = logical.lower()
+                if any(d in low for d in DUMP):
+                    target = dump / name / logical
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(i))
+                if (low in CHANGES or low in OPTIONAL or low in WIDGET_RESOURCES) and low not in found:
+                    found[low] = (archive, i, name)
+        # Each edition ships a different language set; the graph/scripts and English are required.
+        required = {name for name in CHANGES if not name.endswith('.lng')} | WIDGET_RESOURCES
+        required.add('ui/octane_options_menu_en.lng')
+        if not required <= set(found):
+            missing = ', '.join(sorted(required - set(found)))
+            raise ValueError(f'not found: {missing}')
+        files = []
+        for low in sorted((set(CHANGES) | WIDGET_RESOURCES) & set(found)):
+            archive, i, name = found[low]
+            full, logical = archive.names[i]
+            files.append((full, logical, archive.infos[i][1] & ~0xFF, (CHANGES[low](archive.read(i)) if low in CHANGES else archive.read(i))))
             print(f'Graphics tab: {logical} from {name}')
-        else:
+        # Quit is all-or-nothing for the languages present in this edition, after the Graphics files.
+        quit_required = {name for name in OPTIONAL if not name.endswith('.lng')}
+        quit_required.update(f'ui/octane_mainmenu_{lang}.lng' for lang in LABELS
+                             if f'ui/octane_options_menu_{lang}.lng' in found)
+        if quit_required <= set(found):
             try:
-                quit_files.append(entry + (OPTIONAL[low](archive.read(i)),))
+                quit_files = []
+                for low in sorted(quit_required):
+                    archive, i, _name = found[low]
+                    full, logical = archive.names[i]
+                    quit_files.append((full, logical, archive.infos[i][1] & ~0xFF,
+                                       OPTIONAL[low](archive.read(i))))
+                files += quit_files
+                print('Graphics tab: Quit Game button in the main menu')
             except (ValueError, KeyError, IndexError, struct.error, ImportError) as error:
-                # Only the button is left out: the Graphics tab does not depend on it.
                 print(f'Graphics tab: no Quit Game button ({type(error).__name__}: {error})')
-                quit_files = None
-                break
-    if quit_files and len(quit_files) == len(OPTIONAL):
-        files += quit_files
-        print('Graphics tab: Quit Game button in the main menu')
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    write_archive(dest, files, archives[0])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_archive(dest, files, archives[0])
 
 
 def enabled(settings):

@@ -22,6 +22,16 @@ constexpr std::uint8_t CopyPrologue[PrologueSize] = {0x55, 0x48, 0x89, 0xe5, 0x4
                                                      0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                                      0x53, 0x48, 0x83, 0xe4, 0xe0};
 
+/// CUSA14876 (EU) 1.21 has both functions 0x10 earlier; the engine global each loads right after
+/// its prologue (RIP-relative, at +0x11 and +0x18) is at the same address in both editions.
+constexpr std::uint64_t EuShift = 0x10;
+constexpr std::uint64_t ClearCopyGlobal = 0x2807098;
+constexpr std::uint64_t UnknownEdition = ~std::uint64_t{0};
+
+/// What to subtract from ClearFunction and CopyFunction for this executable: 0 (USA 1.21),
+/// EuShift (EU 1.21) or UnknownEdition when neither layout matches.
+std::uint64_t EditionShift(const unsigned char* image, std::uint64_t size);
+
 /// Hooks the function at `offset` of the image when its first bytes are `prologue`: a stub saves
 /// the argument registers (rdi, rsi, rdx, rcx, r8, r9, xmm0-7), calls `handler` (System V ABI)
 /// with them, restores them and runs the function. `who` prefixes the log lines.

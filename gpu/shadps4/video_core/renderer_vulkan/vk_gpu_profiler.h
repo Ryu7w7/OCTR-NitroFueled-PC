@@ -3,6 +3,9 @@
 // written where each of them starts (and at the frame end); the time to the next timestamp is
 // charged to its label, barriers and copies recorded in between included. Results are read four
 // frames later and printed every 5 s: GPU ms per frame by label.
+// BB_GPU_PROFILE_DRAWS=1 also writes one inside the render pass before every draw, labelled by
+// its shaders (as the native renderer's pass trace times each draw): a pass's own label then
+// keeps only what comes before its first draw.
 
 #pragma once
 
@@ -38,6 +41,19 @@ public:
         WriteTimestamp(key);
     }
 
+    /// BB_GPU_PROFILE_DRAWS=1: each draw is timed (MarkDraw).
+    [[nodiscard]] bool Draws() const noexcept {
+        return draws;
+    }
+    /// Starts a draw's segment, inside the open render pass.
+    template <typename Describe>
+    void MarkDraw(u64 key, Describe&& describe) {
+        if (!described.contains(key)) {
+            described.emplace(key, describe());
+        }
+        WriteTimestamp(key, true);
+    }
+
     /// The label of the open segment, for Resume after a nested segment (transfers).
     [[nodiscard]] u64 Current() const noexcept {
         return current;
@@ -57,18 +73,19 @@ public:
 
 private:
     GpuProfiler(const Instance& instance, Scheduler& scheduler);
-    void WriteTimestamp(u64 key);
+    void WriteTimestamp(u64 key, bool in_pass = false);
     void Collect(u32 slice);
     void Print();
 
     static constexpr u32 NumSlices = 4;
-    static constexpr u32 SliceQueries = 4096;
+    static constexpr u32 SliceQueries = 8192;
     static inline GpuProfiler* instance_ptr = nullptr;
 
     vk::Device device;
     Scheduler& scheduler;
     vk::UniqueQueryPool pool;
     double period_ns = 1.0;
+    bool draws = false;
     u32 slice = 0;
     std::array<std::vector<u64>, NumSlices> keys; ///< label of each timestamp but the last
     std::array<u32, NumSlices> used{};

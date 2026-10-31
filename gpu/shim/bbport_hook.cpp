@@ -123,6 +123,36 @@ bool Install(unsigned char* image, std::uint64_t size, std::uint64_t offset,
 }
 } // namespace
 
+std::uint64_t EditionShift(const unsigned char* image, std::uint64_t size) {
+    struct Site {
+        u64 offset;
+        const u8* prologue;
+        u64 load; // `mov r64, [rip + disp32]` of ClearCopyGlobal
+    };
+    const Site sites[] = {{ClearFunction, ClearPrologue, 0x11}, {CopyFunction, CopyPrologue, 0x18}};
+    for (const u64 shift : {u64{0}, EuShift}) {
+        bool ok = true;
+        for (const Site& s : sites) {
+            const u64 at = s.offset - shift, load = at + s.load;
+            std::int32_t disp = 0;
+            if (load + 7 > size || std::memcmp(image + at, s.prologue, PrologueSize) != 0 ||
+                image[load] != 0x48 || image[load + 1] != 0x8b || (image[load + 2] & 0xc7) != 0x05) {
+                ok = false;
+                break;
+            }
+            std::memcpy(&disp, image + load + 3, sizeof(disp));
+            ok = load + 7 + disp == ClearCopyGlobal;
+            if (!ok) {
+                break;
+            }
+        }
+        if (ok) {
+            return shift;
+        }
+    }
+    return UnknownEdition;
+}
+
 bool PassThrough(unsigned char* image, std::uint64_t size, std::uint64_t offset,
                  const std::uint8_t* prologue, std::uint64_t handler, const char* who,
                  const char* name) {
