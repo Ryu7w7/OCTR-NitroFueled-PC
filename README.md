@@ -460,7 +460,8 @@ names from shadPS4's aerolib list.
 
 Display settings offer 16:9 (default), experimental 16:10, 21:9 and 32:9. The in-game
 Graphics page offers the same choices after a restart. 16:10 supports 1280x800, 1920x1200
-and 2560x1600 through its own display/camera preparation, with the original menus and HUD.
+and 2560x1600 through its own display/camera preparation, with corrected Adventure
+collectible spacing and boost-gauge proportions. The original menu layout is retained.
 See [aspect ratio settings and 16:10 verification](docs/sacredfire/23-aspect-ratios.md).
 
 ### Corrected widescreen layouts (Windows)

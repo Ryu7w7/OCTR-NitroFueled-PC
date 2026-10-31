@@ -36,6 +36,17 @@ source executable stay unchanged.
 
 16:10 keeps the original menu assets, HUD shaders and video code. It clears a prior
 `BB_HUD_SCALE` override and keeps existing archive patches such as the online playlist.
+Its HUD corrections are prepared separately by `scripts/aspect_hud.py` from the
+player's archives, through the same archive overlay mechanism as the existing layouts.
+The Adventure relic/key/trophy effects receive the inverse of the camera's horizontal
+expansion, including their bobbing-animation position keys. Their count text stays in
+its authored position. The shared boost gauge's master container gets a 0.9 Y scale,
+with its bottom edge preserved; its fill, cursor and effects keep their hierarchy.
+The charging effect also uses the existing wide layouts' named-field size correction.
+No whole HUD asset is distributed, and every other asset byte and reference stays intact.
+Unexpected HUD structures or overlapping asset replacements reject the 16:10 plan
+instead of overwriting a mod. Without archives, executable-only callers can still
+prepare the display/camera plan.
 FSR/DLSS and raw ultrawide are disabled in the private launch settings. The existing
 `layout_internal` scene scaling supports 480p through 2160p; the display size follows
 the selected 16:10 output, while the internal targets retain their authored 16:9 shape.
@@ -48,5 +59,13 @@ overlaps, signature and projection-data fallback, the shell launch plan, and exe
 of the camera-copy instructions to check pixel proportions. C++ checks cover settings
 load/save precedence, all four in-game choices, output-size changes and restart detection.
 
-Live menu/HUD, split-screen, subtitles, video proportions and online verification remain
-pending; videos may stretch. Existing 21:9/32:9 visual confirmations do not certify 16:10.
+HUD checks cover all seven applicable EU asset copies, animation-key projection at all
+three output sizes, unchanged count text and references, bottom-edge and pixel-proportion
+preservation, archive-overlay composition/cache behavior, and unexpected-data rejection.
+EU 1.21 Adventure was visually checked at 2560x1600 with a 1440p internal scene: all three
+collectible/count pairs align, the icons keep their bobbing, and the shared boost frame
+has its corrected height.
+
+Race transitions, split-screen, subtitles, video proportions and online HUD verification
+remain pending; videos may stretch. Existing 21:9/32:9 visual confirmations do not certify
+16:10. The shared boost asset is also used by race HUDs; the live check above is Adventure.
