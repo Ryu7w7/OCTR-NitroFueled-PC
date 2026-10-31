@@ -28,6 +28,16 @@ output-size loads and adapts tcosi's projection-copy replacement with factor
 signature relocation preserves them on supported USA and EU 1.21 builds. The four
 projection-row X components change; vertical field of view stays the same.
 
+The second signed write corrects `igGuiPlaceableBolt`'s GUI-to-effect conversion.
+Before camera unprojection, it multiplies all three corners' normalized X by 0.9.
+This compensates for the camera's 10/9 X factor, keeping 3D HUD effects aligned with
+their 2D sprites and text. Both position and width are corrected, so a charging
+effect follows the animated fill instead of extending ahead of it. The correction
+uses the current canvas and placeable transform, including host scaling and
+animations. Its relative loads and jump stay inside the replacement; the following
+native matrix-transform call is retained. Readable assembly is included alongside
+the XML in `scripts/aspect_ratio_data/16x10-vfx.s`.
+
 Every write must match one executable signature before the files are published.
 Unsupported editions, missing or ambiguous signatures, and malformed projection
 data fall back to 16:9. The generated patch is `out/aspect_ratio/patches/AspectRatio.xml`;
@@ -38,9 +48,9 @@ source executable stay unchanged.
 `BB_HUD_SCALE` override and keeps existing archive patches such as the online playlist.
 Its HUD corrections are prepared separately by `scripts/aspect_hud.py` from the
 player's archives, through the same archive overlay mechanism as the existing layouts.
-The Adventure relic/key/trophy effects receive the inverse of the camera's horizontal
-expansion, including their bobbing-animation position keys. Their count text stays in
-its authored position. The shared boost gauge's master container gets a 0.9 Y scale,
+Adventure collectible assets and bobbing-animation keys remain unchanged; their
+spacing is handled by the GUI VFX conversion above. The shared boost gauge's master
+container gets a 0.9 Y scale,
 with its bottom edge preserved; its fill, cursor and effects keep their hierarchy.
 The charging effect also uses the existing wide layouts' named-field size correction.
 No whole HUD asset is distributed, and every other asset byte and reference stays intact.
@@ -59,12 +69,14 @@ overlaps, signature and projection-data fallback, the shell launch plan, and exe
 of the camera-copy instructions to check pixel proportions. C++ checks cover settings
 load/save precedence, all four in-game choices, output-size changes and restart detection.
 
-HUD checks cover all seven applicable EU asset copies, animation-key projection at all
-three output sizes, unchanged count text and references, bottom-edge and pixel-proportion
-preservation, archive-overlay composition/cache behavior, and unexpected-data rejection.
+HUD checks cover the five applicable EU boost asset copies, bottom-edge and pixel-proportion
+preservation, unchanged references, archive-overlay composition/cache behavior, and
+unexpected-data rejection. The GUI VFX instruction checks cover three corner points,
+animated fill positions, canvas sizes, and preserved Y/depth/W components.
 EU 1.21 Adventure was visually checked at 2560x1600 with a 1440p internal scene: all three
 collectible/count pairs align, the icons keep their bobbing, and the shared boost frame
-has its corrected height.
+has its corrected height. The player also checked the active drift gauge and confirmed
+that its charging effect now aligns with the fill.
 
 Race transitions, split-screen, subtitles, video proportions and online HUD verification
 remain pending; videos may stretch. Existing 21:9/32:9 visual confirmations do not certify

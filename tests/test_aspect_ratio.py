@@ -21,7 +21,8 @@ def projection_line():
 
 def game_code():
     signatures = [bytes.fromhex(patches.OUTPUT_SIZE_SIGNATURE),
-                  bytes.fromhex(projection_line().get('Signature')),
+                  *[bytes.fromhex(line.get('Signature')) for line in
+                    ET.parse(aspect_ratio.DATA / '16x10.xml').iter('Line')],
                   bytes.fromhex(patches.RENDER_SCALE_SIGNATURE),
                   bytes.fromhex(patches.OUTPUT_DOUBLE_SIGNATURE),
                   bytes.fromhex(patches.GPU_HEAP_SIGNATURE)]
@@ -174,7 +175,7 @@ class Aspect16x10Tests(unittest.TestCase):
                         xml = ET.parse(plan['patches_dir'] / 'AspectRatio.xml').getroot()
                         self.assertEqual(xml.find('./TitleID/ID').text, title)
                         lines = list(xml.iter('Line'))
-                        self.assertEqual(len(lines), 3)
+                        self.assertEqual(len(lines), 4)
                         values = [patches.encode(line) for line in lines if len(patches.encode(line)) == 5]
                         width, height = map(int, output.split('x'))
                         self.assertEqual(values, [b'\xb8' + struct.pack('<I', width),
@@ -186,10 +187,13 @@ class Aspect16x10Tests(unittest.TestCase):
                         self.assertTrue(all(end <= other for (_, end), (other, _) in zip(spans, spans[1:])))
 
     def test_missing_or_ambiguous_code_leaves_no_layout_or_settings(self):
-        display = bytes.fromhex(patches.OUTPUT_SIZE_SIGNATURE)
-        camera = bytes.fromhex(projection_line().get('Signature'))
-        for code in (display, camera, display + camera + bytes(64) + camera,
-                     display + bytes(64) + display + camera):
+        signatures = [bytes.fromhex(patches.OUTPUT_SIZE_SIGNATURE)] + [
+            bytes.fromhex(line.get('Signature'))
+            for line in ET.parse(aspect_ratio.DATA / '16x10.xml').iter('Line')]
+        original = game_code()
+        cases = [code for signature in signatures for code in (
+            original.replace(signature, bytes(len(signature))), original + signature)]
+        for code in cases:
             with self.subTest(code_bytes=len(code)), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 (root / 'eboot.elf').write_bytes(game_elf(code))

@@ -69,7 +69,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
         target = xml.find('./TitleID/ID')
         meta = xml.find('Metadata')
         lines = xml.find('./Metadata/PatchList')
-        if (target is None or meta is None or lines is None or len(lines) != 1 or
+        if (target is None or meta is None or lines is None or len(lines) != 2 or
                 meta.get('AppVer') != APP_VERSION or meta.get('AppElf') != 'eboot.bin'):
             raise ValueError('Unexpected 16:10 projection XML')
         target.text = title_id

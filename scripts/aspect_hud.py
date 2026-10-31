@@ -1,9 +1,8 @@
-"""16:10 collectible placement and boost gauge, made from the player's HUD assets.
+"""16:10 boost gauge proportions, made from the player's HUD assets.
 
-The camera correction expands 3D effects about the screen center, while the HUD's
-text uses its original canvas. Invert that expansion for the Adventure collectibles,
-including their position animation keys. The shared boost gauge keeps its bottom
-edge and corrects its vertical proportions in every HUD that instantiates it.
+The shared boost gauge keeps its bottom edge and corrects its vertical proportions
+in every HUD that instantiates it. GUI VFX placement is corrected by the 16:10
+executable patch; collectible assets and their animation keys remain authored.
 
 The IGZ reader and charging-effect cleanup are from tcosi's existing layout work.
 No game files are changed; all other asset bytes and existing archive overlays stay.
@@ -23,7 +22,7 @@ from nitro_components import sha
 from widescreen_startup import IGZ
 
 FORMAT = 1
-FACTOR = .9  # (16 / 10) / (16 / 9), the reciprocal camera X correction
+FACTOR = .9  # (16 / 10) / (16 / 9), square HUD pixels at the selected output
 ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_hub.pak', 'juicedomain_race.pak',
             'juicedomain_race_flareday.pak', 'juicedomain_race_flarenight.pak')
 
@@ -114,61 +113,6 @@ class _Asset:
                 yield self.objects[track]
 
 
-def _adventure(data):
-    a = _Asset(data)
-    root = a.named('Root_placeable')
-    a.check_transform(root, (0, 0), (0, 0, 1), (1, 1, 1), (1920, 1080))
-    top = a.named('Null_Asset_TopItems')
-    a.check_transform(top, (961, 136), (.5, .5, .5), (1, 1, 1), (100, 100))
-    a.parent(top, 'Root_placeable')
-    groups = {}
-    for name, x in [('Null_Asset_Relics', -769), ('Null_Asset_Relics001', -1),
-                    ('Null_Asset_Relics002', 751)]:
-        group = a.named(name)
-        a.check_transform(group, (x, 45), (.5, .5, .5), (1, 1, 1), (100, 100))
-        a.parent(group, 'Null_Asset_TopItems')
-        groups[name] = group
-    for ancestor in [root, top, *groups.values()]:
-        for track in a.tracks(ancestor):
-            _require(track['type'] != 'igGuiVec3Track', 'animated ancestor transform')
-
-    owners = [
-        ('Effect_Octane_HUD_Relic_Silver_vfx001', 'Null_Asset_Relics', 50.22, 15, 0),
-        ('Effect_Octane_HUD_Relic_Gold_vfx001', 'Null_Asset_Relics', 50.22, 15, 0),
-        ('Effect_Octane_HUD_Relic_Blue_vfx', 'Null_Asset_Relics', 50.21702, 15, 1),
-        ('Effect_Octane_HUD_Keys_vfx', 'Null_Asset_Relics001', 40.75, 0, 1),
-        ('Effect_Octane_HUD_Trophy_vfx', 'Null_Asset_Relics002', 27, 0, 1),
-    ]
-    for name, group_name, old_x, rotation, expected_tracks in owners:
-        owner = a.named(name)
-        a.check_transform(owner, (old_x, 45), (.5, .5, .5), (1, 1, 1), (150, 150),
-                          (0, 0, rotation))
-        group = a.parent(owner, group_name)
-        # Zero-rotation, unit-scale ancestors: position minus pivot * authored size.
-        parent_x = sum(a.vector(o, 0x60, 1)[0] -
-                       a.vector(o, 0x6c, 1)[0] * a.vector(o, 0x90, 1)[0]
-                       for o in (root, top, group))
-        center = a.vector(root, 0x90, 1)[0] / 2
-        def corrected(x):
-            return center + FACTOR * (parent_x + x - center) - parent_x
-        a.write(owner['offset'] + 0x60, corrected(a.vector(owner, 0x60, 1)[0]))
-        position_tracks = 0
-        for track in a.tracks(owner):
-            if track['type'] != 'igGuiVec3Track' or a.q(track['ptr'] + 0x18) != 2:
-                continue
-            position_tracks += 1
-            keys = a.list_items(a.q(track['ptr'] + 0x10), 'igGuiKeyframeList')
-            _require(len(keys) == 3, 'idle position keyframes')
-            for pointer in keys:
-                key = a.obj(pointer, 'igGuiVec3LinearKeyframe')
-                x, y, z = a.vector(key, 0x18)
-                _require(_close((x, z), (old_x, 0)) and math.isfinite(y) and 45 <= y <= 60,
-                         'unexpected idle position')
-                a.write(key['offset'] + 0x18, corrected(x))
-        _require(position_tracks == expected_tracks, 'idle position tracks for ' + name)
-    return bytes(a.result)
-
-
 def _boost(data):
     a = _Asset(data)
     root = a.named('Octane_NFBoostBar_asset_root')
@@ -207,10 +151,6 @@ def _checked(transform, data):
         raise ValueError('Unsupported 16:10 HUD asset') from error
 
 
-def correct_adventure_hud(data):
-    return _checked(_adventure, data)
-
-
 def correct_boost_bar(data):
     return _checked(_boost, data)
 
@@ -219,7 +159,7 @@ def prepare(game, out, base):
     """Checked HUD archive overlays, composed with the launch's existing overlays.
 
     Without archives, callers can still prepare the executable-only launch plan.
-    When archives are present, both HUD assets must be found and every affected
+    When archives are present, the boost gauge must be found and every affected
     copy must have the expected structure before the cached set is published.
     """
     folder = Path(game) / 'archives'
@@ -242,8 +182,7 @@ def prepare(game, out, base):
             return made
     except (OSError, KeyError, TypeError, ValueError):
         pass
-    transforms = {'ui/octane_adventure_hud.igz': correct_adventure_hud,
-                  'ui/guisharedassets/octane_nfboostbar.igz': correct_boost_bar}
+    transforms = {'ui/guisharedassets/octane_nfboostbar.igz': correct_boost_bar}
     changed = {}
     found = set()
     for name, path in sources.items():
