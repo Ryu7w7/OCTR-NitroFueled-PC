@@ -2876,7 +2876,7 @@ void AspectRatioSettings() {
     App& a = g_app;
     std::string mode = a.game.Get("aspect_ratio", a.game.Get("widescreen_layout", "16x9"));
     static constexpr Choice ratios[] = {{"16:9", "16:9", "16x9"},
-                                        {"16:10 (experimental)", "16:10 (experimental)", "16x10"},
+                                        {"16:10", "16:10", "16x10"},
                                         {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
     if (mode != "16x10" && mode != "21x9" && mode != "32x9") mode = "16x9";
     const char* preview = "16:9";
@@ -2920,9 +2920,9 @@ void AspectRatioSettings() {
     bool changed;
     if (mode == "16x10") {
         changed = GameChoiceCombo(label, "aspect_output", tall, output.empty() ? "1920x1200" : output.c_str(), 16.0f);
-        ImGui::TextColored(kGrey, "%s", T("16:10 experimental: pantalla y cámara adaptadas; menús y HUD originales. "
+        ImGui::TextColored(kGrey, "%s", T("16:10: pantalla y cámara adaptadas; efectos del HUD alineados. "
             "Actualización 1.21, USA o Europa. Sin FSR ni DLSS. Requiere reiniciar.",
-            "Experimental 16:10 display and camera; original menus and HUD. USA or Europe 1.21. "
+            "16:10 display and camera; aligned HUD effects. USA or Europe 1.21. "
             "No FSR or DLSS. Requires a restart."));
     } else if (mode == "21x9") {
         changed = GameChoiceCombo(label, "aspect_output", wide, output.empty() ? "3440x1440" : output.c_str(), 16.0f);

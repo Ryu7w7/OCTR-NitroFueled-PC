@@ -106,7 +106,7 @@ RENDER_RESOLUTIONS = [("Game default (the PS4 Pro switches decide)", ""),
                       ("4K (3840 x 2160)", "2160")]
 # bbport.ini aspect_ratio / aspect_output: the display shape and its screen sizes.
 # scripts/aspect_ratio.py prepares 16:10; widescreen.py keeps the corrected 21:9/32:9 layouts.
-ASPECT_RATIOS = [("16:9", "16x9"), ("16:10 (experimental)", "16x10"),
+ASPECT_RATIOS = [("16:9", "16x9"), ("16:10", "16x10"),
                  ("21:9 (corrected menus and HUD)", "21x9"),
                  ("32:9 (corrected menus and HUD)", "32x9")]
 ASPECT_OUTPUTS = {"16x10": [("1920 x 1200", "1920x1200"), ("1280 x 800", "1280x800"),
@@ -1262,7 +1262,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.render_res_row)
         self.layout_row = combo_row(
             tr("Aspect ratio"),
-            tr("16:10 is experimental and keeps the original menus and HUD. 21:9 and 32:9 include menu and HUD corrections. "
+            tr("16:10 keeps the original menus and aligns the HUD effects. 21:9 and 32:9 include menu and HUD corrections. "
                "USA or Europe 1.21; otherwise the game starts at 16:9. No FSR or DLSS. Requires a restart."),
             ASPECT_RATIOS, self.ini.get("aspect_ratio", self.ini.get("widescreen_layout", "16x9")))
         screen.add(self.layout_row)
