@@ -55,24 +55,20 @@ class HudPlanTests(unittest.TestCase):
             guest = '/app0/archives/update.pak'
             archive_patch.write_entries_patch(prior, source, guest, {2: b'previous overlay'})
             with patch.object(aspect_hud, 'Archive', Archive), \
-                 patch.object(aspect_hud, 'correct_adventure_hud', return_value=b'corrected HUD') as hud, \
                  patch.object(aspect_hud, 'correct_boost_bar', return_value=b'corrected gauge') as gauge:
                 made = aspect_hud.prepare(root / 'game', root / 'out', {guest: prior})
-                self.assertEqual(entry(source, made[guest], 0), b'corrected HUD')
+                self.assertEqual(entry(source, made[guest], 0), b'original \x00')
                 self.assertEqual(entry(source, made[guest], 1), b'corrected gauge')
                 self.assertEqual(entry(source, made[guest], 2), b'previous overlay')
                 self.assertEqual(source.read_bytes(), original)
-                hud.assert_called_once_with(b'HUD')
                 gauge.assert_called_once_with(b'gauge')
-                hud.reset_mock()
                 gauge.reset_mock()
                 self.assertEqual(aspect_hud.prepare(root / 'game', root / 'out', {guest: prior}), made)
-                hud.assert_not_called()
                 gauge.assert_not_called()
                 made[guest].unlink()
                 self.assertEqual(aspect_hud.prepare(root / 'game', root / 'out', {guest: prior}), made)
                 self.assertEqual(entry(source, made[guest], 2), b'previous overlay')
-                hud.assert_called_once()
+                gauge.assert_called_once()
 
     def test_a_mod_replacing_the_same_asset_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,13 +78,12 @@ class HudPlanTests(unittest.TestCase):
             archive_file(source)
             prior = root / 'prior.bbpatch'
             guest = '/app0/archives/update.pak'
-            archive_patch.write_entries_patch(prior, source, guest, {0: b'custom HUD'})
+            archive_patch.write_entries_patch(prior, source, guest, {1: b'custom gauge'})
             with patch.object(aspect_hud, 'Archive', Archive), \
-                 patch.object(aspect_hud, 'correct_adventure_hud', return_value=b'corrected HUD'), \
                  patch.object(aspect_hud, 'correct_boost_bar', return_value=b'corrected gauge'):
                 with self.assertRaisesRegex(ValueError, 'already replaced'):
                     aspect_hud.prepare(root / 'game', root / 'out', {guest: prior})
-            self.assertEqual(entry(source, prior, 0), b'custom HUD')
+            self.assertEqual(entry(source, prior, 1), b'custom gauge')
             self.assertFalse(list((root / 'out').rglob('stamp.json')))
 
     def test_incomplete_assets_are_not_published(self):
@@ -101,8 +96,7 @@ class HudPlanTests(unittest.TestCase):
             source = root / 'game/archives/update.pak'
             source.parent.mkdir(parents=True)
             archive_file(source)
-            with patch.object(aspect_hud, 'Archive', Incomplete), \
-                 patch.object(aspect_hud, 'correct_adventure_hud', return_value=b'corrected HUD'):
+            with patch.object(aspect_hud, 'Archive', Incomplete):
                 with self.assertRaisesRegex(ValueError, 'assets are missing'):
                     aspect_hud.prepare(root / 'game', root / 'out', {})
             self.assertFalse(list((root / 'out').rglob('*.bbpatch')))
