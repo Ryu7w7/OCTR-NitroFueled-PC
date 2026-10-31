@@ -60,6 +60,20 @@ def elf64(path):
         return False
 
 
+def is_nvidia_manifest(path_str):
+    if "nvidia" in Path(path_str).name.lower():
+        return True
+    try:
+        p = Path(path_str)
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            lib = str(data.get("ICD", {}).get("library_path", "")).lower()
+            return "nvidia" in lib
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return False
+
+
 def host_nvidia(manifest_dirs, library_dirs):
     for directory in manifest_dirs:
         for manifest in sorted(directory.glob("*nvidia*.json")):
@@ -101,8 +115,19 @@ def configure(env, manifest_dirs=MANIFEST_DIRS, library_dirs=LIBRARY_DIRS,
             env.pop("LD_LIBRARY_PATH", None)
     # Both overrides belong to the user; VK_DRIVER_FILES takes precedence over
     # VK_ICD_FILENAMES. In particular don't replace an explicit Lavapipe setup.
-    if env.get("VK_DRIVER_FILES") or env.get("VK_ICD_FILENAMES"):
-        return "Vulkan: using explicit driver override"
+    override = env.get("VK_DRIVER_FILES") or env.get("VK_ICD_FILENAMES")
+    if override:
+        override_paths = [p for p in override.split(":") if p]
+        has_nvidia = any(is_nvidia_manifest(p) for p in override_paths)
+        if not has_nvidia:
+            return "Vulkan: using explicit driver override"
+        # The override specifies an NVIDIA manifest (often exported by /etc/environment,
+        # /etc/profile.d, or hybrid graphics tools). Inside the AppImage, the host
+        # NVIDIA driver cannot load without its companion libraries in LD_LIBRARY_PATH
+        # and the rewritten manifest. Ensure the directory is searched.
+        custom_dirs = tuple(Path(p).parent for p in override_paths if Path(p).parent.is_dir())
+        if custom_dirs:
+            manifest_dirs = (*custom_dirs, *manifest_dirs)
     bundled = env.get("BB_BUNDLED_VK_DRIVER_FILES", "")
     if env.get("VK_ADD_DRIVER_FILES"):
         bundled = env["VK_ADD_DRIVER_FILES"] + (":" + bundled if bundled else "")
@@ -113,6 +138,7 @@ def configure(env, manifest_dirs=MANIFEST_DIRS, library_dirs=LIBRARY_DIRS,
     if not found:
         if bundled:
             env["VK_DRIVER_FILES"] = bundled
+            env.pop("VK_ICD_FILENAMES", None)
         return "Vulkan: bundled AMD/Intel drivers; no accessible NVIDIA ICD found"
 
     data, driver = found
@@ -154,6 +180,7 @@ def configure(env, manifest_dirs=MANIFEST_DIRS, library_dirs=LIBRARY_DIRS,
     env["VK_DRIVER_FILES"] = str(manifest) + (":" + bundled if bundled else "")
     env["LD_LIBRARY_PATH"] = str(libraries) + (
         ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+    env.pop("VK_ICD_FILENAMES", None)
     # #107: NVIDIA's ICD gave no vkCreateInstance on some hosts (a GTX 1650 laptop on CachyOS)
     # until glvnd saw the host's EGL vendor files, NVIDIA's first; the package's glvnd only looks
     # in its own store. The user's own list, or BB_NVIDIA_EGL=0, keeps it as it is.
