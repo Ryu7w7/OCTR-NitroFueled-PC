@@ -111,7 +111,13 @@ struct ShaderInfo {
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     bool load_tried = false;
     bool native = false; // a shader written for the PC (native/) in place of the translation
+    bool reads_own_pixel = false; // a pixel shader sampling its targets' copies at its own pixel
 };
+
+/// Pixel shaders that sample copies of their own targets only at their own pixel (the reflection
+/// blends' screen passes): with VK_EXT_attachment_feedback_loop_layout they read the target in
+/// place and the copy is not made (ReadInPlace).
+constexpr const char* OwnPixelPasses[] = {"ReflectionBlend_1c2a0b3d_ps", "ReflectionBlend_d76f31c6_ps"};
 
 /// A Vulkan image standing in for an engine render or depth target (or a texture copy's
 /// destination), keyed by its GPU address. Same size as the engine's for now.
@@ -136,11 +142,13 @@ struct Slot {
     const Tex::Texture* texture = nullptr;
 };
 
-/// One shader stage's textures, samplers and channel-order codes.
+/// One shader stage's textures, samplers and channel-order codes (the engine binds 16 slots of
+/// each; kept small, as every draw packet holds three).
 struct StageRes {
-    Slot slots[32];
+    Slot slots[16];
     VkSampler samplers[16]{};
-    u32 swz[32]{};
+    u16 view_swz[16]{}; // channel order each slot's view reads in (SwizzleCode; 0: the identity)
+    u16 swz[16]{};      // ctr_swz: channel order left to gen 2 shaders (depth targets)
 };
 
 /// Buffer data of a draw: a fixed buffer (resident, imported), or bytes captured on the game's
@@ -414,6 +422,9 @@ bool LoadIndex() {
             cur->hash = key;
             cur->name = name;
             cur->kind = kind;
+            for (const char* p : OwnPixelPasses) {
+                cur->reads_own_pixel = cur->reads_own_pixel || name == p;
+            }
         } else if (cur && tag == 'T') {
             int slot = 0, dims = 0;
             is >> slot >> dims;
@@ -517,14 +528,29 @@ void LoadModule(ShaderInfo& s) {
         }
     } slow_load{s};
     // a shader written for the PC in place of the translation, where there is one
-    // (BB_VK_NATIVE_SHADERS=0: the translations)
+    // (BB_VK_NATIVE_SHADERS=0: the translations; BB_VK_NATIVE_SKIP=Name,...: the translations of
+    // the shaders whose names start with one of these)
     static const bool native_shaders = [] {
         const char* env = std::getenv("BB_VK_NATIVE_SHADERS");
         return !(env && env[0] == '0');
     }();
+    static const std::vector<std::string> native_skip = [] {
+        std::vector<std::string> names;
+        const char* env = std::getenv("BB_VK_NATIVE_SKIP");
+        for (std::string rest = env ? env : ""; !rest.empty();) {
+            const std::size_t comma = rest.find(',');
+            if (comma) {
+                names.push_back(rest.substr(0, comma));
+            }
+            rest = comma == std::string::npos ? "" : rest.substr(comma + 1);
+        }
+        return names;
+    }();
+    const bool skipped = std::any_of(native_skip.begin(), native_skip.end(),
+                                     [&](const std::string& n) { return s.name.rfind(n, 0) == 0; });
     fs::path path = shader_root / "native" / (s.name + ".spv");
     std::error_code ec;
-    s.native = native_shaders && fs::exists(path, ec);
+    s.native = native_shaders && !skipped && fs::exists(path, ec);
     if (s.native) {
         std::printf("Native Vulkan: %s: the PC shader in place of the translation\n", s.name.c_str());
     } else {
@@ -812,7 +838,6 @@ struct DrawPacket {
     const ShaderInfo* vs = nullptr;
     const ShaderInfo* ps = nullptr;
     const ShaderInfo* gs = nullptr;
-    StageRes res[3]; // vs, ps, gs
     Ref cb[3][14];
     Gpu::Pass pass;
     const Target* depth_ro = nullptr;
@@ -825,6 +850,7 @@ struct DrawPacket {
     union {
         u8 no_init_ = 0;
         struct {
+            StageRes res[3]; // vs, ps, gs: set by Draw (gs only with a geometry shader)
             vk::VertexInputBindingDescription2EXT bindings[17];
             vk::VertexInputAttributeDescription2EXT attributes[32];
             Ref vb[16];
@@ -832,6 +858,8 @@ struct DrawPacket {
     };
     bool indexed = false;
     bool writes_depth = false; // depth or stencil written (else the attachment is only read)
+    bool writes_z = false;     // depth values written (writes_depth without it: stencil only)
+    const Target* twin = nullptr; // a depth copy's destination, sampled as the depth target instead
     Ref ib;
     vk::IndexType ib_type = vk::IndexType::eUint32;
     u32 count = 0;
@@ -970,10 +998,15 @@ const Capture* capturing = nullptr;       // the capture being turned into a bat
 void Flush();
 // deferred copies (RunCopy)
 bool defer_copies = true;
+bool feedback_loops = false; // ReadInPlace (BB_VK_FEEDBACK=0: off), with the layout extension on
+std::vector<const Gpu::Image*> stale_copies; // copy destinations a ReadInPlace left unmade
 std::vector<CopyPacket> pending_copies; // recorder side; at most one per destination
-std::atomic<u64> copies_dropped{0}, copies_swapped{0};
+std::atomic<u64> copies_dropped{0}, copies_swapped{0}, copies_in_place{0}, copies_twinned{0}, stale_reads{0};
 void BeforeRead(const Gpu::Image* img);
 void BeforeWrite(const Gpu::Image* img);
+void BeforeStencilWrite(const Gpu::Image* img);
+void ReadInPlace(DrawPacket& d);
+void Covered(const Gpu::Image* img);
 void FlushCopiesFrom(const Gpu::Image* img);
 bool DropCopyInto(const Gpu::Image* img);
 void StartRecorder();
@@ -1004,7 +1037,125 @@ void EndOp() {
     }
 }
 
-std::atomic<u64> set_generation{0}; // bumped when a view a cached set may hold is destroyed
+// Image views destroyed since the descriptor set cache last looked (any thread): the cached sets
+// naming them go before any set is looked up again (the driver may hand the handles out again).
+std::mutex dead_views_mutex;
+std::vector<VkImageView> dead_views;
+std::atomic<bool> views_died{false};
+
+void ViewsDestroyed(const std::vector<VkImageView>& views) {
+    if (views.empty()) {
+        return;
+    }
+    std::lock_guard lk(dead_views_mutex);
+    dead_views.insert(dead_views.end(), views.begin(), views.end());
+    views_died.store(true, std::memory_order_release);
+}
+
+// Sampled views in another channel order than the identity (a T#'s dst_sel, a target's component
+// swap), per view they copy: made on first use, destroyed with that view.
+struct SwizzledView {
+    u32 code;
+    VkImageView view;
+};
+std::mutex swizzle_mutex;
+std::unordered_map<VkImageView, std::vector<SwizzledView>> swizzled_views;
+std::atomic<u64> swizzled_made{0};
+
+vk::ComponentSwizzle SwizzleOf(u32 c) {
+    switch (c) {
+    case 0:
+        return vk::ComponentSwizzle::eZero;
+    case 1:
+        return vk::ComponentSwizzle::eOne;
+    case 2:
+        return vk::ComponentSwizzle::eR;
+    case 3:
+        return vk::ComponentSwizzle::eG;
+    case 4:
+        return vk::ComponentSwizzle::eB;
+    default:
+        return vk::ComponentSwizzle::eA;
+    }
+}
+
+/// `base` (made from `like`) reading in channel order `code` (SwizzleCode). `base` itself when
+/// such a view cannot be made.
+VkImageView Swizzled(VkImageView base, vk::ImageViewCreateInfo like, u32 code) {
+    std::lock_guard lk(swizzle_mutex);
+    std::vector<SwizzledView>& list = swizzled_views[base];
+    for (const SwizzledView& s : list) {
+        if (s.code == code) {
+            return s.view;
+        }
+    }
+    like.components = vk::ComponentMapping{SwizzleOf(code & 7), SwizzleOf((code >> 3) & 7),
+                                           SwizzleOf((code >> 6) & 7), SwizzleOf((code >> 9) & 7)};
+    auto [r, view] = instance.load()->GetDevice().createImageView(like);
+    if (r != vk::Result::eSuccess) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 5) {
+            std::printf("Native Vulkan: view in channel order %o not made (%s)\n", code,
+                        vk::to_string(r).c_str());
+        }
+        return base;
+    }
+    list.push_back({code, VkImageView(view)});
+    swizzled_made.fetch_add(1, std::memory_order_relaxed);
+    return list.back().view;
+}
+
+/// Takes the swizzled views of `bases` out of the cache, into `out` (swizzle_mutex held): they go
+/// with the views they copy.
+void TakeSwizzledLocked(const std::vector<VkImageView>& bases, std::vector<VkImageView>& out) {
+    for (const VkImageView base : bases) {
+        if (const auto it = swizzled_views.find(base); it != swizzled_views.end()) {
+            for (const SwizzledView& s : it->second) {
+                out.push_back(s.view);
+            }
+            swizzled_views.erase(it);
+        }
+    }
+}
+
+/// A target's sampled view (2D or one-slice array) in channel order `code`.
+VkImageView TargetView(const Target& t, bool arrayed, u32 code) {
+    const VkImageView base = arrayed ? t.view_array : t.view;
+    if (!code || !base) {
+        return base;
+    }
+    return Swizzled(base,
+                    {.image = t.img.image,
+                     .viewType = arrayed ? vk::ImageViewType::e2DArray : vk::ImageViewType::e2D,
+                     .format = t.img.format,
+                     .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                          .baseMipLevel = 0,
+                                          .levelCount = 1,
+                                          .baseArrayLayer = 0,
+                                          .layerCount = 1}},
+                    code);
+}
+
+/// A texture's view (`view` or `view_array`, as Tex made them) in channel order `code`.
+VkImageView TextureView(const Tex::Texture& t, bool arrayed, u32 code) {
+    const VkImageView base = arrayed ? t.view_array : t.view;
+    if (!code || !base) {
+        return base;
+    }
+    const vk::ImageViewType type = base == t.view_array ? vk::ImageViewType::e2DArray
+                                   : t.cube             ? vk::ImageViewType::eCube
+                                                        : vk::ImageViewType::e2D;
+    return Swizzled(base,
+                    {.image = t.image,
+                     .viewType = type,
+                     .format = t.format,
+                     .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                          .baseMipLevel = t.first_level,
+                                          .levelCount = t.levels - t.first_level,
+                                          .baseArrayLayer = 0,
+                                          .layerCount = t.slices}},
+                    code);
+}
 
 void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     const vk::Device dev = inst.GetDevice();
@@ -1012,7 +1163,6 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     const VkImage image = t.img.image;
     const VmaAllocation allocation = t.allocation;
     Tex::UnwatchTarget(&t.written_over); // usually done when it left `targets`
-    set_generation.fetch_add(1, std::memory_order_release); // cached sets may hold its views
     std::vector<VkImageView> views{t.view};
     if (t.view_array) {
         views.push_back(t.view_array);
@@ -1020,6 +1170,13 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
     if (t.img.attach && t.img.attach != t.view) {
         views.push_back(t.img.attach);
     }
+    {
+        std::lock_guard lk(swizzle_mutex);
+        std::vector<VkImageView> swizzled;
+        TakeSwizzledLocked(views, swizzled);
+        views.insert(views.end(), swizzled.begin(), swizzled.end());
+    }
+    ViewsDestroyed(views); // cached sets may hold them
     auto destroy = [dev, vma, image, allocation, views] {
         for (const VkImageView v : views) {
             if (v) {
@@ -1044,6 +1201,16 @@ void DestroyTarget(const Vulkan::Instance& inst, Target& t) {
 }
 
 /// The image for the target at `base`, made again when its size or format changes.
+/// Whole depth -> color copies whose destination still holds what the depth target holds (the
+/// capture thread): destination, depth target. A draw sampling the destination that writes
+/// neither depth nor stencil samples the depth target instead (bound read-only), and the copy is
+/// left unmade (the recorder's DropTwinCopy). Forgotten when either is written.
+std::vector<std::pair<const Target*, Target*>> depth_twins;
+
+void ForgetTwin(const Target* t) {
+    std::erase_if(depth_twins, [t](const auto& e) { return e.first == t || e.second == t; });
+}
+
 Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 comp_swap,
                    const char* what) {
     const Vulkan::Instance* inst = instance.load();
@@ -1065,6 +1232,7 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     }
     if (slot) {
         Tex::UnwatchTarget(&slot->written_over);
+        ForgetTwin(slot.get());
         targets_remade.fetch_add(1, std::memory_order_relaxed);
         if (drawing) {
             // work queued before still draws to the old image: it goes after that work
@@ -1096,7 +1264,13 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
         .tiling = vk::ImageTiling::eOptimal,
         .usage = U::eSampled | U::eTransferDst | U::eTransferSrc |
                  (depth ? vk::ImageUsageFlags{U::eDepthStencilAttachment}
-                        : vk::ImageUsageFlags{U::eColorAttachment}),
+                        : vk::ImageUsageFlags{U::eColorAttachment}) |
+                 // the formats the reflection blends read in place (ReadInPlace); targets trade
+                 // images (SwapForClear), so any of them may be the one
+                 (feedback_loops && (format == vk::Format::eR8G8B8A8Unorm ||
+                                     format == vk::Format::eR8G8Unorm)
+                      ? vk::ImageUsageFlags{U::eAttachmentFeedbackLoopEXT}
+                      : vk::ImageUsageFlags{}),
         .sharingMode = vk::SharingMode::eExclusive,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
@@ -1330,7 +1504,21 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
                             info.last_level + 1, slot, s.name.c_str());
             }
         }
-        res.swz[slot] = SwizzleCode(tsharp, out.target);
+        // the channel order goes in the image view, as the PS4 sampler applies dst_sel for free
+        // (selecting channels in the shader took 3-5x the original's instructions). A depth view
+        // reads (D, 0, 0, 1) and the shaders read D from x: depth keeps its own view, and gen 2
+        // shaders (which still select channels) its code
+        const u32 code = SwizzleCode(tsharp, out.target);
+        const bool depth = out.target && out.target->img.depth;
+        res.view_swz[slot] = u16(depth ? 0 : code);
+        res.swz[slot] = u16(depth ? code : 0);
+        if (depth && code && (code & 7) != 2 && LogCopies()) {
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1) < 20) {
+                std::printf("Native Vulkan: %s slot %u samples a depth target in channel order %o "
+                            "(read as D, 0, 0, 1)\n", s.name.c_str(), slot, code);
+            }
+        }
         // lab: BB_VK_LOG_SHADER=<part of a name>: every texture bound to that shader's draws, once
         // per (shader, slot, texture), to catch textures read in the wrong format or channel order
         static const char* log_shader = std::getenv("BB_VK_LOG_SHADER");
@@ -1360,7 +1548,7 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
                             s.name.c_str(), slot, (unsigned long long)info.base, info.width, info.height,
                             info.dfmt, info.nfmt, info.dst_sel, info.last_level + 1,
                             out.target ? "render target" : out.texture ? "texture" : "NO IMAGE",
-                            vk::to_string(info.format).c_str(), res.swz[slot]);
+                            vk::to_string(info.format).c_str(), code);
             }
         }
     }
@@ -1379,7 +1567,9 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
             ss[2] = (k & 0x30) << 22 | (k & 0xc0) << 18 | (k & 0xf) << 20;
         }
         sampler_binds.fetch_add(1, std::memory_order_relaxed);
-        res.samplers[slot] = Tex::Sampler(ss, compare);
+        // a depth target read through this slot (the translator pairs t# and s# by number)
+        const bool depth = res.slots[slot].target && res.slots[slot].target->img.depth;
+        res.samplers[slot] = Tex::Sampler(ss, compare, depth);
         if (!res.samplers[slot]) {
             sampler_misses.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1458,95 +1648,138 @@ void FetchVertices(u64 ctx, u64 vsh, const ShaderInfo& vs, VertexInput& vi,
             locations |= sem < 32 ? 1u << sem : 0;
         }
     }
-    bool zero_binding = false;
-    for (u32 sem = 0; sem < 32; ++sem) {
-        if (!(locations >> sem & 1)) {
-            continue;
-        }
-        u32 usage = 0xff, uidx = 0xff;
-        for (s32 k = 0; ins && k < nin && k < 64; ++k) {
-            if (R<u32>(ins + k * 12 + 8) == sem) {
-                usage = R<u32>(ins + k * 12);
-                uidx = R<u32>(ins + k * 12 + 4);
-            }
-        }
+    // the matching depends only on the shader and the engine's vertex formats, which do not
+    // change: made once per pair (reading their guest memory for every input of every draw was
+    // ~10% of the capture thread in the adventure hub)
+    struct Attr {
+        u8 sem = 0, binding = 0, sign = 0, vin = 0;
+        bool missing = false;
         vk::Format format = vk::Format::eUndefined;
-        int binding = -1;
         u32 offset = 0;
-        for (int slot = 0; slot < 15 && usage != 0xff && binding < 0; ++slot) {
-            const u64 vf = Q(ctx + CtxVertexFormats + slot * 8);
-            const u64 el = vf ? Q(vf + 0x18) : 0, fm = vf ? Q(vf + 0x28) : 0;
-            for (int k = 0; el && fm && k < 32 && R<u8>(el + k * 12) != ','; ++k) {
-                if (R<u8>(el + k * 12 + 4) != usage || R<u8>(el + k * 12 + 5) != uidx) {
-                    continue;
+    };
+    struct Layout {
+        u64 vsh = 0;
+        u64 vf[15]{};
+        u32 locations = 0, count = 0;
+        Attr attrs[32];
+    };
+    thread_local std::array<Layout, 256> layouts;
+    u64 vf[15];
+    u64 h = vsh ^ (u64(locations) << 32);
+    for (int slot = 0; slot < 15; ++slot) {
+        vf[slot] = Q(ctx + CtxVertexFormats + slot * 8);
+        h = (h ^ vf[slot]) * 0x100000001b3ull;
+    }
+    Layout& layout = layouts[(h ^ h >> 29) & 255];
+    if (layout.vsh != vsh || layout.locations != locations || !std::equal(vf, vf + 15, layout.vf)) {
+        layout.vsh = 0;
+        layout.count = 0;
+        for (u32 sem = 0; sem < 32; ++sem) {
+            Attr attr{.sem = u8(sem)};
+            if (!(locations >> sem & 1)) {
+                continue;
+            }
+            u32 usage = 0xff, uidx = 0xff;
+            for (s32 k = 0; ins && k < nin && k < 64; ++k) {
+                if (R<u32>(ins + k * 12 + 8) == sem) {
+                    usage = R<u32>(ins + k * 12);
+                    uidx = R<u32>(ins + k * 12 + 4);
                 }
-                const u32 df = R<u32>(fm + k * 4);
-                int sign = 0;
-                format = VertexFormat(df, &sign);
-                if (format == vk::Format::eUndefined) {
-                    unknown_vertex_formats.fetch_add(1, std::memory_order_relaxed);
+            }
+            vk::Format format = vk::Format::eUndefined;
+            int binding = -1;
+            u32 offset = 0;
+            for (int slot = 0; slot < 15 && usage != 0xff && binding < 0; ++slot) {
+                const u64 el = vf[slot] ? Q(vf[slot] + 0x18) : 0, fm = vf[slot] ? Q(vf[slot] + 0x28) : 0;
+                for (int k = 0; el && fm && k < 32 && R<u8>(el + k * 12) != ','; ++k) {
+                    if (R<u8>(el + k * 12 + 4) != usage || R<u8>(el + k * 12 + 5) != uidx) {
+                        continue;
+                    }
+                    const u32 df = R<u32>(fm + k * 4);
+                    int sign = 0;
+                    format = VertexFormat(df, &sign);
+                    if (format == vk::Format::eUndefined) {
+                        unknown_vertex_formats.fetch_add(1, std::memory_order_relaxed);
+                        break;
+                    }
+                    attr.sign = u8(sign);
+                    const u32 ch = (df >> 8) & 0xf;
+                    attr.vin = u8(ch == 2 ? 1 : ch == 3 ? 2 : 0);
+                    binding = slot;
+                    offset = R<u16>(el + k * 12 + 8);
                     break;
                 }
-                if (sign) {
-                    integer_attributes.fetch_add(1, std::memory_order_relaxed);
-                    (sign == 1 ? vi.uint_mask : vi.sint_mask) |= 1u << sem;
+            }
+            if (binding < 0) {
+                // lab: which vertex shader input found no element (each shader and input once): a
+                // blend weight read as zero changes what a material looks like
+                static std::mutex missing_mutex;
+                static std::unordered_set<u64> missing_logged;
+                std::lock_guard ml(missing_mutex);
+                const u64 mkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
+                if (missing_logged.size() < 300 && missing_logged.insert(mkey).second) {
+                    std::printf("Native Vulkan: vertex input missing: %s location %u (usage %u index %u)%s\n",
+                                vs.name.c_str(), sem, usage, uidx,
+                                usage == 0xff ? " - not in the shader header" : " - no vertex format element");
                 }
-                const u32 ch = (df >> 8) & 0xf;
-                vi.vin[sem] = ch == 2 ? 1 : ch == 3 ? 2 : 0;
-                binding = slot;
-                offset = R<u16>(el + k * 12 + 8);
-                break;
+                binding = ZeroBinding;
+                format = vk::Format::eR32G32B32A32Sfloat;
+                // lab: a missing vertex color (usage 4) reads white, as engines give a mesh without
+                // colors; zeros made the blended track's plates layer black (Roo's Tubes)
+                offset = usage == 4 && Gpu::ConstantVertices() ? 16 : 0;
+                attr.missing = true;
+            } else {
+                // lab: BB_VK_LOG_SHADER also names the inputs a matching vertex shader did find
+                static const char* log_inputs = std::getenv("BB_VK_LOG_SHADER");
+                if (log_inputs && *log_inputs) {
+                    std::string list = log_inputs;
+                    bool wanted = false;
+                    for (std::size_t at = 0; at <= list.size() && !wanted;) {
+                        const std::size_t end = std::min(list.find(',', at), list.size());
+                        wanted = end > at && vs.name.find(list.substr(at, end - at)) != std::string::npos;
+                        at = end + 1;
+                    }
+                    static std::mutex found_mutex;
+                    static std::unordered_set<u64> found_logged;
+                    std::lock_guard fl(found_mutex);
+                    const u64 fkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
+                    if (wanted && found_logged.size() < 400 && found_logged.insert(fkey).second) {
+                        std::printf("Native Vulkan: vertex input found: %s location %u (usage %u index %u) "
+                                    "slot %d offset %u format %s\n",
+                                    vs.name.c_str(), sem, usage, uidx, binding, offset,
+                                    vk::to_string(format).c_str());
+                    }
+                }
             }
+            attr.binding = u8(binding);
+            attr.format = format;
+            attr.offset = offset;
+            layout.attrs[layout.count++] = attr;
         }
-        if (binding < 0) {
+        layout.vsh = vsh;
+        layout.locations = locations;
+        std::copy(vf, vf + 15, layout.vf);
+    }
+    bool zero_binding = false;
+    for (u32 i = 0; i < layout.count; ++i) {
+        const Attr& attr = layout.attrs[i];
+        if (attr.missing) {
             missing_attributes.fetch_add(1, std::memory_order_relaxed); // the port feeds zeros
-            // lab: which vertex shader input found no element (each shader and input once): a
-            // blend weight read as zero changes what a material looks like
-            static std::mutex missing_mutex;
-            static std::unordered_set<u64> missing_logged;
-            std::lock_guard ml(missing_mutex);
-            const u64 mkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
-            if (missing_logged.size() < 300 && missing_logged.insert(mkey).second) {
-                std::printf("Native Vulkan: vertex input missing: %s location %u (usage %u index %u)%s\n",
-                            vs.name.c_str(), sem, usage, uidx,
-                            usage == 0xff ? " - not in the shader header" : " - no vertex format element");
-            }
-            binding = ZeroBinding;
-            format = vk::Format::eR32G32B32A32Sfloat;
-            // lab: a missing vertex color (usage 4) reads white, as engines give a mesh without
-            // colors; zeros made the blended track's plates layer black (Roo's Tubes)
-            offset = usage == 4 && Gpu::ConstantVertices() ? 16 : 0;
             zero_binding = true;
         } else {
-            used[binding] = true;
-            // lab: BB_VK_LOG_SHADER also names the inputs a matching vertex shader did find
-            static const char* log_inputs = std::getenv("BB_VK_LOG_SHADER");
-            if (log_inputs && *log_inputs) {
-                std::string list = log_inputs;
-                bool wanted = false;
-                for (std::size_t at = 0; at <= list.size() && !wanted;) {
-                    const std::size_t end = std::min(list.find(',', at), list.size());
-                    wanted = end > at && vs.name.find(list.substr(at, end - at)) != std::string::npos;
-                    at = end + 1;
-                }
-                static std::mutex found_mutex;
-                static std::unordered_set<u64> found_logged;
-                std::lock_guard fl(found_mutex);
-                const u64 fkey = std::hash<std::string>{}(vs.name) ^ (u64(sem) << 58);
-                if (wanted && found_logged.size() < 400 && found_logged.insert(fkey).second) {
-                    std::printf("Native Vulkan: vertex input found: %s location %u (usage %u index %u) "
-                                "slot %d offset %u format %s\n",
-                                vs.name.c_str(), sem, usage, uidx, binding, offset,
-                                vk::to_string(format).c_str());
-                }
+            used[attr.binding] = true;
+            vi.vin[attr.sem] = attr.vin;
+            if (attr.sign) {
+                integer_attributes.fetch_add(1, std::memory_order_relaxed);
+                (attr.sign == 1 ? vi.uint_mask : vi.sint_mask) |= 1u << attr.sem;
             }
         }
-        vi.attributes.push_back({.location = sem, .binding = u32(binding), .format = format,
-                                 .offset = offset});
-        Mix(key, sem);
-        Mix(key, format);
-        Mix(key, binding);
-        Mix(key, offset);
+        vi.attributes.push_back({.location = attr.sem, .binding = attr.binding,
+                                 .format = attr.format, .offset = attr.offset});
+        Mix(key, u32(attr.sem)); // the types the key was made of (pipelines.bin keeps it)
+        Mix(key, attr.format);
+        Mix(key, int(attr.binding));
+        Mix(key, attr.offset);
     }
     for (int slot = 0; slot < 15; ++slot) {
         if (!used[slot]) {
@@ -1860,6 +2093,9 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
         .stencilAttachmentFormat = s.stencil ? s.depth : vk::Format::eUndefined};
     const vk::GraphicsPipelineCreateInfo info{
         .pNext = &rendering,
+        .flags = feedback_loops && s.ps && s.ps->reads_own_pixel
+                     ? vk::PipelineCreateFlags{vk::PipelineCreateFlagBits::eColorAttachmentFeedbackLoopEXT}
+                     : vk::PipelineCreateFlags{},
         .stageCount = u32(stages.size()),
         .pStages = stages.data(),
         .pVertexInputState = &vertex_input,
@@ -2243,9 +2479,12 @@ bool StageConstants(u32 stage, u64 shader, Ref cbs[14]) {
     return true;
 }
 
-bool InfoConstants(u32 stage, const StageRes& res, const u32* vin, Ref* span) {
+bool InfoConstants(u32 stage, const ShaderInfo& s, const StageRes& res, const u32* vin, Ref* span) {
+    if (s.ubo_slots.empty() || s.ubo_slots.back() != 13) {
+        return true; // not read (gen 3 shaders without input conversion or texture scales)
+    }
     InfoCB info{};
-    std::memcpy(info.swz, res.swz, sizeof(info.swz));
+    std::copy(std::begin(res.swz), std::end(res.swz), info.swz);
     if (vin) {
         std::memcpy(info.vin, vin, sizeof(info.vin));
     }
@@ -2259,7 +2498,8 @@ bool InfoConstants(u32 stage, const StageRes& res, const u32* vin, Ref* span) {
 // A stage's set holds its textures and samplers, and its constant buffers as dynamic uniform
 // buffers over the upload ring (each draw gives its offsets when it binds the set), so a set
 // depends only on what the stage samples: sets are made once and kept across command buffers.
-// Destroying a target view drops them all, their pools going once the GPU is done with them.
+// A destroyed view drops the sets naming it (kept in their pools, unused, until the cache is
+// emptied: the pools go once the GPU is done with them).
 // All of it on the recording side (under gpu_mutex).
 
 struct CachedSet {
@@ -2268,7 +2508,9 @@ struct CachedSet {
 };
 std::unordered_map<u64, CachedSet> set_cache;
 std::vector<VkDescriptorPool> set_pools; // set_cache's; the last one takes new sets
-u64 set_cache_generation = 0;           // set_generation when set_cache was last valid
+std::unordered_map<VkImageView, std::vector<u64>> sets_by_view; // the cached sets naming each view
+std::size_t orphan_sets = 0; // dropped for a destroyed view, still allocated in their pools
+constexpr std::size_t MaxOrphanSets = 4096;
 std::atomic<u64> sets_made{0}, sets_reused{0}, sets_dropped{0};
 constexpr std::size_t MaxCachedSets = 16384;
 constexpr u32 SetsPerCachePool = 1024;
@@ -2277,6 +2519,8 @@ constexpr u32 SetsPerCachePool = 1024;
 void DropSets() {
     sets_dropped.fetch_add(set_cache.size(), std::memory_order_relaxed);
     set_cache.clear();
+    sets_by_view.clear();
+    orphan_sets = 0;
     if (!set_pools.empty()) {
         const vk::Device dev = instance.load()->GetDevice();
         Gpu::Defer([dev, pools = std::move(set_pools)] {
@@ -2321,12 +2565,45 @@ VkDescriptorSet AllocateKept(VkDescriptorSetLayout layout) {
     return VK_NULL_HANDLE;
 }
 
+/// `t` is one of the pass's targets read in place (its feedback loop).
+bool InPlace(const Gpu::Pass& pass, const Target* t) {
+    for (u32 c = 0; pass.feedback && c < 8; ++c) {
+        if (((pass.feedback >> c) & 1) && pass.color[c] == &t->img) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// A stage's descriptor set for what it samples (bindings b# 0.., t# 64.., s# 128..): the
 /// cached one, else written now and kept.
-vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Target* depth_ro) {
-    if (const u64 g = set_generation.load(std::memory_order_acquire); g != set_cache_generation) {
-        DropSets();
-        set_cache_generation = g;
+vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Target* depth_ro,
+                           const Gpu::Pass* pass = nullptr) {
+    if (views_died.load(std::memory_order_acquire)) {
+        // only the sets naming a destroyed view go (dropping the whole cache made a 35-54 ms
+        // hitch each time a texture left the pool mid-race)
+        std::vector<VkImageView> dead;
+        {
+            std::lock_guard lk(dead_views_mutex);
+            dead.swap(dead_views);
+            views_died.store(false, std::memory_order_relaxed);
+        }
+        for (const VkImageView v : dead) {
+            const auto it = sets_by_view.find(v);
+            if (it == sets_by_view.end()) {
+                continue;
+            }
+            for (const u64 h : it->second) {
+                if (set_cache.erase(h)) {
+                    ++orphan_sets;
+                    sets_dropped.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            sets_by_view.erase(it);
+        }
+        if (orphan_sets > MaxOrphanSets) {
+            DropSets();
+        }
     }
     static const u32 default_ss[4] = {0, 0xfff000, 0x5000000, 0};
     // the image and sampler descriptors, in binding order: with the layout, the cache key
@@ -2341,7 +2618,7 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
             for (u32 i = 0; i < b.count; ++i) {
                 const u32 slot = b.binding + i - 64;
                 vk::DescriptorImageInfo ii{.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
-                if (slot < 32 && b.dim == 3 && !b.arrayed) {
+                if (slot < 16 && b.dim == 3 && !b.arrayed) {
                     // a cube (gcn2hlsl's TextureCube): the cube view of a six-face texture, which
                     // filters across faces as the PS4 does (no seams on rough reflections)
                     if (const Tex::Texture* tex = res.slots[slot].texture; tex && tex->slices == 6) {
@@ -2349,14 +2626,18 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                         tex->ready.wait(false, std::memory_order_acquire);
                         if (!tex->broken.load(std::memory_order_relaxed) && tex->view &&
                             tex->view != tex->view_array) {
-                            ii.imageView = tex->view;
+                            ii.imageView = TextureView(*tex, false, res.view_swz[slot]);
                         }
                     }
-                } else if (slot < 32 && b.dim == 1) { // 2D (no 3D or cube targets yet)
+                } else if (slot < 16 && b.dim == 1) { // 2D (no 3D or cube targets yet)
                     if (const Target* t = res.slots[slot].target) {
-                        ii.imageView = b.arrayed ? t->view_array : t->view;
+                        ii.imageView = TargetView(*t, b.arrayed, res.view_swz[slot]);
                         if (t == depth_ro) {
-                            ii.imageLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+                            ii.imageLayout = pass && pass->stencil_written
+                                                 ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
+                                                 : vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+                        } else if (pass && InPlace(*pass, t)) {
+                            ii.imageLayout = vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT;
                         }
                     } else if (const Tex::Texture* tex = res.slots[slot].texture;
                                tex && (b.arrayed || tex->slices == 1)) {
@@ -2365,7 +2646,7 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                         tex->ready.wait(false, std::memory_order_acquire);
                         // a plain 2D binding takes only one-slice textures (view types must match)
                         if (!tex->broken.load(std::memory_order_relaxed)) {
-                            ii.imageView = b.arrayed ? tex->view_array : tex->view;
+                            ii.imageView = TextureView(*tex, b.arrayed, res.view_swz[slot]);
                         }
                     }
                 }
@@ -2379,7 +2660,7 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                 const u32 slot = b.binding + i - 128;
                 VkSampler smp = slot < 16 ? res.samplers[slot] : VK_NULL_HANDLE;
                 if (!smp) {
-                    smp = Tex::Sampler(default_ss, false); // samplers cannot be null
+                    smp = Tex::Sampler(default_ss, false, false); // samplers cannot be null
                 }
                 images.push_back({.sampler = smp});
                 key.push_back(u64(smp));
@@ -2455,6 +2736,14 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
     sets_made.fetch_add(1, std::memory_order_relaxed);
     if (keep) {
         set_cache.emplace(h, CachedSet{key, set});
+        for (const vk::DescriptorImageInfo& ii : images) {
+            if (ii.imageView) {
+                auto& list = sets_by_view[VkImageView(ii.imageView)];
+                if (list.empty() || list.back() != h) {
+                    list.push_back(h);
+                }
+            }
+        }
     }
     return set;
 }
@@ -2565,11 +2854,40 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
     pass.depth = depth_target ? &depth_target->img : nullptr;
     const Target* depth_ro = nullptr;
+    // a depth copy's destination that still holds the depth: the depth target itself, its depth
+    // read-only (its stencil may still be written), when the draw writes no depth
+    const bool swrite = depth_target && depth_target->img.stencil && (dctl & 1) &&
+                        ((R<u32>(ctx + CtxStencilControl) >> 16) & 0xff);
+    const Target* twin = nullptr;
     for (StageRes* res : {&vres, &pres}) {
         for (Slot& slot : res->slots) {
             Target* t = slot.target;
             if (!t) {
                 continue;
+            }
+            if (depth_target && !depth_twins.empty()) {
+                for (const auto& [dst, src] : depth_twins) {
+                    if (dst == t && (zwrite || src != depth_target)) {
+                        static std::atomic<int> told{0};
+                        if (told.fetch_add(1, std::memory_order_relaxed) < 6) {
+                            std::printf("Native Vulkan: depth copy %s sampled by %s not read from "
+                                        "the depth target: depth write %d, other depth target %d\n",
+                                        Gpu::Describe(&t->img).c_str(),
+                                        ps ? ps->name.c_str() : "-", zwrite, src != depth_target);
+                        }
+                        break;
+                    }
+                    if (dst == t) {
+                        twin = t;
+                        slot.target = t = depth_target;
+                        // as a depth target bound directly: its own view, the channel order left
+                        // to the shader
+                        const std::size_t i = &slot - res->slots;
+                        res->swz[i] = res->view_swz[i];
+                        res->view_swz[i] = 0;
+                        break;
+                    }
+                }
             }
             if (std::find(colors, colors + 8, t) != colors + 8) {
                 color_feedback.fetch_add(1, std::memory_order_relaxed);
@@ -2580,15 +2898,22 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
                     depth_dropped.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     pass.depth_read_only = true;
+                    pass.stencil_written = swrite;
                     depth_ro = t;
                     depth_read_only.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
     }
+    for (int i = 0; i < 8; ++i) {
+        if (colors[i]) {
+            ForgetTwin(colors[i]); // drawn to
+        }
+    }
     if (!pass.depth) {
         depth_ro = nullptr;
         pass.depth_read_only = false;
+        pass.stencil_written = false;
     }
 
     // pipeline
@@ -2606,7 +2931,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     if (pass.depth) {
         st.depth = pass.depth->format;
         st.stencil = pass.depth->stencil;
-        st.depth_read_only = pass.depth_read_only;
+        st.depth_read_only = pass.depth_read_only && !pass.stencil_written; // no depth write either way
     }
     st.blend = R<u32>(ctx + CtxBlendControl);
     // the write mask names the shader's (logical) channels, which is the order the native targets
@@ -2668,9 +2993,9 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
     // a draw given up from here is left in the batch as nothing to record
     auto drop = [&] { d.pipeline = VK_NULL_HANDLE; };
-    if (!StageConstants(0, vsh, vcb) || !InfoConstants(0, vres, vi.vin, &vcb[13]) ||
-        (ps && (!StageConstants(1, psh, pcb) || !InfoConstants(1, pres, nullptr, &pcb[13]))) ||
-        (gs && (!StageConstants(2, gsh, gcb) || !InfoConstants(2, gres, nullptr, &gcb[13])))) {
+    if (!StageConstants(0, vsh, vcb) || !InfoConstants(0, vs, vres, vi.vin, &vcb[13]) ||
+        (ps && (!StageConstants(1, psh, pcb) || !InfoConstants(1, *ps, pres, nullptr, &pcb[13]))) ||
+        (gs && (!StageConstants(2, gsh, gcb) || !InfoConstants(2, *gs, gres, nullptr, &gcb[13])))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         drop();
         return;
@@ -2813,13 +3138,21 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     d.gs = gs;
     d.res[0] = vres;
     d.res[1] = pres;
+    if (gs) {
+        d.res[2] = gres;
+    }
     d.pass = pass;
     d.depth_ro = depth_ro;
     // depth writes need the depth test on (DB_DEPTH_CONTROL Z_ENABLE, Z_WRITE_ENABLE), stencil
     // writes the stencil test and a write mask
-    d.writes_depth = pass.depth && !pass.depth_read_only &&
-                     ((((dctl >> 1) & 1) && ((dctl >> 2) & 1)) ||
-                      (st.stencil && (dctl & 1) && ((st.refmask >> 16) & 0xff)));
+    d.writes_z = pass.depth && !pass.depth_read_only && ((dctl >> 1) & 1) && ((dctl >> 2) & 1);
+    d.writes_depth = d.writes_z ||
+                     (pass.depth && (!pass.depth_read_only || pass.stencil_written) && st.stencil &&
+                      (dctl & 1) && ((st.refmask >> 16) & 0xff));
+    d.twin = twin;
+    if (d.writes_z) {
+        ForgetTwin(depth_target); // the copies took the depth only: stencil writes keep them
+    }
     d.layout = layout;
     d.pipeline = pipeline;
     lap(SecPacket);
@@ -2860,6 +3193,54 @@ bool ToRing(Ref& r) {
     return true;
 }
 
+/// A pixel shader that samples copies of its own targets at its own pixel reads the targets
+/// themselves instead (a feedback loop), and the copies are not made. Their destinations then
+/// hold something older until a whole copy or clear covers them: a read before that is counted
+/// (stale_reads), which would show a destination something else reads too.
+void ReadInPlace(DrawPacket& d) {
+    for (Slot& slot : d.res[1].slots) {
+        Target* const b = slot.target;
+        if (!b) {
+            continue;
+        }
+        const auto it = std::find_if(pending_copies.begin(), pending_copies.end(),
+                                     [&](const CopyPacket& q) { return q.dst == b; });
+        if (it == pending_copies.end()) {
+            continue;
+        }
+        const CopyPacket p = *it;
+        Target* const a = p.src;
+        u32 at = 8;
+        for (u32 c = 0; c < 8; ++c) {
+            if (d.pass.color[c] == &a->img) {
+                at = c;
+            }
+        }
+        if (at == 8 || p.from_depth || p.sx || p.dx || p.s_top || p.d_top ||
+            p.w != a->img.width || p.h != a->img.height || b->img.width != a->img.width ||
+            b->img.height != a->img.height || b->img.format != a->img.format ||
+            b->comp_swap != a->comp_swap ||
+            !(a->img.format == vk::Format::eR8G8B8A8Unorm || a->img.format == vk::Format::eR8G8Unorm)) {
+            continue;
+        }
+        pending_copies.erase(it);
+        for (Slot& other : d.res[1].slots) {
+            if (other.target == b) {
+                other.target = a;
+            }
+        }
+        d.pass.feedback |= u8(1u << at);
+        if (std::find(stale_copies.begin(), stale_copies.end(), &b->img) == stale_copies.end()) {
+            stale_copies.push_back(&b->img);
+        }
+        copies_in_place.fetch_add(1, std::memory_order_relaxed);
+        if (Gpu::Tracing()) {
+            Gpu::Trace("  read %s in place (copy to %s not made)\n", Gpu::Describe(&a->img).c_str(),
+                       Gpu::Describe(&b->img).c_str());
+        }
+    }
+}
+
 /// Records a captured draw (the recorder thread).
 void RecordDraw(DrawPacket& d) {
     if (!d.pipeline) {
@@ -2867,6 +3248,20 @@ void RecordDraw(DrawPacket& d) {
     }
     lap.Start();
     // pending copies this draw reads or writes over are made first (before the ring is used)
+    if (feedback_loops && d.ps && d.ps->reads_own_pixel && !pending_copies.empty()) {
+        ReadInPlace(d);
+    }
+    if (d.twin && DropCopyInto(&d.twin->img)) {
+        // sampled as the depth target instead: the copy's destination misses it
+        copies_twinned.fetch_add(1, std::memory_order_relaxed);
+        if (std::find(stale_copies.begin(), stale_copies.end(), &d.twin->img) == stale_copies.end()) {
+            stale_copies.push_back(&d.twin->img);
+        }
+        if (Gpu::Tracing()) {
+            Gpu::Trace("  %s read as the depth target (copy not made)\n",
+                       Gpu::Describe(&d.twin->img).c_str());
+        }
+    }
     if (!pending_copies.empty()) {
         for (const StageRes* res : {&d.res[0], &d.res[1]}) {
             for (const Slot& slot : res->slots) {
@@ -2882,8 +3277,10 @@ void RecordDraw(DrawPacket& d) {
         }
         if (d.pass.depth) {
             // a depth attachment only tested against is read
-            if (d.writes_depth) {
+            if (d.writes_z) {
                 BeforeWrite(d.pass.depth);
+            } else if (d.writes_depth) {
+                BeforeStencilWrite(d.pass.depth);
             } else {
                 BeforeRead(d.pass.depth);
             }
@@ -2911,7 +3308,7 @@ void RecordDraw(DrawPacket& d) {
     // layouts of the sampled targets, then the pass
     for (const StageRes* res : {&d.res[0], &d.res[1]}) {
         for (const Slot& slot : res->slots) {
-            if (slot.target && slot.target != d.depth_ro) {
+            if (slot.target && slot.target != d.depth_ro && !InPlace(d.pass, slot.target)) {
                 Gpu::Use(const_cast<Target*>(slot.target)->img, vk::ImageLayout::eShaderReadOnlyOptimal);
             }
         }
@@ -2937,9 +3334,9 @@ void RecordDraw(DrawPacket& d) {
     lap(SecPass);
     const ShaderInfo* ps = d.ps;
     const ShaderInfo* gs = d.gs;
-    const vk::DescriptorSet vset = StageSet(*d.vs, d.res[0], d.depth_ro);
+    const vk::DescriptorSet vset = StageSet(*d.vs, d.res[0], d.depth_ro, &d.pass);
     // set 1 is bound even without a PS when the GS's set 2 follows it (an empty set)
-    const vk::DescriptorSet pset = ps   ? StageSet(*ps, d.res[1], d.depth_ro)
+    const vk::DescriptorSet pset = ps   ? StageSet(*ps, d.res[1], d.depth_ro, &d.pass)
                                    : gs ? Gpu::AllocateSet(empty_set_layout)
                                         : vk::DescriptorSet{};
     const vk::DescriptorSet gset = gs ? StageSet(*gs, d.res[2], nullptr) : vk::DescriptorSet{};
@@ -3213,6 +3610,7 @@ void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth)
     if (flags & 6) {
         if (const u64 dh = Q(ctx + CtxDepthTarget)) {
             if (Target* d = DepthTarget(dh)) {
+                ForgetTwin(d);
                 ClearPacket& c = Push(Op::Clear, open_batch->clears);
                 c.target = d;
                 c.depth = flags & 2;
@@ -3226,6 +3624,7 @@ void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth)
         for (int i = 0; i < 8; ++i) {
             if (const u64 h = Q(ctx + CtxColorTargets + i * 8)) {
                 if (Target* t = ColorTarget(h)) {
+                    ForgetTwin(t);
                     ClearPacket& c = Push(Op::Clear, open_batch->clears);
                     c.target = t;
                     c.color = true;
@@ -3317,7 +3716,12 @@ bool SwapForClear(Target* t) {
 
 void RunClear(const ClearPacket& c) {
     const bool whole = c.color || (c.depth && (c.stencil || !c.target->img.stencil));
-    if (!(whole && !pending_copies.empty() && SwapForClear(c.target))) {
+    if (whole) {
+        Covered(&c.target->img);
+    }
+    if (!c.color && !c.depth) {
+        BeforeStencilWrite(&c.target->img);
+    } else if (!(whole && !pending_copies.empty() && SwapForClear(c.target))) {
         BeforeWrite(&c.target->img);
     }
     if (c.color) {
@@ -3415,6 +3819,11 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
     CopyPacket& c = Push(Op::Copy, open_batch->copies);
     c = CopyPacket{.src = &st, .dst = dt, .from_depth = from_depth, .sx = sx, .dx = dx, .w = w,
                    .h = h, .src_bytes = src_bytes, .s_top = s_top, .d_top = d_top};
+    ForgetTwin(dt);
+    if (from_depth && feedback_loops && !sx && !dx && !s_top && !d_top && w == sw && h == sh &&
+        dw == sw && dh == sh) {
+        depth_twins.emplace_back(dt, &st);
+    }
     EndOp();
     return true;
 }
@@ -3531,10 +3940,44 @@ void BeforeWrite(const Gpu::Image* img) {
     }
 }
 
+/// The stencil of depth image `img` is about to be written, its depth kept: pending depth copies
+/// from it into color images (which take the depth only) can wait, so a later whole copy into
+/// the same destination can still drop them.
+void BeforeStencilWrite(const Gpu::Image* img) {
+    if (pending_copies.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < pending_copies.size();) {
+        const CopyPacket& p = pending_copies[i];
+        if (&p.src->img == img && !(p.from_depth && !p.dst->img.depth)) {
+            const CopyPacket c = p;
+            pending_copies.erase(pending_copies.begin() + i);
+            DoCopy(c);
+        } else {
+            ++i;
+        }
+    }
+    FlushCopiesInto(img);
+}
+
 /// `img` is about to be read.
 void BeforeRead(const Gpu::Image* img) {
     if (!pending_copies.empty()) {
         FlushCopiesInto(img);
+    }
+    if (!stale_copies.empty() &&
+        std::find(stale_copies.begin(), stale_copies.end(), img) != stale_copies.end() &&
+        stale_reads.fetch_add(1, std::memory_order_relaxed) < 4) {
+        std::printf("Native Vulkan: %s read after a copy into it was left unmade (read in place)\n",
+                    Gpu::Describe(img).c_str());
+    }
+}
+
+/// `img` is wholly written: it no longer misses a copy left unmade.
+void Covered(const Gpu::Image* img) {
+    if (const auto it = std::find(stale_copies.begin(), stale_copies.end(), img);
+        it != stale_copies.end()) {
+        stale_copies.erase(it);
     }
 }
 
@@ -3555,6 +3998,9 @@ void RunCopy(const CopyPacket& c) {
     BeforeRead(&c.src->img);
     FlushCopiesFrom(&c.dst->img); // copies reading the destination's present contents go first
     const bool whole = c.dx == 0 && c.d_top == 0 && c.w >= c.dst->img.width && c.h >= c.dst->img.height;
+    if (whole) {
+        Covered(&c.dst->img);
+    }
     if (!whole || !DropCopyInto(&c.dst->img)) {
         FlushCopiesInto(&c.dst->img);
     }
@@ -3647,6 +4093,9 @@ void StartTextures() {
             force_copy = !(fc && fc[0] == '0');
             const char* dc = std::getenv("BB_VK_DEFER_COPIES");
             defer_copies = !(dc && dc[0] == '0');
+            const char* fb = std::getenv("BB_VK_FEEDBACK");
+            feedback_loops = defer_copies && !(fb && fb[0] == '0') && inst->IsFeedbackLoopLayoutEnabled();
+            std::printf("Native Vulkan: feedback loops %s\n", feedback_loops ? "on" : "off");
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
             if (drawing) {
@@ -3852,7 +4301,7 @@ void Report() {
             std::printf("Native Vulkan: per second: %.1f frames shown, %.1f submits; game's thread "
                         "%.0f ms in draws (%.1f us each), %.0f ms clears, %.0f ms copies, %.0f ms "
                         "submits, of it %.0f ms waiting for the capture thread (%.0f ms busy); GPU "
-                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed, %llu swapped instead; not done: %s\n",
+                        "%.0f ms. Copies: %llu depth -> color, %llu as draws, %llu in place of the engine's, %llu never needed, %llu swapped instead, %llu read in place, %llu read from the depth target (%llu stale reads); not done: %s\n",
                         (fr - last_frames) / 5.0, (gp.submits - last_submits) / 5.0,
                         (dn - last_draw_ns) / 5e6, nd ? (dn - last_draw_ns) / 1e3 / nd : 0.0,
                         (cn - last_clear_ns) / 5e6, (pn - last_copy_ns) / 5e6,
@@ -3862,7 +4311,10 @@ void Report() {
                         (unsigned long long)draw_copies.load(),
                         (unsigned long long)copies_replaced.load(),
                         (unsigned long long)copies_dropped.load(),
-                        (unsigned long long)copies_swapped.load(), reasons.c_str());
+                        (unsigned long long)copies_swapped.load(),
+                        (unsigned long long)copies_in_place.load(),
+                        (unsigned long long)copies_twinned.load(),
+                        (unsigned long long)stale_reads.load(), reasons.c_str());
             {
                 std::size_t queued = 0;
                 {
@@ -3953,6 +4405,13 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::printf("Native Vulkan: image too small for the 1.21 layout: off\n");
         return;
     }
+    // USA or EU 1.21: the hooked functions move, the engine globals and structures do not.
+    const u64 shift = BbHook::EditionShift(image, size);
+    if (shift == BbHook::UnknownEdition) {
+        std::printf("Native Vulkan: not a USA or EU 1.21 executable: off\n");
+        std::fflush(stdout);
+        return;
+    }
     const char* dir = std::getenv("BB_VK_SHADERS");
     shader_root = dir ? fs::path(dir) : fs::path();
     if (!dir || !LoadIndex()) {
@@ -3962,11 +4421,11 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::fflush(stdout);
         return;
     }
-    std::printf("Native Vulkan: on (shadPS4 still draws too); %zu translated shaders from %s\n",
-                shaders.size(), shader_root.string().c_str());
-    BbHook::Replace(image, size, BbHook::ClearFunction, BbHook::ClearPrologue,
+    std::printf("Native Vulkan: on (%s 1.21; shadPS4 still draws too); %zu translated shaders from %s\n",
+                shift ? "EU" : "USA", shaders.size(), shader_root.string().c_str());
+    BbHook::Replace(image, size, BbHook::ClearFunction - shift, BbHook::ClearPrologue,
                     reinterpret_cast<u64>(&OnClear), "Native Vulkan", "kClearRenderTarget");
-    BbHook::Replace(image, size, BbHook::CopyFunction, BbHook::CopyPrologue,
+    BbHook::Replace(image, size, BbHook::CopyFunction - shift, BbHook::CopyPrologue,
                     reinterpret_cast<u64>(&OnCopy), "Native Vulkan", "kCopyTexture");
     std::fflush(stdout);
     enabled = true;
@@ -4333,9 +4792,19 @@ void RunBatch(Batch& b) {
             // not destroyed: the cached sets stay; only destroyed views drop them, then)
             Tex::Texture* t = b.tex_retired[i];
             Gpu::Defer([t] {
-                if (Tex::Destroy(t)) {
-                    set_generation.fetch_add(1, std::memory_order_release);
+                // its swizzled views go first, before its image may (pooled views keep none:
+                // they are made again for the next texture using them)
+                std::vector<VkImageView> destroyed;
+                {
+                    std::lock_guard lk(swizzle_mutex);
+                    TakeSwizzledLocked({t->view, t->view_array}, destroyed);
                 }
+                const vk::Device dev = instance.load()->GetDevice();
+                for (const VkImageView v : destroyed) {
+                    dev.destroyImageView(v);
+                }
+                Tex::Destroy(t, destroyed);
+                ViewsDestroyed(destroyed);
             });
             break;
         }

@@ -58,6 +58,12 @@ class PackageTests(unittest.TestCase):
     def test_new_zip_listed_but_disabled(self):
         self.package();self.assertIn('sample',self.scan()['entries'])
         self.assertEqual(self.prepare(),(self.game,str(self.ini)))
+    def test_mod_session_keeps_launcher_invitation_directory(self):
+        self.package();self.enable('sample')
+        _,config=self.prepare()
+        self.assertNotEqual(Path(config),self.ini)
+        self.assertEqual(self.environment['BB_CONFIG'],config)
+        self.assertEqual(Path(self.environment['BB_LAUNCHER_CONFIG']),self.ini.resolve())
     def test_creator_description_survives_catalog_and_xml(self):
         text='Creator description: "warm" & curved.\nSecond line <plain text>.'
         self.package(manifest=self.manifest()|{'description':text})

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// SacredFire: FSR 3.1 temporal upscaling for CTR Nitro-Fueled (docs/sacredfire/14-fsr3.md).
+// SacredFire: temporal upscaling for CTR Nitro-Fueled (docs/sacredfire/14-fsr3.md):
+// FSR 3.1, NVIDIA DLSS or AMD FSR 4 (v07 INT8) at the finished frame.
 //
 // bbport's TemporalUpscaler is built around Bloodborne's frame. CTR's is simpler to feed: its
 // G-buffer pass (four RGBA8 targets and the scene depth, 2x MSAA) also writes a velocity target
@@ -7,14 +8,20 @@
 // stretches it (the FSR 1 spot, before the HUD), the scene depth and that velocity, and gives
 // the display pass an output-size image instead. Scene draws (the ones with the scene depth that
 // are not full-screen passes) are jittered by a sub-pixel viewport offset.
+//
+// FSR 4 takes linear FP16: the frame is decoded into one (fsr4_color.comp), upscaled, encoded
+// back (ENCODE) and packed into the 8-bit output (ctr_fsr4_pack.comp).
 
 #pragma once
 
 #include <array>
 #include <chrono>
+#include <mutex>
+#include <thread>
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_fsr4.h"
 #include "video_core/texture_cache/image.h"
 
 struct FfxVkPortableUpscaleContext;
@@ -68,7 +75,14 @@ public:
 
 private:
     bool EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format);
+    /// The FSR 3 context for the current sizes (see context_retry_in).
+    bool EnsureContext();
     void CreatePipelines();
+    void EnsureFsr4Pipelines();
+    /// True when the FSR 4 backend for this size is already built. Never builds.
+    bool Fsr4BackendReady(int preset, u32 ow, u32 oh);
+    /// Starts the background backend build (FSR 3 meanwhile). No-op while one runs.
+    void Fsr4KickPreload(int preset, u32 ow, u32 oh);
     vk::ImageView SourceView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect, int slot);
     vk::ImageView OutputView(vk::Format format, vk::ComponentMapping mapping);
@@ -83,6 +97,13 @@ private:
     Runtime& runtime;
 
     bool failed = false;
+    /// The working images exist for (width, height) -> (out_width, out_height).
+    bool resources_ready = false;
+    /// The FSR 3 context is made the first time FSR 3 itself runs (DLSS and FSR 4 never
+    /// need it). Creation can fail on a transient memory spike (streaming at a level
+    /// start): FSR 1 meanwhile, and another try after this many FSR 3 frames instead of
+    /// FSR 3 being off for the session (dispatch failures stay sticky).
+    u32 context_retry_in = 0;
     bool announced = false;
     VideoCore::ImageId scene_depth{}, velocity{};
     u64 scene_depth_uid = 0, velocity_uid = 0;
@@ -122,6 +143,27 @@ private:
     std::array<SourceViewEntry, 3> source_views{}; ///< depth, velocity, the frame (DLSS)
     vk::UniqueImageView output_storage_view;       ///< DLSS writes the output through it
     bool dlss_failed = false, dlss_warned = false, last_dlss = false;
+    /// FSR 4 (temporal=fsr4): linear FP16 working images, the v07 backend and the
+    /// decode/encode/pack pipelines (fsr4_decode/encode_comp, ctr_fsr4_pack_comp).
+    Fsr4Upscaler fsr4;
+    VideoCore::UniqueImage fsr4_linear_image, fsr4_output_image;
+    vk::UniqueImageView fsr4_linear_view, fsr4_output_view;
+    vk::UniqueDescriptorSetLayout fsr4_io_layout;
+    vk::UniquePipelineLayout fsr4_io_pipeline_layout;
+    vk::UniquePipeline fsr4_decode_pipeline, fsr4_encode_pipeline, fsr4_pack_pipeline;
+    bool fsr4_failed = false, fsr4_warned = false, last_fsr4 = false;
+    /// Background FSR 4 backend build (file reads + driver compiles): FSR 3 runs
+    /// meanwhile, the switch happens with reset when the worker finishes. The worker
+    /// owns the FSR 4 backend until it is joined; the frame path must not touch it.
+    std::thread fsr4_preload_thread;
+    std::mutex fsr4_preload_mutex;
+    bool fsr4_preloading = false, fsr4_preload_done = false, fsr4_preload_ok = false;
+    int fsr4_preload_preset = 0;
+    u32 fsr4_preload_ow = 0, fsr4_preload_oh = 0;
+    /// The backend currently built (by preload or a frame), if any.
+    bool fsr4_built = false;
+    int fsr4_built_preset = 0;
+    u32 fsr4_built_ow = 0, fsr4_built_oh = 0;
 
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pipeline_layout;

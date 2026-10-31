@@ -46,6 +46,10 @@ Other executable layouts keep the game's original progression.
 
 | Release | What it brought |
 |---|---|
+| [v0.7.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.5) | Another player's racer from a mod you don't have shows as Crash instead of freezing the lobby at 0; Itemless no longer carries over to public races (no items, Tiger Temple's door open); Discord invites with mods on (Vo1dTear); a clear message when an antivirus blocks the game |
+| [v0.7.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.4) | Private online cups: four tracks with the game's points and a podium from the totals (n0buholic); a native Graphics page and no crash opening Options in a race (n0buholic); Speed Mode renamed Itemless, where bumping another kart keeps your reserves (n0buholic); experimental 16:10 (david-labib); AMD FSR 4 (experimental, shown only with its model files; GetLostIn's wiring); crash signatures in the anonymous performance data |
+| [v0.7.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.3) | Native Vulkan: faster (translated shaders about half as heavy, no hitches from descriptor sets, a lighter capture thread in the adventure hub), Hyper Spaceway's dark sheet of triangles and Assembly Lane's whitish steam fixed; a damaged game file no longer stops online at start (Speed Mode is skipped); Graphics and Quit Game in Arabic (Majed-allababedi) |
+| [v0.7.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.2) | Online with a 21:9/32:9 layout starts again (amscova); Aspect Ratio in the in-game Graphics menu (immaculatevibes2025); EU 1.21 gets the Graphics menu, Quit Game and private Speed Mode (n0buholic), the native Vulkan engine and the faster loading; native Vulkan: the sun's glow and lens flares, and fur without holes on AMD GPUs |
 | [v0.7](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7) | Native Vulkan engine as an experimental choice in the launcher (straightarrows), with a shader build window; Speed Mode for private rooms, synced to the players who join (n0buholic); loading screens about half as long (liblzma decoding, n0buholic, and a RAM cache); motion blur off by default; older GPUs start again; opt-in anonymous performance reports; foldable friends list; in-game Graphics menu, Quit Game, Skip intro and the MSAA sky lines fixed on NVIDIA (immaculatevibes2025) |
 | [v0.6.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.5) | Online item-box odds set by the server; 21:9/32:9 layouts render at the chosen internal resolution up to 4K (startupandhold); mods start at any internal resolution (Vo1dTear), EU mod packages (Majed-allababedi) and several name mods together (SoyAlejandroCalixto); no code 20 at a first start without GitHub; nicknames register behind ISP filters; GPUs without sparse buffers get a clear message |
 | [v0.6.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.4) | Mods checked at the code they change, so they work on more 1.21 dumps (tcosi); mods import from deep folders; no freeze when a controller connects or drops (SoyAlejandroCalixto); the Controllers tab shows each player's controller; Linux launcher with Achievements and Mods (Brony666); a racer's outfit no longer ends the game with code 3 |
@@ -457,9 +461,15 @@ recompiler, [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.s
 and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch)). Import
 names from shadPS4's aerolib list.
 
+### Aspect ratio
+
+Display settings offer 16:9 (default), experimental 16:10, 21:9 and 32:9. The in-game
+Graphics page offers the same choices after a restart. 16:10 supports 1280x800, 1920x1200
+and 2560x1600 through its own display/camera preparation, with the original menus and HUD.
+See [aspect ratio settings and 16:10 verification](docs/sacredfire/23-aspect-ratios.md).
+
 ### Corrected widescreen layouts (Windows)
 
-Display settings include Resolution followed by Aspect ratio (16:9 default, 21:9, 32:9).
-The corrected layouts include menu/background/HUD asset fixes and centered-HUD shaders.
+The 21:9 and 32:9 layouts include menu/background/HUD asset fixes and centered-HUD shaders.
 The initial integration is for the tested USA 1.21 game and official v0.5.3 Windows engine, offline.
 See [setup, verification and limitations](docs/sacredfire/18-widescreen-layouts.md).

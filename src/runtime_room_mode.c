@@ -53,7 +53,7 @@ static void *publish(void *arg) {
     snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me, speed ? "speed" : "normal");
     const int status = runtime_ryunet_request("POST", target, body, sizeof body);
     printf("Native Online mode: this private room is %s for the players who join (RyuNET %d)\n",
-           speed ? "Speed Mode" : "Normal Mode", status);
+           speed ? "ITEMLESS" : "NORMAL", status);
     fflush(stdout);
     return NULL;
 }
@@ -137,6 +137,7 @@ void runtime_room_mode_joined(const char *session_id) {
 
 /* Leaving the host's room (or picking, or hosting): this player's own choice again. */
 void runtime_room_mode_left(void) {
+    runtime_online_mode_leave_cup();
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
 }

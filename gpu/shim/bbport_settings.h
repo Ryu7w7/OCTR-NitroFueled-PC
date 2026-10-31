@@ -65,6 +65,10 @@ inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatch
 /// 1080p; scripts/patches.py and run.py apply it at start, docs/sacredfire/13-resolution.md).
 inline constexpr int RenderResHeights[] = {480, 720, 1080, 1440, 1620, 2160};
 inline constexpr int RenderResCount = 6;
+/// Display shape (aspect_ratio); the corrected wide modes also accept the older widescreen keys.
+enum AspectRatio : int { Aspect16x9 = 0, Aspect16x10, Aspect21x9, Aspect32x9, AspectRatioCount };
+inline constexpr const char* AspectRatioKeys[] = {"16x9", "16x10", "21x9", "32x9"};
+inline constexpr const char* AspectRatioNames[] = {"16:9", "16:10", "21:9", "32:9"};
 /// Live output resolutions: the upscaler's output and the UI host targets.
 inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
 inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
@@ -74,12 +78,15 @@ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 /// SacredFire: controller ports for split screen (bbport.ini port.1..4: SDL GUID or part of the
 /// gamepad name; the runtime re-reads the file when the menu saves it).
 constexpr int ControllerPorts = 4;
-/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss): FSR 1 (spatial, the
+/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss|fsr4): FSR 1 (spatial, the
 /// display pass's stretch) or temporal upscaling/AA of the finished frame (vk_ctr_fsr3; FSR 3
-/// where DLSS cannot run).
+/// where DLSS or FSR 4 cannot run).
 enum Temporal : int { TemporalOff = 0, TemporalFsr1 = 1, TemporalFsr3 = 2, TemporalDlss = 3,
-                      TemporalCount = 4 };
-inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss"};
+                      TemporalFsr4 = 4, TemporalCount = 5 };
+inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss", "fsr4"};
+/// v0.7.4: FSR 4 (temporal=fsr4) is offered only when its model files are there (fsr4_shaders
+/// next to the package, or BB_FSR4_DIR) and the GPU has INT8 dot products.
+bool Fsr4Available();
 /// bbport.ini dlss_quality: auto (render_res decides the render size) or one of NVIDIA's modes,
 /// which set the render size from dlss_output (scripts/patches.py render_plan; at start).
 inline constexpr const char* DlssQualityNames[] = {"auto", "dlaa", "quality", "balanced",
@@ -158,6 +165,10 @@ struct Values {
     std::atomic<int> ultrawide{-1};
     std::atomic<bool> ultrawide_ask{false};
     std::atomic<int> ultrawide_w{0}, ultrawide_h{0};
+    /// The launcher's aspect_ratio / aspect_output (scripts/aspect_ratio.py at start).
+    std::atomic<int> aspect_ratio{Aspect16x9};
+    std::atomic<int> aspect_w{0}, aspect_h{0};
+    bool aspect_ratio_seen = false, aspect_output_seen = false; ///< newer keys win while loading
     /// The desktop size of the game's monitor (window.cpp), for the ultrawide choice.
     std::atomic<int> display_w{0}, display_h{0};
     /// SacredFire: the upscaler (Temporal: off, FSR 1, FSR 3, DLSS).
@@ -188,6 +199,7 @@ struct Values {
     int startup_render_res = -1;
     bool startup_ultrawide = false;
     int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
+    int startup_aspect_ratio = Aspect16x9;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;

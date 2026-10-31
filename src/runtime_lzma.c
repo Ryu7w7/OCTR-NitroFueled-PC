@@ -231,8 +231,8 @@ static void absolute_jump(unsigned char *where, const void *target) {
     memcpy(where + 6, &target, 8);
 }
 
-static void expand_decode_workers(unsigned char *image, size_t size, long cpus) {
-    enum { WORKERS = 0x14e6548 };
+static void expand_decode_workers(unsigned char *image, size_t size, long cpus, size_t shift) {
+    const size_t WORKERS = 0x14e6548 - shift;
     static const unsigned char signature[] = {
         0xbe,0xc0,0x03,0x00,0x00,0xba,0x64,0x00,0x00,0x00,
         0x48,0x89,0xdf,0xe8,0x56,0x0b,0x0a,0x00
@@ -251,16 +251,26 @@ static void expand_decode_workers(unsigned char *image, size_t size, long cpus) 
 void runtime_lzma_patch(unsigned char *image, size_t size) {
     const char *setting = getenv("BB_NATIVE_LZMA");
     if (setting && !strcmp(setting, "0")) return;
-    enum { ENTRY = 0x1584ed0, CALL = 0x14f46ca, PREFIX = 17 };
+    enum { PREFIX = 17 };
     static const unsigned char prefix[PREFIX] = {
         0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x78
     };
     static const unsigned char call[] = {0xe8,0x01,0x08,0x09,0x00,0x48,0x8b,0xb5,0x58,0xff,0xff,0xff};
     static const unsigned char setup[] = {0x83,0xf9,0x02,0x0f,0x85,0x4f,0x01,0x00,0x00};
-    /* Fail closed on other games/builds. Verified CTR 01.21 LZMA call and ABI. */
-    if (original_decode || size < ENTRY + PREFIX || size < CALL + sizeof(call) ||
-        memcmp(image + ENTRY, prefix, PREFIX) || memcmp(image + CALL, call, sizeof(call)) ||
-        memcmp(image + 0x14f4630, setup, sizeof(setup))) return;
+    /* Fail closed on other games/builds. Verified CTR 01.21 LZMA call and ABI: USA (CUSA13795)
+     * at these addresses, EU (CUSA14876) with the same code 0x10 earlier. */
+    static const size_t shifts[] = {0, 0x10};
+    size_t ENTRY = 0, CALL = 0, shift = 0;
+    int found = 0;
+    for (size_t i = 0; !found && i < sizeof(shifts) / sizeof(shifts[0]); i++) {
+        shift = shifts[i];
+        ENTRY = 0x1584ed0 - shift;
+        CALL = 0x14f46ca - shift;
+        found = size >= ENTRY + PREFIX && size >= CALL + sizeof(call) &&
+                !memcmp(image + ENTRY, prefix, PREFIX) && !memcmp(image + CALL, call, sizeof(call)) &&
+                !memcmp(image + 0x14f4630 - shift, setup, sizeof(setup));
+    }
+    if (original_decode || !found) return;
 #ifdef _WIN32
     unsigned char *trampoline = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!trampoline) return;
@@ -287,11 +297,12 @@ void runtime_lzma_patch(unsigned char *image, size_t size) {
     absolute_jump(image + ENTRY, (void *)decode_block);
     cache_init();
 #ifdef _WIN32
-    expand_decode_workers(image, size, (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+    expand_decode_workers(image, size, (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), shift);
 #else
-    expand_decode_workers(image, size, sysconf(_SC_NPROCESSORS_ONLN));
+    expand_decode_workers(image, size, sysconf(_SC_NPROCESSORS_ONLN), shift);
 #endif
-    puts("Archive decoder: native liblzma enabled for CTR 01.21 (BB_NATIVE_LZMA=0 disables)");
+    printf("Archive decoder: native liblzma enabled for CTR %s 1.21 (BB_NATIVE_LZMA=0 disables)\n",
+           shift ? "EU" : "USA");
 }
 
 void runtime_lzma_report(void) {

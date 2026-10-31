@@ -142,6 +142,9 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         save_json(session/'launch.json',{'packages':names,'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
+        # Discord invites are written by the launcher beside its original config,
+        # including while the game runs with this session's isolated settings.
+        environment['BB_LAUNCHER_CONFIG']=str(Path(config).resolve())
         environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
         mod_file_paths.configure(environment)
         log('OCTR mod session: '+', '.join(names)+' at '+str(plan['selection_settings'].get('output_res')))

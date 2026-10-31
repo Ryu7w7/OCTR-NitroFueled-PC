@@ -116,11 +116,11 @@ def render_plan(settings):
         return None
     layout=s.get('layout_internal')
     if res=='1080' and layout in RENDER_RESOLUTIONS and layout!='1080':
-        # A widescreen layout writes the display size itself (WxH at 0x17a9d61), but the 3D
+        # An aspect ratio patch writes the display size itself (WxH at 0x17a9d61), but the 3D
         # targets are 1920x1080 times the scale getter at 0x13e2eb0, which returns 1.0 on the base
         # path. So the scene is made larger as at 16:9: the Pro path with the scale, and without
         # its doubling of the output, which would double the layout's size.
-        return dict(label=f'{layout}p ultrawide',scale=RENDER_SCALES.get(layout),pro=True,single=True,
+        return dict(label=f'{layout}p {s.get("aspect_ratio", "ultrawide").replace("x", ":")}',scale=RENDER_SCALES.get(layout),pro=True,single=True,
                     heap=layout=='2160')
     if res=='1080':
         return dict(label='1080p',scale=None,pro=False,single=False,heap=False)

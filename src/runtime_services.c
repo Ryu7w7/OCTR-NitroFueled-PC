@@ -164,10 +164,12 @@ static void poll_invite_file(void) {
     if (now==last_check) return;
     last_check=now;
     char path[600];
-    const char *cfg=getenv("BB_CONFIG");
+    /* Mod sessions redirect BB_CONFIG; the launcher still writes to its own directory. */
+    const char *cfg=getenv("BB_LAUNCHER_CONFIG");
+    if (!cfg || !*cfg) cfg=getenv("BB_CONFIG");
     const char *slash=cfg ? strrchr(cfg,'/') : NULL;
     const char *bslash=cfg ? strrchr(cfg,'\\') : NULL;
-    if (bslash>slash) slash=bslash;
+    if (bslash && (!slash || bslash>slash)) slash=bslash;
     if (slash) snprintf(path,sizeof path,"%.*s/ryunet_join.txt",(int)(slash-cfg),cfg);
     else snprintf(path,sizeof path,"ryunet_join.txt");
     FILE *f=fopen(path,"r");

@@ -16,6 +16,9 @@
 #include "video_core/host_shaders/ctr_fsr3_inputs_d_comp.h"
 #include "video_core/host_shaders/ctr_fsr3_inputs_dv_comp.h"
 #include "video_core/host_shaders/ctr_fsr3_inputs_v_comp.h"
+#include "video_core/host_shaders/ctr_fsr4_pack_comp.h"
+#include "video_core/host_shaders/fsr4_decode_comp.h"
+#include "video_core/host_shaders/fsr4_encode_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -27,6 +30,117 @@
 namespace Vulkan {
 
 namespace {
+
+// SacredFire: diagnostics for a failed FSR 3 context creation. The FFX backend loads its
+// Vulkan entry points through the getDeviceProcAddr it is given: this one logs every call
+// that fails during creation (which allocation, how large, from which memory type).
+PFN_vkGetDeviceProcAddr trace_gdpa = nullptr;
+#define BB_TRACE_FN(name, params, args, what)                                                   \
+    PFN_##name trace_real_##name = nullptr;                                                     \
+    VKAPI_ATTR VkResult VKAPI_CALL Trace_##name params {                                        \
+        const VkResult result = trace_real_##name args;                                         \
+        if (result != VK_SUCCESS) {                                                             \
+            std::printf("FSR 3:   " #name " failed (%d)%s\n", int(result), what);               \
+        }                                                                                       \
+        return result;                                                                          \
+    }
+BB_TRACE_FN(vkCreateImage,
+            (VkDevice d, const VkImageCreateInfo* i, const VkAllocationCallbacks* a, VkImage* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkCreateBuffer,
+            (VkDevice d, const VkBufferCreateInfo* i, const VkAllocationCallbacks* a, VkBuffer* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkCreateImageView,
+            (VkDevice d, const VkImageViewCreateInfo* i, const VkAllocationCallbacks* a,
+             VkImageView* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkCreateDescriptorPool,
+            (VkDevice d, const VkDescriptorPoolCreateInfo* i, const VkAllocationCallbacks* a,
+             VkDescriptorPool* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkAllocateDescriptorSets,
+            (VkDevice d, const VkDescriptorSetAllocateInfo* i, VkDescriptorSet* o), (d, i, o), "")
+BB_TRACE_FN(vkCreateComputePipelines,
+            (VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo* i,
+             const VkAllocationCallbacks* a, VkPipeline* o),
+            (d, c, n, i, a, o), "")
+BB_TRACE_FN(vkCreatePipelineLayout,
+            (VkDevice d, const VkPipelineLayoutCreateInfo* i, const VkAllocationCallbacks* a,
+             VkPipelineLayout* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkCreateDescriptorSetLayout,
+            (VkDevice d, const VkDescriptorSetLayoutCreateInfo* i, const VkAllocationCallbacks* a,
+             VkDescriptorSetLayout* o),
+            (d, i, a, o), "")
+BB_TRACE_FN(vkBindImageMemory, (VkDevice d, VkImage i, VkDeviceMemory m, VkDeviceSize o),
+            (d, i, m, o), "")
+BB_TRACE_FN(vkBindBufferMemory, (VkDevice d, VkBuffer b, VkDeviceMemory m, VkDeviceSize o),
+            (d, b, m, o), "")
+#undef BB_TRACE_FN
+PFN_vkAllocateMemory trace_real_vkAllocateMemory = nullptr;
+VKAPI_ATTR VkResult VKAPI_CALL Trace_vkAllocateMemory(VkDevice d, const VkMemoryAllocateInfo* i,
+                                                      const VkAllocationCallbacks* a,
+                                                      VkDeviceMemory* o) {
+    const VkResult result = trace_real_vkAllocateMemory(d, i, a, o);
+    if (result != VK_SUCCESS) {
+        std::printf("FSR 3:   vkAllocateMemory failed (%d): %.2f MB from memory type %u\n",
+                    int(result), double(i->allocationSize) / 1048576.0, i->memoryTypeIndex);
+    }
+    return result;
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL TraceGetDeviceProcAddr(VkDevice device,
+                                                                 const char* name) {
+    const PFN_vkVoidFunction real = trace_gdpa(device, name);
+#define BB_TRACE_HOOK(fn)                                                                       \
+    if (real && std::strcmp(name, #fn) == 0) {                                                  \
+        trace_real_##fn = reinterpret_cast<PFN_##fn>(real);                                     \
+        return reinterpret_cast<PFN_vkVoidFunction>(&Trace_##fn);                               \
+    }
+    BB_TRACE_HOOK(vkAllocateMemory)
+    BB_TRACE_HOOK(vkCreateImage)
+    BB_TRACE_HOOK(vkCreateBuffer)
+    BB_TRACE_HOOK(vkCreateImageView)
+    BB_TRACE_HOOK(vkCreateDescriptorPool)
+    BB_TRACE_HOOK(vkAllocateDescriptorSets)
+    BB_TRACE_HOOK(vkCreateComputePipelines)
+    BB_TRACE_HOOK(vkCreatePipelineLayout)
+    BB_TRACE_HOOK(vkCreateDescriptorSetLayout)
+    BB_TRACE_HOOK(vkBindImageMemory)
+    BB_TRACE_HOOK(vkBindBufferMemory)
+#undef BB_TRACE_HOOK
+    return real;
+}
+
+/// Each memory heap's budget and use, and which memory types still take a 16 MB allocation.
+void PrintMemoryState(const Instance& instance) {
+    const vk::PhysicalDevice gpu = instance.GetPhysicalDevice();
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    vk::PhysicalDeviceMemoryProperties2 props{.pNext = &budget};
+    gpu.getMemoryProperties2(&props);
+    const auto& mem = props.memoryProperties;
+    for (u32 h = 0; h < mem.memoryHeapCount; ++h) {
+        std::printf("FSR 3:   heap %u: %.0f MiB, budget %.0f MiB, used %.0f MiB%s\n", h,
+                    double(mem.memoryHeaps[h].size) / 1048576.0,
+                    double(budget.heapBudget[h]) / 1048576.0,
+                    double(budget.heapUsage[h]) / 1048576.0,
+                    (mem.memoryHeaps[h].flags & vk::MemoryHeapFlagBits::eDeviceLocal) ? " (VRAM)"
+                                                                                      : "");
+    }
+    const auto device = instance.GetDevice();
+    for (u32 t = 0; t < mem.memoryTypeCount; ++t) {
+        VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, 16u << 20, t};
+        VkDeviceMemory memory{};
+        const VkResult result =
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(device, &info, nullptr, &memory);
+        std::printf("FSR 3:   type %u (heap %u, flags 0x%x): 16 MB %s\n", t,
+                    mem.memoryTypes[t].heapIndex, u32(mem.memoryTypes[t].propertyFlags),
+                    result == VK_SUCCESS ? "ok" : "FAILS");
+        if (result == VK_SUCCESS) {
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(device, memory, nullptr);
+        }
+    }
+    std::fflush(stdout);
+}
 
 // Moving objects (CTR's velocity target, memory channel 2 marks them; their own motion in
 // channels 1 and 0): BB_FSR3_MV="sx,sy,bias,mode,cx,cy" adds pixels = v * s to the camera's
@@ -196,9 +310,12 @@ vk::Format Linear(vk::Format format) {
 CtrFsr3::CtrFsr3(const Instance& instance_, Scheduler& scheduler_,
                  VideoCore::TextureCache& texture_cache_, Runtime& runtime_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
-      runtime{runtime_} {}
+      runtime{runtime_}, fsr4{instance_, scheduler_} {}
 
 CtrFsr3::~CtrFsr3() {
+    if (fsr4_preload_thread.joinable()) {
+        fsr4_preload_thread.join();
+    }
     if (context) {
         ffxVkPortableUpscaleContextDestroy(context);
     }
@@ -206,7 +323,8 @@ CtrFsr3::~CtrFsr3() {
 
 bool CtrFsr3::Enabled() const {
     const int temporal = BbSettings::Get().temporal;
-    return !failed && (temporal == BbSettings::TemporalFsr3 || temporal == BbSettings::TemporalDlss);
+    return !failed && (temporal == BbSettings::TemporalFsr3 || temporal == BbSettings::TemporalDlss ||
+                         temporal == BbSettings::TemporalFsr4);
 }
 
 void CtrFsr3::OnGBufferPass(VideoCore::ImageId depth, VideoCore::ImageId velocity_,
@@ -348,8 +466,106 @@ void CtrFsr3::CreatePipelines() {
     pipelines[3] = compute(CTR_FSR3_INPUTS_DV_COMP);
 }
 
+/// FSR 4 v07 model preset from the render ratio (native, quality, balanced,
+/// performance, ultra performance), as the asset set is per preset.
+static int Fsr4ModelPreset(float render_width, float output_width) {
+    const float ratio = render_width / std::max(output_width, 1.0f);
+    if (ratio >= 0.9f) return 0;
+    if (ratio >= 0.6f) return 1;
+    if (ratio >= 0.45f) return 2;
+    if (ratio >= 0.3f) return 3;
+    return 4;
+}
+
+void CtrFsr3::EnsureFsr4Pipelines() {
+    if (fsr4_pack_pipeline) {
+        return;
+    }
+    const auto device = instance.GetDevice();
+    const std::array<vk::DescriptorSetLayoutBinding, 2> bindings{{
+        {0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute},
+        {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute},
+    }};
+    fsr4_io_layout = Check(device.createDescriptorSetLayoutUnique({
+        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .bindingCount = u32(bindings.size()),
+        .pBindings = bindings.data(),
+    }));
+    fsr4_io_pipeline_layout = Check(device.createPipelineLayoutUnique({
+        .setLayoutCount = 1,
+        .pSetLayouts = &*fsr4_io_layout,
+    }));
+    const auto compute = [&](std::span<const u32> code) {
+        const auto module = CompileSPV(code, device);
+        auto result = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = module,
+                              .pName = "main"},
+                    .layout = *fsr4_io_pipeline_layout,
+                }));
+        device.destroyShaderModule(module);
+        return result;
+    };
+    fsr4_decode_pipeline = compute(FSR4_DECODE_COMP);
+    fsr4_encode_pipeline = compute(FSR4_ENCODE_COMP);
+    fsr4_pack_pipeline = compute(CTR_FSR4_PACK_COMP);
+}
+
+bool CtrFsr3::Fsr4BackendReady(int preset, u32 ow, u32 oh) {
+    if (fsr4_built && fsr4_built_preset == preset && fsr4_built_ow == ow &&
+        fsr4_built_oh == oh) {
+        return true;
+    }
+    std::scoped_lock lock{fsr4_preload_mutex};
+    if (!fsr4_preloading || !fsr4_preload_done) {
+        return false;
+    }
+    fsr4_preload_thread.join();
+    fsr4_preloading = false;
+    if (!fsr4_preload_ok) {
+        return false;
+    }
+    if (fsr4_preload_preset != preset || fsr4_preload_ow != ow || fsr4_preload_oh != oh) {
+        // A live size change overtook the worker: drop its backend and start over.
+        fsr4.Discard();
+        fsr4_built = false;
+        return false;
+    }
+    fsr4_built = true;
+    fsr4_built_preset = preset;
+    fsr4_built_ow = ow;
+    fsr4_built_oh = oh;
+    std::printf("FSR 4: backend ready, switching\n");
+    std::fflush(stdout);
+    return true;
+}
+
+void CtrFsr3::Fsr4KickPreload(int preset, u32 ow, u32 oh) {
+    std::scoped_lock lock{fsr4_preload_mutex};
+    if (fsr4_preloading) {
+        return;
+    }
+    if (fsr4_preload_thread.joinable()) {
+        fsr4_preload_thread.join();
+    }
+    fsr4_preloading = true;
+    fsr4_preload_done = false;
+    fsr4_preload_preset = preset;
+    fsr4_preload_ow = ow;
+    fsr4_preload_oh = oh;
+    std::printf("FSR 4: preloading model in the background (FSR 3 meanwhile)\n");
+    std::fflush(stdout);
+    fsr4_preload_thread = std::thread([this, preset, ow, oh] {
+        const bool ok = fsr4.Preload(preset, ow, oh);
+        std::scoped_lock lock{fsr4_preload_mutex};
+        fsr4_preload_ok = ok;
+        fsr4_preload_done = true;
+    });
+}
+
 bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
-    if (context && w == width && h == height && ow == out_width && oh == out_height &&
+    if (resources_ready && w == width && h == height && ow == out_width && oh == out_height &&
         format == output_format) {
         return true;
     }
@@ -365,36 +581,8 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
     out_height = oh;
     output_format = format;
     reset = true;
-
-    FfxVkPortableDeviceInfo device_info{};
-    device_info.structSize = sizeof(device_info);
-    device_info.instance = instance.GetInstance();
-    device_info.physicalDevice = instance.GetPhysicalDevice();
-    device_info.device = device;
-    device_info.getDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
-    device_info.queue = instance.GetGraphicsQueue();
-    device_info.queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex();
-    device_info.shaderFloat16Enabled = instance.IsShaderFloat16Enabled();
-    device_info.subgroupSizeControlEnabled = instance.IsSubgroupSizeControlEnabled();
-    device_info.synchronization2Enabled = VK_TRUE;
-    device_info.shaderStorageImageWriteWithoutFormatEnabled = VK_TRUE;
-
-    FfxVkPortableUpscaleCreateInfo create_info{};
-    create_info.structSize = sizeof(create_info);
-    // The game's finished, tonemapped frame (8 bits a channel): no HDR, no exposure.
-    create_info.flags = std::getenv("BB_FSR3_DEPTH_INVERTED") ? FFX_VK_PORTABLE_CONTEXT_DEPTH_INVERTED : 0;
-    create_info.maxRenderSize = {w, h};
-    create_info.maxOutputSize = {ow, oh};
-    if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
-        PrintIssues("create info", issues);
-        return false;
-    }
-    if (ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context) !=
-        FFX_VK_PORTABLE_OK) {
-        std::printf("FSR 3: context creation failed\n");
-        context = nullptr;
-        return false;
-    }
+    resources_ready = false;
+    context_retry_in = 0; // a new size: try the FSR 3 context at once
 
     const auto allocator = instance.GetAllocator();
     const auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView* view,
@@ -431,6 +619,9 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
     make(depth_image, &depth_view, vk::Format::eR32Sfloat, w, h, inputs);
     make(motion_image, &motion_view, vk::Format::eR16G16Sfloat, w, h, inputs);
     make(debug_image, &debug_view, vk::Format::eR8G8B8A8Unorm, w, h, inputs);
+    // FSR 4 working images (linear FP16): the decoded frame at render size, its output.
+    make(fsr4_linear_image, &fsr4_linear_view, vk::Format::eR16G16B16A16Sfloat, w, h, inputs);
+    make(fsr4_output_image, &fsr4_output_view, vk::Format::eR16G16B16A16Sfloat, ow, oh, inputs);
     // The output has the frame's memory layout (RGBA or BGRA) and is sampled through views like
     // the game's (sRGB or not, swizzled).
     static constexpr std::array<vk::Format, 4> formats{
@@ -459,9 +650,11 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
 
     // The images start in General: FSR 3 reads and writes them there.
     const auto cmdbuf = scheduler.CommandBuffer();
-    std::array<vk::ImageMemoryBarrier2, 4> barriers{};
-    const std::array<vk::Image, 4> images{vk::Image(depth_image), vk::Image(motion_image),
-                                          vk::Image(debug_image), vk::Image(output_image)};
+    std::array<vk::ImageMemoryBarrier2, 6> barriers{};
+    const std::array<vk::Image, 6> images{vk::Image(depth_image), vk::Image(motion_image),
+                                          vk::Image(debug_image), vk::Image(output_image),
+                                          vk::Image(fsr4_linear_image),
+                                          vk::Image(fsr4_output_image)};
     for (u32 i = 0; i < barriers.size(); ++i) {
         barriers[i] = vk::ImageMemoryBarrier2{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -479,11 +672,78 @@ bool CtrFsr3::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, vk::Format format) {
     // FSR's recommended jitter sequence length: 8 times the area ratio.
     const float ratio = float(ow) / float(w);
     jitter_phases = std::clamp(u32(std::ceil(8.0f * ratio * ratio)), 8u, 72u);
+    resources_ready = true;
+    return true;
+}
+
+bool CtrFsr3::EnsureContext() {
+    if (context) {
+        return true;
+    }
+    if (context_retry_in > 0) {
+        --context_retry_in;
+        return false;
+    }
+    const auto device = instance.GetDevice();
+    const u32 w = width, h = height, ow = out_width, oh = out_height;
+    const vk::Format format = output_format;
+    FfxVkPortableDeviceInfo device_info{};
+    device_info.structSize = sizeof(device_info);
+    device_info.instance = instance.GetInstance();
+    device_info.physicalDevice = instance.GetPhysicalDevice();
+    device_info.device = device;
+    device_info.getDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+    device_info.queue = instance.GetGraphicsQueue();
+    device_info.queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex();
+    device_info.shaderFloat16Enabled = instance.IsShaderFloat16Enabled();
+    device_info.subgroupSizeControlEnabled = instance.IsSubgroupSizeControlEnabled();
+    device_info.synchronization2Enabled = VK_TRUE;
+    device_info.shaderStorageImageWriteWithoutFormatEnabled = VK_TRUE;
+
+    FfxVkPortableUpscaleCreateInfo create_info{};
+    create_info.structSize = sizeof(create_info);
+    // The game's finished, tonemapped frame (8 bits a channel): no HDR, no exposure.
+    create_info.flags = std::getenv("BB_FSR3_DEPTH_INVERTED") ? FFX_VK_PORTABLE_CONTEXT_DEPTH_INVERTED : 0;
+    create_info.maxRenderSize = {w, h};
+    create_info.maxOutputSize = {ow, oh};
+    if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
+        PrintIssues("create info", issues);
+        context_retry_in = ~0u; // these sizes never work
+        return false;
+    }
+    // Failed calls of the creation are logged (see TraceGetDeviceProcAddr).
+    trace_gdpa = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+    device_info.getDeviceProcAddr = &TraceGetDeviceProcAddr;
+    const FfxVkPortableResult created =
+        ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context);
+    if (created != FFX_VK_PORTABLE_OK) {
+        const char* why = "backend error";
+        switch (created) {
+        case FFX_VK_PORTABLE_ERROR_OUT_OF_MEMORY: why = "out of memory"; break;
+        case FFX_VK_PORTABLE_ERROR_INVALID_ARGUMENT: why = "invalid argument"; break;
+        case FFX_VK_PORTABLE_ERROR_UNSUPPORTED: why = "unsupported"; break;
+        case FFX_VK_PORTABLE_ERROR_VULKAN: why = "Vulkan error"; break;
+        default: break;
+        }
+        std::printf("FSR 3: context creation failed for %ux%u -> %ux%u (%s): %s; FSR 1 meanwhile, "
+                    "retrying in 600 frames\n", w, h, ow, oh, vk::to_string(format).c_str(), why);
+        std::fflush(stdout);
+        context = nullptr;
+        context_retry_in = 600;
+        static int reported = 0;
+        if (reported++ < 2) {
+            PrintMemoryState(instance);
+        }
+        return false;
+    }
+
     FfxVkPortableMemoryUsage usage{};
     usage.structSize = sizeof(usage);
     ffxVkPortableUpscaleContextGetMemoryUsage(context, &usage);
     std::printf("FSR 3: %ux%u -> %ux%u (%s), %u jitter phases, %.1f MB\n", w, h, ow, oh,
                 vk::to_string(format).c_str(), jitter_phases, usage.totalUsageInBytes / 1e6);
+    std::fflush(stdout);
+    reset = true;
     return true;
 }
 
@@ -540,6 +800,7 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
     if (!EnsureResources(w, h, out.width, out.height, frame_format)) {
         failed = true;
         std::printf("FSR 3: off for this session\n");
+        std::fflush(stdout);
         return {};
     }
 
@@ -713,6 +974,26 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
         return *debug_view;
     }
 
+    // The planes for the temporal backends below (DLSS, FSR 4, FSR 3), from the
+    // projection at floats 48-63 (column-major, OpenGL style): [5] = 1/tan(fov/2),
+    // [10] = A, [14] = B with near = B/(A-1), far = B/(A+1).
+    float near_plane = 16.0f, far_plane = 150000.0f, fov = 1.2870f;
+    if (camera_valid) {
+        const float* p = &camera[48];
+        const float a = p[10], b = p[14];
+        if (p[5] > 0.0f && std::isfinite(a) && std::isfinite(b) && a != 1.0f && a != -1.0f) {
+            fov = 2.0f * std::atan(1.0f / p[5]);
+            near_plane = std::abs(b / (a - 1.0f));
+            far_plane = std::abs(b / (a + 1.0f));
+        }
+    }
+    if (!(near_plane > 0.0f) || !(far_plane > near_plane) || !(fov > 0.01f && fov < 3.1f)) {
+        near_plane = 16.0f;
+        far_plane = 150000.0f;
+        fov = 1.2870f;
+    }
+    const auto& settings = BbSettings::Get();
+
     // 2. DLSS: its inputs in shader-read layout, the output in General.
     if (use_dlss) {
         const auto transition = [&](vk::Image image, vk::ImageLayout from, vk::ImageLayout to) {
@@ -769,25 +1050,179 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
         return OutputView(view_format, mapping);
     }
 
-    // 3. FSR 3.
-    float near_plane = 16.0f, far_plane = 150000.0f, fov = 1.2870f;
-    if (camera_valid) {
-        // Projection at floats 48-63 (column-major, OpenGL style): [5] = 1/tan(fov/2),
-        // [10] = A, [14] = B with near = B/(A-1), far = B/(A+1).
-        const float* p = &camera[48];
-        const float a = p[10], b = p[14];
-        if (p[5] > 0.0f && std::isfinite(a) && std::isfinite(b) && a != 1.0f && a != -1.0f) {
-            fov = 2.0f * std::atan(1.0f / p[5]);
-            near_plane = std::abs(b / (a - 1.0f));
-            far_plane = std::abs(b / (a + 1.0f));
+    // 2b. FSR 4 (v07 INT8): the tonemapped frame decoded to linear FP16, upscaled,
+    // encoded back and packed into the 8-bit output. The backend builds on a worker
+    // thread (FSR 3 meanwhile); falls through to FSR 3 below when unavailable.
+    bool want_fsr4 = false;
+    const int fsr4_preset = Fsr4ModelPreset(float(w), float(out.width));
+    if (BbSettings::Get().temporal == BbSettings::TemporalFsr4 && !fsr4_failed) {
+        if (!instance.IsFsr4Int8Supported()) {
+            fsr4_failed = true;
+            std::printf("FSR 4: the GPU lacks INT8 dot product support; FSR 3 from now on\n");
+            std::fflush(stdout);
+        } else if (out.width > 3840 || out.height > 2160) {
+            if (!fsr4_warned) {
+                fsr4_warned = true;
+                std::printf("FSR 4: output %ux%u is above the v07 model range; FSR 3 instead\n",
+                            out.width, out.height);
+                std::fflush(stdout);
+            }
+        } else {
+            Fsr4KickPreload(fsr4_preset, out.width, out.height); // no-op while running
+            if (Fsr4BackendReady(fsr4_preset, out.width, out.height)) {
+                want_fsr4 = true;
+            } else if (!fsr4_preloading) {
+                // The worker finished without a backend: report once, FSR 3 from now on.
+                fsr4_failed = true;
+                std::printf("FSR 4: %s; FSR 3 from now on\n",
+                            fsr4.Problem() ? fsr4.Problem() : "unavailable");
+                std::fflush(stdout);
+            }
+            // Else the worker is still building: FSR 3 meanwhile.
         }
     }
-    if (!(near_plane > 0.0f) || !(far_plane > near_plane) || !(fov > 0.01f && fov < 3.1f)) {
-        near_plane = 16.0f;
-        far_plane = 150000.0f;
-        fov = 1.2870f;
+    if (want_fsr4 != last_fsr4) {
+        last_fsr4 = want_fsr4;
+        reset = true;
+        std::printf("Temporal upscaling: %s\n", want_fsr4 ? "FSR 4" : "FSR 3");
+        std::fflush(stdout);
     }
-    const auto& settings = BbSettings::Get();
+    bool use_fsr4 = false;
+    if (want_fsr4) {
+        EnsureFsr4Pipelines();
+        // Decode the finished frame to linear light (sampled raw, as FSR 3 reads it).
+        {
+            const vk::DescriptorImageInfo infos[2] = {
+                {{}, SourceView(source, source.info.pixel_format,
+                                vk::ImageAspectFlagBits::eColor, 2),
+                 vk::ImageLayout::eShaderReadOnlyOptimal},
+                {{}, *fsr4_linear_view, vk::ImageLayout::eGeneral},
+            };
+            std::array<vk::WriteDescriptorSet, 2> writes{};
+            for (u32 i = 0; i < writes.size(); ++i) {
+                writes[i] = {.dstBinding = i,
+                             .descriptorCount = 1,
+                             .descriptorType = i == 0 ? vk::DescriptorType::eSampledImage
+                                                      : vk::DescriptorType::eStorageImage,
+                             .pImageInfo = &infos[i]};
+            }
+            const vk::MemoryBarrier2 ready{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead |
+                                 vk::AccessFlagBits2::eShaderStorageWrite,
+            };
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &ready});
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *fsr4_decode_pipeline);
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
+                                        *fsr4_io_pipeline_layout, 0, writes);
+            cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            const vk::MemoryBarrier2 decoded{
+                .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            };
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &decoded});
+        }
+        const float sharp = std::clamp(settings.fsr3_sharpness.load(), 0.0f, 1.0f);
+        const bool ok = fsr4.Record({
+            .cmdbuf = cmdbuf,
+            .color = {vk::Image(fsr4_linear_image), *fsr4_linear_view, w, h},
+            .depth = {vk::Image(depth_image), *depth_view, w, h},
+            .motion = {vk::Image(motion_image), *motion_view, w, h},
+            .output = {vk::Image(fsr4_output_image), *fsr4_output_view, out.width, out.height},
+            .render_width = w,
+            .render_height = h,
+            .preset = fsr4_preset,
+            .jitter = {frame_jitter[0], frame_jitter[1]},
+            .frame_ms = frame_ms,
+            .near_plane = near_plane,
+            .far_plane = far_plane,
+            .vertical_fov = fov,
+            .sharpness = sharp,
+            .sharpen = sharp > 0.0f,
+            .reset = reset,
+            .auto_exposure = false,
+        });
+        scheduler.GetDynamicState().Invalidate(); // FSR 4 records its own Vulkan state
+        if (!ok) {
+            if (fsr4.Fatal()) {
+                fsr4_failed = true;
+                fsr4_built = false;
+                std::printf("FSR 4: %s; FSR 3 from now on\n",
+                            fsr4.Problem() ? fsr4.Problem() : "unavailable");
+                std::fflush(stdout);
+            }
+        } else {
+            // The sRGB curve back in place, then packed into the 8-bit output.
+            const vk::DescriptorImageInfo out_info{
+                {}, *fsr4_output_view, vk::ImageLayout::eGeneral};
+            const vk::WriteDescriptorSet out_write{.dstBinding = 0,
+                                                  .descriptorCount = 1,
+                                                  .descriptorType = vk::DescriptorType::eStorageImage,
+                                                  .pImageInfo = &out_info};
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *fsr4_encode_pipeline);
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
+                                        *fsr4_io_pipeline_layout, 0, out_write);
+            cmdbuf.dispatch((out.width + 7) / 8, (out.height + 7) / 8, 1);
+            const vk::MemoryBarrier2 encoded{
+                .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead |
+                                 vk::AccessFlagBits2::eShaderStorageWrite,
+            };
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &encoded});
+            const vk::DescriptorImageInfo pack_infos[2] = {
+                {{}, *fsr4_output_view, vk::ImageLayout::eGeneral},
+                {{}, *output_storage_view, vk::ImageLayout::eGeneral},
+            };
+            std::array<vk::WriteDescriptorSet, 2> pack_writes{};
+            for (u32 i = 0; i < pack_writes.size(); ++i) {
+                pack_writes[i] = {.dstBinding = i,
+                                  .descriptorCount = 1,
+                                  .descriptorType = i == 0 ? vk::DescriptorType::eSampledImage
+                                                           : vk::DescriptorType::eStorageImage,
+                                  .pImageInfo = &pack_infos[i]};
+            }
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *fsr4_pack_pipeline);
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
+                                        *fsr4_io_pipeline_layout, 0, pack_writes);
+            cmdbuf.dispatch((out.width + 7) / 8, (out.height + 7) / 8, 1);
+            use_fsr4 = true;
+        }
+    }
+    if (use_fsr4) {
+        reset = false;
+        if (last_skip) {
+            last_skip = nullptr;
+            std::printf("FSR 4: upscaling again\n");
+        }
+        const vk::MemoryBarrier2 done{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
+        scheduler.GetDynamicState().Invalidate();
+        static bool announced_fsr4 = false;
+        if (!announced_fsr4) {
+            announced_fsr4 = true;
+            std::printf("FSR 4: upscaling %ux%u -> %ux%u (near %.2f, far %.0f, fov %.1f deg)\n",
+                        w, h, out.width, out.height, near_plane, far_plane, fov * 57.29578f);
+        }
+        layout = vk::ImageLayout::eGeneral;
+        return OutputView(view_format, mapping);
+    }
+
+    // 3. FSR 3 (its context is made here, the first time FSR 3 itself runs).
+    if (!EnsureContext()) {
+        Skip("FSR 3 context unavailable");
+        return {};
+    }
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
     info.commandBuffer = cmdbuf;

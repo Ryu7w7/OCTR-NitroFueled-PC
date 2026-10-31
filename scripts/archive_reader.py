@@ -10,7 +10,9 @@ class Archive:
   self._file=self.path.open('rb')
   self.data=b=mmap.mmap(self._file.fileno(),0,access=mmap.ACCESS_READ)
   u=lambda o:struct.unpack_from('<I',b,o)[0]
-  assert u(0)==0x1a414749
+  if len(b)<56 or u(0)!=0x1a414749:
+   b.close();self._file.close()
+   raise ValueError(f'{self.path.name} is not a game archive (a damaged or incomplete copy of the game)')
   self.version=u(4);count=u(12);self.sector=u(16);names=struct.unpack_from('<Q',b,40)[0]
   self.files=[]
   for i in range(count):

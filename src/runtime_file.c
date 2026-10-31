@@ -441,8 +441,12 @@ int runtime_speed_race_active(void) {
      * This predicate gates both archive assets and seasonal pickup spawning.
      * Keep runtime_speed_mode_enabled() so remembered private selection alone
      * cannot enable Speed outside an active eligible room.
+     * v0.7.5: the game's own private-match flag too. The session flag outlived a private
+     * menu (no DELETE), so a remembered Itemless choice reached public races (no items,
+     * Tiger Temple's door open).
      */
-    return runtime_speed_mode_enabled() && runtime_private_room_active();
+    return runtime_speed_mode_enabled() && runtime_private_room_active() &&
+           runtime_online_mode_in_private();
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {

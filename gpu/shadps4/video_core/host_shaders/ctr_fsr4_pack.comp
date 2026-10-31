@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire: FSR 4 output (display-encoded linear FP16) back into the game's 8-bit
+// frame for the display pass. The ENCODE pass (fsr4_color.comp) applies the sRGB
+// curve in place; this only quantizes into UNORM8.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D source_tex;
+layout(binding = 1, rgba8) uniform writeonly image2D result_img;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(result_img)))) {
+        return;
+    }
+    const vec4 c = texelFetch(source_tex, pixel, 0);
+    imageStore(result_img, pixel, vec4(clamp(c.rgb, 0.0, 1.0), c.a));
+}

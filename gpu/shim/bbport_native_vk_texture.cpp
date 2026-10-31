@@ -1253,23 +1253,23 @@ bool TakePooled(const PoolKey& key, Pooled* out) {
     return false;
 }
 
-bool Destroy(Texture* t) {
+void Destroy(Texture* t, std::vector<VkImageView>& destroyed) {
     const vk::Device dev = instance->GetDevice();
     if (PoolOn() && t->image && t->view && t->view_array && !t->broken.load() &&
         t->bytes <= PoolBudget / 4) {
         std::lock_guard lk(pool_mutex);
-        // the oldest entries go first to make room (their views destroyed: sets dropped)
-        bool destroyed = false;
+        // the oldest entries go first to make room (their views destroyed)
         while (!pool.empty() && pool_bytes + t->bytes > PoolBudget) {
             const Pooled old = pool.front();
             pool.erase(pool.begin());
             pool_bytes -= old.bytes;
             if (old.view && old.view != old.view_array) {
                 dev.destroyImageView(old.view);
+                destroyed.push_back(old.view);
             }
             dev.destroyImageView(old.view_array);
+            destroyed.push_back(old.view_array);
             vmaDestroyImage(instance->GetAllocator(), old.image, old.allocation);
-            destroyed = true;
         }
         pool.push_back(Pooled{{t->format, t->width, t->height, t->levels, t->slices,
                                t->first_level, t->cube},
@@ -1277,20 +1277,20 @@ bool Destroy(Texture* t) {
         pool_bytes += t->bytes;
         pool_kept.fetch_add(1, std::memory_order_relaxed);
         delete t;
-        return destroyed;
+        return;
     }
-    const bool views = t->view || t->view_array;
     if (t->view && t->view != t->view_array) {
         dev.destroyImageView(t->view);
+        destroyed.push_back(t->view);
     }
     if (t->view_array) {
         dev.destroyImageView(t->view_array);
+        destroyed.push_back(t->view_array);
     }
     if (t->image) {
         vmaDestroyImage(instance->GetAllocator(), t->image, t->allocation);
     }
     delete t;
-    return views;
 }
 
 namespace {
@@ -1518,11 +1518,12 @@ const Texture* Get(const std::uint32_t* tsharp) {
     return &tex;
 }
 
-VkSampler Sampler(const std::uint32_t ss[4], bool compare) {
+VkSampler Sampler(const std::uint32_t ss[4], bool compare, bool depth) {
     if (!instance) {
         return VK_NULL_HANDLE;
     }
-    const u64 key = Fnv(reinterpret_cast<const u8*>(ss), 16) ^ (compare ? 0x5bd1e995ull : 0);
+    const u64 key = Fnv(reinterpret_cast<const u8*>(ss), 16) ^ (compare ? 0x5bd1e995ull : 0) ^
+                    (depth ? 0x9e3779b97f4a7c15ull : 0);
     if (const auto it = samplers.find(key); it != samplers.end()) {
         return it->second;
     }
@@ -1531,8 +1532,18 @@ VkSampler Sampler(const std::uint32_t ss[4], bool compare) {
     const u32 depth_func = (ss[0] >> 12) & 7;
     const u32 mag = (ss[2] >> 20) & 3, min = (ss[2] >> 22) & 3, mipf = (ss[2] >> 26) & 3;
     const bool lin_mag = mag == 1 || mag == 3, lin_min = min == 1 || min == 3;
-    // PC extra, as the port: 16x anisotropy for filtered, mipmapped samplers
-    const bool aniso = anisotropy && !compare && ((mag >= 2 || min >= 2) || (lin_min && lin_mag && mipf != 0));
+    // PC extra, as shadPS4's ForceAnisotropy: 16x for mipmapped samplers whose min filter is
+    // bilinear or anisotropic linear, not for depth reads, and the game's mip filter is kept;
+    // anisotropic filters the game asks for keep their own ratio. BB_ANISO as shadPS4's (16; 0 or
+    // 1: the game's)
+    static const u32 forced_ratio = [] {
+        const char* env = std::getenv("BB_ANISO");
+        const int v = env ? std::atoi(env) : 16;
+        return v >= 16 ? 16u : v >= 8 ? 8u : v >= 4 ? 4u : v >= 2 ? 2u : 0u;
+    }();
+    const bool forced = anisotropy && forced_ratio && !compare && !depth && mipf != 0 &&
+                        (min == 1 || min == 3) && max_aniso < forced_ratio;
+    const bool aniso = forced || (anisotropy && !compare && (mag >= 2 || min >= 2) && max_aniso > 1);
     const float min_lod = (ss[1] & 0xfff) / 256.0f;
     float max_lod = mipf == 0 ? min_lod : ((ss[1] >> 12) & 0xfff) / 256.0f;
     if (max_lod >= 15.9f) {
@@ -1546,14 +1557,13 @@ VkSampler Sampler(const std::uint32_t ss[4], bool compare) {
     const vk::SamplerCreateInfo sci{
         .magFilter = lin_mag || aniso ? vk::Filter::eLinear : vk::Filter::eNearest,
         .minFilter = lin_min || aniso ? vk::Filter::eLinear : vk::Filter::eNearest,
-        .mipmapMode = mipf == 2 || aniso ? vk::SamplerMipmapMode::eLinear
-                                         : vk::SamplerMipmapMode::eNearest,
+        .mipmapMode = mipf == 2 ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
         .addressModeU = AddressMode(ss[0]),
         .addressModeV = AddressMode(ss[0] >> 3),
         .addressModeW = AddressMode(ss[0] >> 6),
         .mipLodBias = float(std::int32_t((ss[2] & 0x3fff) << 18) >> 18) / 256.0f,
         .anisotropyEnable = aniso,
-        .maxAnisotropy = aniso ? float(std::max<u32>(max_aniso, 16)) : 1.0f,
+        .maxAnisotropy = forced ? float(forced_ratio) : aniso ? float(max_aniso) : 1.0f,
         .compareEnable = compare,
         .compareOp = compare ? (depth_func ? ops[depth_func] : vk::CompareOp::eLessOrEqual)
                              : vk::CompareOp::eNever,

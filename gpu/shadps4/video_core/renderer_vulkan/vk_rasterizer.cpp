@@ -1675,6 +1675,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
+    MarkDraw(pipeline);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
@@ -1818,6 +1819,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
+    MarkDraw(pipeline);
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
@@ -4606,6 +4608,18 @@ void Rasterizer::MarkPass(const GraphicsPipeline* pipeline, const RenderState& s
                                          : std::string{"-"},
                            vs.pgm_hash, ps ? ps->pgm_hash : 0);
     });
+}
+
+void Rasterizer::MarkDraw(const GraphicsPipeline* pipeline) {
+    auto* profiler = GpuProfiler::Get();
+    if (!profiler || !profiler->Draws()) {
+        return;
+    }
+    const u64 vs = pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash;
+    const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const u64 ps = ps_info ? ps_info->pgm_hash : 0;
+    profiler->MarkDraw(vs * 0x9E3779B97F4A7C15ull ^ ps ^ 0xD8A3ull,
+                       [&] { return fmt::format("draw vs {:016x} ps {:016x}", vs, ps); });
 }
 
 vk::ImageView Rasterizer::DisplayFsr(VideoCore::ImageId id, vk::ImageView game_view,

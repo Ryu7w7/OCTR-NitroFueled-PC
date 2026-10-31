@@ -8,7 +8,10 @@ times. run.py feeds every line the game prints to a Collector, which groups thos
 - the build and the settings that change performance (resolution, upscaler, FPS limit, layout...),
   the renderer (shadPS4's Vulkan or the native one), the edition, online or not;
 - per track: seconds played, average FPS, 1% low, share of slow frames, loading frames;
-- how the game ended (its exit code: 23 is a lost GPU device).
+- how the game ended (its exit code: 23 is a lost GPU device), where (the track or the menus), and
+  for a crash its signature: the kind of fault and the function it happened in (the runtime's
+  "Fault:" line, without addresses, paths or thread numbers);
+- the names of the mods in use (their folders), to tell crashes of mods from the game's.
 
 Nothing personal goes into it: no nickname, key, IP, paths, friends or room. The report is always
 kept beside the logs (perf/, the last 10) and is sent to the RyuNET server only with consent."""
@@ -25,7 +28,7 @@ REPORT_VERSION = 1
 KEEP = 10
 # bbport.ini keys that change performance; nothing else of the file is read into the report.
 SETTINGS = ('render_res', 'output_res', 'upscaler', 'temporal', 'fps_limit', 'present_mode', 'preset',
-            'msaa', 'live_resolution', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
+            'msaa', 'live_resolution', 'aspect_ratio', 'aspect_output', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
             'patch_60fps', 'patch_no_motion_blur', 'patch_pro_1080p', 'async_pipelines', 'model_lod')
 EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 75: 'restart'}
 
@@ -33,6 +36,46 @@ _PERF = re.compile(r'^Perf: frames (\d+) ms ([\d.]+) worst ([\d.]+) long (\d+) h
 _LEVEL = re.compile(r"LOADING LEVEL: '([^']+)'")
 _LOADED = re.compile(r'level finished loading in ([\d.]+) secs')
 _GPU = re.compile(r'^GPU: (.+?), (\d+) MiB VRAM; (.+?), Vulkan ([\d.]+)\s*$')
+# probe.c's fatal_exception and runtime_kernel.c: the first one is the crash
+_FAULT_ACCESS = re.compile(r'^Fault: (read|write|execute) access to (?:0x)?([0-9a-fA-F]+) at (.+?) \(thread \d+\)')
+_FAULT_ABORT = re.compile(r'^Fault: abort\(\) called \((.*)\) at (.+?) \(thread \d+\)')
+_FAULT_OTHER = re.compile(r'^Fault: exception (0x[0-9a-fA-F]+) at (.+?) \(thread \d+\)')
+_GUEST_STOP = re.compile(r'^STOP: guest raised debug exception code=(0x[0-9a-fA-F]+)')
+_PATH = re.compile(r'([A-Za-z]:)?[\\/][^\s:;,()]+')
+_IP = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b')
+
+
+def scrub(text, limit=100):
+    """A crash text without paths or addresses that could name the player (a user folder)."""
+    return _IP.sub('<ip>', _PATH.sub('<path>', text)).strip()[:limit]
+
+
+def fault_of(line):
+    """The crash signature of a "Fault:"/"STOP:" line, else None. `where` is a guest offset or a
+    module and offset (probe.c describe_address: the file name only); a bare pointer is dropped."""
+    m = _FAULT_ACCESS.match(line)
+    if m:
+        address = int(m[2], 16)
+        target = ('null+0x%x' % address if address < 0x10000 else
+                  'invalid pointer' if address >> 47 else 'other')
+        return {'kind': m[1] + ' access', 'target': target, 'where': _where(m[3])}
+    m = _FAULT_ABORT.match(line)
+    if m:
+        return {'kind': 'abort', 'reason': scrub(m[1]), 'where': _where(m[2])}
+    m = _FAULT_OTHER.match(line)
+    if m:
+        return {'kind': 'exception ' + m[1].lower(), 'where': _where(m[2])}
+    m = _GUEST_STOP.match(line)
+    if m:
+        return {'kind': 'guest debug exception ' + m[1].lower()}
+    return None
+
+
+def _where(text):
+    text = text.strip()
+    if re.fullmatch(r'(0x)?[0-9a-fA-F]{6,}', text):
+        return 'unknown'  # an address outside the game and every module
+    return scrub(text, 120)
 
 
 def short_level(path):
@@ -95,6 +138,7 @@ class Collector:
         self.levels = {}
         self.loads = {}  # level -> the game's own load times in seconds ("level finished loading")
         self.gpu = {}
+        self.fault = None  # the crash's signature (fault_of), the first one only
         self.started = time.time()
 
     def feed(self, text):
@@ -112,6 +156,9 @@ class Collector:
             m = _LOADED.search(line)
             if m:
                 self.loads.setdefault(self.level, []).append(round(float(m[1]), 2))
+                continue
+            if self.fault is None and line.startswith(('Fault: ', 'STOP: ')):
+                self.fault = fault_of(line)
                 continue
             if not self.gpu:
                 m = _GPU.match(line)
@@ -135,6 +182,8 @@ class Collector:
             **meta,
             'overall': everything.summary() if everything.frames else None,
             'tracks': tracks,
+            'ended_in': self.level,
+            **({'fault': self.fault} if self.fault else {}),
         }
 
 
@@ -232,6 +281,19 @@ def keep(report, folder):
     return path
 
 
+def mods_in_use(data):
+    """The folder names of the mods this launch used (scripts/mods.py's choice), at most 20."""
+    if os.environ.get('BB_MODS_ENABLED', '1') == '0':
+        return []
+    try:
+        import mods
+        names = mods.selected(os.environ.get('BB_MODS_DIR') or Path(data) / 'mods',
+                              os.environ.get('BB_MODS_CONFIG') or Path(data) / 'mods.json')
+    except Exception:
+        return []
+    return [scrub(n, 40) for n in names[:20]]
+
+
 def exit_meaning(code):
     return EXIT_CODES.get(code, 'crash' if code else 'normal')
 
@@ -242,7 +304,7 @@ def exit_meaning(code):
 # (with consent) sends the report.
 
 def _state_of(c):
-    return {'level': c.level, 'loads': c.loads, 'gpu': c.gpu, 'started': c.started,
+    return {'level': c.level, 'loads': c.loads, 'gpu': c.gpu, 'started': c.started, 'fault': c.fault,
             'levels': {n: [lv.frames, lv.ms, lv.worst, lv.long, lv.hist] for n, lv in c.levels.items()}}
 
 
@@ -250,6 +312,7 @@ def _collector_of(state):
     c = Collector()
     c.level, c.loads, c.gpu = state.get('level', 'start'), state.get('loads', {}), state.get('gpu', {})
     c.started = state.get('started', c.started)
+    c.fault = state.get('fault')
     for name, (frames, ms, worst, long_frames, hist) in state.get('levels', {}).items():
         c.levels.setdefault(name, Level()).add(frames, ms, worst, long_frames, hist)
     return c
@@ -286,8 +349,9 @@ def finish(state_path, code, config, data, octr, edition, say=print):
         'online': os.environ.get('BB_ONLINE') == '1',
         'settings': settings_of(config),
         'exit': {'code': code, 'meaning': exit_meaning(code)},
+        'mods': mods_in_use(data),
     })
-    if not report.get('overall'):
+    if not report.get('overall') and not report.get('fault'):
         return
     path = keep(report, Path(data) / 'perf')
     if consent(config) != '1':

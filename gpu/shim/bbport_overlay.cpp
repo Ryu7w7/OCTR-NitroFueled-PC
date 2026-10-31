@@ -1294,13 +1294,17 @@ void Menu() {
             "выводится в 4K; на экране 1080p это сглаживает края. Для 4K нужна мощная видеокарта."));
     }
     // SacredFire: one upscaler at a time (bbport.ini temporal): FSR 1 (spatial) or the temporal
-    // ones, FSR 3 and DLSS (vk_ctr_fsr3). Live; DLSS's quality mode and output need a restart.
+    // ones, FSR 3, DLSS and FSR 4 (vk_ctr_fsr3). Live; DLSS's quality mode and output need a
+    // restart. FSR 4 is listed only with its model files and an INT8-capable GPU.
     {
         static constexpr const char* labels[BbSettings::TemporalCount] = {
-            "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)"};
+            "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)",
+            "AMD FSR 4 (experimental)"};
         const int current = std::clamp(s.temporal.load(), 0, BbSettings::TemporalCount - 1);
+        const bool fsr4 = BbSettings::Fsr4Available();
         if (ImGui::BeginCombo(BbSettings::MenuText("Upscaling", "Апскейл"), BbSettings::Label(labels[current]))) {
             for (int t = 0; t < BbSettings::TemporalCount; ++t) {
+                if (t == BbSettings::TemporalFsr4 && !fsr4 && t != current) continue;
                 if (ImGui::Selectable(BbSettings::Label(labels[t]), t == current)) {
                     Store(s.temporal, t, t != current);
                 }
@@ -1310,8 +1314,8 @@ void Menu() {
         Hint(BbSettings::MenuText(
             "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. "
             "FSR 3 and DLSS rebuild detail over several frames from the game's depth and motion, "
-            "and smooth edges even at the same resolution. DLSS needs an NVIDIA RTX card (FSR 3 "
-            "runs otherwise). Applies at once.",
+            "and smooth edges even at the same resolution. DLSS needs an NVIDIA RTX card and FSR 4 "
+            "a GPU with INT8 support (FSR 3 runs otherwise). Applies at once.",
             "FSR 1 увеличивает сцену чётче простого растяжения. FSR 3 и DLSS восстанавливают "
             "детали за несколько кадров. DLSS нужна видеокарта RTX. Применяется сразу."));
     }
@@ -1360,8 +1364,8 @@ void Menu() {
             "CNN: the older model (preset E), lighter; NVIDIA marks it deprecated. Applies at once.",
             "Transformer: текущая модель NVIDIA. CNN: старая, легче. Применяется сразу."));
     }
-    if (s.temporal == BbSettings::TemporalFsr3) {
-        Slider(BbSettings::MenuText("FSR 3 sharpness", "Резкость FSR 3"), s.fsr3_sharpness, 0.0f, 1.0f);
+    if (s.temporal == BbSettings::TemporalFsr3 || s.temporal == BbSettings::TemporalFsr4) {
+        Slider(BbSettings::MenuText("FSR sharpness", "Резкость FSR"), s.fsr3_sharpness, 0.0f, 1.0f);
     }
 
     ImGui::EndTabItem();

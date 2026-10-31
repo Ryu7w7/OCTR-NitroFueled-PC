@@ -50,18 +50,18 @@ int main(void) {
     const unsigned char worker_code[] = {
         0xbe,0xc0,0x03,0,0,0xba,0x64,0,0,0,0x48,0x89,0xdf,0xe8,0x56,0x0b,0x0a,0
     };
-    expand_decode_workers(image, size, 12);
+    expand_decode_workers(image, size, 12, 0);
     assert(image[workers] == 0);
     memcpy(image + workers, worker_code, sizeof(worker_code));
-    expand_decode_workers(image, size, 4);
+    expand_decode_workers(image, size, 4, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
     setenv("BB_LZMA_WORKERS", "4", 1); /* the player's opt-out keeps the game's four */
-    expand_decode_workers(image, size, 16);
+    expand_decode_workers(image, size, 16, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
     unsetenv("BB_LZMA_WORKERS");
-    expand_decode_workers(image, workers, 12);
+    expand_decode_workers(image, workers, 12, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
-    expand_decode_workers(image, size, 12);
+    expand_decode_workers(image, size, 12, 0);
     assert(image[workers + 1] == 0xc0 && image[workers + 2] == 0x0f);
     assert(!memcmp(image + workers + 3, worker_code + 3, sizeof(worker_code) - 3));
     runtime_lzma_patch(image, size);
