@@ -63,6 +63,17 @@ def fail(message, code=1):
     sys.exit(code)
 
 
+def blocked(exe, error):
+    """Windows refused to start the game (WinError 5): an antivirus or Smart App Control blocked
+    or quarantined it, usually right after an update replaced it with a new build."""
+    fail(f'Windows did not let {exe.name} start ({error.strerror or error}). An antivirus or Smart App '
+         f'Control blocked it, or moved it to quarantine. Restore it from the quarantine if needed, add '
+         f'the game folder ({exe.parent.parent}) as an exclusion, and start the game again.\n'
+         f'Windows no dejó iniciar {exe.name}. Un antivirus o el Control inteligente de aplicaciones lo '
+         f'bloqueó o lo puso en cuarentena. Restáuralo si hace falta, agrega la carpeta del juego como '
+         f'exclusión y vuelve a iniciar el juego.')
+
+
 def wait_for(pid):
     kernel32 = ctypes.windll.kernel32
     SYNCHRONIZE = 0x00100000
@@ -711,8 +722,11 @@ def main():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
     # Instruction sets this CPU lacks (MOVBE, BMI1, LZCNT): the ISA rewrite covers them; exit 20
     # is a set nothing covers.
-    features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              text=True, creationflags=no_console())
+    try:
+        features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, text=True, creationflags=no_console())
+    except PermissionError as error:
+        blocked(probe, error)
     if features.returncode == 20:
         print(features.stdout, end='', flush=True)
         sys.exit(20)
@@ -1006,8 +1020,11 @@ def main():
             else:
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, creationflags=no_console())
+            try:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, creationflags=no_console())
+            except PermissionError as error:
+                blocked(probe, error)
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
             VULKAN_START.update(window=0.0, ready=False)
             reader.start()
