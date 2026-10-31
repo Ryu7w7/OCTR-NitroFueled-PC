@@ -176,6 +176,55 @@ static void set_string(unsigned char *field, const char *text) {
     if (old) drop_string(*string_pool, old - 0x10);
 }
 
+/* Another player's racer (the lobby's customization message: +0x20 field count, +0x88 the
+ * racer's name, +0x90 its outfit, +0xb0 the player's slot). A racer from a mod this game lacks
+ * (DriverSonic) loads from an archive that is not here, and the lobby waits for it forever:
+ * the countdown stops at 0 for everyone. It is shown as Crash here instead.
+ * BB_KNOWN_HEROES: the game's own racers (scripts/online_mode.py known_heroes); a racer this
+ * player's own mods add has its archive here and stays. */
+typedef void (ABI *PeerCustomization)(void *, unsigned char *);
+static PeerCustomization original_peer_customization;
+
+static char lower_ascii(char c) { return (char)(c >= 'A' && c <= 'Z' ? c + 32 : c); }
+
+static int known_hero(const char *name) {
+    const char *list = getenv("BB_KNOWN_HEROES");
+    if (!name || !*name || !list || !*list) return 1;
+    const size_t length = strlen(name);
+    for (const char *at = list; *at;) {
+        const char *end = strchr(at, ',');
+        const size_t n = end ? (size_t)(end - at) : strlen(at);
+        size_t same = 0;
+        while (n == length && same < n && lower_ascii(at[same]) == lower_ascii(name[same])) ++same;
+        if (n == length && same == n) return 1;
+        if (!end) break;
+        at = end + 1;
+    }
+    char path[128], lower[64];
+    if (length >= sizeof lower) return 0;
+    for (size_t i = 0; i <= length; ++i) lower[i] = lower_ascii(name[i]);
+    snprintf(path, sizeof path, "/app0/archives/%s.pak", lower);
+    unsigned char stat[256];
+    return runtime_file_stat(path, stat) == 0;
+}
+
+static void ABI peer_customization(void *self, unsigned char *message) {
+    uint32_t fields = 0;
+    if (message) memcpy(&fields, message + 0x20, sizeof fields);
+    const char *hero = fields >= 8 ? pointer_at(message, 0x88) : NULL;
+    if (hero && !known_hero(hero)) {
+        int slot;
+        memcpy(&slot, message + 0xb0, sizeof slot);
+        printf("Native Online: player %d's racer %s is not in this game (a mod); shown as Crash\n",
+               slot, hero);
+        fflush(stdout);
+        set_string(message + 0x88, "DriverCrash");
+        void *no_outfit = NULL; /* the mod's outfit does not exist either */
+        memcpy(message + 0x90, &no_outfit, sizeof no_outfit);
+    }
+    original_peer_customization(self, message);
+}
+
 static void set_text(unsigned char *placeable, const char *text) {
     if (!placeable || !text) return;
     const char *old = pointer_at(placeable, 0x30);
@@ -1285,6 +1334,16 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     memcpy(trampoline + 832, ui_prefix, sizeof ui_prefix);
     jump_to(trampoline + 849, image + (0xe9ba41 - shift));
     stub_end = 880 + podium_slot_stub(trampoline + 880, image);
+    /* The racer receiver's prologue (no RIP-relative operand): copied, then back after it. */
+    static const unsigned char custo_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,
+        0x41,0x54,0x53,0x48,0x83,0xec,0x68};
+    const size_t custo_at = 0xec03c0 - shift;
+    const int custo_ok = !memcmp(image + custo_at, custo_prefix, sizeof custo_prefix);
+    if (custo_ok) {
+        memcpy(trampoline + 1024, custo_prefix, sizeof custo_prefix);
+        jump_to(trampoline + 1024 + sizeof custo_prefix, image + custo_at + sizeof custo_prefix);
+        stub_end = 1024 + sizeof custo_prefix + 14;
+    }
     if (!write_code(trampoline, trampoline, stub_end)) return 0;
     original_clear_participants = (NativeEvent)(trampoline + 544);
     original_reset_racer_pool = (NativeEvent)(trampoline + 688);
@@ -1409,6 +1468,14 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + 0x9b1fc0, jump, sizeof jump)) return 0;
     jump_to(jump, private_race_timer_done);
     if (!write_code(image + (0xeac310 - shift), jump, sizeof jump)) return 0;
+    if (custo_ok) {
+        original_peer_customization = (PeerCustomization)(trampoline + 1024);
+        jump_to(jump, (void *)peer_customization);
+        if (!write_code(image + custo_at, jump, sizeof jump)) return 0;
+        puts("Native Online: racers from mods this game lacks are shown as Crash");
+    } else {
+        puts("Native Online: racer receiver not recognized; mod racers are not replaced");
+    }
     puts("Native Online mode: NORMAL / ITEMLESS / BATTLE selector installed");
     return 1;
 }

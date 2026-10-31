@@ -883,6 +883,7 @@ def main():
                             game, out / 'online-mode', out / 'eboot.elf', base)
                         env['BB_MOD_FILE_MAP'] = str((out / 'online-mode/cup-files.map').resolve())
                         env.setdefault('BB_MOD_SOURCE_GAME', str(game))
+                        env['BB_KNOWN_HEROES'] = online_mode.known_heroes(game)
                     try:
                         normal_patches, speed_patches, track_count = speed_mode.prepare(
                             game, out / 'speed-mode', base)

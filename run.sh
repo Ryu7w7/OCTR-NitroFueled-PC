@@ -197,6 +197,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
                     archive_patches) IFS='|' read -r -a speed_existing <<< "$value" ;;
                     online_mode_hook) export BB_ONLINE_MODE_HOOK=$value ;;
                     cup_file_map) export BB_MOD_FILE_MAP=$value BB_MOD_SOURCE_GAME=${BB_MOD_SOURCE_GAME:-$game} ;;
+                    known_heroes) export BB_KNOWN_HEROES=$value ;;
                 esac
             done <<< "$mode_result"
             speed_bases=()

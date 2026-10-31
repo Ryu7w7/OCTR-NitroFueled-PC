@@ -292,6 +292,29 @@ def current_entry(pak, entries, index, base):
 
 
 
+CHARACTERS_ENTRY = 'temporary/octane/data/ps4/output/characterlisting.igz'
+
+
+def known_heroes(game):
+    """The game's own racers (DriverCrash, DriverSmallNorm...), from its character listing in the
+    newest archive that has one. Another player's racer outside it comes from a mod this game
+    lacks: src/runtime_online_mode.c shows it as Crash, or the lobby waits for it forever."""
+    for name in ('update2', 'update', 'permanent'):
+        try:
+            pak = resolve(Path(game) / 'archives' / (name + '.pak'))
+            entry = next((e for e in iga.pak_entries(pak) if e[0].lower() == CHARACTERS_ENTRY), None)
+            if entry is None:
+                continue
+            with pak.open('rb') as f:
+                strings = Igz(iga.read_entry(f, *entry[1:])).strings
+        except (OSError, ValueError, KeyError, IndexError):
+            continue
+        heroes = sorted({s for s in strings if re.fullmatch(r'Driver[A-Z][A-Za-z0-9]{1,30}', s)})
+        if 'DriverCrash' in heroes:
+            return ','.join(heroes)
+    return ''
+
+
 def prepare(game, out, elf, bases):
     out = Path(out)
     assets = out / 'cup-assets'
@@ -358,3 +381,4 @@ if __name__ == '__main__':
     print('archive_patches=' + '|'.join(map(str, patches)))
     print('online_mode_hook=' + hook)
     print('cup_file_map=' + str((a.out / 'cup-files.map').resolve()))
+    print('known_heroes=' + known_heroes(a.game))
