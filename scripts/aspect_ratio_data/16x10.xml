@@ -8,7 +8,7 @@
   <TitleID>
     <ID>CUSA13795</ID>
   </TitleID>
-  <Metadata Title="Crash Team Racing Nitro-Fueled" Name="16:10 display and camera (experimental)" Author="tcosi (projection); OCTR contributors" PatchVer="1.0" AppVer="01.21" AppElf="eboot.bin" isEnabled="true">
+  <Metadata Title="Crash Team Racing Nitro-Fueled" Name="16:10 display, camera and HUD" Author="tcosi (projection); OCTR contributors" PatchVer="1.1" AppVer="01.21" AppElf="eboot.bin" isEnabled="true">
     <PatchList>
       <Line Type="bytes" Address="0xf18695" Value="c601010f1043700f1141100f1141500f1083800000000f1141200f1141600f1083900000000f1141300f1141700f1083a00000000f1141400f1181800000000f1083b0000000f30f59054e0000000f1181900000000f1083c0000000f30f5905380000000f1181a00000000f1083d0000000f30f5905220000000f1181b00000000f1083e0000000f30f59050c0000000f1181c0000000e90c000000e4388e3f9090909090909090" Signature="c6 01 01 c5 f8 10 43 70 c5 f8 11 41 10 c5 f8 10 83 80 00 00 00 c5 f8 11 41 20 c5 f8 10 83 90 00 00 00 c5 f8 11 41 30 c5 f8 10 83 a0 00 00 00 c5 f8 11 41 40 c5 f8 10 43 70 c5 f8 11 41 50 c5 f8 10 83 80 00 00 00 c5 f8 11 41 60 c5 f8 10 83 90 00 00 00 c5 f8 11 41 70 c5 f8 10 83 a0 00 00 00 c5 f8 11 81 80 00 00 00 c5 f8 10 83 b0 00 00 00 c5 f8 11 81 90 00 00 00 c5 f8 10 83 c0 00 00 00 c5 f8 11 81 a0 00 00 00 c5 f8 10 83 d0 00 00 00 c5 f8 11 81 b0 00 00 00 c5 f8 10 83 e0 00 00 00 c5 f8 11 81 c0 00 00 00" />
       <!-- GUI VFX: inverse normalized X before camera unprojection. See 16x10-vfx.s. -->
