@@ -105,6 +105,27 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
             self.assertEqual(order([10] * 8, {1, 7}, [1, 3, 4, 5, 6, 7, 8, 2]), [7, 1, 0, 2, 3, 4, 5, 6])
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_racer_receiver_hook_site(self):
+        # src/runtime_online_mode.c hooks the peer customization receiver at 0xec03c0 - shift
+        # (the selector hook's shift): its copied 17-byte prologue, and the function that logs
+        # "RECEIVE PEER CUSTO UPDATE"; the game's racers list for mod racers comes along.
+        from patches import load_segments
+        game = Path(os.environ['BB_TEST_GAME'])
+        elf = parse_self((game / 'eboot.bin').read_bytes())[0]
+        shift = 0x1277e00 - online_mode.hook_site(elf)
+        v, off, size = load_segments(elf)[0]
+        at = off + 0xec03c0 - shift - v
+        self.assertEqual(elf[at:at + 17].hex(), '554889e54157415641554154534883ec68')
+        text = elf.index(b'**BRIBRI: RECEIVE PEER CUSTO UPDATE!')
+        string = next(sv + text - so for sv, so, ss in load_segments(elf) if so <= text < so + ss)
+        body = elf[at:at + 0x200]
+        lea = body.index(bytes.fromhex('488d3d'), 0x100)
+        self.assertEqual(0xec03c0 - shift + lea + 7 + struct.unpack_from('<i', body, lea + 3)[0], string)
+        heroes = online_mode.known_heroes(game).split(',')
+        self.assertIn('DriverSmallNorm', heroes)
+        self.assertNotIn('DriverSonic', heroes)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
     def test_native_cup_navigation(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
         entries = iga.pak_entries(pak)

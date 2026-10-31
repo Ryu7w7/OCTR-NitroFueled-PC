@@ -238,6 +238,30 @@ static void ABI advance_cup(void *zone) {
 static void ABI return_lobby(void) { ++lobby_returns; }
 static void *ABI get_network_state(void) { return test_network_state; }
 static int ABI in_network_race(int state) { return state == 16; }
+static char received_hero[32];
+static void *received_outfit;
+static void ABI received_customization(void *self, unsigned char *message) {
+    (void)self;
+    const char *hero; memcpy(&hero, message + 0x88, 8);
+    snprintf(received_hero, sizeof received_hero, "%s", hero);
+    memcpy(&received_outfit, message + 0x90, 8);
+}
+static void customization(unsigned char *image, size_t shift, const char *hero) {
+    unsigned char message[0xc0] = {0};
+    const uint32_t fields = 8; memcpy(message + 0x20, &fields, 4);
+    const int slot = 6; memcpy(message + 0xb0, &slot, 4);
+    char *name = make_string(NULL, hero); memcpy(message + 0x88, &name, 8);
+    void *outfit = (void *)0x1234; memcpy(message + 0x90, &outfit, 8);
+    ((void (ABI *)(void *, unsigned char *))(image + (0xec03c0 - shift)))(NULL, message);
+    char *now; memcpy(&now, message + 0x88, 8);
+    if (now) free_string(NULL, now - 16);
+}
+
+int64_t runtime_file_stat(const char *path, void *guest_stat) {
+    (void)guest_stat;
+    return strstr(path, "/drivermymod.pak") ? 0 : -2;
+}
+
 static void test_region(size_t shift) {
     speed = -1; private = 1; base_calls = 0;
     result_racers = NULL; cup_sorts = 0;
@@ -404,6 +428,13 @@ static void test_region(size_t shift) {
     direct_stub(image + 0x9fa130, in_network_race);
     direct_stub(image + 0xa9cbe0, return_lobby);
     direct_stub(image + (0x1046200 - shift), advance_cup);
+    /* The racer receiver: its prologue, then undo it and hand the message to the mock. */
+    unsigned char *receiver = image + (0xec03c0 - shift);
+    memcpy(receiver, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x68", 17);
+    memcpy(receiver + 17, "\x48\x83\xc4\x68\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d\x48\xb8", 16);
+    void *receiver_mock = (void *)received_customization;
+    memcpy(receiver + 33, &receiver_mock, 8);
+    memcpy(receiver + 41, "\xff\xe0", 2);
     assert(!runtime_online_mode_start(image, 0x2af1fa8));
     setenv("BB_ONLINE_MODE_HOOK", "unsupported", 1);
     assert(!runtime_online_mode_start(image, size));
@@ -411,6 +442,18 @@ static void test_region(size_t shift) {
     assert(!runtime_online_mode_start(image, size));
     setenv("BB_ONLINE_MODE_HOOK", shift ? "1277df0" : "1277e00", 1);
     assert(runtime_online_mode_start(image, size));
+    /* A racer from a mod this game lacks shows as Crash; the game's own and this player's mod
+     * racers stay; no list (an older launcher) changes nothing. */
+    setenv("BB_KNOWN_HEROES", "DriverCrash,DriverCoco,DriverSmallNorm", 1);
+    customization(image, shift, "DriverSonic");
+    assert(!strcmp(received_hero, "DriverCrash") && !received_outfit);
+    customization(image, shift, "drivercoco");
+    assert(!strcmp(received_hero, "drivercoco") && received_outfit == (void *)0x1234);
+    customization(image, shift, "DriverMyMod");
+    assert(!strcmp(received_hero, "DriverMyMod") && received_outfit);
+    unsetenv("BB_KNOWN_HEROES");
+    customization(image, shift, "DriverSonic");
+    assert(!strcmp(received_hero, "DriverSonic"));
     void (ABI *season)(void *, int) = (void (ABI *)(void *, int))(image + (0xfb7710 - shift));
     choice = (void (ABI *)(void *, int))(image + (0x1277e00 - shift));
     uintptr_t result[2] = {0};
