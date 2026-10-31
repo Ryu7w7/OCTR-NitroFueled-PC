@@ -100,7 +100,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
     effective_config = root / 'bbport.ini'
     effective_config.write_text('\n'.join(kept + [f'{k}={v}' for k, v in effective.items()]) + '\n',
                                 encoding='utf-8')
-    say(f'16:10 at {output}, internal {internal}p: experimental display and camera; '
+    say(f'16:10 at {output}, internal {internal}p: display and camera; '
         f'{"corrected collectibles and boost gauge" if hud else "original HUD (no archives)"}')
     return {'config': effective_config, 'patches_dir': patches_dir, 'archive_patches': hud,
             'env': {'BB_TEMPORAL': 'off', 'BB_HUD_SCALE': ''}}

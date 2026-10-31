@@ -458,7 +458,7 @@ names from shadPS4's aerolib list.
 
 ### Aspect ratio
 
-Display settings offer 16:9 (default), experimental 16:10, 21:9 and 32:9. The in-game
+Display settings offer 16:9 (default), 16:10, 21:9 and 32:9. The in-game
 Graphics page offers the same choices after a restart. 16:10 supports 1280x800, 1920x1200
 and 2560x1600 through its own display/camera preparation, with aligned HUD effects
 (including Adventure collectibles and the filling drift gauge) and corrected gauge

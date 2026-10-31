@@ -1,6 +1,6 @@
-# Aspect ratio selection and experimental 16:10 support
+# Aspect ratio selection and 16:10 support
 
-Settings -> Display -> **Aspect ratio** offers 16:9 (default), experimental 16:10,
+Settings -> Display -> **Aspect ratio** offers 16:9 (default), 16:10,
 21:9 and 32:9. The in-game Graphics page offers the same four ratios, applied after
 a restart. Both launchers and the game save the same settings:
 
