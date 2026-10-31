@@ -92,6 +92,35 @@ class PerfReportTests(unittest.TestCase):
         self.assertEqual(perf_report.short_level('octane/t231_out_of_time/t231_out_of_time'), 't231_out_of_time')
         self.assertEqual(perf_report.short_level('octane/octane_startscreen/octane_startscreen'), 'menus')
 
+    def test_crash_signature_without_personal_data(self):
+        # probe.c's fault lines: the kind, what was touched and where; no address, path, IP or thread
+        c = perf_report.Collector()
+        c.feed("LOADING LEVEL: 'octane/t111_crash_cove/t111_crash_cove'\n"
+               "Fault: read access to 0000000000000010 at guest offset 0x12ab34 (thread 4321)\n"
+               "Fault: write access to 0000000000000020 at guest offset 0x99 (thread 1)\n")
+        report = c.report({})
+        self.assertEqual(report['ended_in'], 't111_crash_cove')
+        self.assertEqual(report['fault'], {'kind': 'read access', 'target': 'null+0x10',
+                                           'where': 'guest offset 0x12ab34'})
+        abort = perf_report.fault_of('Fault: abort() called (assert: C:\\Users\\Some Player\\a.cpp:3 '
+                                     'via 203.0.113.9) at ucrtbase.dll+0x1234 (thread 7)')
+        self.assertEqual(abort['where'], 'ucrtbase.dll+0x1234')
+        for private in ('Users', 'Some Player', '203.0.113.9'):
+            self.assertNotIn(private, abort['reason'])
+        self.assertEqual(perf_report.fault_of('Fault: exception 0x20474343 at 00007ffabcdef012 (thread 1)'),
+                         {'kind': 'exception 0x20474343', 'where': 'unknown'})
+        self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
+        self.assertNotIn('fault', self.collector().report({}))
+
+    def test_mods_in_use(self):
+        with tempfile.TemporaryDirectory() as folder:
+            mods = Path(folder) / 'mods'
+            for name in ('B kart', 'A skin', 'Off'):
+                (mods / name / 'dvdroot_ps4').mkdir(parents=True)
+            (Path(folder) / 'mods.json').write_text(json.dumps({'disabled': ['Off']}))
+            self.assertEqual(perf_report.mods_in_use(folder), ['A skin', 'B kart'])
+            self.assertEqual(perf_report.mods_in_use(Path(folder) / 'nothing'), [])
+
 
 if __name__ == '__main__':
     unittest.main()

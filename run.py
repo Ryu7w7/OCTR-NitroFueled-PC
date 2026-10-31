@@ -611,9 +611,10 @@ def finish_perf_report(env, config, data, version, title_id, code):
             'online': env.get('BB_ONLINE') == '1',
             'settings': perf_report.settings_of(config),
             'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
+            'mods': perf_report.mods_in_use(data),
         })
-        if not report.get('overall'):
-            return  # nothing was drawn (a start that stopped early): nothing to say
+        if not report.get('overall') and not report.get('fault'):
+            return  # nothing drawn and no crash (a start stopped early): nothing to say
         path = perf_report.keep(report, data / 'perf')
         if perf_report.consent(config) != '1':
             return
