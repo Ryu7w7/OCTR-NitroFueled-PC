@@ -38,6 +38,7 @@ Each run writes `logs/<time>.log`, `.frames.csv` (every frame's time) and, with
 | `BB_VK_SUBMITS_AHEAD=N` | With deferred labels: how many submissions the game may run ahead of the capture thread (1). With no bound, frames came in bursts (40/17/2.5 ms) |
 | `BB_ANISO=N` | Forced anisotropy, as shadPS4's (16; 0 or 1 keeps the game's filters) |
 | `BB_VK_PREP_WORKERS=N` | Threads that work out each draw's shaders, vertex layout and indices ahead of the capture thread (2; 0: the capture thread does it all) |
+| `BB_VK_SERIALIZE_GS=0/1` | Pipelines with a geometry shader compile one at a time per GS (default on the NVIDIA proprietary driver, whose 610.88 shader compiler crashed with two threads building the same fur ES+GS; 0: off, 1: on for every driver). Other pipelines still compile in parallel |
 | `BB_VK_DECODE_DRAWS=1` | Alone mode: shadPS4 decodes the draw state and draws again (by default it passes over them) |
 | `BB_FRAMES_AHEAD=N` | shadPS4's: how many frames its recording thread may run ahead of the GPU at a flip (1). `Run native vulkan - alone (2 frames ahead).bat` tries 2 |
 | `BB_VK_RECORD_THREAD`, `BB_VK_SYNC_PIPELINES=1`, `BB_VK_DEFER_COPIES=0`, `BB_VK_VERTEX_COPY=0`, `BB_VK_FULL_BARRIERS`, `BB_VK_RESIDENT`, `BB_VK_TEXTURE_MB`, `BB_VK_NATIVE_SHADERS`, `BB_VK_DRAW` | Comparison and debugging switches; see `gpu/shim/bbport_native_vk.cpp` |
