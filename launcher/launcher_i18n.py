@@ -12,7 +12,7 @@ LOCALES_DIR = Path(__file__).resolve().parent / "locales"
 # (label, code) for the Launcher language choice: each language named in itself.
 UI_LANGUAGES = [("System", ""), ("English", "en"), ("Español", "es"), ("Português (Brasil)", "pt_BR"),
                 ("Français", "fr"), ("Deutsch", "de"), ("Italiano", "it"), ("日本語", "ja"),
-                ("简体中文", "zh_CN"), ("Русский", "ru")]
+                ("简体中文", "zh_CN"), ("Русский", "ru"), ("العربية", "ar")]
 CODES = {code for _label, code in UI_LANGUAGES if code}
 # The labels above stay in their own language (not translated).
 NATIVE_LABELS = {label for label, code in UI_LANGUAGES if code}

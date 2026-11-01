@@ -97,10 +97,17 @@ inline constexpr int DlssOutputHeights[] = {1080, 2160};
 /// bbport.ini dlss_model: transformer (NVIDIA's default presets K/L/M) or cnn (preset E).
 inline constexpr const char* DlssModelNames[] = {"transformer", "cnn"};
 
+enum FrameGenMode {
+    FrameGenOff = 0,
+    FrameGenFsr3 = 1,
+};
+
 struct Values {
     std::array<std::array<char, 64>, ControllerPorts> ports{}; ///< guarded by PortsMutex()
     /// split_auto: ports 2-4 without a controller chosen take the next connected one (runtime_pad.c).
     std::atomic<bool> split_auto{true};
+    std::atomic<int> framegen{FrameGenOff};
+    std::atomic<int> framegen_motion{0};
     std::atomic<MenuLanguage> menu_language{MenuLanguage::Russian};
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};

@@ -78,6 +78,13 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.notice_position = std::clamp(i, 0, int(NoticeCount) - 1);
     } else if (key == "fps_limit") {
         v.fps_limit = std::clamp(i, 0, 1000);
+    } else if (key == "framegen_motion") {
+        v.framegen_motion = value == "game" ? 1 : 0;
+    } else if (key == "framegen") {
+        // off | fsr3 (fsr, on and 1 from test builds). Anything else: off.
+        v.framegen = (value == "fsr3" || value == "fsr" || value == "on" || value == "1")
+                         ? FrameGenFsr3
+                         : FrameGenOff;
     } else if (key == "async_pipelines") {
         v.async_pipelines = i != 0;
     } else if (key == "msaa") {
@@ -255,6 +262,7 @@ void Load() {
         }
     }
     const std::pair<const char*, const char*> env_keys[] = {
+        {"BB_FRAMEGEN", "framegen"},              {"BB_FRAMEGEN_MOTION", "framegen_motion"},
         {"BB_FSR_SHARPNESS", "sharpness"},        {"BB_JITTER", "jitter"},
         {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
@@ -459,6 +467,7 @@ void Save() {
         put("ultrawide_size", std::to_string(v.ultrawide_w.load()) + "x" + std::to_string(v.ultrawide_h.load()));
     }
     put("temporal", TemporalNames[std::clamp(v.temporal.load(), 0, TemporalCount - 1)]);
+    put("framegen", v.framegen == FrameGenFsr3 ? "fsr3" : "off");
     put("dlss_quality", DlssQualityNames[std::clamp(v.dlss_quality.load(), 0, DlssQualityCount - 1)]);
     put("dlss_output", std::to_string(DlssOutputHeights[v.dlss_output ? 1 : 0]));
     put("dlss_model", DlssModelNames[v.dlss_model ? 1 : 0]);
