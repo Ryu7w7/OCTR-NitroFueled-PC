@@ -1034,7 +1034,7 @@ static void team_result_rows(unsigned char *row, int depth) {
             y = -19.0f;
             /* Keep the native text material's gradient, without team tint. */
         } else if (!strcmp(own_name, "OCTR_TEAM_POINTS")) {
-            snprintf(title, sizeof title, "%d POINTS%s", team_totals[local < 0 ? best : local], team_tiebreak ? " (H2H)" : "");
+            snprintf(title, sizeof title, "%d POINTS%s", team_totals[best], team_tiebreak ? " (H2H)" : "");
             y = 9.0f;
             const float scale[] = {0.08081815f, 0.11369143f, 1.0f};
             memcpy(row + 0x84, scale, sizeof scale);

@@ -1931,3 +1931,17 @@ Runtime tests cover normal binding resets, twenty updates without a native
 position reset, a label-height change, and leaving private mode. USA/EU runtime
 tests pass. Visual centering still needs confirmation in the running game after
 relaunching the rebuilt executable.
+
+
+## 2026-11-02 — winner heading must display the winner's points
+
+The reported four-team screenshot shows GREEN TEAM WINS but 7 POINTS even
+though Green's row awards are 10+4=14. Aggregation already uses the current
+10/8/6/5/4/3/2/1 awards (superseding historical 9/6/3/1 notes). The heading
+incorrectly selected the local team's total: Blue's 6+1=7 in that capture.
+The points heading now always selects team_winner, matching its adjacent name;
+the WINS/LOSE label still reflects the local team. No award or tie-break changes.
+Tests cover the reported eight-racer arrangement from every local player's
+perspective, unchanged row awards, two-team losers and tied leaders. The old
+runtime fails the updated losing-view assertion. Screenshot evidence was removed;
+no replacement screenshot is claimed before a fresh live capture.

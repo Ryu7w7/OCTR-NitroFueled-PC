@@ -1749,7 +1749,7 @@ static void test_region(size_t shift) {
     project_event(ranking_project, panel_event);
     assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
     assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "17 POINTS"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
     local_player_mock = players[0];
     handle_timer(NULL, &event, timer_owner);
     assert(*(float *)(timer_owner + 0x60) == 1050.0f);
@@ -1815,8 +1815,24 @@ static void test_region(size_t shift) {
     receive_results(team_results);
     assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
     assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "11 POINTS (H2H)"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "14 POINTS (H2H)"));
     *(int *)(native_settings + 0x28) = 4;
+    /* Reported screenshot: GREEN 10+4=14, YELLOW 8+5=13,
+     * BLUE 6+1=7, RED 3+2=5. Header points belong to the named winner. */
+    const int screenshot_teams[] = {2, 3, 0, 3, 2, 1, 1, 0};
+    for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = screenshot_teams[i];
+    receive_results(team_results);
+    for (int i = 0; i < 8; ++i) {
+        local_player_mock = players[i];
+        project_event(ranking_project, panel_event);
+        assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
+        assert(!strcmp(*(char **)(points_text + 0x30), "14 POINTS"));
+        assert(!strcmp(*(char **)(wins_text + 0x30), screenshot_teams[i] == 2 ? "WINS" : "LOSE"));
+        put_pointer(bound_racer, 0x28, racers[i]);
+        row_event(row_behavior, NULL, NULL);
+        assert(!strcmp(*(char **)(score_text + 0x30), awards[i]));
+    }
+    local_player_mock = players[0];
     for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = i % 4;
     put_pointer(racers[3], 0x10, NULL);
     *(int *)(racers[3] + 0x164) = 3;
