@@ -174,6 +174,143 @@ void EndCard() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Racing Themes & Appearance System
+
+struct UiTheme {
+    const char* name_en;
+    const char* name_es;
+    ImVec4 win_bg;
+    ImVec4 nav_bg;
+    ImVec4 content_bg;
+    ImVec4 popup_bg;
+    ImVec4 titlebar_bg;
+    ImVec4 frame_bg;
+    ImVec4 frame_hover;
+    ImVec4 frame_active;
+    ImVec4 button_bg;
+    ImVec4 button_hover;
+    ImVec4 button_active;
+    ImVec4 accent;
+    ImVec4 accent_alt;
+    ImVec4 border;
+};
+
+int g_ui_theme = 0;
+
+constexpr UiTheme kThemes[5] = {
+    // 0: Classic Azure (Original Blue / Cyan)
+    {"Classic Azure", "Azul Clásico",
+     {0.02f, 0.10f, 0.24f, 1.00f},
+     {0.025f, 0.19f, 0.40f, 0.78f},
+     {0.015f, 0.13f, 0.32f, 0.82f},
+     {0.02f, 0.13f, 0.30f, 0.98f},
+     {0.027f, 0.28f, 0.57f, 1.00f},
+     {0.04f, 0.24f, 0.43f, 0.90f},
+     {0.07f, 0.38f, 0.60f, 1.00f},
+     {0.10f, 0.48f, 0.68f, 1.00f},
+     {0.04f, 0.27f, 0.49f, 0.95f},
+     {0.10f, 0.50f, 0.70f, 1.00f},
+     {0.17f, 0.71f, 0.87f, 1.00f},
+     {0.17f, 0.65f, 0.89f, 1.00f},
+     {0.38f, 0.91f, 1.00f, 1.00f},
+     {0.48f, 0.84f, 0.97f, 0.35f}},
+    // 1: Nitro Flame (Obsidian Carbon + Nitro Orange/Gold)
+    {"Nitro Flame", "Llama Nitro",
+     {0.055f, 0.063f, 0.086f, 1.00f},
+     {0.067f, 0.075f, 0.106f, 0.92f},
+     {0.082f, 0.094f, 0.129f, 0.90f},
+     {0.075f, 0.086f, 0.118f, 0.98f},
+     {0.047f, 0.055f, 0.075f, 1.00f},
+     {0.125f, 0.141f, 0.192f, 0.92f},
+     {0.180f, 0.200f, 0.267f, 1.00f},
+     {0.235f, 0.255f, 0.333f, 1.00f},
+     {0.165f, 0.180f, 0.243f, 0.96f},
+     {0.920f, 0.380f, 0.090f, 1.00f},
+     {1.000f, 0.560f, 0.140f, 1.00f},
+     {1.000f, 0.420f, 0.100f, 1.00f},
+     {1.000f, 0.740f, 0.180f, 1.00f},
+     {1.000f, 0.520f, 0.160f, 0.32f}},
+    // 2: Oxide Neon (Deep Void + Toxic Emerald)
+    {"Oxide Neon", "Neón Oxide",
+     {0.047f, 0.059f, 0.082f, 1.00f},
+     {0.059f, 0.078f, 0.106f, 0.92f},
+     {0.071f, 0.098f, 0.129f, 0.90f},
+     {0.063f, 0.086f, 0.114f, 0.98f},
+     {0.039f, 0.051f, 0.071f, 1.00f},
+     {0.106f, 0.149f, 0.192f, 0.92f},
+     {0.145f, 0.216f, 0.267f, 1.00f},
+     {0.184f, 0.275f, 0.333f, 1.00f},
+     {0.129f, 0.184f, 0.235f, 0.96f},
+     {0.120f, 0.760f, 0.420f, 1.00f},
+     {0.200f, 0.900f, 0.520f, 1.00f},
+     {0.180f, 0.900f, 0.450f, 1.00f},
+     {0.000f, 0.850f, 0.750f, 1.00f},
+     {0.180f, 0.900f, 0.450f, 0.32f}},
+    // 3: Aku Crimson (Volcanic Dark + Ruby Red)
+    {"Aku Crimson", "Carmesí Aku",
+     {0.075f, 0.047f, 0.059f, 1.00f},
+     {0.094f, 0.059f, 0.075f, 0.92f},
+     {0.114f, 0.075f, 0.094f, 0.90f},
+     {0.102f, 0.067f, 0.082f, 0.98f},
+     {0.063f, 0.039f, 0.051f, 1.00f},
+     {0.176f, 0.114f, 0.141f, 0.92f},
+     {0.243f, 0.157f, 0.192f, 1.00f},
+     {0.310f, 0.200f, 0.243f, 1.00f},
+     {0.212f, 0.137f, 0.169f, 0.96f},
+     {0.880f, 0.180f, 0.280f, 1.00f},
+     {1.000f, 0.280f, 0.380f, 1.00f},
+     {1.000f, 0.220f, 0.320f, 1.00f},
+     {1.000f, 0.760f, 0.220f, 1.00f},
+     {1.000f, 0.260f, 0.360f, 0.34f}},
+    // 4: Midnight Cobalt (Deep Navy + Cyan)
+    {"Midnight Cobalt", "Cobalto Nocturno",
+     {0.047f, 0.071f, 0.118f, 1.00f},
+     {0.059f, 0.090f, 0.149f, 0.92f},
+     {0.075f, 0.114f, 0.184f, 0.90f},
+     {0.067f, 0.102f, 0.165f, 0.98f},
+     {0.039f, 0.059f, 0.098f, 1.00f},
+     {0.114f, 0.169f, 0.267f, 0.92f},
+     {0.157f, 0.231f, 0.357f, 1.00f},
+     {0.200f, 0.294f, 0.443f, 1.00f},
+     {0.141f, 0.208f, 0.322f, 0.96f},
+     {0.180f, 0.560f, 0.960f, 1.00f},
+     {0.280f, 0.680f, 1.000f, 1.00f},
+     {0.240f, 0.660f, 1.000f, 1.00f},
+     {1.000f, 0.680f, 0.200f, 1.00f},
+     {0.240f, 0.660f, 1.000f, 0.34f}},
+};
+
+const UiTheme& CurrentTheme() {
+    return kThemes[std::clamp(g_ui_theme, 0, 4)];
+}
+
+void ApplyUiTheme() {
+    if (!ImGui::GetCurrentContext()) return;
+    const UiTheme& th = CurrentTheme();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_Text] = ImVec4(0.95f, 0.96f, 0.98f, 1.0f);
+    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.64f, 0.72f, 1.0f);
+    style.Colors[ImGuiCol_WindowBg] = th.win_bg;
+    style.Colors[ImGuiCol_ChildBg] = th.nav_bg;
+    style.Colors[ImGuiCol_PopupBg] = th.popup_bg;
+    style.Colors[ImGuiCol_Border] = th.border;
+    style.Colors[ImGuiCol_FrameBg] = th.frame_bg;
+    style.Colors[ImGuiCol_FrameBgHovered] = th.frame_hover;
+    style.Colors[ImGuiCol_FrameBgActive] = th.frame_active;
+    style.Colors[ImGuiCol_Button] = th.button_bg;
+    style.Colors[ImGuiCol_ButtonHovered] = th.button_hover;
+    style.Colors[ImGuiCol_ButtonActive] = th.button_active;
+    style.Colors[ImGuiCol_CheckMark] = th.accent_alt;
+    style.Colors[ImGuiCol_SliderGrab] = th.accent;
+    style.Colors[ImGuiCol_SliderGrabActive] = th.accent_alt;
+    style.Colors[ImGuiCol_Header] = ImVec4(th.accent.x, th.accent.y, th.accent.z, 0.28f);
+    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(th.accent.x, th.accent.y, th.accent.z, 0.48f);
+    style.Colors[ImGuiCol_HeaderActive] = ImVec4(th.accent.x, th.accent.y, th.accent.z, 0.68f);
+    style.Colors[ImGuiCol_Separator] = th.border;
+    style.Colors[ImGuiCol_PlotHistogram] = th.accent;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Language: Spanish or English, chosen in the launcher (default: Windows' language).
 
 bool g_spanish = false;
@@ -185,6 +322,7 @@ std::string DetectWindowsLocale() {
     if (!GetUserDefaultLocaleName(name, LOCALE_NAME_MAX_LENGTH)) return "en";
     std::wstring locale(name);
     std::transform(locale.begin(), locale.end(), locale.begin(), [](wchar_t c) { return wchar_t(towlower(c)); });
+    if (locale.rfind(L"ar", 0) == 0) return "ar";
     if (locale.rfind(L"pt", 0) == 0) return "pt_BR";
     if (locale.rfind(L"es", 0) == 0) return "es";
     if (locale.rfind(L"fr", 0) == 0) return "fr";
@@ -201,6 +339,351 @@ void ApplyLauncherLanguage() {
     g_spanish = g_active_locale == "es";
 }
 
+// ---------------------------------------------------------------------------------------------
+// Arabic contextual shaping (Presentation Forms-B U+FE70..U+FEFC) & visual RTL ordering for ImGui
+// ---------------------------------------------------------------------------------------------
+namespace ArabicShaper {
+
+struct LetterForms {
+    uint16_t iso;
+    uint16_t fin;
+    uint16_t ini;
+    uint16_t med;
+    bool joins_next; // dual-joining (true) vs right-joining only (false)
+};
+
+inline bool GetLetterForms(uint32_t cp, LetterForms& out) {
+    switch (cp) {
+        case 0x0621: out = {0xFE80, 0xFE80, 0xFE80, 0xFE80, false}; return true; // Hamza
+        case 0x0622: out = {0xFE81, 0xFE82, 0xFE81, 0xFE82, false}; return true; // Alef Madda
+        case 0x0623: out = {0xFE83, 0xFE84, 0xFE83, 0xFE84, false}; return true; // Alef Hamza Above
+        case 0x0624: out = {0xFE85, 0xFE86, 0xFE85, 0xFE86, false}; return true; // Waw Hamza
+        case 0x0625: out = {0xFE87, 0xFE88, 0xFE87, 0xFE88, false}; return true; // Alef Hamza Below
+        case 0x0626: out = {0xFE89, 0xFE8A, 0xFE8B, 0xFE8C, true};  return true; // Yeh Hamza
+        case 0x0627: out = {0xFE8D, 0xFE8E, 0xFE8D, 0xFE8E, false}; return true; // Alef
+        case 0x0628: out = {0xFE8F, 0xFE90, 0xFE91, 0xFE92, true};  return true; // Beh
+        case 0x0629: out = {0xFE93, 0xFE94, 0xFE93, 0xFE94, false}; return true; // Teh Marbuta
+        case 0x062A: out = {0xFE95, 0xFE96, 0xFE97, 0xFE98, true};  return true; // Teh
+        case 0x062B: out = {0xFE99, 0xFE9A, 0xFE9B, 0xFE9C, true};  return true; // Theh
+        case 0x062C: out = {0xFE9D, 0xFE9E, 0xFE9F, 0xFEA0, true};  return true; // Jeem
+        case 0x062D: out = {0xFEA1, 0xFEA2, 0xFEA3, 0xFEA4, true};  return true; // Hah
+        case 0x062E: out = {0xFEA5, 0xFEA6, 0xFEA7, 0xFEA8, true};  return true; // Khah
+        case 0x062F: out = {0xFEA9, 0xFEAA, 0xFEA9, 0xFEAA, false}; return true; // Dal
+        case 0x0630: out = {0xFEAB, 0xFEAC, 0xFEAB, 0xFEAC, false}; return true; // Thal
+        case 0x0631: out = {0xFEAD, 0xFEAE, 0xFEAD, 0xFEAE, false}; return true; // Reh
+        case 0x0632: out = {0xFEAF, 0xFEB0, 0xFEAF, 0xFEB0, false}; return true; // Zain
+        case 0x0633: out = {0xFEB1, 0xFEB2, 0xFEB3, 0xFEB4, true};  return true; // Seen
+        case 0x0634: out = {0xFEB5, 0xFEB6, 0xFEB7, 0xFEB8, true};  return true; // Sheen
+        case 0x0635: out = {0xFEB9, 0xFEBA, 0xFEBB, 0xFEBC, true};  return true; // Sad
+        case 0x0636: out = {0xFEBD, 0xFEBE, 0xFEBF, 0xFEC0, true};  return true; // Dad
+        case 0x0637: out = {0xFEC1, 0xFEC2, 0xFEC3, 0xFEC4, true};  return true; // Tah
+        case 0x0638: out = {0xFEC5, 0xFEC6, 0xFEC7, 0xFEC8, true};  return true; // Zah
+        case 0x0639: out = {0xFEC9, 0xFECA, 0xFECB, 0xFECC, true};  return true; // Ain
+        case 0x063A: out = {0xFECD, 0xFECE, 0xFECF, 0xFED0, true};  return true; // Ghain
+        case 0x0640: out = {0x0640, 0x0640, 0x0640, 0x0640, true};  return true; // Tatweel
+        case 0x0641: out = {0xFED1, 0xFED2, 0xFED3, 0xFED4, true};  return true; // Feh
+        case 0x0642: out = {0xFED5, 0xFED6, 0xFED7, 0xFED8, true};  return true; // Qaf
+        case 0x0643: out = {0xFED9, 0xFEDA, 0xFEDB, 0xFEDC, true};  return true; // Kaf
+        case 0x0644: out = {0xFEDD, 0xFEDE, 0xFEDF, 0xFEE0, true};  return true; // Lam
+        case 0x0645: out = {0xFEE1, 0xFEE2, 0xFEE3, 0xFEE4, true};  return true; // Meem
+        case 0x0646: out = {0xFEE5, 0xFEE6, 0xFEE7, 0xFEE8, true};  return true; // Noon
+        case 0x0647: out = {0xFEE9, 0xFEEA, 0xFEEB, 0xFEEC, true};  return true; // Heh
+        case 0x0648: out = {0xFEED, 0xFEEE, 0xFEED, 0xFEEE, false}; return true; // Waw
+        case 0x0649: out = {0xFEEF, 0xFEF0, 0xFEEF, 0xFEF0, false}; return true; // Alef Maksura
+        case 0x064A: out = {0xFEF1, 0xFEF2, 0xFEF3, 0xFEF4, true};  return true; // Yeh
+        default: return false;
+    }
+}
+
+inline bool IsDiacritic(uint32_t cp) {
+    return (cp >= 0x064B && cp <= 0x065F) || cp == 0x0670;
+}
+
+inline bool IsArabicCodepoint(uint32_t cp) {
+    return (cp >= 0x0600 && cp <= 0x06FF) ||
+           (cp >= 0x0750 && cp <= 0x077F) ||
+           (cp >= 0x08A0 && cp <= 0x08FF) ||
+           (cp >= 0xFB50 && cp <= 0xFDFF) ||
+           (cp >= 0xFE70 && cp <= 0xFEFF);
+}
+
+inline bool JoinsWithPrev(uint32_t cp) {
+    LetterForms f{};
+    return cp != 0x0621 && GetLetterForms(cp, f);
+}
+
+inline bool JoinsWithNext(uint32_t cp) {
+    LetterForms f{};
+    return GetLetterForms(cp, f) && f.joins_next;
+}
+
+inline uint32_t LamAlefLigature(uint32_t alef, bool joined_prev) {
+    switch (alef) {
+        case 0x0622: return joined_prev ? 0xFEF6 : 0xFEF5;
+        case 0x0623: return joined_prev ? 0xFEF8 : 0xFEF7;
+        case 0x0625: return joined_prev ? 0xFEFA : 0xFEF9;
+        case 0x0627: return joined_prev ? 0xFEFC : 0xFEFB;
+        default: return 0;
+    }
+}
+
+inline std::vector<uint32_t> DecodeUtf8(const std::string& s) {
+    std::vector<uint32_t> out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        const uint8_t c = static_cast<uint8_t>(s[i]);
+        if (c < 0x80) {
+            out.push_back(c);
+            i += 1;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
+            out.push_back(((c & 0x1F) << 6) | (static_cast<uint8_t>(s[i + 1]) & 0x3F));
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
+            out.push_back(((c & 0x0F) << 12) |
+                          ((static_cast<uint8_t>(s[i + 1]) & 0x3F) << 6) |
+                          (static_cast<uint8_t>(s[i + 2]) & 0x3F));
+            i += 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
+            out.push_back(((c & 0x07) << 18) |
+                          ((static_cast<uint8_t>(s[i + 1]) & 0x3F) << 12) |
+                          ((static_cast<uint8_t>(s[i + 2]) & 0x3F) << 6) |
+                          (static_cast<uint8_t>(s[i + 3]) & 0x3F));
+            i += 4;
+        } else {
+            out.push_back(c);
+            i += 1;
+        }
+    }
+    return out;
+}
+
+inline void AppendUtf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+inline uint32_t MirrorBracket(uint32_t cp) {
+    switch (cp) {
+        case '(': return ')';
+        case ')': return '(';
+        case '[': return ']';
+        case ']': return '[';
+        case '{': return '}';
+        case '}': return '{';
+        case 0x00AB: return 0x00BB;
+        case 0x00BB: return 0x00AB;
+        default: return cp;
+    }
+}
+
+inline bool IsStrongLtr(uint32_t cp) {
+    return (cp >= 'A' && cp <= 'Z') ||
+           (cp >= 'a' && cp <= 'z') ||
+           (cp >= '0' && cp <= '9') ||
+           cp == '%' || cp == '\\' || cp == '/';
+}
+
+inline std::string ShapeLine(const std::string& line, bool reorder_full_line) {
+    const std::vector<uint32_t> cps = DecodeUtf8(line);
+    bool has_arabic = false;
+    for (uint32_t cp : cps) {
+        if (IsArabicCodepoint(cp)) {
+            has_arabic = true;
+            break;
+        }
+    }
+    if (!has_arabic) return line;
+
+    // 1. Contextual Arabic glyph shaping + Lam-Alef ligatures
+    std::vector<uint32_t> shaped;
+    shaped.reserve(cps.size());
+    for (size_t i = 0; i < cps.size(); ++i) {
+        const uint32_t cp = cps[i];
+        if (IsDiacritic(cp)) continue; // Strip combining tashkeel so glyph advances stay clean in ImGui
+
+        LetterForms forms{};
+        if (!GetLetterForms(cp, forms)) {
+            shaped.push_back(cp);
+            continue;
+        }
+
+        bool join_prev = false;
+        for (int p = static_cast<int>(i) - 1; p >= 0; --p) {
+            if (IsDiacritic(cps[p])) continue;
+            join_prev = JoinsWithNext(cps[p]);
+            break;
+        }
+
+        // Check Lam + Alef ligature
+        if (cp == 0x0644) {
+            size_t next_idx = i + 1;
+            while (next_idx < cps.size() && IsDiacritic(cps[next_idx])) ++next_idx;
+            if (next_idx < cps.size()) {
+                const uint32_t lig = LamAlefLigature(cps[next_idx], join_prev);
+                if (lig != 0) {
+                    shaped.push_back(lig);
+                    i = next_idx;
+                    continue;
+                }
+            }
+        }
+
+        bool join_next = false;
+        if (forms.joins_next) {
+            for (size_t n = i + 1; n < cps.size(); ++n) {
+                if (IsDiacritic(cps[n])) continue;
+                join_next = JoinsWithPrev(cps[n]);
+                break;
+            }
+        }
+
+        uint32_t glyph = forms.iso;
+        if (join_prev && join_next) glyph = forms.med;
+        else if (join_prev) glyph = forms.fin;
+        else if (join_next) glyph = forms.ini;
+        shaped.push_back(glyph);
+    }
+
+    // 2. Partition into directional runs (RTL Arabic runs vs LTR Latin/number/format runs)
+    struct Run {
+        bool is_rtl;
+        std::vector<uint32_t> chars;
+    };
+    std::vector<Run> runs;
+    size_t idx = 0;
+    while (idx < shaped.size()) {
+        const uint32_t cp = shaped[idx];
+        if (IsArabicCodepoint(cp)) {
+            Run r{true, {}};
+            while (idx < shaped.size()) {
+                const uint32_t c = shaped[idx];
+                if (IsArabicCodepoint(c)) {
+                    r.chars.push_back(c);
+                    ++idx;
+                } else if (!IsStrongLtr(c)) {
+                    // Neutral punctuation/space: attach to RTL run if followed by another Arabic char
+                    size_t look = idx + 1;
+                    while (look < shaped.size() && !IsArabicCodepoint(shaped[look]) && !IsStrongLtr(shaped[look])) {
+                        ++look;
+                    }
+                    if (look < shaped.size() && IsArabicCodepoint(shaped[look])) {
+                        r.chars.push_back(MirrorBracket(c));
+                        ++idx;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            std::reverse(r.chars.begin(), r.chars.end());
+            runs.push_back(std::move(r));
+        } else if (IsStrongLtr(cp)) {
+            Run r{false, {}};
+            while (idx < shaped.size()) {
+                const uint32_t c = shaped[idx];
+                if (IsStrongLtr(c)) {
+                    r.chars.push_back(c);
+                    ++idx;
+                } else if (!IsArabicCodepoint(c)) {
+                    // Keep internal spaces/punctuation (e.g. "FSR 3.1", "%s:%d", "v01.21") inside LTR run
+                    // if followed by another strong LTR char
+                    size_t look = idx + 1;
+                    while (look < shaped.size() && !IsArabicCodepoint(shaped[look]) && !IsStrongLtr(shaped[look])) {
+                        ++look;
+                    }
+                    if (look < shaped.size() && IsStrongLtr(shaped[look])) {
+                        r.chars.push_back(c);
+                        ++idx;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            runs.push_back(std::move(r));
+        } else {
+            // Standalone neutral sequence at boundary or between RTL and LTR
+            Run r{true, {}};
+            while (idx < shaped.size() && !IsArabicCodepoint(shaped[idx]) && !IsStrongLtr(shaped[idx])) {
+                r.chars.push_back(MirrorBracket(shaped[idx]));
+                ++idx;
+            }
+            std::reverse(r.chars.begin(), r.chars.end());
+            runs.push_back(std::move(r));
+        }
+    }
+
+    if (reorder_full_line) {
+        std::reverse(runs.begin(), runs.end());
+    }
+
+    std::string out;
+    out.reserve(line.size() + 16);
+    for (const auto& r : runs) {
+        for (uint32_t c : r.chars) {
+            AppendUtf8(out, c);
+        }
+    }
+    return out;
+}
+
+inline std::string ShapeArabicForImGui(const std::string& input) {
+    if (input.empty()) return input;
+    // Preserve ImGui ID suffix (##...) untouched at the end
+    const size_t hash_pos = input.find("##");
+    const std::string visible = (hash_pos == std::string::npos) ? input : input.substr(0, hash_pos);
+    const std::string suffix  = (hash_pos == std::string::npos) ? ""    : input.substr(hash_pos);
+
+    // Count printf '%' format specifiers (excluding "%%")
+    int fmt_specs = 0;
+    for (size_t i = 0; i < visible.size(); ++i) {
+        if (visible[i] == '%') {
+            if (i + 1 < visible.size() && visible[i + 1] == '%') {
+                ++i;
+            } else if (i + 1 < visible.size() && (visible[i + 1] == 's' || visible[i + 1] == 'd' ||
+                       visible[i + 1] == 'u' || visible[i + 1] == 'f' || visible[i + 1] == '.' ||
+                       visible[i + 1] == 'z' || (visible[i + 1] >= '0' && visible[i + 1] <= '9'))) {
+                ++fmt_specs;
+            }
+        }
+    }
+    const bool reorder_full_line = (fmt_specs < 2);
+
+    std::string result;
+    result.reserve(input.size() + 16);
+    size_t start = 0;
+    while (start <= visible.size()) {
+        const size_t nl = visible.find('\n', start);
+        const std::string line = (nl == std::string::npos)
+            ? visible.substr(start)
+            : visible.substr(start, nl - start);
+        result += ShapeLine(line, reorder_full_line);
+        if (nl == std::string::npos) break;
+        result.push_back('\n');
+        start = nl + 1;
+    }
+    result += suffix;
+    return result;
+}
+
+} // namespace ArabicShaper
+
 const char* T(const char* es, const char* en) {
     if (g_active_locale == "es") return es;
     if (g_active_locale == "en") return en;
@@ -208,7 +691,17 @@ const char* T(const char* es, const char* en) {
     const auto language = all.find(g_active_locale);
     if (language != all.end()) {
         const auto value = language->second.find(en);
-        if (value != language->second.end()) return value->second.c_str();
+        if (value != language->second.end()) {
+            if (g_active_locale == "ar") {
+                static std::map<std::string, std::string> s_shaped_ar;
+                auto it = s_shaped_ar.find(en);
+                if (it == s_shaped_ar.end()) {
+                    it = s_shaped_ar.emplace(en, ArabicShaper::ShapeArabicForImGui(value->second)).first;
+                }
+                return it->second.c_str();
+            }
+            return value->second.c_str();
+        }
     }
     return en;
 }
@@ -776,6 +1269,7 @@ void SaveLauncher() {
     a.launcher.Set("base_dir", PathText(a.base_dir));
     a.launcher.Set("update_dir", PathText(a.update_dir));
     a.launcher.Set("ui_language", g_language);
+    a.launcher.Set("ui_theme", std::to_string(g_ui_theme));
     if (!a.launcher.Save(LauncherIni(), "# CTR-NitroFueled-PC launcher")) {
         a.notice = T("No se pudo guardar launcher.ini.", "Could not save launcher.ini.");
     }
@@ -2541,31 +3035,37 @@ bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
     const float y0 = a.y + 2.0f + press_offset;
     const float y1 = a.y + actual_size.y - 2.0f + press_offset;
     const float cy = (y0 + y1) * 0.5f;
-    const float inset = 11.0f;
-    ImVec2 shape[] = {
-        {a.x + inset, y0}, {a.x + actual_size.x - 22.0f, y0}, {a.x + actual_size.x - 5.0f, cy},
-        {a.x + actual_size.x - 22.0f, y1}, {a.x + inset, y1}, {a.x + inset + 13.0f, cy},
-    };
+    const UiTheme& th = CurrentTheme();
     ImDrawList* d = ImGui::GetWindowDrawList();
+
+    const ImVec2 r0{a.x + 4.0f, y0};
+    const ImVec2 r1{a.x + actual_size.x - 4.0f, y1};
+    const float rounding = 8.0f * g_ui_scale;
     if (!active) {
-        ImVec2 shadow[6];
-        for (int i = 0; i < 6; ++i) shadow[i] = ImVec2(shape[i].x, shape[i].y + 4.0f);
-        d->AddConvexPolyFilled(shadow, 6, IM_COL32(0, 29, 76, disabled ? 90 : 185));
+        d->AddRectFilled({r0.x, r0.y + 4.0f}, {r1.x, r1.y + 4.0f},
+                         IM_COL32(0, 0, 0, disabled ? 80 : 180), rounding);
     }
-    const ImU32 fill = disabled ? IM_COL32(140, 190, 210, 190)
-                                : hovered ? IM_COL32(250, 255, 255, 255) : IM_COL32(224, 247, 255, 255);
-    d->AddConvexPolyFilled(shape, 6, fill);
-    d->AddPolyline(shape, 6, disabled ? IM_COL32(177, 215, 230, 170) : IM_COL32(255, 255, 255, 255),
-                   ImDrawFlags_Closed, hovered ? 2.4f : 1.8f);
-    d->AddLine({a.x + 24.0f, y0 + 5.0f}, {a.x + actual_size.x - 28.0f, y0 + 5.0f},
-               disabled ? IM_COL32(255, 255, 255, 70) : IM_COL32(255, 255, 255, 170), 1.0f);
-    DrawMenuIcon(d, 0, {a.x + 39.0f, cy}, disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(5, 63, 109, 255), 1.0f);
-    ImFont* font = ImGui::GetFont();
-    const float font_size = ImGui::GetFontSize();
+    const ImU32 col_left = disabled ? IM_COL32(55, 60, 72, 200)
+                                    : Col(hovered ? th.button_active : th.accent, 1.0f);
+    const ImU32 col_right = disabled ? IM_COL32(45, 50, 62, 200)
+                                     : Col(hovered ? th.accent_alt : th.button_hover, 1.0f);
+    d->AddRectFilledMultiColor(r0, r1, col_left, col_right, col_right, col_left);
+    d->AddRect(r0, r1, disabled ? IM_COL32(110, 118, 135, 120) : Col(th.accent_alt, hovered ? 0.95f : 0.72f),
+               rounding, 0, hovered ? 2.2f : 1.5f);
+    d->AddLine({r0.x + 14.0f, y0 + 3.0f}, {r1.x - 14.0f, y0 + 3.0f},
+               disabled ? IM_COL32(255, 255, 255, 35) : IM_COL32(255, 255, 255, 130), 1.0f);
+
+    const ImU32 icon_col = disabled ? IM_COL32(140, 148, 165, 200) : IM_COL32(18, 18, 24, 255);
+    DrawMenuIcon(d, 0, {a.x + 36.0f, cy}, icon_col, 1.0f);
+    ImFont* font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize() * 1.08f;
     const ImVec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label);
     const ImVec2 text_pos{a.x + (actual_size.x - text_size.x) * 0.5f, cy - text_size.y * 0.5f};
+    if (!disabled) {
+        d->AddText(font, font_size, {text_pos.x + 1.0f, text_pos.y + 1.0f}, IM_COL32(255, 255, 255, 90), label);
+    }
     d->AddText(font, font_size, text_pos,
-               disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(4, 49, 86, 255), label);
+               disabled ? IM_COL32(145, 152, 168, 210) : IM_COL32(14, 14, 20, 255), label);
     return pressed;
 }
 
@@ -6523,15 +7023,27 @@ void ToolsTab() {
     if (ImGui::Button(T("Borrar la caché de shaders", "Clear the shader cache"))) a.confirm_clear_cache = true;
     ImGui::EndDisabled();
 
-    ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
+    ImGui::SeparatorText(T("Idioma y apariencia", "Language & appearance"));
+    static const std::string kArabicLanguageName = ArabicShaper::ShapeArabicForImGui("العربية");
     const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
-                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский"};
-    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru"};
+                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский", kArabicLanguageName.c_str()};
+    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru", "ar"};
     int selected_language = 0;
-    for (int i = 0; i < 10; ++i) if (g_language == language_codes[i]) selected_language = i;
-    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 10)) {
+    for (int i = 0; i < 11; ++i) if (g_language == language_codes[i]) selected_language = i;
+    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 11)) {
         g_language = language_codes[selected_language];
         ApplyLauncherLanguage();
+        SaveLauncher();
+    }
+    const char* theme_names[] = {
+        T(kThemes[0].name_es, kThemes[0].name_en),
+        T(kThemes[1].name_es, kThemes[1].name_en),
+        T(kThemes[2].name_es, kThemes[2].name_en),
+        T(kThemes[3].name_es, kThemes[3].name_en),
+        T(kThemes[4].name_es, kThemes[4].name_en),
+    };
+    if (ImGui::Combo(T("Tema visual", "Visual theme"), &g_ui_theme, theme_names, 5)) {
+        ApplyUiTheme();
         SaveLauncher();
     }
 
@@ -6582,8 +7094,9 @@ void ClearShaderCache() {
 void HeroHeader() {
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float width = ImGui::GetContentRegionAvail().x;
-    const float height = 270.0f;
+    const float height = 178.0f * g_ui_scale;
     const ImVec2 end{origin.x + width, origin.y + height};
+    const UiTheme& th = CurrentTheme();
     ImDrawList* draw = ImGui::GetWindowDrawList();
     if (g_hero_art.texture) {
         const float image_aspect = float(g_hero_art.width) / float(g_hero_art.height);
@@ -6600,42 +7113,115 @@ void HeroHeader() {
         }
         draw->AddImage((ImTextureID)(intptr_t)g_hero_art.texture, origin, end, uv0, uv1);
     } else {
-        draw->AddRectFilled(origin, end, IM_COL32(48, 32, 20, 255));
+        draw->AddRectFilled(origin, end, Col(th.nav_bg, 1.0f));
     }
+    // Smooth dark vignette fade on left and bottom so the logo and tabs blend cleanly
+    draw->AddRectFilledMultiColor(origin, ImVec2(origin.x + width * 0.52f, end.y),
+                                  IM_COL32(8, 10, 14, 195), IM_COL32(8, 10, 14, 0),
+                                  IM_COL32(8, 10, 14, 0), IM_COL32(8, 10, 14, 215));
+    draw->AddRectFilledMultiColor(ImVec2(origin.x, end.y - 54.0f * g_ui_scale), end,
+                                  IM_COL32(10, 12, 18, 0), IM_COL32(10, 12, 18, 0),
+                                  Col(th.win_bg, 0.96f), Col(th.win_bg, 0.96f));
     if (g_logo_art.texture) {
-        const float max_w = std::min(width * 0.34f, 390.0f);
-        const float max_h = height * 0.78f;
+        const float max_w = std::min(width * 0.30f, 320.0f * g_ui_scale);
+        const float max_h = height * 0.80f;
         const float aspect = float(g_logo_art.width) / float(g_logo_art.height);
         float logo_w = max_w, logo_h = logo_w / aspect;
         if (logo_h > max_h) { logo_h = max_h; logo_w = logo_h * aspect; }
-        const ImVec2 lo{origin.x + 28.0f, origin.y + (height - logo_h) * 0.5f};
+        const ImVec2 lo{origin.x + 24.0f * g_ui_scale, origin.y + (height - logo_h) * 0.5f};
         const ImVec2 hi{lo.x + logo_w, lo.y + logo_h};
         draw->AddImage((ImTextureID)(intptr_t)g_logo_art.texture, lo, hi);
     }
-    draw->AddRectFilled(ImVec2(origin.x, end.y - 4.0f), end, IM_COL32(238, 169, 48, 255));
+    // Glowing racing accent bar along bottom of hero banner
+    draw->AddRectFilledMultiColor(ImVec2(origin.x, end.y - 3.0f * g_ui_scale), end,
+                                  Col(th.accent, 1.0f), Col(th.accent_alt, 1.0f),
+                                  Col(th.accent_alt, 1.0f), Col(th.accent, 1.0f));
     ImGui::Dummy(ImVec2(width, height));
 }
 
 void WindowBar(float width) {
-    const float height = 40.0f;
+    const float height = 42.0f * g_ui_scale;
     ImGui::SetCursorPos(ImVec2(0, 0));
     const ImVec2 p = ImGui::GetWindowPos();
+    const UiTheme& th = CurrentTheme();
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height), IM_COL32(7, 72, 145, 255));
-    draw->AddRectFilled(ImVec2(p.x, p.y + height - 1), ImVec2(p.x + width, p.y + height),
-                        IM_COL32(44, 166, 228, 255));
-    const float bw = 42.0f, bh = 30.0f, gap = 3.0f;
-    const float left = width - 3.0f * bw - 2.0f * gap - 8.0f;
+    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height), Col(th.titlebar_bg, 1.0f));
+    draw->AddRectFilledMultiColor(ImVec2(p.x, p.y + height - 2.0f), ImVec2(p.x + width, p.y + height),
+                                  Col(th.accent, 0.95f), Col(th.accent_alt, 0.95f),
+                                  Col(th.accent_alt, 0.95f), Col(th.accent, 0.95f));
+
+    // Left: Launcher Title + Accent Bar
+    ImFont* title_font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
+    const float fsize = ImGui::GetFontSize();
+    const char* title_txt = "CTR: NITRO-FUELED";
+    const ImVec2 tsize = title_font->CalcTextSizeA(fsize, FLT_MAX, 0.0f, title_txt);
+    const float ty = p.y + (height - tsize.y) * 0.5f;
+    draw->AddRectFilled(ImVec2(p.x + 12.0f * g_ui_scale, p.y + 10.0f * g_ui_scale),
+                        ImVec2(p.x + 16.0f * g_ui_scale, p.y + height - 10.0f * g_ui_scale),
+                        Col(th.accent, 1.0f), 2.0f);
+    draw->AddText(title_font, fsize, ImVec2(p.x + 24.0f * g_ui_scale, ty), IM_COL32(248, 250, 255, 255), title_txt);
+
+    // Region & Status pills on titlebar
+    float pill_x = p.x + 24.0f * g_ui_scale + tsize.x + 14.0f * g_ui_scale;
+    auto draw_pill = [&](const std::string& text, ImVec4 border_col, ImVec4 text_col) {
+        ImFont* f = ImGui::GetFont();
+        const float pfs = fsize * 0.84f;
+        const ImVec2 sz = f->CalcTextSizeA(pfs, FLT_MAX, 0.0f, text.c_str());
+        const float pw = sz.x + 18.0f * g_ui_scale;
+        const float ph = 24.0f * g_ui_scale;
+        const float py = p.y + (height - ph) * 0.5f;
+        draw->AddRectFilled(ImVec2(pill_x, py), ImVec2(pill_x + pw, py + ph),
+                            IM_COL32(18, 22, 32, 220), ph * 0.5f);
+        draw->AddRect(ImVec2(pill_x, py), ImVec2(pill_x + pw, py + ph),
+                      Col(border_col, 0.70f), ph * 0.5f, 0, 1.2f);
+        draw->AddText(f, pfs, ImVec2(pill_x + 9.0f * g_ui_scale, py + (ph - sz.y) * 0.5f),
+                      Col(text_col, 1.0f), text.c_str());
+        pill_x += pw + 8.0f * g_ui_scale;
+    };
+    if (IsCtrTitle(g_app.game_info.title)) {
+        const std::string region = (g_app.game_info.title == "CUSA14876" ? "Europe (PAL) · " : "Americas (NTSC) · ") +
+                                   g_app.game_info.title;
+        draw_pill(region, th.accent_alt, th.accent_alt);
+    }
+    if (g_app.game_info.kind == Kind::Complete && g_app.game_checked && g_app.game_ok) {
+        const bool onl = g_app.game.Flag("online", true);
+        const std::string status = onl ? std::string(T("● ONLINE ACTIVO", "● ONLINE READY"))
+                                       : std::string(T("● LISTO (OFFLINE)", "● READY TO PLAY"));
+        draw_pill(status, kGreen, kGreen);
+    }
+
+    const float bw = 42.0f * g_ui_scale, bh = 30.0f * g_ui_scale, gap = 3.0f * g_ui_scale;
+    const float left = width - 3.0f * bw - 2.0f * gap - 8.0f * g_ui_scale;
+
+    // Theme quick-switch button right next to window controls
+    const std::string theme_btn_label = std::string(T("Tema: ", "Theme: ")) + T(th.name_es, th.name_en) + "##theme_cycle";
+    const float theme_bw = 165.0f * g_ui_scale;
+    const float theme_bx = left - theme_bw - 10.0f * g_ui_scale;
+    if (theme_bx > pill_x - p.x + 8.0f) {
+        ImGui::SetCursorPos(ImVec2(theme_bx, (height - bh) * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button, th.frame_bg);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.button_hover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.button_active);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f * g_ui_scale);
+        if (ImGui::Button(theme_btn_label.c_str(), ImVec2(theme_bw, bh))) {
+            g_ui_theme = (g_ui_theme + 1) % 5;
+            ApplyUiTheme();
+            SaveLauncher();
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+    }
+
     auto button = [&](const char* id, int kind) {
-        ImGui::SetCursorPos(ImVec2(left + kind * (bw + gap), 5.0f));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.25f, 0.47f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f, 0.40f, 0.66f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.78f, 1));
+        ImGui::SetCursorPos(ImVec2(left + kind * (bw + gap), (height - bh) * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button, th.frame_bg);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kind == 2 ? ImVec4(0.85f, 0.20f, 0.24f, 1.0f) : th.button_hover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kind == 2 ? ImVec4(0.95f, 0.28f, 0.32f, 1.0f) : th.button_active);
         const bool clicked = ImGui::Button(id, ImVec2(bw, bh));
         ImGui::PopStyleColor(3);
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         const ImVec2 c{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
-        const ImU32 ink = IM_COL32(255, 234, 198, 255);
+        const ImU32 ink = IM_COL32(245, 245, 250, 255);
         if (kind == 0) draw->AddLine(ImVec2(c.x - 5, c.y), ImVec2(c.x + 5, c.y), ink, 1.6f);
         else if (kind == 1) draw->AddRect(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), ink, 0, 0, 1.4f);
         else {
@@ -6649,8 +7235,9 @@ void WindowBar(float width) {
     if (button("##close", 2)) SendMessageW(g_app.hwnd, WM_CLOSE, 0, 0);
     RECT client{};
     GetClientRect(g_app.hwnd, &client);
-    g_titlebar_drag = RECT{0, 0, std::max<LONG>(0, client.right - LONG(3 * bw + 2 * gap + 8)), LONG(height)};
-    ImGui::SetCursorPos(ImVec2(14, height + 10));
+    const LONG drag_right = std::max<LONG>(0, LONG(theme_bx > 0 ? theme_bx : left));
+    g_titlebar_drag = RECT{0, 0, drag_right, LONG(height)};
+    ImGui::SetCursorPos(ImVec2(14, height + 6));
 }
 
 bool LoadArtworkFile(const fs::path& path, LauncherArtwork& artwork) {
@@ -6700,7 +7287,7 @@ void ReleaseArtwork() {
 }
 
 void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
-    const ImU32 navy = IM_COL32(6, 39, 89, 255);
+    const ImU32 navy = IM_COL32(12, 14, 22, 240);
     auto line = [&](ImVec2 a, ImVec2 b, float t = 2.2f) { d->AddLine(a, b, navy, t * s); d->AddLine(a, b, ink, t * s * 0.58f); };
     if (id == 0) { // checkered flag / race
         line({c.x-7*s,c.y+8*s},{c.x-7*s,c.y-8*s},2.5f); d->AddRectFilled({c.x-5*s,c.y-8*s},{c.x+8*s,c.y+1*s},ink,1.5f*s);
@@ -6727,6 +7314,10 @@ void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
     } else if (id == 7) { // crate
         d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
         d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
+    } else if (id == 8) { // trophy star
+        d->AddCircleFilled(c, 7.2f * s, navy, 16);
+        d->AddCircleFilled(c, 5.6f * s, ink, 16);
+        d->AddCircleFilled(c, 2.4f * s, navy, 12);
     } else { // crossed tools
         line({c.x-7*s,c.y-7*s},{c.x+7*s,c.y+7*s},3); line({c.x+7*s,c.y-7*s},{c.x-7*s,c.y+7*s},3); d->AddCircleFilled(c,2.5f*s,ink,12);
     }
@@ -6734,43 +7325,45 @@ void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
 
 bool MenuEntry(int id, const char* label, bool selected, float width) {
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    const ImVec2 size{width, 44.0f};
+    const ImVec2 size{width, 42.0f * g_ui_scale};
     const bool clicked = ImGui::InvisibleButton(label, size);
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 a{start.x, start.y}, b{start.x + size.x, start.y + size.y};
+    const UiTheme& th = CurrentTheme();
     ImDrawList* d = ImGui::GetWindowDrawList();
-    const double now = ImGui::GetTime();
-    static double selected_since = 0.0;
-    static int last_selected = -1;
-    if (selected && last_selected != id) { last_selected = id; selected_since = now; }
-    const float t = selected ? std::clamp(float((now - selected_since) / 0.26), 0.0f, 1.0f) : 1.0f;
-    const float ease = 1.0f - (1.0f-t)*(1.0f-t);
-    const float slide = selected ? (1.0f-ease) * -13.0f : 0.0f;
-    ImVec2 p0{a.x+slide,a.y+4}, p1{b.x+slide-10,a.y+4}, p2{b.x+slide,a.y+size.y-4}, p3{a.x+slide+10,a.y+size.y-4};
-    const ImU32 shadow=IM_COL32(0,31,79,95), dark=hovered?IM_COL32(7,65,130,218):IM_COL32(6,55,113,178);
-    const ImVec2 sh[]={ImVec2(p0.x,p0.y+3),ImVec2(p1.x,p1.y+3),ImVec2(p2.x,p2.y+3),ImVec2(p3.x,p3.y+3)};
-    d->AddConvexPolyFilled(sh,4,shadow);
-    const ImVec2 poly[]={p0,p1,p2,p3};
-    d->AddConvexPolyFilled(poly,4,selected?IM_COL32(234,250,255,248):dark);
+    const float rounding = 7.0f * g_ui_scale;
+    const ImVec2 r0{a.x + 2.0f, a.y + 2.0f};
+    const ImVec2 r1{b.x - 2.0f, b.y - 2.0f};
+
     if (selected) {
-        d->AddPolyline(poly,4,IM_COL32(255,255,255,215),ImDrawFlags_Closed,1.6f);
-        d->AddRectFilled({p3.x+3,p3.y-1},{p3.x+8,p3.y+1},IM_COL32(29,211,255,255));
-        const float elapsed = float(now-selected_since);
-        if (elapsed < 0.42f) {
-            const float shine = std::clamp(elapsed / 0.42f, 0.0f, 1.0f);
-            const float sx = a.x+slide+12.0f+shine*(size.x-54.0f);
-            d->PushClipRect({p0.x,p0.y},{p2.x,p2.y},true);
-            d->AddLine({sx,p0.y+5},{sx+13,p2.y-5},IM_COL32(255,255,255,110),2.0f);
-            d->PopClipRect();
-        }
+        d->AddRectFilledMultiColor(r0, r1,
+                                   Col(th.accent, 0.34f), Col(th.accent_alt, 0.14f),
+                                   Col(th.accent_alt, 0.14f), Col(th.accent, 0.34f));
+        d->AddRect(r0, r1, Col(th.accent, 0.85f), rounding, 0, 1.5f);
+        d->AddRectFilled({r0.x, r0.y + 4.0f * g_ui_scale},
+                         {r0.x + 4.5f * g_ui_scale, r1.y - 4.0f * g_ui_scale},
+                         Col(th.accent_alt, 1.0f), 2.0f);
+    } else if (hovered) {
+        d->AddRectFilled(r0, r1, Col(th.frame_hover, 0.88f), rounding);
+        d->AddRect(r0, r1, Col(th.border, 0.70f), rounding, 0, 1.0f);
+        d->AddRectFilled({r0.x, r0.y + 8.0f * g_ui_scale},
+                         {r0.x + 3.0f * g_ui_scale, r1.y - 8.0f * g_ui_scale},
+                         Col(th.accent, 0.80f), 1.5f);
+    } else {
+        d->AddRectFilled(r0, r1, Col(th.frame_bg, 0.55f), rounding);
     }
-    const ImVec2 icon{a.x+31.0f+slide,a.y+size.y*0.5f};
-    DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),0.75f);
+
+    const ImVec2 icon{a.x + 26.0f * g_ui_scale, a.y + size.y * 0.5f};
+    const ImU32 icon_col = selected ? Col(th.accent_alt, 1.0f)
+                                    : hovered ? IM_COL32(255, 255, 255, 245) : IM_COL32(195, 204, 220, 220);
+    DrawMenuIcon(d, id, icon, icon_col, 0.78f * g_ui_scale);
     ImFont* label_font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
     const float label_font_size = ImGui::GetFontSize();
-    const ImVec2 text_size=label_font->CalcTextSizeA(label_font_size, FLT_MAX, 0.0f, label);
-    const ImVec2 text{a.x+55.0f+slide,a.y+(size.y-text_size.y)*0.5f};
-    d->AddText(label_font,label_font_size,text,selected?IM_COL32(4,46,84,255):IM_COL32(237,249,255,245),label);
+    const ImVec2 text_size = label_font->CalcTextSizeA(label_font_size, FLT_MAX, 0.0f, label);
+    const ImVec2 text{a.x + 48.0f * g_ui_scale, a.y + (size.y - text_size.y) * 0.5f};
+    const ImU32 txt_col = selected ? Col(th.accent_alt, 1.0f)
+                                   : hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(224, 230, 242, 235);
+    d->AddText(label_font, label_font_size, text, txt_col, label);
     return clicked;
 }
 
@@ -6778,6 +7371,7 @@ void Frame() {
     App& a = g_app;
     PollJobs();
     PollUpdate();
+    const UiTheme& th = CurrentTheme();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -6790,9 +7384,10 @@ void Frame() {
         ImVec2 uv0{0,0},uv1{1,1};
         if (ia>wa) { const float v=wa/ia; uv0.x=(1-v)*0.5f; uv1.x=1-uv0.x; }
         else { const float v=ia/wa; uv0.y=(1-v)*0.5f; uv1.y=1-uv0.y; }
-        ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)g_menu_background.texture,
-                                             vp->WorkPos, ImVec2(vp->WorkPos.x + vp->WorkSize.x,
-                                                                 vp->WorkPos.y + vp->WorkSize.y),uv0,uv1);
+        ImDrawList* bg = ImGui::GetWindowDrawList();
+        const ImVec2 p1{vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y};
+        bg->AddImage((ImTextureID)(intptr_t)g_menu_background.texture, vp->WorkPos, p1, uv0, uv1);
+        bg->AddRectFilled(vp->WorkPos, p1, Col(th.win_bg, 0.84f));
     }
     const float width = ImGui::GetWindowSize().x;
     WindowBar(width);
@@ -6805,35 +7400,35 @@ void Frame() {
     }
     UpdateBanner();
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, th.nav_bg);
     ImGui::BeginChild("menu_body", ImVec2(0, 0), ImGuiChildFlags_None);
-    const float menu_w = 238.0f;
+    const float menu_w = 236.0f * g_ui_scale;
     ImGui::BeginChild("menu_navigation", ImVec2(menu_w, 0), ImGuiChildFlags_None);
-    ImGui::SetCursorPos(ImVec2(18.0f, 14.0f));
-    ImGui::TextColored(ImVec4(0.76f, 0.92f, 1.0f, 0.9f), "%s", T("MENÚ PRINCIPAL", "MAIN MENU"));
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
-    const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
-                           T("Teclado", "Keyboard"), "Mods", T("Guardados", "Saves"), "DLC",
+    ImGui::SetCursorPos(ImVec2(16.0f * g_ui_scale, 12.0f * g_ui_scale));
+    ImGui::TextColored(th.accent_alt, "%s", T("MENÚ DE CARRERA", "RACING MENU"));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f * g_ui_scale);
+    const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), T("En línea", "Online"), T("Mando", "Gamepad"),
+                           T("Teclado", "Keyboard"), T("Mods", "Mods"), T("Guardados", "Saves"), T("DLC", "DLC"),
                            T("Logros", "Achievements"), T("Herramientas", "Tools")};
     for (int i=0; i<10; ++i) {
-        ImGui::SetCursorPosX(8.0f);
-        if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
+        ImGui::SetCursorPosX(8.0f * g_ui_scale);
+        if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f * g_ui_scale)) {
             a.active_page = i;
             if (i != 3) g_pad_capture = -1;
             if (i != 4) g_key_capture = -1;
         }
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f * g_ui_scale);
     }
-    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 38.0f));
-    ImGui::SetCursorPosX(18.0f);
-    ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.84f), "CTR  •  %s", a.version.c_str());
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 34.0f * g_ui_scale));
+    ImGui::SetCursorPosX(16.0f * g_ui_scale);
+    ImGui::TextColored(ImVec4(0.72f, 0.76f, 0.84f, 0.85f), "CTR  •  %s", a.version.c_str());
     ImGui::EndChild();
     ImGui::SameLine(0.0f, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.015f, 0.13f, 0.32f, 0.82f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, th.content_bg);
     // Real child padding applies to every row, table, wrap edge and tab.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 17.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f * g_ui_scale, 16.0f * g_ui_scale));
     ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
     switch (a.active_page) {
     case 0: PlayTab(); break;
     case 1: SettingsTab(); break;
@@ -6924,6 +7519,7 @@ void LoadState() {
     SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
     g_language = lang.empty() ? "auto" : lang;
+    g_ui_theme = std::clamp(a.launcher.Int("ui_theme", 0), 0, 4);
     ApplyLauncherLanguage();
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
@@ -7267,31 +7863,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
+    ApplyUiTheme();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.Colors[ImGuiCol_Text] = ImVec4(0.94f, 0.98f, 1.0f, 1.0f);
-    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.65f, 0.83f, 0.94f, 1.0f);
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.10f, 0.24f, 1.0f);
-    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.02f, 0.18f, 0.36f, 0.78f);
-    style.Colors[ImGuiCol_PopupBg] = ImVec4(0.02f, 0.13f, 0.30f, 0.98f);
-    style.Colors[ImGuiCol_Border] = ImVec4(0.48f, 0.84f, 0.97f, 0.35f);
-    style.Colors[ImGuiCol_FrameBg] = ImVec4(0.04f, 0.24f, 0.43f, 0.90f);
-    style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.07f, 0.38f, 0.60f, 1.0f);
-    style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.10f, 0.48f, 0.68f, 1.0f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.04f, 0.27f, 0.49f, 0.95f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.10f, 0.50f, 0.70f, 1.0f);
-    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.17f, 0.71f, 0.87f, 1.0f);
-    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.91f, 1.0f, 1.0f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.05f, 0.35f, 0.60f, 0.9f);
-    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.11f, 0.55f, 0.76f, 1.0f);
-    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.16f, 0.68f, 0.84f, 1.0f);
     style.FontSizeBase = 17.0f;
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
     style.WindowPadding = ImVec2(16 * scale, 14 * scale);
     style.FramePadding = ImVec2(10 * scale, 6 * scale);
     style.ItemSpacing = ImVec2(10 * scale, 8 * scale);
-    style.FrameRounding = 4 * scale;
-    style.TabRounding = 4 * scale;
+    style.FrameRounding = 5 * scale;
+    style.TabRounding = 5 * scale;
     style.WindowRounding = 9 * scale;
     wchar_t fonts[MAX_PATH];
     const UINT n = GetWindowsDirectoryW(fonts, MAX_PATH);
@@ -7308,10 +7889,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (!fs::is_regular_file(file, ec)) continue;
             ImFontConfig merge;
             merge.MergeMode = true;
-            io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), 0.0f, &merge);
+            io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), style.FontSizeBase, &merge);
         }
     };
-    if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
+    if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str(), style.FontSizeBase);
     else io.Fonts->AddFontDefault();
     merge_fallbacks(false);
     const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
