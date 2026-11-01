@@ -102,11 +102,15 @@ void runtime_online_mode_adopt(int speed);
 void runtime_online_mode_leave_cup(void);
 int runtime_online_mode_private_speed(void);
 int runtime_online_mode_private_cup(void);
+int runtime_online_mode_private_single_options(void);
 int runtime_online_mode_in_private(void);
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
 int runtime_speed_race_active(void);
+void runtime_race_options_leave_room(void);
+void runtime_race_options_map_loading(const char *map);
+int runtime_race_options_start(unsigned char *image, size_t size);
 int runtime_itemless_start(unsigned char *image, size_t size);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);

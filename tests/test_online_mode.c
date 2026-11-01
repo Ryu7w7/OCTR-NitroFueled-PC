@@ -6,7 +6,89 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+void runtime_race_options_map_loading(const char *map) { (void)map; }
 static int speed = -1, private = 1, base_calls;
+static int clock_calls;
+static void ABI clock_mock(void *component, void *target, void *effect) {
+    (void)component; (void)target; (void)effect;
+    ++clock_calls;
+}
+static int damage_calls;
+static int ABI damage_mock(unsigned char *component, unsigned kind, void **source, unsigned char flags) {
+    (void)component; (void)kind; (void)source; (void)flags;
+    ++damage_calls;
+    return 0;
+}
+static int confetti_calls, animation_calls, animation_selection;
+static unsigned char result_anim[8];
+static int result_sounds, released_result_sounds, result_sound_won;
+static void ABI result_sound_mock(void *kart, const char *name, void **sound, void **callback) {
+    assert(kart && !callback[0] && !callback[1]);
+    result_sound_won = !strcmp(name, "UI_Player_Lap_Change_End_Win");
+    assert(result_sound_won || !strcmp(name, "UI_Player_Lap_Change_End_Lose"));
+    *sound = result_anim; ++result_sounds;
+}
+static void ABI release_result_sound_mock(void *sound) {
+    assert(sound == result_anim); ++released_result_sounds;
+}
+static void *ABI result_animation_mock(void *kart) { assert(kart); return result_anim; }
+static void ABI confetti_mock(void *racer) { assert(racer); ++confetti_calls; }
+static void ABI animation_selector_mock(void *anim, const char *name, int value) {
+    assert(anim == result_anim && !strcmp(name, "VictoryLapAnimSelector"));
+    animation_selection = value;
+}
+static void ABI animation_event_mock(void *anim, const char *name) {
+    assert(anim == result_anim && !strcmp(name, "OnVictoryLap")); ++animation_calls;
+}
+static int team_settings_broadcasts, broadcast_team_count;
+static int ai_team_calls;
+static int inserted_ready, controls_enabled;
+static void ABI activate_input_mock(unsigned char *project) { project[0x34] |= 0x20; }
+static void ABI enable_controls_mock(void *project) {
+    assert(project);
+    int *disabled_depth = (int *)((unsigned char *)project + 0x48);
+    if (*disabled_depth > 0) --*disabled_depth;
+    ++controls_enabled;
+}
+static void ABI ready_insert_mock(void *table, void *player, unsigned char *ready, unsigned hash) {
+    assert(table == (void *)1 && player == (void *)2 && hash == 3);
+    inserted_ready = *ready;
+}
+static void ABI assign_ai_teams_mock(void) { ++ai_team_calls; }
+static void ABI broadcast_teams_mock(unsigned char *settings) {
+    ++team_settings_broadcasts;
+    memcpy(&broadcast_team_count, settings + 0x28, 4);
+}
+static int ABI racer_faction_mock(unsigned char *racer) {
+    int faction;
+    memcpy(&faction, racer + 0x174, 4);
+    return faction;
+}
+static void ABI ranking_row_mock(unsigned char *self, void *event, void *owner) {
+    (void)event; (void)owner;
+    assert(self[0xd8] == 0); /* Must clear before native binding, not after drawing. */
+}
+static int keep_slot_position;
+static void ABI team_slot_update_mock(unsigned char *self, unsigned char *owner, float dt) {
+    (void)owner; assert(dt == .25f);
+    unsigned char *name, *number;
+    memcpy(&name, self+0x10, 8); memcpy(&number, self+0x18, 8);
+    if (!keep_slot_position) *(float *)(name+0x64)=85.f;
+    *(unsigned *)(number+12) &= ~0x400u; /* Native binding can reveal the label again. */
+}
+static int selector_native_events;
+static void ABI leader_event_mock(void *self, void *event, void *owner) {
+    ++selector_native_events;
+    (void)self; (void)event; (void)owner;
+}
+static void ABI leader_update_mock(void *self, void *owner, float dt) {
+    (void)self; (void)owner; (void)dt;
+}
+static unsigned char hero_record[0x20];
+static void *ABI lookup_hero_mock(void *catalog, const char *hero) {
+    assert(catalog && !strcmp(hero, "hero_crash"));
+    return hero_record;
+}
 static int room_active, lobby_updates;
 static void ABI base_update(void *self, void *owner, float dt) {
     (void)self;
@@ -17,6 +99,32 @@ void runtime_speed_mode_set(int enabled) { speed = enabled; }
 int runtime_speed_race_active(void) { return speed == 1 && room_active; }
 static void ABI private_state(unsigned char *yes, unsigned char *no) {
     *yes = (unsigned char)private; *no = (unsigned char)!private;
+}
+static unsigned char *timer_config;
+static float timer_ui_initial;
+static int individual_sounds;
+static void ABI timer_init_mock(unsigned char *self) {
+    unsigned char *owner = *(void **)(self + 0x18);
+    if (!owner || (owner[0x3b] & 1))
+        memcpy(self + 0x28, timer_config + (private ? 0x110 : 0x11c), 4);
+    memcpy(self + 0x2c, timer_config + 0x118, 4);
+    memcpy(self + 0x30, timer_config + 0x114, 4);
+    memcpy(&timer_ui_initial, self + 0x28, 4);
+}
+static void ABI individual_sound_mock(void *context, unsigned char *pins) {
+    (void)context; (void)pins; ++individual_sounds;
+}
+static int gate_notices, gate_native_calls, gate_ready = 1;
+static void ABI can_start_mock(unsigned char *yes, unsigned char *no) {
+    *yes = (unsigned char)gate_ready; *no = (unsigned char)!gate_ready;
+}
+static void ABI lobby_start_mock(unsigned char *self) {
+    ++gate_native_calls;
+    self[0x42] = 1; /* This is the broadcast's native one-shot latch. */
+}
+static void ABI gate_notice_mock(const char *text, void *callback) {
+    assert(!callback && strstr(text, "TEAMS WITH NO AI NEED") && strstr(text, "ENABLE AI"));
+    ++gate_notices;
 }
 static void ABI base_event(void *self, void *event, void *owner) {
     (void)self; (void)event; (void)owner; base_calls++;
@@ -44,6 +152,23 @@ static void stub(unsigned char *at, void *function) {
     memcpy(at + 15, &function, 8);
     memcpy(at + 23, "\xff\xe0", 2);
 }
+static void *local_player_mock;
+static int ABI local_controller_mock(int controller) { assert(controller != 0); return 0; }
+static void *ABI local_find_mock(void *list, int id) { (void)list; (void)id; return local_player_mock; }
+
+static unsigned char selector_ready;
+static int selector_ready_found = 1;
+static int ABI selector_ready_find_mock(void *table, void *key, unsigned hash, unsigned char **value) {
+    (void)table; (void)key; (void)hash;
+    *value = &selector_ready;
+    return selector_ready_found;
+}
+
+static int network_query_value = 1;
+static void *last_graph_node;
+static unsigned char ABI network_query_mock(void) { return (unsigned char)network_query_value; }
+static void ABI run_node_mock(void *context, void *node) { (void)context; last_graph_node = node; }
+
 static void put_pointer(unsigned char *at, size_t offset, const void *pointer) {
     memcpy(at + offset, &pointer, sizeof pointer);
 }
@@ -104,7 +229,11 @@ static void ABI zone_handle(void **slot, void *zone) {
         put_pointer(test_handles[i], 0x28, zone);
         return;
     }
-    assert(0);
+    static unsigned char project_handles[32][0x30];
+    static unsigned next;
+    assert(next < sizeof project_handles / sizeof project_handles[0]);
+    unsigned char *handle = project_handles[next++];
+    *(unsigned *)handle = 4; put_pointer(handle, 0x28, zone); *slot = handle;
 }
 static int cleared_participants, forced_finishes;
 static int pool_queued, pool_waited, ai_spawns;
@@ -122,21 +251,58 @@ static void ABI spawn_ai_mock(void *manager) {
     assert(manager && pool_waited == pool_queued);
     ++ai_spawns;
 }
+static int disable_node_calls;
+static void ABI disable_node_mock(void *context, unsigned char *pins) {
+    (void)context; assert(pins); ++disable_node_calls;
+}
 static int expected_grid, grid_calls;
 static unsigned char ranking_handle[0x30], panel_handle[0x30];
+static unsigned char leaders_handle[0x30], leaders_project[0x20];
 static unsigned char ranking_project[0x20], panel_project[0x20], panel_root[0x20];
-static int panel_opens, panel_events, ranking_events, context_finishes;
+static int panel_opens, panel_events, ranking_events, context_finishes, team_score_opens;
+static const char *expected_ranking;
+static void (ABI *open_race_ui_project)(void **, void *, const char *, void *, int, void *, float);
 static void ABI race_ui_mock(unsigned char *self) {
-    put_pointer(self, 0x60, ranking_handle);
+    unsigned char options[40] = {0};
+    *(int *)(options + 8) = 2; *(int *)(options + 12) = -1;
+    *(int *)(options + 24) = 8; *(int *)(options + 28) = -1;
+    const int previous = panel_opens;
+    open_race_ui_project((void **)(self + 0x60), NULL,
+                        runtime_online_mode_private_cup() ? "Octane_CupRace_Ranking" : "Octane_Race_Ranking",
+                        options, -1, NULL, 0);
+    if (runtime_online_mode_private_cup())
+        assert(panel_opens == previous + 1); /* Before native intro would open. */
+    put_pointer(self, 0x58, leaders_handle);
 }
 static void *ABI panel_event_type(unsigned char *event) { return *(void **)(event + 8); }
+static void *ready_target, *ready_behavior, *ready_owner;
+static void (ABI *ready_handler)(void *, void *, void *);
+static int broadcast_routes, ready_project_events;
 static void ABI project_event_mock(void *self, void *event) {
+    if (self == ready_target && ready_handler) {
+        ++ready_project_events; ready_handler(ready_behavior, event, ready_owner); return;
+    }
     assert(event);
     if (self == panel_project) ++panel_events;
     else ++ranking_events;
 }
+static void ABI broadcast_mock(void *layer, void *event) {
+    (void)layer;
+    if (broadcast_routes) project_event_mock(ready_target, event);
+}
 static void ABI open_panel_mock(void **result, void *manager, const char *name,
                                unsigned char *options, int player, void *context, float delay) {
+    if (context && !strcmp(name, "Octane_BattleTeam_Ranking")) {
+        ++team_score_opens;
+        ++*(unsigned *)ranking_handle;
+        *result = ranking_handle;
+        return;
+    }
+    if (!context) {
+        assert(!strcmp(name, expected_ranking && strcmp(expected_ranking, "Octane_BattleTeam_Ranking") ? expected_ranking : runtime_online_mode_private_cup() ? "Octane_CupRace_Ranking" : "Octane_Race_Ranking"));
+        *result = expected_ranking && !strcmp(expected_ranking, "Octane_BattleTeam_Ranking") ? panel_handle : ranking_handle;
+        return;
+    }
     (void)manager;
     assert(!strcmp(name, "Octane_Race_Ranking") && player == -1 && delay == 0.0f);
     assert(*(int *)(options + 8) == 2 && *(int *)(options + 12) == -1);
@@ -149,8 +315,15 @@ static void ABI open_panel_mock(void **result, void *manager, const char *name,
 }
 static void ABI finish_context_mock(void *context) { assert(context); ++context_finishes; }
 static void ABI hide_panel_mock(unsigned char *root, int hidden) {
-    assert(root == panel_root && hidden == 1);
-    root[12] = 1;
+    if (root == panel_root) {
+        assert(hidden == 1);
+        root[12] = 1;
+    } else {
+        unsigned flags;
+        memcpy(&flags, root + 12, 4);
+        if (hidden) flags |= 0x400u; else flags &= ~0x400u;
+        memcpy(root + 12, &flags, 4);
+    }
 }
 static void ABI place_racers_mock(unsigned char *manager) {
     unsigned char *list = *(void **)(manager + 0x10);
@@ -263,6 +436,8 @@ int64_t runtime_file_stat(const char *path, void *guest_stat) {
 }
 
 static void test_region(size_t shift) {
+    expected_ranking = NULL;
+    team_score_opens = 0;
     speed = -1; private = 1; base_calls = 0;
     result_racers = NULL; cup_sorts = 0;
     const size_t size = 0x3000000;
@@ -273,6 +448,43 @@ static void test_region(size_t shift) {
     assert(runtime_online_mode_start(image, size));
     setenv("BB_ONLINE_MODE_HOOK", shift ? "1277df0" : "1277e00", 1);
     assert(!runtime_online_mode_start(image, size));
+    memcpy(image + (0xebe570 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x48\x83\xec\x18\x4c\x8b\x3d\x14\x8b\x94\x01", 20);
+    image[0xebe580 - shift] += (unsigned char)shift;
+    memcpy(image + (0xebe584 - shift), "\x48\x83\xc4\x18\x5b\x41\x5e\x41\x5f\x5d", 10);
+    direct_stub(image + (0xebe58e - shift), lobby_start_mock);
+    memcpy(image + (0x12108f0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x48\x83\xec\x18", 13);
+    direct_stub(image + (0xf507f0 - shift), can_start_mock);
+    direct_stub(image + 0xa548e0, gate_notice_mock);
+    memcpy(image + (0xf1fb50 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0xf1fb61 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0xf1fb6f - shift), clock_mock);
+    memcpy(image + 0xe330e0, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x48", 17);
+    memcpy(image + 0xe330f1, "\x48\x83\xc4\x48\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0xe330ff, damage_mock);
+    memcpy(image + (0x110bbc0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
+    memcpy(image + (0x110bbd1 - shift), "\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0x110bbdf - shift), disable_node_mock);
+    memcpy(image + (0x110b9c0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x83\xec\x10", 15);
+    memcpy(image + (0x110b9cf - shift), "\x48\x83\xc4\x10\x5b\x41\x5c\x41\x5e\x41\x5f\x5d", 12);
+    direct_stub(image + (0x110b9db - shift), disable_node_mock);
+    memcpy(image + (0xeb7950 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x89\xfb\x48\x8b\x43\x18", 17);
+    memcpy(image + (0xeb7961 - shift), "\x58\x5b\x41\x5e\x41\x5f\x5d\xc3", 8);
+    memcpy(image + (0x115a740 - shift), "\x55\x48\x89\xe5\x41\x56\x53\x48\x89\xd3\x49\x89\xfe\xe8\xbe\x63\x93\xff", 18);
+    image[0x115a74e - shift] += (unsigned char)shift;
+    direct_stub(image + 0xa90b10, network_query_mock);
+    direct_stub(image + 0x46efd0, run_node_mock);
+    memcpy(image + (0xeb79d3 - shift), "\x48\x8b\x05\x6e\x64\xc1\x01\x8b\x80\x40\x0d\0\0\x83\xc0\xf7\x83\xf8\x04\x77\xae", 21);
+    image[0xeb79d6 - shift] += (unsigned char)shift;
+    memcpy(image + 0x9c153f, "\xe8\xfc\x4c\xae\0\x48\x8b\x8d\x68\xff\xff\xff\x4c\x8b\xbd\x40\xff\xff\xff", 19);
+    image[0x9c1540] -= (unsigned char)shift;
+    direct_stub(image + (0x14a6240 - shift), ready_insert_mock);
+    memcpy(image + (0xe9de80 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
+    memcpy(image + (0xe9de91 - shift), "\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d\xc3", 15);
+    direct_stub(image + (0xe9dcf0 - shift), assign_ai_teams_mock);
+    memcpy(image + 0x2000, "\x48\x83\xec\x08", 4);
+    stub(image + 0x2004, image + (0xeb79d3 - shift));
+    memcpy(image + (0xeb79e8 - shift), "\xb8\x01\0\0\0\x48\x83\xc4\x08\xc3", 10);
+    memcpy(image + (0xeb7996 - shift), "\x31\xc0\x48\x83\xc4\x08\xc3", 7);
     memcpy(image + (0x1277e00 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x8d\x05\x97\xa1\x87\x01", 17);
     image[0x1277e00 - shift + 13] += (unsigned char)shift;
     /* Record the remapped index and relocated LEA result, then undo the prologue. */
@@ -283,6 +495,22 @@ static void test_region(size_t shift) {
     memcpy(image + (0xffd9c7 - shift), "\x0f\x85\xf2\x0b\0\0", 6);
     memcpy(image + (0xfff9c2 - shift), "\x0f\x85\xd6\x06\0\0", 6);
     stub(image + (0xf50350 - shift), (void *)private_state);
+    direct_stub(image + 0xc2ed20, broadcast_teams_mock);
+    direct_stub(image + (0xff1810 - shift), racer_faction_mock);
+    memcpy(image + (0xf382f0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x8a\x05\x68\xa5\xb5\x01", 16);
+    image[0xf382fc - shift] += (unsigned char)shift;
+    memcpy(image + (0xf38300 - shift), "\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d", 10);
+    direct_stub(image + (0xf3830a - shift), confetti_mock);
+    memcpy(image + (0xeb71d0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x58", 17);
+    memcpy(image + (0xeb71e1 - shift), "\x48\x83\xc4\x58\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0xeb71ef - shift), timer_init_mock);
+    memcpy(image + (0x1093ca0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0x1093cb1 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0x1093cbf - shift), individual_sound_mock);
+    direct_stub(image + (0x1024340 - shift), result_sound_mock);
+    direct_stub(image + (0x149d260 - shift), release_result_sound_mock);
+    direct_stub(image + 0xcb0c70, animation_selector_mock);
+    direct_stub(image + 0xc64790, animation_event_mock);
     stub(image + (0x1277c70 - shift), (void *)original_handler);
     direct_stub(image + 0x97dfc0, base_update);
     put_pointer(image, 0x2773b50, image + 0x97dfc0);
@@ -309,12 +537,20 @@ static void test_region(size_t shift) {
     memcpy(image + (0xe9ba41 - shift), "\x48\x83\xc4\x48\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0xe9ba4f - shift), race_ui_mock);
     direct_stub(image + 0x253740, project_event_mock);
-    direct_stub(image + 0x986820, open_panel_mock);
+    memcpy(image + 0x248d10, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
+    memcpy(image + 0x248d21, "\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0x248d2f, broadcast_mock);
+    put_pointer(image, 0x2abee50, (void *)42); put_pointer(image, 0x2abee68, (void *)43);
+    memcpy(image + 0x986820, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x48", 17);
+    memcpy(image + 0x986831, "\x48\x83\xc4\x48\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0x98683f, open_panel_mock);
+    open_race_ui_project = (void *)(image + 0x986820);
     direct_stub(image + 0x27ae10, finish_context_mock);
     direct_stub(image + 0x252110, hide_panel_mock);
     put_pointer(image, 0x2432338, image + 0x253740);
     put_pointer(image, 0x2ac02b0, (void *)11);
     put_pointer(image, 0x2ac02a8, (void *)12);
+    put_pointer(image, 0x2ac02b0, (void *)11);
     memcpy(image + (0xe73820 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
     memcpy(image + (0xe73831 - shift), "\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0xe7383f - shift), queue_pool_mock);
@@ -344,6 +580,31 @@ static void test_region(size_t shift) {
     podium_hook = image + 0xa29a92;
     direct_stub(image + 0xa298c0, results_mock);
     put_pointer(image, 0x254c430, image + 0xa298c0);
+    put_pointer(image, 0x2778150, image + (0x1293030 - shift));
+    stub(image + (0x1293030 - shift), (void *)base_event);
+    put_pointer(image, 0x2ae4a38, (void *)999);
+    direct_stub(image + 0x97f160, local_controller_mock);
+    direct_stub(image + 0xc02600, local_find_mock);
+    put_pointer(image, 0x2543d68, image + 0x9c1250);
+    direct_stub(image + 0x9c1250, leader_event_mock);
+    put_pointer(image, 0x2544140, image + 0x9c60b0);
+    direct_stub(image + 0x9c60b0, team_slot_update_mock);
+    put_pointer(image, 0x25436c8, image + 0x9b73f0);
+    direct_stub(image + 0x9b73f0, ranking_row_mock);
+    memcpy(image + 0x253970, "\x8b\x47\x48\x31\xd2\x8d\x48\xff\x83\xf8\x01\x0f\x4f\xd1\x89\x57\x48\xc3", 18);
+    memcpy(image + 0x253990, "\xff\x47\x48\xc3", 4);
+    memcpy(image + 0xa09190, "\x55\x48\x89\xe5\x53\x50\x48\x89\xfb\x48\x85\xdb", 12);
+    memcpy(image + 0xa0919c, "\x58\x5b\x5d", 3);
+    direct_stub(image + 0xa0919f, enable_controls_mock);
+    memcpy(image + 0x24ac80, "\x8a\x47\x34\x89\xc1\x80\xc9\x20", 8);
+    direct_stub(image + 0x24ac88, activate_input_mock);
+    put_pointer(image, 0x2546008, image + 0x9de1b0);
+    put_pointer(image, 0x2546018, image + 0x9dedb0);
+    direct_stub(image + 0x9de1b0, leader_event_mock);
+    put_pointer(image, 0x2545940, image + 0x9d67e0);
+    direct_stub(image + 0x9d67e0, leader_event_mock);
+    stub(image + (0xf9c610 - shift), lookup_hero_mock);
+    direct_stub(image + 0x9dedb0, leader_update_mock);
     int32_t roster_disp = 0x1ba0739 + (int32_t)shift;
     memcpy(image + (0xf34433 - shift), &roster_disp, 4);
     memcpy(image + (0xe9b9f9 - shift), "\x48\x8b\x05\x70\x91\xc3\x01\x48\x8b\x78\x28\xe8\xc7\xc4\x65\0", 16);
@@ -444,6 +705,23 @@ static void test_region(size_t shift) {
     assert(runtime_online_mode_start(image, size));
     /* A racer from a mod this game lacks shows as Crash; the game's own and this player's mod
      * racers stay; no list (an older launcher) changes nothing. */
+    int (ABI *team_gate)(void) = (void *)(image + 0x2000);
+    unsigned char *ready_trampoline = *(void **)(image + 0x9c153f + 6);
+    void (ABI *initialize_ready)(void *, void *, unsigned char *, unsigned) = *(void **)(ready_trampoline + 2);
+    for (int room = 0; room <= 1; ++room) {
+        private = room;
+        for (int mode = 0; mode <= 15; ++mode) {
+            *race_mode = mode;
+            assert(team_gate() == ((mode >= 9 && mode <= 13) || (room && mode == 1)));
+            assert(*race_mode == mode);
+            unsigned char ready = 1;
+            initialize_ready((void *)1, (void *)2, &ready, 3);
+            assert(inserted_ready == !(room && mode == 1));
+            assert(ready == 1);
+        }
+    }
+    *race_mode = 1;
+    private = 1;
     setenv("BB_KNOWN_HEROES", "DriverCrash,DriverCoco,DriverSmallNorm", 1);
     customization(image, shift, "DriverSonic");
     assert(!strcmp(received_hero, "DriverCrash") && !received_outfit);
@@ -722,7 +1000,7 @@ static void test_region(size_t shift) {
     void (ABI *spawn_ai)(void *) = (void *)(image + (0xfff740 - shift));
     void (ABI *place_racers)(void *) = (void *)(image + (0xf31160 - shift));
     grid_calls = 0;
-    unsigned char race_ui_owner[0x68] = {0}, panel_event[16] = {0};
+    unsigned char race_ui_owner[0x70] = {0}, panel_event[16] = {0};
     void *panel_event_vtable[] = {(void *)panel_event_type};
     put_pointer(panel_event, 0, panel_event_vtable);
     put_pointer(ranking_handle, 0x28, ranking_project);
@@ -759,6 +1037,9 @@ static void test_region(size_t shift) {
         assert(panel_opens == cup_index + 1 && context_finishes == panel_opens);
         assert(*(unsigned *)ranking_handle == 101 && *(unsigned *)panel_handle == 101);
         int events_before = panel_events;
+        put_pointer(panel_event, 8, (void *)99); /* Other project's input/init event. */
+        project_event(ranking_project, panel_event);
+        assert(panel_events == events_before);
         put_pointer(panel_event, 8, (void *)12); /* full CUP scoreboard */
         project_event(ranking_project, panel_event);
         assert(panel_root[12] && panel_events == events_before);
@@ -880,6 +1161,7 @@ static void test_region(size_t shift) {
     unsigned char timer_owner[0x100] = {0}, timer_label[0x100] = {0}, timer_children[40] = {0};
     void *timer_items[] = {timer_label};
     put_pointer(timer_owner, 0x28, "OCTR_PRIVATE_RETURN_TIMER");
+    *(float *)(timer_owner + 0x60) = 1601.0f;
     put_pointer(timer_owner, 0x48, timer_children);
     put_pointer(timer_children, 0x20, timer_items);
     *(int *)(timer_children + 12) = 1;
@@ -890,6 +1172,7 @@ static void test_region(size_t shift) {
     *(int *)(manager + 0xd68) = cup_index;
     handle_timer(NULL, &event, timer_owner);
     assert(!strcmp(*(char **)(timer_label + 0x30), "NEXT RACE 2/4"));
+    assert(*(float *)(timer_owner + 0x60) == 1601.0f);
     cup_index = 2;
     *(int *)(manager + 0xd68) = cup_index;
     handle_timer(NULL, &event, timer_owner);
@@ -941,8 +1224,101 @@ static void test_region(size_t shift) {
     assert(*race_mode == 1 && *(int *)(manager + 0xd4c) == 1);
     assert(*(int *)(private_settings + 0x20) == 1);
     memcpy(packet + 0x3c, &single_mode, 4);
+    *(int *)(private_settings + 0x28) = 1; /* Host selected No Teams. */
     received(packet);
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
+    assert(*(int *)(private_settings + 0x28) == 1);
+    unsigned char native_settings[0x40] = {0};
+    put_pointer(image, 0x2ad4e30, native_settings);
+    unsigned char team_slot[0x88]={0}, slot_name[0x120]={0}, slot_number[0x120]={0};
+    put_pointer(team_slot,0x10,slot_name); put_pointer(team_slot,0x18,slot_number);
+    *(float *)(slot_number+0x64)=60.f;
+    *(float *)(slot_number+0x94)=40.f; *(float *)(slot_name+0x94)=50.f;
+    *(float *)(slot_number+0x70)=.5f; *(float *)(slot_name+0x70)=.5f;
+    void (ABI *slot_update)(void *,void *,float)=*(void **)(image+0x2544140);
+    private=1;
+    for(int update=0;update<2;++update) {
+        slot_update(team_slot,NULL,.25f);
+        assert(*(unsigned *)(slot_number+12)&0x400);
+        assert(*(float *)(slot_name+0x64)==75.f && (*(unsigned *)(slot_name+12)&0x1000));
+    }
+    keep_slot_position=1;
+    for (int update=0; update<20; ++update) {
+        slot_update(team_slot,NULL,.25f);
+        assert(*(float *)(slot_name+0x64)==75.f); /* No cumulative upward drift. */
+    }
+    *(float *)(slot_number+0x94)=60.f;
+    slot_update(team_slot,NULL,.25f);
+    assert(*(float *)(slot_name+0x64)==70.f); /* Re-centers after layout size changes. */
+    keep_slot_position=0;
+    private=0; slot_update(team_slot,NULL,.25f);
+    assert(!(*(unsigned *)(slot_number+12)&0x400) && *(float *)(slot_name+0x64)==85.f);
+    unsigned char gate_manager[0x20] = {0}, gate_list[0x28] = {0};
+    put_pointer(gate_manager, 0x10, gate_list);
+    put_pointer(image, 0x2ad1160, gate_manager);
+    unsigned char gate_lobby[0x50] = {0};
+    void (ABI *start_gate)(void *) = (void *)(image + (0xebe570 - shift));
+    unsigned char query_pins[0x28] = {0}, query_outputs[0x28] = {0};
+    void *query_nodes[] = {(void *)201, (void *)202};
+    put_pointer(query_outputs, 0x20, query_nodes);
+    void (ABI *start_query)(void *, void *, void *) = (void *)(image + (0x12108f0 - shift));
+    for (int room = 0; room <= 1; ++room)
+        for (int teams = 1; teams <= 4; teams *= 2)
+            for (int ai = 0; ai <= 1; ++ai)
+                for (int players = 0; players <= 9; ++players) {
+                    private = room;
+                    private_settings[0x18] = !ai; /* Stale private settings must not control the gate. */
+                    native_settings[0x10] = ai;
+                    *(int *)(native_settings + 0x28) = teams;
+                    *(int *)(gate_list + 0x0c) = players;
+                    gate_notices = gate_native_calls = 0;
+                    gate_lobby[0x42] = 0;
+                    start_gate(gate_lobby);
+                    const int blocked = room && teams > 1 && !ai && (players < teams || players > 8 || players % teams);
+                    assert(gate_notices == blocked && gate_native_calls == !blocked);
+                    assert(gate_lobby[0x42] == !blocked);
+                    for (int marked = 0; marked <= 1; ++marked)
+                        for (gate_ready = 0; gate_ready <= 1; ++gate_ready) {
+                            *(int *)query_pins = marked;
+                            gate_notices = 0;
+                            last_graph_node = NULL;
+                            start_query(NULL, query_pins, query_outputs);
+                            assert(gate_notices == (marked && blocked));
+                            assert(last_graph_node == (marked && blocked ? NULL : query_nodes[marked ? 0 : !gate_ready]));
+                            if (marked && blocked) {
+                                start_query(NULL, query_pins, query_outputs);
+                                assert(gate_notices == 2 && last_graph_node == NULL);
+                            }
+                        }
+                    gate_ready = 1;
+                }
+    put_pointer(image, 0x2ad1160, NULL);
+    void (ABI *setup_teams)(void *) = (void *)(image + (0xe9de80 - shift));
+    for (int room = 0; room <= 1; ++room)
+        for (int mode = 1; mode <= 13; ++mode)
+            for (int teams = 1; teams <= 4; ++teams)
+                for (int ai = 0; ai <= 1; ++ai) {
+                    private = room;
+                    *(int *)(manager + 0xd4c) = mode;
+                    *(int *)(native_settings + 0x28) = teams;
+                    native_settings[0x10] = ai;
+                    ai_team_calls = 0;
+                    setup_teams(NULL);
+                    assert(ai_team_calls == (room && mode == 1 && teams >= 2 && ai));
+                }
+    *(int *)(manager + 0xd4c) = 1;
+    team_settings_broadcasts = 0;
+    private = 1;
+    for (int teams = 1; teams <= 4; ++teams) {
+        memcpy(native_settings + 0x28, &teams, 4);
+        send_settings(packet);
+        assert(team_settings_broadcasts == teams && broadcast_team_count == (teams == 3 ? 2 : teams));
+        assert(*(int *)(packet + 0x3c) == 1);
+    }
+    private = 0;
+    send_settings(packet);
+    assert(team_settings_broadcasts == 4);
+    private = 1;
     memcpy(packet + 0x3c, &cup_mode, 4);
     put_pointer(packet, 0x28, "unknown-track");
     received(packet);
@@ -999,6 +1375,17 @@ static void test_region(size_t shift) {
     handle(race, &event, race_row);
     assert(runtime_online_mode_private_cup());
     assert(*(int *)(race + 0x190) == 1);
+    unsigned char team_setting_behavior[0x1d0] = {0}, team_available[40] = {0};
+    unsigned char team_choices[] = {1, 1, 1, 1};
+    put_pointer(team_setting_behavior, 0x1b0, team_available);
+    put_pointer(team_available, 0x20, team_choices);
+    *(int *)(team_available + 12) = 4;
+    *(int *)(native_settings + 0x28) = 4;
+    void (ABI *team_setting_event)(void *, void *, void *) = *(void **)(image + 0x2778150);
+    team_setting_event(team_setting_behavior, &event, NULL);
+    assert(*(int *)(native_settings + 0x28) == 1);
+    assert(team_choices[0] && !team_choices[1] && !team_choices[2] && !team_choices[3]);
+
     memcpy(state + 0x13c, &normal, 4);
     private = 0;
     event.index = -1;
@@ -1009,6 +1396,529 @@ static void test_region(size_t shift) {
     event.index = 0;
     handle(race, &event, race_row);
     assert(!runtime_online_mode_private_cup());
+    *(int *)(native_settings + 0x28) = 3;
+    team_setting_event(team_setting_behavior, &event, NULL);
+    assert(*(int *)(native_settings + 0x28) == 2);
+    assert(*(int *)(team_setting_behavior + 0x190) == 1);
+    assert(team_choices[0] && team_choices[1] && !team_choices[2] && team_choices[3]);
+    unsigned char blocked_team_event[0x20] = {0};
+    put_pointer(blocked_team_event, 0, vtable);
+    *(int *)(blocked_team_event + 0x18) = 2;
+    put_pointer(image, 0x2ae4a38, (void *)456);
+    const int before_blocked_team = base_calls;
+    team_setting_event(team_setting_behavior, blocked_team_event, NULL);
+    assert(base_calls == before_blocked_team && *(int *)(native_settings + 0x28) == 2);
+    *(int *)(blocked_team_event + 0x18) = 3;
+    team_setting_event(team_setting_behavior, blocked_team_event, NULL);
+    assert(base_calls == before_blocked_team + 1);
+    put_pointer(image, 0x2ae4a38, (void *)999);
+
+    expected_ranking = "Octane_TeamSelect";
+    *race_mode = 1;
+    controls_enabled = 0;
+    void *selector_project = NULL;
+    open_race_ui_project(&selector_project, NULL, "Octane_TeamSelect", NULL, -1, NULL, 0);
+    assert(controls_enabled == 0); /* Streaming/open is too early to enable. */
+    unsigned char selector_behavior[0xa0] = {0}, selector_owner[0x28] = {0};
+    unsigned char native_selector_project[0x50] = {0};
+    *(int *)(native_selector_project + 0x48) = 3;
+    put_pointer(selector_owner, 0x20, native_selector_project);
+    void (ABI *selector_event)(void *, void *, void *) = *(void **)(image + 0x2543d68);
+    event.index = -1;
+    private = 0; /* The latch survives lobby-component teardown during open. */
+    selector_event(selector_behavior, &event, selector_owner);
+    assert(controls_enabled == 1);
+    assert(*(int *)(native_selector_project + 0x48) == 0);
+    assert(native_selector_project[0x34] & 0x20);
+    assert(*(unsigned *)(native_selector_project + 0x44) == 0xff);
+    /* Cancel never leaves private Single; ready Cancel still reaches native Unready. */
+    put_pointer(image, 0x2a21d00, (void *)44);
+    direct_stub(image + 0x9c32c0, selector_ready_find_mock);
+    unsigned char selector_player[0x100] = {0}, selector_manager[0x18] = {0};
+    put_pointer(selector_manager, 0x10, selector_player);
+    put_pointer(image, 0x2ad1160, selector_manager);
+    local_player_mock = selector_player;
+    unsigned char input_event[0x28] = {0}; void *input_vtable[] = {panel_event_type};
+    put_pointer(input_event, 0, input_vtable); put_pointer(input_event, 8, (void *)44);
+    *(int *)(input_event + 0x18) = 9; *(int *)(input_event + 0x1c) = 1;
+    selector_ready = 0; selector_ready_found = 1;
+    int before_input = selector_native_events;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == before_input);
+    selector_ready = 1;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == ++before_input);
+    selector_ready_found = 0;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == before_input);
+    selector_ready_found = 1; selector_ready = 0;
+    *(int *)(input_event + 0x18) = 8;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == ++before_input); /* Ready remains native. */
+    *(int *)(input_event + 0x18) = 6;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == ++before_input); /* Team movement remains native. */
+    *race_mode = 9; *(int *)(input_event + 0x18) = 9;
+    selector_event(selector_behavior, input_event, selector_owner);
+    assert(selector_native_events == ++before_input); /* Battle keeps native Back. */
+    *race_mode = 1;
+    put_pointer(image, 0x2ad1160, NULL); local_player_mock = NULL;
+    ready_target = native_selector_project; ready_behavior = selector_behavior; ready_owner = selector_owner;
+    ready_handler = selector_event; ready_project_events = broadcast_routes = 0;
+    unsigned char ready_event[0x28] = {0}; void *ready_vtable[] = {panel_event_type};
+    put_pointer(ready_event, 0, ready_vtable); put_pointer(ready_event, 8, (void *)42);
+    void (ABI *broadcast)(void *, void *) = (void *)(image + 0x248d10);
+    broadcast(NULL, ready_event); assert(ready_project_events == 1); /* Missed native GUI layer. */
+    broadcast_routes = 1;
+    broadcast(NULL, ready_event); assert(ready_project_events == 2); /* Already delivered: no duplicate. */
+    broadcast_routes = 0; put_pointer(ready_event, 8, (void *)43);
+    broadcast(NULL, ready_event); assert(ready_project_events == 3); /* Unready uses the same route. */
+    put_pointer(ready_event, 8, (void *)99);
+    broadcast(NULL, ready_event); assert(ready_project_events == 3);
+    unsigned char disable_pins[24] = {0};
+    void (ABI *disable_node)(void *, void *) = (void *)(image + (0x110b9c0 - shift));
+    void (ABI *legend_node)(void *, void *) = (void *)(image + (0x110bbc0 - shift));
+    int legend_before = disable_node_calls;
+    *(int *)disable_pins = 5;
+    legend_node(NULL, disable_pins);
+    assert(disable_node_calls == legend_before); /* Private Back hidden. */
+    *(int *)disable_pins = 4;
+    legend_node(NULL, disable_pins);
+    assert(disable_node_calls == ++legend_before); /* Ready retained. */
+    *race_mode = 9;
+    *(int *)disable_pins = 5;
+    legend_node(NULL, disable_pins);
+    assert(disable_node_calls == ++legend_before); /* Battle Back retained. */
+    *race_mode = 1;
+    const int disable_before = disable_node_calls;
+    *(int *)disable_pins = 3;
+    disable_node(NULL, disable_pins);
+    assert(disable_node_calls == disable_before); /* Open callback cannot relock private selector. */
+    *(int *)disable_pins = 2;
+    disable_node(NULL, disable_pins);
+    assert(disable_node_calls == disable_before + 1); /* Other native disables stay intact. */
+    *(int *)disable_pins = 3;
+    runtime_online_mode_leave_cup();
+    put_pointer(ready_event, 8, (void *)42); broadcast(NULL, ready_event);
+    assert(ready_project_events == 3); /* No stale project dispatch after leaving. */
+    ready_target = NULL; ready_handler = NULL;
+    disable_node(NULL, disable_pins);
+    assert(disable_node_calls == disable_before + 2); /* Outside private selector. */
+    *(int *)(native_selector_project + 0x48) = 3;
+    private = 0;
+    open_race_ui_project(&selector_project, NULL, "Octane_TeamSelect", NULL, -1, NULL, 0);
+    selector_event(selector_behavior, &event, selector_owner);
+    assert(controls_enabled == 1);
+    assert(*(int *)(native_selector_project + 0x48) == 3);
+    private = 1;
+    *race_mode = 9;
+    open_race_ui_project(&selector_project, NULL, "Octane_TeamSelect", NULL, -1, NULL, 0);
+    assert(controls_enabled == 1);
+    disable_node(NULL, disable_pins);
+    assert(disable_node_calls == disable_before + 3); /* Battle keeps its native callback. */
+    /* Final host order produces team points once, and only in private Single. */
+    *(int *)(manager + 0xd4c) = *race_mode = 1;
+    *(int *)(native_settings + 0x28) = 2;
+    expected_ranking = "Octane_BattleTeam_Ranking";
+    unsigned char countdown[0x40] = {0}, config[0x130] = {0};
+    timer_config = config;
+    put_pointer(state, 0x40, config);
+    *(float *)(config + 0x110) = 10.f;
+    *(float *)(config + 0x118) = 5.f;
+    *(float *)(config + 0x114) = 10.f;
+    *(float *)(config + 0x11c) = 30.f;
+    void (ABI *init_countdown)(void *) = (void *)(image + (0xeb71d0 - shift));
+    init_countdown(countdown);
+    assert(timer_ui_initial == 30.f && *(float *)(countdown + 0x28) == 30.f);
+    assert(*(float *)(countdown + 0x30) == 30.f); /* Prepare peers on first tick, not 20s later. */
+    assert(*(float *)(config + 0x110) == 10.f && *(float *)(config + 0x118) == 5.f);
+    void (ABI *tick_countdown)(void *) = (void *)(image + (0xeb7950 - shift));
+    *(float *)(countdown + 0x28) = 30.0f;
+    *(float *)(countdown + 0x2c) = 10.0f;
+    tick_countdown(countdown);
+    assert(*(float *)(countdown + 0x2c) == 30.0f && *(float *)(countdown + 0x28) == 30.0f);
+    *(float *)(countdown + 0x2c) = -1.0f;
+    *(float *)(countdown + 0x28) = 5.0f; /* Includes the native all-ready fast start. */
+    tick_countdown(countdown);
+    assert(*(float *)(countdown + 0x2c) == -1.0f && *(float *)(countdown + 0x28) == 5.0f);
+    unsigned char countdown_owner[0x40] = {0};
+    *(void **)(countdown + 0x18) = countdown_owner;
+    *(float *)(countdown + 0x28) = 30.f; /* Replicated host value before guest UI creation. */
+    init_countdown(countdown);
+    assert(timer_ui_initial == 30.f && *(float *)(countdown + 0x30) == 30.f);
+    assert(*(float *)(config + 0x114) == 10.f);
+    *(float *)(countdown + 0x28) = 22.0f;
+    *(float *)(countdown + 0x2c) = 10.0f;
+    tick_countdown(countdown);
+    assert(*(float *)(countdown + 0x28) == 22.0f && *(float *)(countdown + 0x2c) == 22.0f);
+    *(void **)(countdown + 0x18) = NULL;
+    *(int *)(native_settings + 0x28) = 1;
+    init_countdown(countdown);
+    assert(timer_ui_initial == 10.f); /* Private solo retains its native duration. */
+    *(int *)(native_settings + 0x28) = 2;
+    private = 0;
+    init_countdown(countdown);
+    assert(timer_ui_initial == 30.f); /* Public retains its native duration. */
+    *(float *)(countdown + 0x2c) = 10.0f;
+    tick_countdown(countdown);
+    assert(*(float *)(countdown + 0x2c) == 10.0f);
+    private = 1;
+    *(int *)(native_settings + 0x28) = 1;
+    load_map("solo-test-track", 8);
+    assert(image[0xf34575 - shift] == 0xff); /* Solo includes AI finishers too. */
+    individual_sounds = 0;
+    void (ABI *finish_confetti)(void *) = (void *)(image + (0xf382f0 - shift));
+    void (ABI *finish_sound)(void *, void *) = (void *)(image + (0x1093ca0 - shift));
+    unsigned char finish_pins[0x28] = {0};
+    *(int *)finish_pins = 5;
+    int confetti_before = confetti_calls;
+    finish_confetti(racers[0]);
+    finish_sound(NULL, finish_pins);
+    assert(confetti_calls == confetti_before + 1 && individual_sounds == 1); /* Solo. */
+    *(int *)(native_settings + 0x28) = 2;
+    load_map("team-test-track", 8);
+    confetti_before = confetti_calls;
+    finish_confetti(racers[0]);
+    finish_sound(NULL, finish_pins);
+    assert(confetti_calls == confetti_before && individual_sounds == 1);
+    *(int *)finish_pins = 4;
+    finish_sound(NULL, finish_pins);
+    assert(individual_sounds == 2); /* Other sound nodes remain native. */
+    assert(image[0xf34575 - shift] == 0xff); /* An AI finisher starts the native timer too. */
+    unsigned char damage_component[0x20] = {0}, victim[0x80] = {0}, attacker[0x80] = {0};
+    unsigned char attacker_handle[0x30] = {0};
+    put_pointer(damage_component, 0x18, victim);
+    put_pointer(attacker_handle, 0x28, attacker);
+    void *source_handle = attacker_handle;
+    int (ABI *damage)(void *, unsigned, void **, unsigned char) = (void *)(image + 0xe330e0);
+    *(int *)(native_settings + 0x28) = 2;
+    *(unsigned *)(victim + 0x78) = 1u << 22;
+    *(unsigned *)(attacker + 0x78) = 1u << 22;
+    unsigned char clock_component[0x30] = {0};
+    put_pointer(clock_component, 0x28, attacker_handle);
+    void (ABI *clock_apply)(void *, void *, void *) = (void *)(image + (0xf1fb50 - shift));
+    clock_calls = 0;
+    clock_apply(clock_component, victim, NULL);
+    assert(clock_calls == 0); /* No teammate slow effect or hit message. */
+    damage_calls = 0;
+    for (unsigned kind = 0; kind < 10; ++kind) assert(damage(damage_component, kind, &source_handle, 0) == 1);
+    assert(damage_calls == 0);
+    *(unsigned *)(attacker + 0x78) = 1u << 23;
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 1);
+    clock_apply(clock_component, victim, NULL);
+    assert(clock_calls == 1);
+    *(unsigned *)(attacker + 0x78) = 0; /* Unknown faction is not a teammate. */
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 2);
+    assert(damage(damage_component, 0, NULL, 0) == 0 && damage_calls == 3);
+    put_pointer(attacker_handle, 0x28, victim); /* Own traps remain native. */
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 4);
+    put_pointer(attacker_handle, 0x28, attacker);
+    *(unsigned *)(attacker + 0x78) = 1u << 22;
+    *(int *)(native_settings + 0x28) = 1;
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 5);
+    *(int *)(native_settings + 0x28) = 4;
+    *(unsigned *)(victim + 0x78) = *(unsigned *)(attacker + 0x78) = 1u << 25;
+    assert(damage(damage_component, 0, &source_handle, 0) == 1 && damage_calls == 5);
+    *(int *)(native_settings + 0x28) = 2;
+
+    private = 0; /* Native lobby component no longer exists on the track. */
+    assert(runtime_online_mode_in_private());
+    unsigned char score_root[0x120] = {0}, score_position[0x120] = {0}, score_text[0x120] = {0};
+    unsigned char score_children[40] = {0}, team_results[0x40] = {0}, winner_text[0x120] = {0};
+    unsigned char points_text[0x120] = {0};
+    put_pointer(points_text, 0x28, "OCTR_TEAM_POINTS");
+    unsigned char wins_text[0x120] = {0};
+    put_pointer(wins_text, 0x28, "[WinsText]");
+    unsigned char leader_position[0x120] = {0};
+    *(unsigned *)leaders_handle = 4;
+    put_pointer(leaders_handle, 0x28, leaders_project);
+    put_pointer(leaders_project, 0x10, leader_position);
+    put_pointer(leader_position, 0x28, "[PositionText]");
+    put_pointer(leader_position, 0x30, make_string(NULL, "1"));
+    unsigned char score_name[0x120] = {0};
+    put_pointer(score_name, 0x28, "[PlayerTagText]");
+    put_pointer(score_name, 0x30, make_string(NULL, "Crash"));
+    unsigned char list_parent[0x120]={0};
+    unsigned char list_placeable[0x120]={0}, list_asset[0xa0]={0}, list_handle[0x30]={0}, list_template[0x120]={0};
+    put_pointer(list_placeable,0x28,"OCTR_TEAM_LIST");
+    put_pointer(list_placeable,0x40,list_parent);
+    *(float *)(list_parent+0x64)=303;
+    put_pointer(list_placeable,0x38,list_handle); put_pointer(list_handle,0x28,list_asset);
+    put_pointer(list_asset,0x20,list_template);
+    *(float *)(list_template+0x94)=86; *(int *)(list_asset+0x90)=4;
+    void *score_items[] = {score_position, score_text, winner_text, score_name, wins_text, points_text, list_placeable};
+    put_pointer(composition, 0x20, score_root);
+    put_pointer(ranking_project, 0x10, composition_root);
+    put_pointer(score_root, 0x48, score_children);
+    put_pointer(score_children, 0x20, score_items);
+    *(int *)(score_children + 12) = 7;
+    put_pointer(winner_text, 0x28, "[WinnerNameText]");
+    put_pointer(score_position, 0x28, "[PositionText]");
+    put_pointer(score_position, 0x30, make_string(NULL, "1"));
+    put_pointer(score_text, 0x28, "[BattleScore]");
+    for (int i = 0; i < 8; ++i) {
+        racer_items[i] = racers[i];
+        put_pointer(racers[i], 0x10, handles[i]);
+        *(int *)(players[i] + 0xc8) = i;
+        *(int *)(players[i] + 0xe4) = i % 2;
+        *(int *)(racers[i] + 0x60) = i + 1;
+        *(int *)(racers[i] + 0x58) = i + 1;
+        racers[i][0x8c] = 0;
+        *(int *)(team_results + 0x20 + i * 4) = i;
+    }
+    unsigned char row_behavior[0x100] = {0}, bound_racer[0x30] = {0};
+    unsigned char score_avatar[0x120] = {0}, racer_row[0x120] = {0};
+    put_pointer(score_avatar,0x40,racer_row);
+    put_pointer(score_avatar, 0x28, "OCTR_TEAM_AVATAR");
+    *(unsigned *)(score_avatar + 12) = 0x400;
+    put_pointer(row_behavior, 0x98, score_avatar);
+    unsigned char score_engine[0x120]={0};
+    put_pointer(score_engine,0x28,"OCTR_TEAM_ENGINE");
+    *(unsigned *)(score_engine+12)=0x400;
+    for(int c=0;c<4;++c) *(float *)(score_engine+0xc0+c*4)=1;
+    put_pointer(row_behavior,0xa0,score_engine);
+    unsigned char row_behaviors[40] = {0};
+    void *behaviors[] = {row_behavior};
+    put_pointer(row_behavior, 0, image + 0x2543600);
+    put_pointer(row_behavior, 0x78, bound_racer);
+    put_pointer(row_behavior, 0xa8, score_name);
+    put_pointer(row_behavior, 0xb8, score_position);
+    put_pointer(row_behavior, 0xd0, score_text);
+    put_pointer(score_root, 0xe8, row_behaviors);
+    *(int *)(row_behaviors + 12) = 1;
+    put_pointer(row_behaviors, 0x20, behaviors);
+    void (ABI *row_event)(void *, void *, void *) = *(void **)(image + 0x25436c8);
+    put_pointer(image, 0x2ac0dc0, image); /* Non-null native manager fixture. */
+    initialize_race_ui(race_ui_owner);
+    assert(*(void **)(race_ui_owner + 0x60) == panel_handle && team_score_opens == 1);
+    assert(*(void **)(race_ui_owner + 0x68) == ranking_handle); /* Prepared before intro; finish slot unchanged. */
+    unsigned char branch_pins[24] = {0}, branch_outputs[40] = {0};
+    void *branch_nodes[] = {(void *)101, (void *)102};
+    put_pointer(branch_outputs, 0x20, branch_nodes);
+    void (ABI *network_branch)(void *, void *, void *) = (void *)(image + (0x115a740 - shift));
+    *(int *)branch_pins = 1;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[1]); /* Manual private team scoreboard. */
+    *(int *)branch_pins = 0;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[0]); /* Other online graphs stay online. */
+    network_query_value = 0;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[1]);
+    network_query_value = 1;
+    put_pointer(bound_racer, 0x28, racers[0]);
+    int finish_events_before = panel_events;
+    project_event(panel_project, panel_event);
+    assert(panel_events == finish_events_before + 1); /* Native panel receives its own event exactly once. */
+    row_event(row_behavior, NULL, NULL);
+    assert(*(float *)(score_name + 0xc0) == 0.1f); /* Color before final host results. */
+    unsigned char local_manager[0x20] = {0};
+    put_pointer(local_manager, 0x10, players);
+    put_pointer(image, 0x2ad1160, local_manager);
+    local_player_mock = players[0];
+    unsigned char result_kart[8] = {0}, result_vtable[0x118] = {0}, result_handle[0x30] = {0};
+    put_pointer(result_vtable, 0x110, result_animation_mock);
+    put_pointer(result_kart, 0, result_vtable);
+    put_pointer(result_handle, 0x28, result_kart);
+    put_pointer(racers[0], 0x20, result_handle);
+    animation_calls = confetti_calls = result_sounds = released_result_sounds = 0;
+    /* Native RaceFinished arrives before the final host snapshot. */
+    put_pointer(panel_event, 8, (void *)12);
+    int score_events_before = ranking_events;
+    finish_events_before = panel_events;
+    project_event(panel_project, panel_event);
+    assert(team_score_opens == 1 && ranking_events == score_events_before + 1);
+    assert(panel_events == finish_events_before); /* Old graph must not start Wumpa flow. */
+    project_event(panel_project, panel_event);
+    assert(panel_events == finish_events_before && ranking_events == score_events_before + 1);
+
+    project_event(ranking_project, panel_event);
+    assert(ranking_events == score_events_before + 1); /* No duplicate animation if broadcast also visits it. */
+    assert(animation_calls == 0 && confetti_calls == 0); /* Wait for host results. */
+    put_pointer(panel_event, 8, (void *)11);
+    receive_results(team_results);
+    assert(animation_calls == 1 && animation_selection == 0 && confetti_calls == 1);
+    assert(result_sounds == 1 && released_result_sounds == 1 && result_sound_won);
+    assert(team_score_opens == 1 && !*(void **)(race_ui_owner + 0x60) &&
+           *(void **)(race_ui_owner + 0x68) == ranking_handle);
+    assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
+    assert(!strcmp(*(char **)(wins_text + 0x30), "WINS"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+    assert(podium_slots[0] == racers[0] && podium_slots[1] == racers[1] && podium_slots[2] == racers[2]);
+    local_player_mock = players[1];
+    project_event(ranking_project, panel_event);
+    assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
+    assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "17 POINTS"));
+    local_player_mock = players[0];
+    handle_timer(NULL, &event, timer_owner);
+    assert(*(float *)(timer_owner + 0x60) == 1050.0f);
+    assert(*(unsigned *)(timer_owner + 12) & 0x1000);
+    assert(*(float *)(wins_text + 0x64) == -19.0f);
+    assert(*(float *)(winner_text + 0x64) == -4.0f);
+    assert(*(float *)(points_text + 0x64) == 9.0f);
+    /* All eight bound identities, in reverse GUI order, including last place.
+     * Deliberately wrong display text must never decide the row's identity. */
+    const char *awards[] = {"10 POINT", "8 POINT", "6 POINT", "5 POINT", "4 POINT", "3 POINT", "2 POINT", "1 POINT"};
+    for (int i = 7; i >= 0; --i) {
+        put_pointer(bound_racer, 0x28, racers[i]);
+        row_behavior[0xd8] = 1;
+        row_event(row_behavior, NULL, NULL);
+        assert(*(float *)(racer_row+0xe0)==0.6f && (*(unsigned *)(racer_row+12)&0x1000));
+        racers[i][0x8c]=1;
+        row_event(row_behavior,NULL,NULL);
+        assert(*(float *)(racer_row+0xe0)==1.0f); /* Rebound finished rows regain full opacity. */
+        racers[i][0x8c]=0;
+        row_event(row_behavior,NULL,NULL);
+        assert(*(float *)(racer_row+0xe0)==0.6f);
+        assert(!(*(unsigned *)(score_avatar + 12) & 0x400));
+        assert(!(*(unsigned *)(score_engine + 12) & 0x400));
+        assert(*(float *)(score_name+0x60)==158);
+        assert(*(float *)(score_name+0x90)==185);
+        for(int c=0;c<4;++c) assert(*(float *)(score_engine+0xc0+c*4)==1);
+        assert(*(float *)(list_template+0x94)==86 && *(int *)(list_asset+0x90)==8);
+        assert(*(float *)(list_placeable+0x64)==-7);
+        assert(*(float *)(list_parent+0x64)==260 && (*(unsigned *)(list_parent+12)&0x1000));
+        assert(*(float *)(score_text+0x84)==.75f && *(float *)(score_text+0x88)==.75f);
+        assert(!strcmp(*(char **)(score_text + 0x30), awards[i]));
+        assert(atoi(*(char **)(score_position + 0x30)) == i + 1);
+        assert(!strcmp(*(char **)(score_name + 0x30), "Crash"));
+        assert(*(float *)(score_name + 0xc0) == (i % 2 ? 1.0f : 0.1f));
+    }
+    receive_results(team_results); /* Duplicate delivery doesn't accumulate. */
+    assert(animation_calls == 1 && confetti_calls == 1);
+    assert(!strcmp(*(char **)(score_text + 0x30), "10 POINT"));
+    *(int *)(team_results + 0x24) = 0;
+    receive_results(team_results); /* Malformed order retains last valid snapshot. */
+    assert(!strcmp(*(char **)(score_text + 0x30), "10 POINT"));
+    *(int *)(team_results + 0x24) = 1;
+    *(int *)(players[0] + 0xe4) = 4;
+    receive_results(team_results);
+    assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
+    assert(!strcmp(*(char **)(wins_text + 0x30), "RESULT"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+    *(int *)(native_settings + 0x28) = 3;
+    const int tied_teams[] = {1, 0, 2, 2, 0, 1, 2, 0}; /* 13/13/13, RED finishes first. */
+    for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = tied_teams[i];
+    receive_results(team_results);
+    assert(!strcmp(*(char **)(wins_text + 0x30), "WINS"));
+    assert(!strcmp(*(char **)(winner_text + 0x30), "RED TEAM WINS"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "13 POINTS (H2H)"));
+    local_player_mock = players[1];
+    project_event(ranking_project, panel_event);
+    assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
+    assert(!strcmp(*(char **)(winner_text + 0x30), "RED TEAM WINS"));
+    local_player_mock = players[0];
+    /* The individual winner's team loses on points: only tied leaders enter H2H. */
+    const int leader_tie[] = {0, 2, 2, 1, 1, 1, 1, 0}; /* BLUE 11, RED/GREEN 14. */
+    for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = leader_tie[i];
+    receive_results(team_results);
+    assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
+    assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
+    assert(!strcmp(*(char **)(points_text + 0x30), "11 POINTS (H2H)"));
+    *(int *)(native_settings + 0x28) = 4;
+    for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = i % 4;
+    put_pointer(racers[3], 0x10, NULL);
+    *(int *)(racers[3] + 0x164) = 3;
+    *(int *)(racers[3] + 0x174) = 0x19;
+    put_pointer(bound_racer, 0x28, racers[3]);
+    receive_results(team_results);
+    assert(!strcmp(*(char **)(score_text + 0x30), "5 POINT"));
+    unsigned char leader_behavior[0xa0] = {0}, border[0x120] = {0};
+    put_pointer(leader_behavior, 0x88, bound_racer);
+    put_pointer(leader_behavior, 0x50, border);
+    void (ABI *leader_event)(void *, void *, void *) = *(void **)(image + 0x2546008);
+    leader_event(leader_behavior, NULL, NULL);
+    assert(*(float *)(border + 0xc0) == 1.0f && *(float *)(border + 0xc4) == 0.85f);
+    assert(!strcmp(*(char **)(leader_position + 0x30), "1"));
+    unsigned char marker[0x90] = {0}, marker_label[0x120] = {0};
+    unsigned char driver[0x48] = {0}, driver_handle[0x30] = {0}, hero_definition[0x98] = {0};
+    put_pointer(driver_handle, 0x28, driver);
+    put_pointer(racers[3], 0x18, driver_handle);
+    put_pointer(driver, 0x40, hero_definition);
+    put_pointer(hero_definition, 0x90, "hero_crash");
+    put_pointer(racers_manager, 0x18, (void *)1);
+    put_pointer(hero_record, 0x18, "Crash Bandicoot");
+    put_pointer(marker, 0x70, bound_racer);
+    put_pointer(marker, 0x50, marker_label);
+    void (ABI *marker_event)(void *, void *, void *) = *(void **)(image + 0x2545940);
+    marker_event(marker, NULL, NULL);
+    assert(!strcmp(*(char **)(marker_label + 0x30), "Crash Bandicoot"));
+    assert(*(float *)(marker_label + 0xc4) == 0.85f);
+    put_pointer(bound_racer, 0x28, racers[1]); /* Human label stays native. */
+    marker_event(marker, NULL, NULL);
+    assert(!strcmp(*(char **)(marker_label + 0x30), "Crash Bandicoot"));
+    assert(*(float *)(marker_label + 0xc4) == 0.15f);
+    free_string(NULL, *(char **)(marker_label + 0x30) - 16);
+    put_pointer(bound_racer, 0x28, racers[3]);
+    /* Native Battle's +68 pipeline: arena result, RaceFinished, cached result
+     * context. Only RaceFinished duplicates are suppressed, not companion events. */
+    const int prepared_before = team_score_opens;
+    initialize_race_ui(race_ui_owner);
+    assert(team_score_opens == prepared_before + 1);
+    assert(*(void **)(race_ui_owner + 0x60) == panel_handle);
+    assert(*(void **)(race_ui_owner + 0x68) == ranking_handle);
+    score_events_before=ranking_events; finish_events_before=panel_events;
+    put_pointer(panel_event,8,(void *)14);
+    project_event(ranking_project,panel_event);
+    put_pointer(panel_event,8,(void *)12);
+    project_event(ranking_project,panel_event);
+    project_event(panel_project,panel_event);
+    project_event(ranking_project,panel_event);
+    put_pointer(panel_event,8,(void *)13);
+    project_event(ranking_project,panel_event);
+    assert(ranking_events==score_events_before+3 && panel_events==finish_events_before);
+    assert(team_score_opens==prepared_before+1);
+    assert(!*(void **)(race_ui_owner+0x60) && *(void **)(race_ui_owner+0x68)==ranking_handle);
+    /* A losing local racer gets the native loss selection, without confetti. */
+    for (int i=0;i<8;++i) {
+        *(int *)(team_results+0x20+i*4)=i;
+        put_pointer(racers[i],0x10,handles[i]);
+        *(int *)(players[i]+0xe4)=i%2;
+    }
+    *(int *)(players[0]+0xe4)=1;
+    *(int *)(players[1]+0xe4)=0;
+    *(int *)(native_settings+0x28)=2;
+    const int animations_before_loss=animation_calls, confetti_before_loss=confetti_calls;
+    receive_results(team_results);
+    assert(animation_calls==animations_before_loss+1 && animation_selection==1);
+    assert(confetti_calls==confetti_before_loss);
+    assert(result_sounds == animation_calls && released_result_sounds == result_sounds && !result_sound_won);
+    receive_results(team_results);
+    assert(animation_calls==animations_before_loss+1 && confetti_calls==confetti_before_loss);
+
+    lobby_data[0x71] = 1;
+    private = 0;
+    expected_ranking = "Octane_Race_Ranking";
+    load_map(lobby_map, 8);
+    assert(lobby_data[0x71] == 0); /* No invented team ceremony. CUP stays native. */
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 6);
+    clock_apply(clock_component, victim, NULL);
+    assert(clock_calls == 2);
+    assert(!runtime_online_mode_in_private());
+    initialize_race_ui(race_ui_owner);
+    receive_results(team_results);
+    assert(!strcmp(*(char **)(score_text + 0x30), "5 POINT"));
+    free_string(NULL, *(char **)(score_position + 0x30) - 16);
+    free_string(NULL, *(char **)(score_text + 0x30) - 16);
+    free_string(NULL, *(char **)(winner_text + 0x30) - 16);
+    free_string(NULL, *(char **)(wins_text + 0x30) - 16);
+    free_string(NULL, *(char **)(points_text + 0x30) - 16);
+    free_string(NULL, *(char **)(score_name + 0x30) - 16);
+    free_string(NULL, *(char **)(leader_position + 0x30) - 16);
+    put_pointer(ranking_project, 0x10, NULL);
+    private = 1;
+    memcpy(state + 0x13c, &battle, 4);
+    *race_mode = 9;
+    *(int *)(native_settings + 0x28) = 3;
+    load_map("battle-test-map", 8);
+    assert(image[0xf34575 - shift] == 0xed); /* Native Battle timer policy. */
+    assert(*(int *)(native_settings + 0x28) == 3); /* Battle keeps native three-team support. */
+    *(int *)(native_settings + 0x28) = 4;
+    assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 7);
+    clock_apply(clock_component, victim, NULL);
+    assert(clock_calls == 3);
+    free_string(NULL, *(char **)(private_settings + 0x10) - 16);
     munmap(image, size);
 }
 
