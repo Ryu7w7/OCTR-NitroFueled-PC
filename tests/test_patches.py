@@ -106,10 +106,58 @@ class SignatureTests(unittest.TestCase):
         elf = tiny_elf(b'\0' * 4 + b'\xaa\xbb\x07\xdd' + b'\0' * 24)
         self.assertEqual(self.writes(elf, EBOOT_BASE + 0x1012), [(0x1006, b'\x90\x90')])
 
+    def test_signature_already_patched(self):
+        # Some 6.72+ builds ship with the patch applied: the site holds the patch's own bytes.
+        elf = tiny_elf(b'\0' * 16 + b'\xaa\xbb\x90\x90' + b'\0' * 12)
+        self.assertEqual(self.writes(elf, EBOOT_BASE + 0x1012), [(0x1012, b'\x90\x90')])
+        moved = tiny_elf(b'\0' * 4 + b'\xaa\xbb\x90\x90' + b'\0' * 24)
+        self.assertEqual(self.writes(moved, EBOOT_BASE + 0x1012), [(0x1006, b'\x90\x90')])
+        # Only the patch's bytes count: other bytes there still make it a miss.
+        self.assertEqual(self.writes(tiny_elf(b'\0' * 16 + b'\xaa\xbb\x90\x91' + b'\0' * 12),
+                                     EBOOT_BASE + 0x1012), [])
+
     def test_signature_missing_or_ambiguous_skips_the_patch(self):
         self.assertEqual(self.writes(tiny_elf(b'\0' * 32), EBOOT_BASE + 0x1012), [])
         twice = tiny_elf(b'\xaa\xbb\x00\xdd' * 2 + b'\0' * 24)
         self.assertEqual(self.writes(twice, EBOOT_BASE + 0x1012), [])
+
+
+class OptionalGamePatchTests(unittest.TestCase):
+    """A bundled game patch (60 FPS, motion blur) whose code this build lacks never blocks a
+    mod session, and out/patches-applied.json says which ones were applied."""
+
+    @staticmethod
+    def selected(name, signature):
+        meta = patches.ET.fromstring(
+            f'<Metadata Name="{name}" AppVer="01.21"><PatchList><Line Type="bytes" Address="0x00501012" '
+            f'Value="9090" Signature="{signature}" SignatureOffset="0x2"/></PatchList></Metadata>')
+        return meta
+
+    def test_strict_compile_skips_a_missing_game_patch_only(self):
+        elf = tiny_elf(b'\0' * 32)
+        missing = self.selected('60 FPS Unlock', 'aa bb ?? dd')
+        for key in ('CrashTeamRacing.xml/60 FPS Unlock', 'CrashTeamRacingEU.xml/60 FPS Unlock'):
+            applied = []
+            self.assertEqual(compile_external([(key, None, missing)], eboot_segments(elf), elf,
+                                              strict=True, applied=applied), [])
+            self.assertEqual(applied, [])
+        with self.assertRaisesRegex(ValueError, 'Cannot apply enabled mod patch'):
+            compile_external([('OCTR-Mod-Content.xml/x', None, missing)], eboot_segments(elf), elf,
+                             strict=True)
+
+    def test_applied_keys_round_trip(self):
+        elf = tiny_elf(b'\0' * 16 + b'\xaa\xbb\x01\xdd' + b'\0' * 12)
+        applied = []
+        selected = [('CrashTeamRacingEU.xml/60 FPS Unlock', None, self.selected('60 FPS Unlock', 'aa bb ?? dd')),
+                    ('CrashTeamRacing.xml/Disable Motion Blur', None, self.selected('Disable Motion Blur', 'ee ff'))]
+        compile_external(selected, eboot_segments(elf), elf, applied=applied)
+        self.assertEqual(applied, ['CrashTeamRacingEU.xml/60 FPS Unlock'])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(patches.applied_game_patches(tmp))
+            (Path(tmp) / patches.APPLIED_FILE).write_text(json.dumps(applied))
+            self.assertEqual(patches.applied_game_patches(tmp), {'patch_60fps'})
+            (Path(tmp) / patches.APPLIED_FILE).write_text('[]')
+            self.assertEqual(patches.applied_game_patches(tmp), set())
 
 
 class RenderResTests(unittest.TestCase):

@@ -264,6 +264,19 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unverified executable write'):
             adapter.preflight(profile,self.ini,self.prefs)
 
+    def test_preflight_starts_without_a_game_patch_this_build_lacks(self):
+        from test_prepare import fixture
+        profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
+        (profile/'game/eboot.bin').write_bytes(fixture())
+        # The 6.72+ build without the 60 FPS patch's code: the patch is skipped, the mods start.
+        (profile/'patches/CrashTeamRacing.xml').write_text('<Patch><TitleID><ID>CUSA13795</ID></TitleID><Metadata Name="60 FPS Unlock" AppVer="01.21" AppElf="eboot.bin"><PatchList><Line Type="bytes" Address="0x400002" Value="90" Signature="ee ee ee ee" /></PatchList></Metadata></Patch>')
+        self.ini.write_text(self.ini.read_text()+'patch_60fps=1\n')
+        self.assertEqual(adapter.preflight(profile,self.ini,self.prefs),0)
+        # A mod's own write still has to apply.
+        (profile/'patches/OCTR-Mod-Content.xml').write_text('<Patch><Metadata Name="moved" AppVer="01.21" isEnabled="true"><PatchList><Line Type="bytes" Address="0x400002" Value="90" Signature="ee ee ee ee" /></PatchList></Metadata></Patch>')
+        with self.assertRaises(ValueError):
+            adapter.preflight(profile,self.ini,self.prefs)
+
     def test_preflight_expected_code_accepts_unrelated_self_changes(self):
         from test_prepare import fixture
         profile=self.root/'profile';(profile/'game').mkdir(parents=True);(profile/'patches').mkdir()
