@@ -212,6 +212,7 @@ static float real(const void *p, size_t offset) {
 static int selected_driving_level(void) {
     if (!custom_ai_allowed() || !difficulty_manager || !*difficulty_manager) return -1;
     const int level = native_difficulty(*difficulty_manager);
+    if (runtime_speed_race_active() && level < 2) return -1;
     const int profile = effective_profile();
     return level >= 0 && level <= 2 ? level + (level == 2 && profile >= 1 && profile <= 3 ? profile : 0) : -1;
 }
@@ -259,6 +260,7 @@ static void ABI ai_input(void *self, void *input) {
     slide_decision.entry = slide_decision.continuation = -1;
     void *saved_item_use = pending_item_use;
     pending_item_use = NULL;
+    if (ai_data && *ai_data) tune_ai(*ai_data);
     native_ai_input(self, input);
     register_ai_physics(self);
     if (!peer_decision) {
@@ -628,7 +630,7 @@ static void avoid_reference_traffic(void *entity, unsigned id, const float posit
 static float shortcut_approach(const unsigned char *segment);
 
 static void ABI race_targets(unsigned char *self, unsigned char *ai) {
-    if (!custom_ai_allowed()) { native_race_targets(self,ai); return; }
+    if (driving_level() < 0) { native_race_targets(self,ai); return; }
     const int saved_recovery_context = native_recovery_context;
     const int ghost=runtime_speed_race_active() && client && *client && integer(*client,0x144)==16;
     if (!ghost) memset(stuck_recovery,0,sizeof stuck_recovery);
@@ -1275,7 +1277,7 @@ static const int start_boost_racers[] = {2, 3, 5, 6, 7, 8};
 
 static void tune_ai(void *root) {
     if (!root) return;
-    const int driving = custom_ai_allowed();
+    const int driving = custom_ai_allowed() ? (runtime_speed_race_active() ? 2 : 1) : 0;
     const int active = driving && difficulty_manager && *difficulty_manager && native_difficulty(*difficulty_manager) == 2 ? effective_profile() : 0;
     while (atomic_flag_test_and_set_explicit(&tuning_lock, memory_order_acquire)) { }
     if (baseline_root == root && applied_profile == active && applied_driving == driving) {
@@ -1302,7 +1304,7 @@ static void tune_ai(void *root) {
                 if (tuning[i].integral) { int n = (int)(result + 0.5f); memcpy(&bits, &n, 4); }
                 else memcpy(&bits, &result, 4);
             }
-            if (driving) {
+            if (driving && (driving == 1 || column == 2)) {
                 const int level = column == 2 ? 2 + active : column;
                 if (tuning[i].offset == 0x80) memcpy(&bits, &start_boost_racers[level], 4);
                 if (tuning[i].offset == 0x88) memcpy(&bits, &start_boost_chance[level], 4);

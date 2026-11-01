@@ -111,7 +111,8 @@ static void test_ai_physics(void) {
     assert(real(kart,0x198)==damage); /* Damage and native timers remain outside the surface policy. */
     speed_modifiers(human,.016f); assert(fabsf(real(human,0x190)-.6f)<.001f);
     put_int(diff,12,1); ai_profile=0;
-    assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-101.5f)<.001f);
+    assert(kart_speed(kart,speed_data,0,75,.016f)==100);
+    speed_modifiers(kart,.016f); assert(fabsf(real(kart,0x190)-.6f)<.001f);
     reset_ai_physics(); assert(kart_speed(kart,speed_data,0,75,.016f)==100);
     itemless=0; client=difficulty_manager=manager=NULL; ai_profile=0;
 }
@@ -845,6 +846,21 @@ static void test_ai(void) {
         followed_ai_profile=followed_ai_base=-1;
     }
     private_room=1;
+    /* Itemless leaves Easy/Medium native, including after Normal tuning. */
+    put_int(game,0x144,16); followed_ai_profile=-1;
+    for (int repeat=0;repeat<3;++repeat) {
+        itemless=0; tune_ai(root);
+        itemless=1; tune_ai(root);
+        for (int i=0;i<9;++i)
+            assert(integer(values[i],12)==123 && integer(values[i],16)==456);
+        for (int level=0;level<6;++level) {
+            put_int(native,12,level<2 ? level : 2);
+            ai_profile=level>2 ? level-2 : 0;
+            assert(selected_driving_level()==(level<2 ? -1 : level));
+            itemless=0; assert(selected_driving_level()==level); itemless=1;
+        }
+    }
+    itemless=0;
     /* A guest cannot replace an authority profile through a selection event. */
     self[0x1b9] = 1; followed_ai_profile = 3; ai_profile = 0;
     put_int(event, 0x18, 6);
