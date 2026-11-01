@@ -15,6 +15,101 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_team_selector_back_legend(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower().endswith('/octane_teamselect_root.igz'))
+        with pak.open('rb') as f:
+            old = Igz(iga.read_entry(f, *entry[1:]))
+        new = Igz(online_mode.team_selector_legend(old.build()))
+        changed = []
+        for node, kind in old.objects():
+            if kind != 'igVscCppActionNode' or old.u32(node + 0x10) == new.u32(node + 0x10):
+                continue
+            changed.append(node)
+            self.assertEqual(new.u32(node + 0x10), 5)
+            a, b = old.u64(node + 0x20), new.u64(node + 0x20)
+            self.assertEqual(old.data[a:a+32], new.data[b:b+32])
+            self.assertEqual(new.u32(new.u64(b+8)+16), 2)
+            self.assertEqual(new.u64(b+32), 0)
+        self.assertEqual(len(changed), 1)
+        elf = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())[0]
+        shift = 0x1277e00 - online_mode.hook_site(elf)
+        from patches import load_segments
+        v, off, size = load_segments(elf)[0]
+        at = off + 0x110bbc0 - shift - v
+        self.assertEqual(elf[at:at+17].hex(), '554889e54157415641554154534883ec18')
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_private_start_button_marks_only_the_pre_start_guard(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
+        entries = iga.pak_entries(pak)
+        entry = next(e for e in entries if e[0].lower().endswith('/octane_lobby_privategame_buttonready.igz'))
+        with pak.open('rb') as f:
+            original = Igz(iga.read_entry(f, *entry[1:]))
+        patched = Igz(online_mode.private_start_button(original.build()))
+        x = patched.fixup('EXNM')
+        methods = [patched.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
+                   if not b & 0x80000000]
+        old_actions = {o for o, t in original.objects() if t == 'igVscCppActionNode'}
+        added = [o for o, t in patched.objects() if t == 'igVscCppActionNode' and o not in old_actions]
+        self.assertEqual(len(added), 2)
+        native_functions = patched.read_list('RNEX', unpack_offsets)
+        for node in added:
+            self.assertIn(node + 0x38, native_functions)
+            self.assertIn(node + 0x18, patched.sites['RPID'])
+
+        guard = next(o for o in added if patched.u32(o + 0x10) == 1)
+        host = next(o for o in added if o != guard)
+        self.assertEqual(methods[patched.u64(guard + 0x38)], 'COctaneLobbyNodes::canStartGame_VSC')
+        self.assertEqual(methods[patched.u64(host + 0x38)], 'CNetworkNodes::isHost2_VSC')
+        self.assertEqual(patched.u64(patched.u64(guard + 0x20)), 0)
+        def outputs(node):
+            data = patched.u64(patched.u64(node + 0x30) + 0x20)
+            return patched.u64(data), patched.u64(data + 8)
+        ready, rejected = outputs(guard)
+        self.assertEqual(rejected, 0)
+        self.assertEqual(methods[patched.u64(ready + 0x38)], 'COctaneLobbyNodes::readyPlayerLobby_VSC')
+        self.assertEqual(outputs(host), (guard, ready))  # Guests can still ready normally.
+        rewired = []
+        for node, kind in original.objects():
+            if kind == 'igVscActionNodeList' and original.u32(node + 0x10) == 2:
+                data = original.u64(node + 0x20)
+                if original.u64(data + 8) == ready:
+                    self.assertEqual(patched.u64(data + 8), host)
+                    rewired.append(node)
+            if node in old_actions:
+                self.assertEqual(original.data[node:node + 0x40], patched.data[node:node + 0x40])
+        self.assertEqual(len(rewired), 1)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_team_stings_mark_native_win_loss_only(self):
+        for name in ('update.pak', 'update2.pak'):
+            pak = Path(os.environ['BB_TEST_GAME']) / 'archives' / name
+            entry = next(e for e in iga.pak_entries(pak)
+                         if e[0].lower() == online_mode.RACE_MUSIC_ENTRY)
+            with pak.open('rb') as f:
+                original = Igz(iga.read_entry(f, *entry[1:]))
+            patched = Igz(online_mode.team_finish_sounds(original.build()))
+            exid = original.fixup('EXID')
+            handles = list(struct.iter_unpack('<II', exid[3][:exid[1] * 8]))
+            marked = []
+            for node, kind in original.objects():
+                if kind != 'igVscCppActionNode':
+                    continue
+                before, after = original.u32(node + 0x10), patched.u32(node + 0x10)
+                self.assertEqual(original.u64(node + 0x28), patched.u64(node + 0x28))
+                if before == after:
+                    continue
+                self.assertEqual((before, after), (4, 5))
+                old_pins, new_pins = original.u64(node + 0x20), patched.u64(node + 0x20)
+                self.assertEqual(original.data[old_pins:old_pins + 32], patched.data[new_pins:new_pins + 32])
+                self.assertEqual(patched.u64(new_pins + 32), 0)
+                accessor = original.u64(old_pins + 8)
+                field = original.u64(accessor + 0x10)
+                marked.append(handles[original.u64(field + 0x50)])
+            self.assertCountEqual(marked, [(0x8305d2d3, 0x4305904b), (0x789c92ee, 0x4305904b)])
+
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
         block = script[script.index('unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE'):
@@ -53,9 +148,167 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                 self.assertEqual(result.stdout,
                                  'test-hook|normal.bbpatch|speed.bbpatch' if enabled else '||')
 
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_streaming_ranking_archive_contains_patched_project_and_dependencies(self):
+        from graphics_tab import Archive
+        game = Path(os.environ['BB_TEST_GAME'])
+        pak = game / 'archives/update2.pak'
+        entries = iga.pak_entries(pak)
+        with pak.open('rb') as f:
+            entry = next(e for e in entries if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
+            package = iga.read_entry(f, *entry[1:])
+            entry = next(e for e in entries if e[0].lower() == online_mode.TEAM_RANKING_ROOT)
+            graph = online_mode.team_ranking_navigation(iga.read_entry(f, *entry[1:]))
+        relative = online_mode.TEAM_RANKING_ROOT.removeprefix(online_mode.PACKAGE_PREFIX)
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'octane_battleteam_ranking.pak'
+            online_mode.ranking_stream_archive(game, target, package, 'octane_battleteam_ranking',
+                                               {relative: graph})
+            archive = Archive(target)
+            try:
+                files = {archive.logical(i): archive.read(i) for i in range(len(archive.names))}
+            finally:
+                archive.f.close()
+            self.assertEqual(files[relative], graph)
+            self.assertIn('ui/octane_battleteam_ranking.igz', files)
+            rows = online_mode.package_rows(Igz(files[
+                'packages/generated/ui/octane_battleteam_ranking_pkg.igz']))[1]
+            self.assertTrue(rows)
+            self.assertTrue(all(path in files for _, path in rows))
+            self.assertTrue(any(kind == 'material_instances' for kind, _ in rows))
+            self.assertFalse(any('octane_cupselect' in path for _, path in rows))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_team_ranking_navigation_marks_only_network_nodes(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.TEAM_RANKING_ROOT)
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entry[1:])
+        old, new = Igz(blob), Igz(online_mode.team_ranking_navigation(blob))
+        changed = []
+        for offset, kind in old.objects():
+            size = old.sizes[old.u64(offset)]
+            if old.data[offset:offset + size] != new.data[offset:offset + size]:
+                changed.append(offset)
+                self.assertEqual(kind, 'igVscCppActionNode')
+                self.assertEqual(new.u32(offset + 0x10), 1)
+                self.assertEqual(new.u64(new.u64(offset + 0x20)), 0)
+                self.assertEqual(old.data[offset + 0x28:offset + size], new.data[offset + 0x28:offset + size])
+        self.assertEqual(len(changed), 3)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_team_header_preserves_native_gradient_and_hides_extra_label(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.TEAM_RANKING_UI)
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entry[1:])
+        old, new = Igz(blob), Igz(online_mode.team_ranking_header(blob))
+        self.assertEqual(old.data[0xaa0:0xbc0], new.data[0xaa0:0xbc0])
+        # Like native RaceRanking, entrance animation must not undo DNF alpha.
+        for tracks in (0x6268, 0x6650):
+            self.assertEqual(new.u32(tracks + 12), 2)
+            kept = [new.u64(new.u64(tracks + 32) + i * 8) for i in range(2)]
+            self.assertTrue(all(dict(new.objects())[t] == 'igGuiVec3Track' for t in kept))
+            self.assertEqual([new.u32(t + 0x18) for t in kept], [1, 2])
+        marker = next(o for o, t in new.objects() if t == 'igGuiPlaceable' and
+                      o + 0x28 in new.sites['RSTT'] and new.string_at(o + 0x28) == 'OCTR_TEAM_POINTS')
+        self.assertTrue(new.u32(marker + 12) & 0x400)
+        self.assertEqual(new.u64(marker + 0x38), old.u64(0xbc0 + 0x38))
+        self.assertEqual(new.u32(0xa60 + 12), 3)
+        avatar = new.u64(0x5a38 + 0x98)
+        engine = new.u64(0x5a38 + 0xa0)
+        self.assertEqual(new.string_at(engine + 0x28), 'OCTR_TEAM_ENGINE')
+        for sprite in (avatar, engine):
+            self.assertEqual(new.u32(sprite + 0xa0), 0)
+            self.assertEqual(new.u32(sprite + 0xa4), 0)
+        self.assertTrue(new.u32(engine + 12) & 0x400)
+        self.assertEqual(struct.unpack_from('<2f', new.data, engine + 0x90), (80., 80.))
+        self.assertEqual(new.string_at(0xe30 + 0x28), 'OCTR_TEAM_LIST')
+        self.assertEqual(new.u32(0x73c0 + 0x90), old.u32(0x73c0 + 0x90))
+        self.assertEqual(new.u32(0x53f0 + 0x94), old.u32(0x53f0 + 0x94))
+        self.assertEqual(new.data[0x6e70 + 0x68], 1)  # Native name font shrinks to its box.
+        self.assertEqual(new.data[0x6e70 + 0x69], 0)  # Single line; no spill into next row.
+        self.assertEqual(new.string_at(avatar + 0x28), 'OCTR_TEAM_AVATAR')
+        self.assertTrue(new.u32(avatar + 12) & 0x400)
+        self.assertEqual(new.u64(avatar + 0x40), 0x52d0)
+        self.assertEqual(new.u64(avatar + 0x48), 0)
+        self.assertEqual(new.u64(avatar + 0xe8), 0)
+        self.assertEqual(new.u64(avatar + 0xf0), 0)
+        self.assertIn(avatar + 0x38, new.read_list('RHND', unpack_offsets))
+        self.assertIn(0x5a38 + 0x98, new.sites['ROFS'])
+        table = new.u64(0x52d0 + 0x48)
+        self.assertEqual(new.u32(table + 12), old.u32(table + 12) + 2)
+        self.assertEqual(sum(new.u64(new.u64(table + 32) + i * 8) == avatar
+                             for i in range(new.u32(table + 12))), 1)
+        def chain(g):
+            result, at = [], 0x5b50
+            while at and at not in result:
+                result.append(at)
+                at = g.u64(at + 0x58)
+            return result
+        self.assertEqual([o for o in chain(new) if o not in (avatar, engine)], chain(old))
+        self.assertEqual(new.u64(0x5b50 + 0x58), avatar)
+        self.assertEqual(new.u64(avatar + 0x50), 0x5b50)
+        self.assertEqual(new.u64(avatar + 0x58), engine)
+        self.assertEqual(new.u64(engine + 0x50), avatar)
+        self.assertEqual(new.u64(engine + 0x58), 0x5c70)
+        self.assertEqual(new.u64(0x5c70 + 0x50), engine)
+        # Reuse a local export; no new sprite objects or external materials.
+        for tag in ('EXID', 'TDEP'):
+            self.assertEqual(new.fixup(tag)[3], old.fixup(tag)[3])
+        self.assertEqual(new.u32(12), old.u32(12))
+        self.assertEqual(sum(t == 'igGuiSprite' for _, t in new.objects()),
+                         sum(t == 'igGuiSprite' for _, t in old.objects()))
+        names = new.fixup('EXNM')
+        handles = [(new.strings[a], new.strings[b & 0x7fffffff])
+                   for a, b in struct.iter_unpack('<II', names[3][:names[1] * 8]) if b & 0x80000000]
+        self.assertEqual(handles[new.u64(avatar + 0x38) & 0x7fffffff],
+                         ('Portrait001', 'Octane_BattleTeam_Ranking'))
+        self.assertEqual(handles[new.u64(engine + 0x38) & 0x7fffffff],
+                         ('Portrait002', 'Octane_BattleTeam_Ranking'))
+        self.assertNotIn('OCTR_TEAM_PORTRAIT_BORDER', new.strings)
+
     def test_unknown_graph_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'supported USA'):
             online_mode.rebuild(b'not a supported menu')
+
+    def test_unknown_private_team_settings_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
+            online_mode.private_team_settings(b'unknown settings')
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_private_teams_visible_for_races_without_changing_native_selector(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.SETTINGS_ENTRY)
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entry[1:])
+        old, new = Igz(blob), Igz(online_mode.private_team_settings(blob))
+        self.assertEqual(old.objects(), new.objects())
+        self.assertEqual(old.fixups, new.fixups)
+        selector = next(o for o, t in new.objects() if t == 'CGuiBehaviorTeamCountSettingSelector')
+        size = new.sizes[new.u64(selector)]
+        self.assertEqual(old.data[selector:selector + size], new.data[selector:selector + size])
+
+        def values(row, tag):
+            table = new.u64(row + 0xf0)
+            for i in range(new.u32(table + 0x30)):
+                animation = new.u64(new.u64(table + 0x18) + i * 8)
+                if new.strings[new.u32(new.u64(animation + 0x10) + 0x10)] != tag:
+                    continue
+                tracks = new.u64(animation + 0x18)
+                track = new.u64(new.u64(tracks + 0x20))
+                keys = new.u64(track + 0x10)
+                return new.u64(new.u64(keys + 0x20)) + 0x18
+            self.fail(f'missing animation {tag}')
+
+        row = 0x3910
+        alpha = values(row, 'SingleRace')
+        position = values(new.u64(row + 0x40), 'SingleRace')
+        self.assertEqual(struct.unpack_from('<f', new.data, alpha), (1.0,))
+        self.assertEqual(struct.unpack_from('<3f', new.data, position), (65.0, 180.0, 0.0))
+        # Only the race visibility and spacing change; battle rules and navigation stay native.
+        allowed = set(range(alpha, alpha + 4)) | set(range(position, position + 12))
+        self.assertTrue(all(a == b or i in allowed for i, (a, b) in enumerate(zip(old.data, new.data))))
 
     def test_hook_requires_supported_adapter(self):
         with self.assertRaisesRegex(ValueError, 'not uniquely recognized'):
@@ -188,6 +441,48 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         array = new.u64(chunk + 0x38)
         self.assertTrue(set(range(array, array + len(after) * 16, 8)) <= set(new.sites['RSTT']))
 
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_team_panels_preloaded_with_dependency_closure(self):
+        game = Path(os.environ['BB_TEST_GAME'])
+        pak = game / 'archives/update2.pak'
+        entries = {e[0].lower(): e for e in iga.pak_entries(pak)}
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entries[online_mode.ONLINE_PACKAGE][1:])
+            source = iga.read_entry(f, *entries[online_mode.START_PACKAGE][1:])
+            race = iga.read_entry(f, *next(e for name, e in entries.items()
+                                        if name.endswith('/juicedomain_race_pkg.igz'))[1:])
+        with tempfile.TemporaryDirectory() as temp:
+            assets = Path(temp)
+            new = Igz(online_mode.cup_package(game, blob, source, assets, race))
+            _, rows = online_mode.package_rows(new)
+            self.assertEqual(len(rows), len(set(rows)))
+            for name in ('octane_race_ranking', 'octane_battleteam_ranking', 'octane_race_leaders'):
+                self.assertIn(('gui_project', 'ui/' + name + '.igz'), rows)
+            self.assertTrue(any('race' in path.as_posix() for path in assets.rglob('*') if path.is_file()))
+            self.assertTrue(any('race_ranking_materials' in path for _, path in rows))
+            self.assertTrue(any('battleteam_ranking_materials' in path for _, path in rows))
+            self.assertTrue(any('racerportrait_contour' in path for _, path in rows))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_team_selector_marks_only_post_open_disable(self):
+        for archive in ('update', 'update2'):
+            pak = Path(os.environ['BB_TEST_GAME']) / 'archives' / (archive + '.pak')
+            entry = next(e for e in iga.pak_entries(pak)
+                         if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
+            with pak.open('rb') as f:
+                blob = iga.read_entry(f, *entry[1:])
+            old, new = Igz(blob), Igz(online_mode.team_selector_callback(blob))
+            changed = [o for o, t in old.objects()
+                       if old.data[o:o + old.sizes[old.u64(o)]] != new.data[o:o + old.sizes[old.u64(o)]]]
+            self.assertEqual(len(changed), 1)
+            node = changed[0]
+            self.assertEqual(dict(old.objects())[node], 'igVscCppActionNode')
+            self.assertEqual(new.u32(node + 16), 3)
+            self.assertEqual(new.u64(new.u64(node + 32) + 16), 0)
+            self.assertEqual(old.data[old.u64(node + 32):old.u64(node + 32) + 16],
+                             new.data[new.u64(node + 32):new.u64(node + 32) + 16])
+            self.assertEqual(old.data[node + 40:node + 64], new.data[node + 40:node + 64])
+
     def test_hook_regions_and_invalid_displacement(self):
         for address, displacement in ((0x1277e00, 0x187a197), (0x1277df0, 0x187a1a7)):
             code = bytes.fromhex('55 48 89 e5 41 57 41 56 53 50 48 8d 05')
@@ -216,6 +511,36 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
 
         self.assertEqual(struct.unpack('<Q', at(0x2773b40, 8))[0], 0x1277c70 - shift)
         self.assertEqual(struct.unpack('<Q', at(0x254c430, 8))[0], 0xa298c0)
+        self.assertEqual(at(0xf1fb50 - shift, 17), bytes.fromhex('554889e54157415641554154534883ec38'))
+        self.assertEqual(at(0xe330e0, 17), bytes.fromhex('554889e54157415641554154534883ec48'))
+        self.assertEqual(at(0xeb7950 - shift, 17), bytes.fromhex('554889e54157415653504889fb488b4318'))
+        self.assertEqual(at(0xeb71d0 - shift, 17), bytes.fromhex('554889e54157415641554154534883ec58'))
+        self.assertEqual(at(0x1093ca0 - shift, 17), bytes.fromhex('554889e54157415641554154534883ec38'))
+        confetti = bytearray.fromhex('554889e54157415653508a0568a5b501')
+        confetti[12] += shift
+        self.assertEqual(at(0xf382f0 - shift, 16), confetti)
+
+        network_branch = bytearray.fromhex('554889e54156534889d34989fee8be6393ff')
+        network_branch[14] += shift
+        self.assertEqual(at(0x115a740 - shift, 18), network_branch)
+        self.assertEqual(struct.unpack('<Q', at(0x2778150, 8))[0], 0x1293030 - shift)
+        self.assertEqual(at(0x253970, 18), bytes.fromhex("8b474831d28d48ff83f8010f4fd1895748c3"))
+        self.assertEqual(at(0x253990, 4), bytes.fromhex("ff4748c3"))
+        self.assertEqual(at(0xa09190, 12), bytes.fromhex("554889e553504889fb4885db"))
+        for slot, target in ((0x2543d68, 0x9c1250), (0x2545940, 0x9d67e0), (0x25436c8, 0x9b73f0), (0x2546008, 0x9de1b0), (0x2546018, 0x9dedb0)):
+            self.assertEqual(struct.unpack('<Q', at(slot, 8))[0], target)
+        for address in (0xe9de80, 0xe9dcf0):
+            self.assertEqual(at(address - shift, 17),
+                             bytes.fromhex('55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 18'))
+        self.assertEqual(at(0xff1810 - shift, 16),
+                         bytes.fromhex('55 48 89 e5 41 57 41 56 53 50 49 89 ff 49 8b 47'))
+        self.assertEqual(at(0xc2ed20, 11), bytes.fromhex('55 48 89 e5 41 56 53 48 83 ec 10'))
+        self.assertEqual(at(0x9c153f, 19), bytes.fromhex('e8') +
+                         struct.pack('<i', 0xae4cfc - shift) +
+                         bytes.fromhex('48 8b 8d 68 ff ff ff 4c 8b bd 40 ff ff ff'))
+        self.assertEqual(at(0xeb79d3 - shift, 21),
+                         bytes.fromhex('48 8b 05') + struct.pack('<i', 0x1c1646e + shift) +
+                         bytes.fromhex('8b 80 40 0d 00 00 83 c0 f7 83 f8 04 77 ae'))
         # Native host-results receiver writes the resolved finishing position.
         self.assertEqual(at(0xa29a84, 4), bytes.fromhex('45 89 6e 60'))
         # Podium-only branch follows the native race-position write (same USA/EU address).
@@ -307,7 +632,8 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
             card_entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.LOBBY_ENTRY)
             card_blob = iga.read_entry(f, *card_entry[1:])
         card_old, card_new = Igz(card_blob), Igz(online_mode.lobby_card(card_blob))
-        self.assertEqual(card_old.objects(), card_new.objects())
+        self.assertEqual(card_new.objects()[:len(card_old.objects())], card_old.objects())
+        self.assertEqual(card_new.data[:0x200], card_old.data[:0x200])
         self.assertEqual(card_new.string_at(0x480 + 0x28), 'OCTR_PRIVATE_LOBBY')
         def behavior_order(asset):
             behaviors = asset.u64(0x480 + 0xe8)
@@ -319,7 +645,15 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                          'CGuiBehaviorReturnToMainMenuOnDisconnect')
         self.assertEqual([v for v in before if v != after[-1]], after[:-1])
         self.assertEqual(card_new.string_at(0x4180 + 0x28), 'OCTR_PRIVATE_PREVIEW')
+        self.assertEqual(card_new.objects(), card_old.objects())
+        self.assertNotIn('OCTR_PRIVATE_TEAM_BUTTON', card_new.strings)
         old, new = Igz(original), Igz(online_mode.rebuild(original))
+        # The native traversal and child array must agree. A second selector clone
+        # previously displaced RACE TYPE from the array but left it in the chain.
+        children = [new.u64(new.u64(0xfe0) + i * 8) for i in range(new.u32(0xfcc))]
+        for previous, following in zip(children, children[1:]):
+            self.assertEqual(new.u64(previous + 0x58), following)
+            self.assertEqual(new.u64(following + 0x50), previous)
         self.assertEqual(len(new.objects()), len(old.objects()) + 8)
         row = new.u64(0x1058)
         self.assertEqual(new.u64(row + 0x40), 0xea0)

@@ -123,6 +123,10 @@ echo "Version: $version (out/VERSION)"
 if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -o out/online-mode-test
     out/online-mode-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_race_options.c src/runtime_tt_reference.c -lm -o out/race-options-test
+    out/race-options-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror tests/test_tt_reference.c -lm -o out/tt-reference-test
+    out/tt-reference-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_itemless.c -o out/itemless-test
     out/itemless-test
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -Igpu/shim -Igpu/shadps4 tests/test_graphics_tab.cpp -o out/graphics-tab-test

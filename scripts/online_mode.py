@@ -17,8 +17,10 @@ from patches import load_segments
 
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
 LABEL_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect_en.lng'
+RACE_MUSIC_ENTRY = 'temporary/octane/data/ps4/output/vsc/common/race/common_race_music_manager.igz'
 TIMER_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_returntolobby_timer.igz'
 LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategame.igz'
+SETTINGS_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategamesettings.igz'
 GRAPH_SHA256 = {
     '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
     'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
@@ -41,6 +43,311 @@ CUP_GRAPHS = {
         ('3fae87784d9e0fe697a2d36c4f6c2be7066f73155bf8830bb6bac558421b44b2',
          0x2280, 'Octane_Lobby_PrivateGameSettings', False),
 }
+
+
+TEAM_RANKING_ROOT = 'temporary/octane/data/ps4/output/vsc/ui/octane_battleteam_ranking/octane_battleteam_ranking_root.igz'
+
+
+TEAM_RANKING_UI = 'temporary/octane/data/ps4/output/ui/octane_battleteam_ranking.igz'
+
+
+def team_ranking_header(blob):
+    g = Igz(blob)
+    if g.string_at(0xaa0 + 0x28) != '[WinsText]' or g.string_at(0xbc0 + 0x28) != '[WinnerNameText]':
+        raise ValueError('unsupported native team ranking header')
+    for tag in ('RHND', 'RNEX'):
+        try:
+            g.sites[tag] = g.read_list(tag, unpack_offsets)
+        except KeyError:
+            pass
+    source = 0xbc0
+    clone = g.append(g.data[source:source + 0x120])
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if source <= site < source + 0x120:
+                g.add_site(tag, clone + site - source)
+    g.set_u64(clone + 0x28, g.string_index('OCTR_TEAM_POINTS'))
+    g.set_u32(clone + 12, g.u32(clone + 12) | 0x400)  # Runtime reveals only private race teams.
+    g.set_u64(clone + 0x50, source)
+    g.set_u64(source + 0x58, clone)
+    array = g.append(struct.pack('<3Q', 0xaa0, source, clone))
+    for i in range(3):
+        g.add_site('ROFS', array + i * 8)
+    table = 0xa60
+    g.set_u32(table + 12, 3)
+    g.set_u32(table + 16, 3)
+    g.set_u64(table + 24, (1 << 56) | (1 << 52) | 24)
+    g.set_u64(table + 32, array)
+    # The project already exports an unused Portrait001 sprite. Native 9b87e0
+    # replaces its material with the racer's minimap portrait, as in Highscores.
+    behavior, row, template = 0x5a38, 0x52d0, 0x5550
+    # RaceRanking's entrance moves/scales the row but leaves _alpha to DNF.
+    # BattleTeam also fades to alpha=1, erasing the DNF value after binding.
+    for tracks, keep in ((0x6268, (0x62a8, 0x64f0)),
+                         (0x6650, (0x6690, 0x67f8))):
+        if g.u32(tracks + 12) != 3:
+            raise ValueError('unsupported native team entrance tracks')
+        array = g.u64(tracks + 32)
+        for i, track in enumerate(keep):
+            g.set_u64(array + i * 8, track)
+        g.set_u32(tracks + 12, 2)
+    names = next(o for o, t in g.objects() if t == 'igNameList')
+    exports = {g.string_at(g.u64(names + 32) + i * 16): g.u64(g.u64(32) + i * 8)
+               for i in range(g.u32(names + 12))}
+    if (dict(g.objects()).get(exports.get('Portrait001')) != 'igGuiSprite' or
+            dict(g.objects()).get(exports.get('Portrait002')) != 'igGuiSprite' or
+            dict(g.objects()).get(behavior) != 'CGuiBehaviorOctaneRaceRankingSelectItem' or
+            g.u64(behavior + 0x98) or g.u64(behavior + 0xa0) or g.u64(0x5b50 + 0x58) != 0x5c70 or
+            g.u64(0x5c70 + 0x50) != 0x5b50):
+        raise ValueError('unsupported native team portrait layout')
+    exnm = g.fixup('EXNM')
+    pairs = list(struct.iter_unpack('<II', exnm[3][:exnm[1] * 8]))
+    handle = sum(bool(b & 0x80000000) for _, b in pairs)
+    pairs.append((g.string_index('Portrait001'),
+                  g.string_index('Octane_BattleTeam_Ranking') | 0x80000000))
+    pairs.append((g.string_index('Portrait002'),
+                  g.string_index('Octane_BattleTeam_Ranking') | 0x80000000))
+    exnm[1], exnm[3] = len(pairs), b''.join(struct.pack('<II', *p) for p in pairs)
+    exnm[4] = exnm[2] + len(exnm[3])
+    portrait = g.append(g.data[template:template + 0x120])
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if template <= site < template + 0x120:
+                g.add_site(tag, portrait + site - template)
+    g.set_u64(portrait + 0x28, g.string_index('OCTR_TEAM_AVATAR'))
+    g.add_site('RSTT', portrait + 0x28)
+    g.set_u64(portrait + 0x38, handle | 0x80000000)
+    g.set_u64(portrait + 0x40, row)
+    g.set_u32(portrait + 12, g.u32(portrait + 12) | 0x400)
+    # Same portrait geometry as the finish panel; native material stays untinted.
+    struct.pack_into('<3f', g.data, portrait + 0x60, 80.0, 53.0, 0.0)
+    struct.pack_into('<3f', g.data, portrait + 0x6c, 0.5, 0.5, 0.5)
+    struct.pack_into('<3f', g.data, portrait + 0x84, 0.85, 0.85, 1.0)
+    struct.pack_into('<2f', g.data, portrait + 0x90, 64.0, 64.0)
+    # The null-placeable template uses relative alignment (2,2). Portraits in
+    # RaceRanking/Highscores use absolute alignment; copying 2,2 adds half a row.
+    g.set_u32(portrait + 0xa0, 0)
+    g.set_u32(portrait + 0xa4, 0)
+    struct.pack_into('<f', g.data, portrait + 0x80, -3.3261168)
+    # +50/+58 link the flattened project order, not just this child table.
+    # Insert between two neighbors, preserving the remainder of the chain.
+    g.set_u64(portrait + 0x50, 0x5b50)
+    g.set_u64(portrait + 0x58, 0x5c70)
+    g.set_u64(0x5b50 + 0x58, portrait)
+    g.set_u64(0x5c70 + 0x50, portrait)
+    g.set_u64(behavior + 0x98, portrait)
+    g.add_site('ROFS', behavior + 0x98)
+    engine = g.append(g.data[portrait:portrait + 0x120])
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if portrait <= site < portrait + 0x120:
+                g.add_site(tag, engine + site - portrait)
+    g.set_u64(engine + 0x28, g.string_index('OCTR_TEAM_ENGINE'))
+    g.set_u64(engine + 0x38, (handle + 1) | 0x80000000)
+    struct.pack_into('<3f', g.data, engine + 0x60, 131.0, 50.0, 0.0)
+    struct.pack_into('<3f', g.data, engine + 0x84, 0.45, 0.45, 1.0)
+    struct.pack_into('<2f', g.data, engine + 0x90, 80.0, 80.0)
+    g.set_u64(portrait + 0x58, engine)
+    g.set_u64(engine + 0x50, portrait)
+    g.set_u64(0x5c70 + 0x50, engine)
+    g.set_u64(behavior + 0xa0, engine)
+    g.add_site('ROFS', behavior + 0xa0)
+    # Runtime adjusts only private-team lists before their graph populates rows.
+    g.set_u64(0xe30 + 0x28, g.string_index('OCTR_TEAM_LIST'))
+    g.add_site('RSTT', 0xe30 + 0x28)
+    table = g.u64(row + 0x48)
+    count, old = g.u32(table + 12), g.u64(table + 32)
+    children = [g.u64(old + i * 8) for i in range(count)]
+    children[children.index(0x5b50) + 1:children.index(0x5b50) + 1] = [portrait, engine]
+    array = g.append(struct.pack(f'<{len(children)}Q', *children))
+    for i in range(len(children)):
+        g.add_site('ROFS', array + i * 8)
+    g.set_u32(table + 12, len(children))
+    g.set_u32(table + 16, len(children))
+    g.set_u64(table + 24, (g.u64(table + 24) & ~0xffffffff) | len(children) * 8)
+    g.set_u64(table + 32, array)
+    return g.build()
+
+
+def team_selector_legend(blob):
+    """Mark only the selector's Back legend; Battle still uses the native node."""
+    g = Igz(blob)
+    x = g.fixup('EXNM')
+    methods = [g.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
+               if not b & 0x80000000]
+    target = methods.index('CGuiNodes::addButtonToLegend_VSC')
+    kinds = dict(g.objects())
+    marked = 0
+    for node, kind in list(g.objects()):
+        if kind != 'igVscCppActionNode' or g.u64(node + 0x38) != target:
+            continue
+        pins = g.u64(node + 0x20)
+        button = g.u64(pins + 8)
+        if g.u32(node + 0x10) != 4 or kinds.get(button) != 'igVscConstEnumAccessor' or g.u32(button + 16) != 2:
+            continue
+        moved = g.append(g.data[pins:pins + 32] + bytes(8))
+        for i in range(4):
+            if g.u64(moved + i * 8):
+                g.add_site('ROFS', moved + i * 8)
+        g.set_u32(node + 0x10, 5)
+        g.set_u32(node + 0x14, 5)
+        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 40)
+        g.set_u64(node + 0x20, moved)
+        marked += 1
+    if marked != 1:
+        raise ValueError('unsupported native team selector Back legend')
+    return g.build()
+
+
+def team_finish_sounds(blob):
+    """Mark just the individual finish stings; runtime delays them in team races."""
+    g = Igz(blob)
+    names = next(o for o, t in g.objects() if t == 'igNameList')
+    table = g.u64(names + 32)
+    objects = {g.string_at(table + i * 16): g.u64(g.u64(32) + i * 8)
+               for i in range(g.u32(names + 12))}
+    accessors = {objects[name] for name in (
+        'Sound_id_xkmi6sp9_Accessor', 'Sound_id_vm79byis_Accessor')}
+    x = g.fixup('EXNM')
+    methods = [g.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
+               if not b & 0x80000000]
+    target = methods.index('CAudioNodes::playSound_v2_VSC')
+    marked = 0
+    for node, kind in list(g.objects()):
+        if kind != 'igVscCppActionNode' or g.u64(node + 0x38) != target:
+            continue
+        pins = g.u64(node + 0x20)
+        if g.u32(node + 0x10) != 4 or g.u64(pins + 8) not in accessors:
+            continue
+        moved = g.append(g.data[pins:pins + 32] + bytes(8))
+        for i in range(4):
+            if g.u64(moved + i * 8):
+                g.add_site('ROFS', moved + i * 8)
+        g.set_u32(node + 0x10, 5)
+        g.set_u32(node + 0x14, 5)
+        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 40)
+        g.set_u64(node + 0x20, moved)
+        marked += 1
+    if marked != 2:
+        raise ValueError('unsupported native race finish sound graph')
+    return g.build()
+
+
+def private_start_button(blob):
+    """Validate the host before readyPlayerLobby can hide/lock the lobby."""
+    g = Igz(blob)
+    g.sites['RNEX'] = g.read_list('RNEX', unpack_offsets)
+    x = g.fixup('EXNM')
+    methods = [g.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
+               if not b & 0x80000000]
+    def action(name):
+        method = methods.index(name)
+        nodes = [o for o, t in g.objects()
+                 if t == 'igVscCppActionNode' and g.u64(o + 0x38) == method]
+        if len(nodes) != 1:
+            raise ValueError('unsupported native private Start button: ' + name)
+        return nodes[0]
+    can_start = action('COctaneLobbyNodes::canStartGame_VSC')
+    ready = action('COctaneLobbyNodes::readyPlayerLobby_VSC')
+    host = action('CNetworkNodes::isHost2_VSC')
+    incoming = [g.u64(o + 0x20) + 8 for o, t in g.objects()
+                if t == 'igVscActionNodeList' and g.u32(o + 0x10) == 2
+                and g.u64(g.u64(o + 0x20) + 8) == ready]
+    if len(incoming) != 1 or g.u32(can_start + 0x10) != 0:
+        raise ValueError('unsupported native private ready branch')
+    source_outputs = g.u64(can_start + 0x30)
+    def branch(source, yes, no, marked=False):
+        node = g.append(g.data[source:source + 0x40])
+        outputs = g.append(g.data[source_outputs:source_outputs + 0x38])
+        for tag, sites in g.sites.items():
+            for site in list(sites):
+                if source <= site < source + 0x40:
+                    g.add_site(tag, node + site - source)
+                if source_outputs <= site < source_outputs + 0x38:
+                    g.add_site(tag, outputs + site - source_outputs)
+        g.set_u64(node + 0x30, outputs)
+        g.add_site('ROFS', node + 0x30)
+        g.set_u64(outputs + 0x20, outputs + 0x28)
+        g.add_site('ROFS', outputs + 0x20)
+        for offset, target in ((0x28, yes), (0x30, no)):
+            g.set_u64(outputs + offset, target)
+            if target:
+                g.add_site('ROFS', outputs + offset)
+        if marked:
+            g.set_u32(node + 0x10, 1)
+            g.set_u32(node + 0x14, 1)
+            g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 8)
+            g.set_u64(node + 0x20, g.append(bytes(8)))
+            g.add_site('ROFS', node + 0x20)
+        return node
+    guard = branch(can_start, ready, 0, marked=True)
+    g.set_u64(incoming[0], branch(host, guard, ready))
+    return g.build()
+
+
+def team_selector_callback(blob):
+    """Mark the lobby callback that disables the newly opened Team Selector."""
+    g = Igz(blob)
+    names = next(o for o, t in g.objects() if t == 'igNameList')
+    array = g.u64(names + 32)
+    index = next(i for i in range(g.u32(names + 12))
+                 if g.string_at(array + i * 16) == 'method__id_qp45dard')
+    method = g.u64(g.u64(32) + index * 8)
+    entries = g.u64(method + 16)
+    entry = g.u64(g.u64(entries + 32))
+    node = g.u64(entry + 0x30)
+    x = g.fixup('EXNM')
+    methods = [g.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
+               if not b & 0x80000000]
+    if (dict(g.objects()).get(node) != 'igVscCppActionNode' or g.u32(node + 16) != 2 or
+            methods[g.u64(node + 0x38)] != 'CGuiNodes::disableControls_VSC'):
+        raise ValueError('unsupported Team Selector opened callback')
+    old = g.u64(node + 32)
+    pins = g.append(g.data[old:old + 16] + bytes(8))
+    for site in g.sites['ROFS'][:]:
+        if old <= site < old + 16:
+            g.add_site('ROFS', pins + site - old)
+    # Third unused pin marks only this call for the private Single runtime gate.
+    g.set_u32(node + 16, 3)
+    g.set_u32(node + 20, 3)
+    g.set_u64(node + 24, (1 << 56) | (1 << 52) | 24)
+    g.set_u64(node + 32, pins)
+    return g.build()
+
+
+def team_ranking_navigation(blob):
+    """Mark only this graph's network branches for private race navigation."""
+    g = Igz(blob)
+    names = g.fixup('EXNM')
+    methods = [g.strings[a] for a, b in struct.iter_unpack('<II', names[3][:names[1] * 8])
+               if not b & 0x80000000]
+    method = methods.index('CNetworkNodes::isInNetworkGame2_VSC')
+    nodes = [o for o, t in g.objects() if t == 'igVscCppActionNode' and g.u64(o + 0x38) == method]
+    if len(nodes) != 3 or any(g.u32(o + 0x10) != 0 for o in nodes):
+        raise ValueError('unsupported native team ranking network branches')
+    # isInNetworkGame2 takes no pins; one unused null pin is our scoped marker.
+    pin = g.append(bytes(8))
+    for node in nodes:
+        g.set_u32(node + 0x10, 1)
+        g.set_u32(node + 0x14, 1)
+        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 8)
+        g.set_u64(node + 0x20, pin)
+        g.add_site('ROFS', node + 0x20)
+    return g.build()
+
+
+def private_team_settings(blob):
+    if hashlib.sha256(blob).hexdigest() not in {
+        'a2259e5840343814fa5901ce16de69a3c7295760a5ceb8ed51baf2176608fbc4',  # USA 1.21
+        'e8667f50355f3b0cfa35df6b25f159715c068e53bba86cc1ebecb948d4a97cb4',  # EU 1.21
+    }:
+        raise ValueError('unsupported native private team settings')
+    g = Igz(blob)
+    # Single/CUP use the SingleRace settings animation. Give the existing Teams
+    # row its visible battle state and row spacing; keep native selector/sync logic.
+    for target, source, size in ((0x51e0, 0x4e80, 4), (0xe058, 0xdcd8, 12)):
+        g.data[target + 0x18:target + 0x18 + size] = g.data[source + 0x18:source + 0x18 + size]
+    return g.build()
 
 
 def cup_timer(blob):
@@ -101,8 +408,6 @@ def cup_route(blob, specification):
 PACKAGE_PREFIX = 'temporary/octane/data/ps4/output/'
 ONLINE_PACKAGE = PACKAGE_PREFIX + 'packages/generated/ui/domains/juicedomain_onlinemenus_pkg.igz'
 START_PACKAGE = PACKAGE_PREFIX + 'packages/generated/ui/domains/juicedomain_startscreen_pkg.igz'
-
-
 def package_rows(g):
     chunks = [o for o, t in g.objects() if t == 'igStreamingChunkInfo']
     if len(chunks) != 1:
@@ -115,20 +420,29 @@ def package_rows(g):
                    for i in range(count)]
 
 
-def cup_package(game, blob, source_blob, assets=None):
+def cup_package(game, blob, source_blob, assets=None, race_blob=None):
     g, source = Igz(blob), Igz(source_blob)
     chunk, original = package_rows(g)
     _, source_rows = package_rows(source)
+    if race_blob is not None:
+        _, race_rows = package_rows(Igz(race_blob))
+        paths = {path for _, path in source_rows}
+        source_rows += [(kind, path) for kind, path in race_rows if path not in paths]
     source_types = {path: kind for kind, path in source_rows}
     seen = {path for _, path in original}
     # Match the native arcade package's dependency closure. Shared/global assets
     # absent from that package remain owned by their existing global chunks.
     files = {}
-    for name in ('juicedomain_startscreen', 'update', 'update2'):
+    for name in ('juicedomain_startscreen', 'juicedomain_race', 'update', 'update2'):
         pak = resolve(Path(game) / 'archives' / (name + '.pak'))
         for entry in iga.pak_entries(pak):
             files[entry[0].lower().removeprefix(PACKAGE_PREFIX)] = (pak, entry)
     pending = ['ui/octane_cupselect.igz', 'materialinstances/ui/cupselect_materials.igz']
+    if race_blob is not None:
+        # These projects must be resident before openByName: a missing project
+        # falls back to a dedicated StreamingUI archive that does not exist.
+        pending += ['ui/octane_race_ranking.igz', 'ui/octane_race_leaders.igz',
+                    'ui/octane_battleteam_ranking.igz']
     needed = set()
     while pending:
         path = pending.pop()
@@ -139,7 +453,7 @@ def cup_package(game, blob, source_blob, assets=None):
         pak, entry = files[path]
         # The Arcade domain archive is released when entering Online. Keep its
         # required files available through the runtime's existing loose-file map.
-        if assets is not None and pak == resolve(Path(game) / 'archives/juicedomain_startscreen.pak'):
+        if assets is not None and pak.name.lower() in ('juicedomain_startscreen.pak', 'juicedomain_race.pak'):
             target = assets / path
             target.parent.mkdir(parents=True, exist_ok=True)
             with pak.open('rb') as f:
@@ -165,6 +479,62 @@ def cup_package(game, blob, source_blob, assets=None):
     g.set_u64(chunk + 0x30, (g.u64(chunk + 0x30) & ~0xffffffff) | len(rows) * 16)
     g.set_u64(chunk + 0x38, array)
     return g.build()
+
+
+def ranking_stream_archive(game, dest, package_blob, project, replacements):
+    """Provide the native StreamingUI fallback when the online chunk was released."""
+    from graphics_tab import Archive, write_archive
+    from contextlib import ExitStack
+    package = Igz(package_blob)
+    chunk, rows = package_rows(package)
+    kinds = dict((path, kind) for kind, path in rows)
+    with ExitStack() as stack:
+        files = {}
+        template = None
+        for name in ('juicedomain_race', 'update', 'update2'):
+            archive = Archive(resolve(Path(game) / 'archives' / (name + '.pak')))
+            stack.callback(archive.f.close)
+            template = archive
+            for i in range(len(archive.names)):
+                path = archive.logical(i).lower().removeprefix(PACKAGE_PREFIX)
+                files[path] = (archive, i)
+        pending = ['ui/' + project + '.igz']
+        needed = {}
+        while pending:
+            path = pending.pop()
+            if path in needed or path not in kinds:
+                continue  # Other dependencies belong to native permanent chunks.
+            if path not in files:
+                raise ValueError('missing ranking dependency: ' + path)
+            archive, index = files[path]
+            data = replacements.get(path)
+            if data is None:
+                data = archive.read(index)
+            needed[path] = data
+            if kinds[path] in ('texture', 'lang_file'):
+                continue
+            asset = Igz(data)
+            try:
+                dependencies = asset.fixup('TDEP')
+            except KeyError:
+                continue
+            strings = dependencies[3].split(b'\0')[:dependencies[1] * 2]
+            pending.extend(raw.decode().lower().replace('<build>project:/' + PACKAGE_PREFIX, '')
+                           .replace(':/', '/') for raw in strings[1::2])
+        selected = [(kind, path) for kind, path in rows if path in needed]
+        array = package.append(b''.join(struct.pack('<QQ', package.string_index(kind),
+                                                    package.string_index(path)) for kind, path in selected))
+        for offset in range(array, array + len(selected) * 16, 8):
+            package.add_site('RSTT', offset)
+        package.set_u64(chunk + 0x28, len(selected))
+        package.set_u64(chunk + 0x30, (package.u64(chunk + 0x30) & ~0xffffffff) | len(selected) * 16)
+        package.set_u64(chunk + 0x38, array)
+        # 985510 requests generated/UI/<project>; the native package loader
+        # adds packages/ and _pkg.igz. The root export remains chunk_info.
+        package_path = 'packages/generated/ui/' + project + '_pkg.igz'
+        needed[package_path] = package.build()
+        write_archive(dest, [(PACKAGE_PREFIX + path, path, i << 8, data)
+                             for i, (path, data) in enumerate(needed.items())], template)
 
 
 def hook_site(elf):
@@ -265,8 +635,9 @@ def lobby_card(blob):
     values = [v for v in values if v != hooks[0]] + hooks
     for i, value in enumerate(values):
         g.set_u64(slots + i * 8, value)
-    # Tags identify only this menu and its existing postcard; native layout is retained.
-    for placeable, name in ((0x480, 'OCTR_PRIVATE_LOBBY'), (0x4180, 'OCTR_PRIVATE_PREVIEW')):
+    # Runtime markers identify this menu and its existing postcard.
+    for placeable, name in ((0x480, 'OCTR_PRIVATE_LOBBY'),
+                            (0x4180, 'OCTR_PRIVATE_PREVIEW')):
         if g.u64(placeable + 0x28):
             raise ValueError('private lobby marker would overwrite a native binding')
         g.set_u64(placeable + 0x28, g.string_index(name))
@@ -318,6 +689,7 @@ def known_heroes(game):
 def prepare(game, out, elf, bases):
     out = Path(out)
     assets = out / 'cup-assets'
+    (assets / 'vsc/ui/octane_lobby_privategame/octane_lobby_privategame_teambutton.igz').unlink(missing_ok=True)
     site = hook_site(Path(elf).read_bytes())
     pak = resolve(Path(game) / 'archives/update2.pak')
     entries = iga.pak_entries(pak)
@@ -329,26 +701,56 @@ def prepare(game, out, elf, bases):
     base = patches.get(guest)
     payload = rebuild(current_entry(pak, entries, index, base))
     with pak.open('rb') as f:
+        ranking_ui_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_UI)
+        race_ui_index = next(i for i, e in enumerate(entries) if e[0].lower() ==
+                             PACKAGE_PREFIX + 'ui/octane_race_ranking.igz')
+        ranking_ui = team_ranking_header(current_entry(pak, entries, ranking_ui_index, base))
+        ranking_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_ROOT)
+        ranking = team_ranking_navigation(iga.read_entry(f, *entries[ranking_index][1:]))
+        settings_index = next(i for i, e in enumerate(entries) if e[0].lower() == SETTINGS_ENTRY)
+        settings = private_team_settings(current_entry(pak, entries, settings_index, base))
         lobby_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_ENTRY)
         lobby = lobby_card(iga.read_entry(f, *entries[lobby_index][1:]))
+        lobby_root_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
+        lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
+        race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
+        race_package = iga.read_entry(f, *entries[race_package_index][1:])
         package = cup_package(game, iga.read_entry(f, *entries[package_index][1:]),
-                              iga.read_entry(f, *entries[source_index][1:]), assets)
+                              iga.read_entry(f, *entries[source_index][1:]), assets,
+                              race_package)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()
     mapped = dict(mapped)
+    ranking_replacements = {
+        TEAM_RANKING_UI.removeprefix(PACKAGE_PREFIX): ranking_ui,
+        TEAM_RANKING_ROOT.removeprefix(PACKAGE_PREFIX): ranking,
+        'ui/octane_race_ranking.igz': current_entry(pak, entries, race_ui_index, base),
+    }
+    for project in ('octane_battleteam_ranking', 'octane_race_ranking'):
+        archive = out / (project + '.pak')
+        ranking_stream_archive(game, archive, race_package, project, ranking_replacements)
+        mapped.setdefault('archives/' + archive.name, archive)
     for asset in assets.rglob('*'):
         if asset.is_file():
             mapped.setdefault(asset.relative_to(assets).as_posix(), asset)
     file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
              [(Path(relative), source) for relative, source in mapped.items()])
+    music_index = next(i for i, e in enumerate(entries) if e[0].lower() == RACE_MUSIC_ENTRY)
+    with pak.open('rb') as f:
+        music = team_finish_sounds(iga.read_entry(f, *entries[music_index][1:]))
     target = out / 'online-mode.bbpatch'
-    archive_patch.write_entries_patch(target, pak, guest, {index: payload, lobby_index: lobby, package_index: package}, base, override={index})
+    archive_patch.write_entries_patch(target, pak, guest,
+                                      {index: payload, lobby_index: lobby, package_index: package,
+                                       settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
+                                       lobby_root_index: lobby_root, music_index: music}, base,
+                                      override={index, settings_index, ranking_ui_index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)
+    label_base = patches.get('/app0/archives/update.pak')
     label_index = next(i for i, e in enumerate(label_entries) if e[0].lower() == LABEL_ENTRY)
     with label_pak.open('rb') as f:
         label = Igz(iga.read_entry(f, *label_entries[label_index][1:]))
@@ -359,13 +761,23 @@ def prepare(game, out, elf, bases):
     target = out / 'online-mode-label.bbpatch'
     replacements = {label_index: label.build()}
     with label_pak.open('rb') as f:
+        music_index = next(i for i, e in enumerate(label_entries) if e[0].lower() == RACE_MUSIC_ENTRY)
+        replacements[music_index] = team_finish_sounds(iga.read_entry(f, *label_entries[music_index][1:]))
+        selector_index = next(i for i, e in enumerate(label_entries)
+                              if e[0].lower().endswith('/octane_teamselect_root.igz'))
+        replacements[selector_index] = team_selector_legend(iga.read_entry(f, *label_entries[selector_index][1:]))
+        start_index = next(i for i, e in enumerate(label_entries)
+                           if e[0].lower().endswith('/octane_lobby_privategame_buttonready.igz'))
+        replacements[start_index] = private_start_button(iga.read_entry(f, *label_entries[start_index][1:]))
+        root_index = next(i for i, e in enumerate(label_entries) if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
+        replacements[root_index] = team_selector_callback(iga.read_entry(f, *label_entries[root_index][1:]))
         timer_index = next(i for i, e in enumerate(label_entries) if e[0].lower() == TIMER_ENTRY)
         replacements[timer_index] = cup_timer(iga.read_entry(f, *label_entries[timer_index][1:]))
         for name, specification in CUP_GRAPHS.items():
             path = 'temporary/octane/data/ps4/output/vsc/ui/' + name + '.igz'
             index = next(i for i, e in enumerate(label_entries) if e[0].lower() == path)
             replacements[index] = cup_route(iga.read_entry(f, *label_entries[index][1:]), specification)
-    archive_patch.write_entries_patch(target, label_pak, guest, replacements, patches.get(guest))
+    archive_patch.write_entries_patch(target, label_pak, guest, replacements, label_base)
     patches[guest] = target
     return list(patches.values()), f'{site:x}'
 
