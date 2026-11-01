@@ -1735,3 +1735,15 @@ the personal field stays unchanged; the existing lobby-return assertions verify
 restoration afterwards. No production behavior change was needed.
 Race-options C suite passes with warnings as errors. This is synthetic lifecycle
 coverage, not a fresh live four-race host/guest gameplay confirmation.
+
+
+## 2026-11-02: Itemless Easy/Medium remain native
+
+Per the final user correction, this exception applies only to Itemless. Easy
+and Medium bypass custom driving hooks, ghost guidance, base-speed bonuses
+and surface slowdown removal. Their original tuning columns are preserved,
+including after switching from Normal; the tuning cache distinguishes both
+policies. Normal behavior is unchanged. Hard uses N. Tropy, Very Hard Oxide,
+Extreme Velo and Nightmare Developer references in Private Itemless/CUP.
+Controller regression covers mode transitions, all six levels, original lower
+tuning columns, Medium speed and surface modifiers. Live gameplay is unverified.
