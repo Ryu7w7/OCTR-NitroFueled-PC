@@ -71,3 +71,8 @@ Usa el recibo JSON que esta junto al ZIP descargado de tu edicion.
 Una descarga regional tiene su propio hash. No demuestra que el mod de otra
 edicion este cargado: aun se requiere revisar y reiniciar. La confirmacion de
 carga entre ediciones distintas queda pendiente del adaptador de servidor/runtime.
+
+Ya puedes importar sin comandos: cierra el juego, abre Mods, pulsa Revisar e
+importar descarga y elige el recibo JSON junto al ZIP descargado. El mod queda
+sin activar. Revisalo, activalo, reinicia con Jugar y vuelve a entrar a la sala
+manualmente. Los errores aparecen en el registro del launcher.

@@ -217,3 +217,14 @@ CUSA13795/CUSA14876 at 01.21. These inspected uploads did not yet contain the pa
 TXT; authors must rebuild the format-2 file/checksum manifest and re-upload.
 Do not just insert TXT into a previously checksummed ZIP or reuse old upload IDs.
 No third-party ZIP content is included in this source handoff.
+
+LOCAL INTEGRATION REVISION
+See docs/mod-sync-local-demo.txt for the runnable loopback HTTPS example and
+Python-to-Go acceptance test. CI runs the test with a fixed timeout.
+The Windows launcher now offers Review and import download, disabled while playing;
+it invokes the checked receipt importer with the actual selected game folder.
+Imported mods remain disabled. Enable/restart/rejoin remains a user-controlled flow.
+The Windows launcher sources compile and link locally with clang C++20, Win32 and
+D3D11; this check build omits distribution resources and is not a release artifact.
+Go tests with the race detector and go vet pass. The production GPU/game build and
+live lobby/focus acceptance tests remain unverified. No hot-load capability added.

@@ -1,0 +1,48 @@
+LOCAL SERVER/LAUNCHER INTEGRATION HANDOFF
+
+Build the loopback-only fixture from the repository root:
+  cd integration/ryunet-modsync
+  go build -o ../../out/mod-sync-tests/modsync-demo ./cmd/modsync-demo
+  cd ../..
+  python tests/mod_sync_interop.py out/mod-sync-tests/modsync-demo
+On Windows use modsync-demo.exe in both commands.
+
+The fixture opens HTTPS only on an OS-selected loopback port. It generates a
+throwaway key and exposes a test certificate to the child test driver. The client
+trusts that certificate specifically: TLS verification is not disabled. No real
+account, GameBanana download, mod installation or game executable is used.
+The harness has a 30-second process watchdog. Closing stdin stops the server.
+Do not deploy this fixture: three synthetic accounts share an ephemeral test key;
+its stdin room controls and synthetic clock offsets are test facilities only.
+Production MUST use the server team's existing account/proof/replay verifier.
+
+The test exercises the real Python RyuNet/Transport and Go HTTP/Bridge/Coordinator:
+- two regional upload hashes coexist, with no false equivalent-loaded assertion;
+- staged/failing peers can explicitly fall back and allow the race;
+- the opt-out member never prevents start;
+- the countdown releases after the fixed deadline and cannot reacquire;
+- disconnected membership is removed and no-lobby returns 409;
+- invalid and replayed authentication proofs are rejected;
+- administrator disable releases the gate.
+No test of two real game clients or dynamic asset registration is implied.
+
+WINDOWS REVIEW FLOW
+Mods > Open mod downloads locates receipts and their ZIPs. Close the game.
+Mods > Review and import download opens a JSON receipt picker. Choose one receipt.
+The CLI validates the staged hash/package and checks the selected game edition,
+then imports it DISABLED. Review the imported mod, explicitly enable it, restart
+using Play, and manually rejoin the lobby. Unknown editions cannot import code
+patches. Existing IDs with different contents require explicit manual update.
+No automatic process restart, lobby token storage, or private rejoin protocol is
+invented. Runtime locks also block CLI imports during a running session.
+
+CURRENT EXTERNAL ACCEPTANCE WORK
+Ryu's team must connect current authentication, authoritative membership, and the
+real start gate from docs/mod-sync-server-wiring.txt. A deferred start must be
+retried by the server/host by the deadline. Do not rely solely on a HUD countdown.
+For seamless same-lobby loading, implement and verify native safe-boundary package
+mount/registration plus per-region loaded requirements; current receipts only
+prove downloaded bytes. Keep ordinary missing-character fallback intact.
+Run two real PCs with enabled/disabled sync, failure/offline CDN, mixed editions,
+restart/rejoin, and the actual fullscreen/windowed Alt+Tab overlay behavior.
+Linux launcher lifecycle integration remains separate from the portable core.

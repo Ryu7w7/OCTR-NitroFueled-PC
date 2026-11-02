@@ -4025,6 +4025,28 @@ void ModsTab() {
         fs::create_directories(downloads, ec);
         OpenInShell(downloads);
     }
+    ImGui::BeginDisabled(a.game_running || !a.python || a.game_dir.empty());
+    if (ImGui::Button(T("Revisar e importar descarga", "Review and import download"))) {
+        const auto receipts = PickFiles(a.hwnd, L"Select the JSON receipt beside a downloaded mod ZIP",
+                                        L"Download receipt (*.json)", L"*.json");
+        if (receipts.size() == 1) {
+            const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+                Quote((a.root / L"scripts" / L"mod_sync_cli.py").wstring()) + L" import " +
+                Quote(receipts.front().wstring()) + L" --data " + Quote(a.root.wstring()) +
+                L" --game " + Quote(a.game_dir.wstring());
+            const Captured result = RunCaptured(a.python->exe, cmd, a.root, 120000);
+            if (!result.output.empty()) AddLog(result.output);
+            a.notice = result.started && result.code == 0
+                ? T("Importado sin activar. Revisa el mod, activalo y vuelve a entrar a la sala.",
+                    "Imported disabled. Review the mod, enable it and rejoin the lobby after restarting.")
+                : T("No se pudo importar. Revisa el registro.", "Import failed. Check the log.");
+            a.patches = LoadPatches();
+            ReadPatchConfig(a.patch_enabled, a.patch_disabled);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("%s", T("Cierra el juego; elige el recibo JSON en descargas. El mod se importa sin activar.",
+                              "Close the game; select the JSON receipt in downloads. The mod is imported disabled."));
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
     ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));

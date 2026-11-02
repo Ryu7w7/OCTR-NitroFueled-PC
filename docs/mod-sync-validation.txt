@@ -103,3 +103,14 @@ No third-party ZIP content is included in this source handoff.
 Regional revision: 40 focused Python tests passed; all 8 existing runner tests
 passed. Real public ZIPs inspected only, not installed or executed. No live
 mixed-edition lobby or runtime readiness claim is made by this revision.
+
+LOCAL INTEGRATION REVISION
+See docs/mod-sync-local-demo.txt for the runnable loopback HTTPS example and
+Python-to-Go acceptance test. CI runs the test with a fixed timeout.
+The Windows launcher now offers Review and import download, disabled while playing;
+it invokes the checked receipt importer with the actual selected game folder.
+Imported mods remain disabled. Enable/restart/rejoin remains a user-controlled flow.
+The Windows launcher sources compile and link locally with clang C++20, Win32 and
+D3D11; this check build omits distribution resources and is not a release artifact.
+Go tests with the race detector and go vet pass. The production GPU/game build and
+live lobby/focus acceptance tests remain unverified. No hot-load capability added.

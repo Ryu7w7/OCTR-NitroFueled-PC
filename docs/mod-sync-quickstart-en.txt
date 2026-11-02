@@ -56,3 +56,8 @@ Unlabelled uploads cannot be automatically paired; their XML still cannot bypass
 the edition check. Mixed-edition XML inside one ZIP is conservatively rejected.
 Asset-only packages retain upstream asset validation; lack of XML does not prove
 full cross-edition gameplay compatibility.
+
+You can now import without a command line: close the game, open Mods, click
+Review and import download, and choose the JSON receipt beside the cached ZIP.
+The mod starts disabled. Review and enable it, restart with Play, then rejoin the
+lobby manually. Import errors appear in the launcher log.
