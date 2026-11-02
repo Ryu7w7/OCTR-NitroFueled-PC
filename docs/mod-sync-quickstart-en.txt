@@ -1,0 +1,43 @@
+OPTIONAL GAMEBANANA MOD SYNC — QUICK START
+
+FOR RYU / DEVELOPERS
+This is source for an OCTR fork, not a finished player installer. See
+mod-sync-integration.txt for required server/runtime connections and current limits.
+Base: OCTR v0.7.5, commit 3885d1aea24d19ed9b31f96fba57a5cce92183cd.
+Apply the included patch to that source, or copy source-overlay's files over a clean
+checkout. Keep LICENSE. Build the launcher/GPU using OCTR's normal build process.
+
+FOR MOD AUTHORS
+1. Create/find your mod's GameBanana page in the OCTR PC game category.
+2. Add gamebananapageurl.txt beside mod.json (or at the root of an asset-only ZIP).
+3. Put only the full page URL inside, e.g. https://gamebanana.com/mods/YOUR_PAGE_ID.
+4. For format 2, rebuild using: python scripts/package_mod.py YOUR_FOLDER --output YOUR_MOD.zip
+5. Upload that EXACT ZIP to the page. Do not repack it after uploading.
+6. Keep the same ZIP in OCTR's mods folder and enable it normally.
+7. Test the upload identity with:
+   python scripts/mod_sync_cli.py pin YOUR_MOD.zip --out offer.json
+Do not put offer.json inside that ZIP: its SHA-256 identifies the complete outer ZIP.
+If you change any file, rebuild the package and upload a new release.
+
+FOR TESTERS AFTER SERVER INTEGRATION
+Turn on GameBanana mod sync in the Windows launcher's Mods tab. The toggle starts
+the worker on the next game launch. Turning it off during play stops the worker.
+Unchanged public OCTR servers do not yet implement this feature's v2 endpoints.
+
+While sync is active, the existing blue/yellow bar displays progress even when the
+game loses focus. The HUD is still inside the game window, not above other apps.
+A short countdown hold may allow other opted-in players to prepare; after at most
+20 seconds, or on failure/opt-out, normal race behaviour and Crash fallback continue.
+
+CURRENT SOURCE LIMIT: NEW DOWNLOADS ARE STAGED, NOT LIVE-LOADED
+The in-game loader/rejoin adapter is not yet connected. To review a staged package:
+1. Finish and close the game.
+2. Open 'Open mod downloads' in Mods. Each verified ZIP has an adjacent JSON receipt.
+3. From the OCTR source folder run:
+   python scripts/mod_sync_cli.py import "PATH_TO_RECEIPT.json" --data "OCTR_DATA_FOLDER"
+4. Reload Mods, review the author/package and enable it yourself.
+5. Start the game again. Conflicts or an existing different version need manual review.
+This does not change your installed mods automatically or run downloaded installers.
+
+If a ZIP lacks gamebananapageurl.txt, its upload is ambiguous, or GameBanana removes
+the exact file, ordinary play still works. Ask its creator for a sync-ready release.

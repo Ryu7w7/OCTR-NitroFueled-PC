@@ -1,3 +1,4 @@
+#include "bbport_mod_sync_panel.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
 
@@ -80,6 +81,7 @@ PadStatus pad_status[4];
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
 float base_scale = 1.0f;
+ImFont* sync_heading_font = nullptr;
 
 // The game's text dialog (ImeDialog, the character name), typed on the keyboard: drawn while it
 // is open. In fullscreen the window title that showed it is not visible (issues #17, #19).
@@ -1988,6 +1990,11 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         const_cast<vk::Instance*>(&vk_instance));
 
     const VkFormat color_format = static_cast<VkFormat>(format);
+    if (const char* path = std::getenv("BB_MOD_SYNC_FONT")) {
+        std::ifstream file(path, std::ios::binary);
+        if (file.good()) sync_heading_font = io.Fonts->AddFontFromFileTTF(path, 36.0f);
+    }
+
     ImGui_ImplVulkan_InitInfo info{};
     info.ApiVersion = instance.ApiVersion();
     info.Instance = vk_instance;
@@ -2140,7 +2147,8 @@ bool Visible() {
         notice = !notices.empty();
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
-                           (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice);
+                           (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
+                           BbModSync::Snapshot().visible);
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -2241,6 +2249,8 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
     }
+    // Status remains visible when unfocused, including while menus are open.
+    BbModSync::DrawPanel(BbModSync::Snapshot(), sync_heading_font);
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

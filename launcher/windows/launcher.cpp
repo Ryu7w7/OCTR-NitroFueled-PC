@@ -4015,6 +4015,17 @@ bool ModActionIcon(const char* id, const char* tooltip, bool folder, float size)
 
 void ModsTab() {
     App& a = g_app;
+    GameFlag("mod_sync", T("Sincronizar mods de GameBanana (experimental)", "GameBanana mod sync (experimental)"), false,
+        T("Descarga mods del grupo. Espera limitada; si falla, se usa Crash. Los mods nuevos requieren revisión y reinicio.",
+          "Download lobby mods. Limited wait; failures use Crash. New mods require review and restart."));
+    ImGui::TextDisabled("%s", T("Requiere un servidor con mod sync v2.", "Requires a server with mod sync v2."));
+    if (ImGui::TextLink(T("Abrir descargas de mods", "Open mod downloads"))) {
+        std::error_code ec;
+        const fs::path downloads = a.root / L"mod-state" / L"sync" / L"downloads";
+        fs::create_directories(downloads, ec);
+        OpenInShell(downloads);
+    }
+    ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
     ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));
     ModSection(T("Mods incluidos","Built-in mods"),true);

@@ -44,6 +44,8 @@ import online_mode  # noqa: E402
 import perf_report  # noqa: E402
 import native_shaders  # noqa: E402
 import aspect_ratio  # noqa: E402
+from mod_sync.service import start_for_runner as start_mod_sync  # noqa: E402
+from mod_session import launch_lock as mod_sync_runtime_lock  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
@@ -690,6 +692,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
     config = env['BB_CONFIG']
+    sync_config = config  # always observe the launcher's toggle, not a mod-session copy
     # A portable package ships bbport.default.ini, so a new version unzipped over an old one keeps
     # the player's bbport.ini.
     if not Path(config).exists() and (PORT / 'bbport.default.ini').is_file():
@@ -1020,16 +1023,25 @@ def main():
             else:
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.
-            try:
-                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                           stderr=subprocess.STDOUT, creationflags=no_console())
-            except PermissionError as error:
-                blocked(probe, error)
-            reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
-            VULKAN_START.update(window=0.0, ready=False)
-            reader.start()
-            hung = watch_vulkan_start(process, env)
-            code = process.wait()
+            # Also guard vanilla runs: upstream's package lock is held only for mod sessions.
+            sync_state = Path(env.get('BB_MODS_DIR', data / 'mods')).parent / 'mod-state/sync-runtime'
+            with mod_sync_runtime_lock(sync_state):
+                sync_service = start_mod_sync(sync_config, data, env,
+                    lambda method, target: proof_header(env['BB_ONLINE_KEYHASH'], method, target), say)
+                try:
+                    try:
+                        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                   stderr=subprocess.STDOUT, creationflags=no_console())
+                    except PermissionError as error:
+                        blocked(probe, error)
+                    reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+                    VULKAN_START.update(window=0.0, ready=False)
+                    reader.start()
+                    hung = watch_vulkan_start(process, env)
+                    code = process.wait()
+                finally:
+                    if sync_service:
+                        sync_service.close()
             reader.join(timeout=5)
             if hung:
                 # the loader's own switch: no implicit layer this time (the system is not changed)

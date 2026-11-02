@@ -1,0 +1,59 @@
+MOD SYNC SOURCE VALIDATION — 2 NOVEMBER 2026
+
+Base: OCTR v0.7.5 / 3885d1aea24d19ed9b31f96fba57a5cce92183cd.
+Validation used synthetic packages and local test servers, not a live game session.
+
+PASS: 36 focused Python mod-sync tests (final revision).
+  Exact upload selection, checksums, revoked cache entries, changed files, limited
+  download sizes, byte progress, credentials/redirect separation, ZIP paths and
+  declared checksums, opt-out, unsupported server, cancellation, missing lobby,
+  active-game locks, disabled import, existing version protection, signed body
+  identity, clock correction and cached-versus-loaded readiness distinction.
+  Command: python -m unittest discover -s tests -p test_mod_sync.py
+
+PASS: broader package regression run: 125 tests, 123 passed and 2 Linux-only shader
+  tests skipped on Windows. This run preceded the final added clock-offset test;
+  the subsequent focused run includes that change and all 36 sync tests.
+  Command: python -m unittest discover -s tests -p "test_mod_*.py"
+
+PASS: 8 existing runner tests, including loopback HTTP/signature/filter behaviour.
+  Command: python -m unittest discover -s tests -p "test_run_*.py"
+  The initial restricted run could not reach its loopback server; it passed with
+  local network access enabled. Package hard-link fixtures likewise needed normal
+  filesystem permissions. Neither required any change to upstream test assertions.
+
+PASS: Go coordinator/HTTP tests: 9 top-level tests with additional table subcases.
+  Hold until loaded, opt-out, failure, expiry, room departure, fixed deadline,
+  generation/session mismatches, repeated holds, next race, foreign members,
+  malformed offers, multiple participants and authenticated body boundary.
+  Commands (integration/ryunet-modsync): go test -count=1 -v ./... ; go vet ./...
+  Go race detector not run; current server integration has not been compiled.
+
+PASS: two standalone C++20 tests, no visible window or game process:
+  tests/mod_sync_status.cpp: bounded state-file parser, stale messages, fallback.
+  tests/mod_sync_panel.cpp: pinned upstream ImGui f1cc2ae15e53a861a874c3034aae6798fde194ab.
+  The retained panel draws identical vertex counts with focus gained/lost/regained;
+  it captures neither mouse nor keyboard. Hidden state emits no geometry.
+  Built with C:/msys64/clang64/bin/clang++.exe and executed successfully.
+
+PASS: Python compileall and git diff --check.
+
+LIVE READ-ONLY CHECK
+  The implemented GameBanana resolver successfully read:
+    https://gamebanana.com/apiv11/Mod/735177/ProfilePage
+  It identified file 1872959, 30,253,774 bytes, at:
+    https://gamebanana.com/dl/1872959
+  A separate HEAD check followed that URL to filecache53.gamebanana.com.
+  No third-party ZIP was downloaded, extracted or installed for this check.
+
+PATCH/ZIP CHECK
+  scripts/package_mod_sync_handoff.py exports committed changes only, applies the
+  patch to a clean archive of the exact upstream base, compares every changed file
+  byte-for-byte with the source commit, then checks ZIP CRCs and all packaged bytes.
+  SOURCE-MANIFEST.json records base/source commits and SHA-256 for each shipped file.
+
+NOT VERIFIED
+  Full Windows launcher/GPU build; actual in-game Alt+Tab/fullscreen behaviour;
+  live two-PC sync; production authentication/room/countdown connections; runtime
+  mod hot-loading or restart/rejoin; native loaded proof; Linux GTK/run.sh hooks.
+  This is not a claim of release readiness or a fix installed in the playable port.

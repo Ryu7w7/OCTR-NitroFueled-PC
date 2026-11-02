@@ -1,0 +1,182 @@
+OCTR OPTIONAL GAMEBANANA MOD SYNC — SOURCE HANDOFF
+2 November 2026 | Integration candidate, not a ready-to-install player release
+
+BASE
+Repository: https://github.com/Ryu7w7/OCTR-NitroFueled-PC
+Tag: v0.7.5
+Commit: 3885d1aea24d19ed9b31f96fba57a5cce92183cd
+Local feature branch: feature/gamebanana-optional-mod-sync
+License: GPL-2.0-or-later, preserving upstream notices and LICENSE.
+
+WHAT THIS HANDOFF PROVIDES
+- Windows launcher Mods toggle, off by default: mod_sync=1 in bbport.ini.
+- A background run.py worker, independent of window focus.
+- Exact GameBanana file resolution, bounded HTTPS downloads and SHA-256 checks.
+- Existing OCTR ZIP/PAK validation in staging, separate from active game assets.
+- Explicit import for review; imported ZIPs start disabled. No automatic XML/code
+  activation, dependency installation, settings changes or silent package upgrades.
+- The original Nitro blue/yellow, slanted checker sync bar, ported to current OCTR.
+  It renders independently of input focus and does not capture input. It also stays
+  visible when the game menu is open. This is an in-game HUD, not a Windows topmost
+  window: a minimized/covered game cannot draw over other desktop applications.
+- A standalone Go server component: authenticated exchange adapter plus a readiness
+  coordinator with a maximum 20-second countdown hold and 7-second heartbeat expiry.
+- Synthetic Python, C++/ImGui and Go tests; no proprietary game files in fixtures.
+
+THIS IS NOT YET COMPLETE LIVE LOBBY SYNC
+The current public v0.7.5 server has no v2 mod-sync endpoints. The new Go component
+must be connected to Ryu's CURRENT authentication, room membership and actual race
+start decision. The client detects an unsupported server and leaves ordinary play
+unchanged. Do not announce that deploying only the client ZIP enables public sync.
+
+OCTR's current package loader mounts and registers mods at process start. Downloading
+a ZIP while racing does NOT make its character usable in that process. The default
+worker therefore reports fallback/restart-required after staging. It does NOT lie
+about readiness, write into a live session, or attempt the old process-memory hacks.
+
+For seamless use in the same lobby, a verified safe-boundary loader must still be
+implemented. Otherwise connect a user-controlled close/review/enable/restart/rejoin
+flow. Neither seamless hot loading nor automated rejoin is implemented here.
+The Python service exposes loaded_provider(snapshot) specifically for a runtime
+adapter that can attest mounted + registered + usable exact package hashes. It is
+unset in the default runner. Only that adapter may produce a loaded acknowledgement.
+
+The portable Python core and Go component are cross-platform. This patch wires the
+Windows launcher/run.py and current Vulkan overlay. Linux GTK/run.sh lifecycle hooks
+have NOT been wired or tested. No full launcher/GPU binary was built in this handoff.
+
+AGREED LOBBY POLICY
+1. Sync is optional. Off means no mod-sync HTTP traffic from this client.
+2. Participating players may briefly hold the countdown while preparing shared mods.
+3. Never hold beyond 20 seconds from the server's first countdown observation for
+   that race attempt. New manifests, roster changes and repeated reports cannot
+   extend that deadline. Once released, the hold cannot restart during that attempt.
+4. Disabled sync, failed download, disconnected/stale client, unavailable mod, or
+   inability to load within the deadline -> continue using normal OCTR fallback.
+5. Keep src/runtime_online_mode.c's missing-racer-to-Crash behaviour intact.
+   This component does not broaden that upstream fallback to arbitrary track or
+   gameplay modifications. Only advertise shared cosmetic packages appropriate to
+   the online room; gameplay/track compatibility is still the server's responsibility.
+6. A disk checksum or a full progress bar is NOT proof that the engine loaded a mod.
+7. The server holds actual match admission. Pausing a local numeric countdown alone
+   does not prevent other players starting. Native timer presentation should mirror
+   the server's hold, without using the former external memory-patching experiments.
+
+HOW THE URL IN A ZIP WORKS
+Add a UTF-8 file named gamebananapageurl.txt at the package root, beside mod.json for
+format 2. Its entire contents are one canonical page URL, for example:
+  https://gamebanana.com/mods/123456
+123456 is illustrative: replace it with the real page ID, not this example.
+
+Create the GameBanana page first, then add its URL before building the release ZIP.
+For format 2, build with scripts/package_mod.py so the text file is included in the
+manifest's file-size and SHA-256 records. Do not edit a sealed ZIP's contents by hand.
+Upload that exact ZIP. Retain the exact downloaded ZIP in OCTR's mods library.
+
+The owner reads the URL locally and matches the ZIP's size + MD5 to exactly one
+public, clean, unarchived GameBanana upload. It then advertises:
+  page_url, file_id, bytes, sha256
+The receiving client re-queries the official page API, resolves that exact file ID,
+downloads it, and verifies length, API MD5, peer SHA-256 and package contents.
+MD5 is only GameBanana's upload lookup field; SHA-256 is the cross-player integrity
+identity. Neither checksum proves publisher authenticity or that a mod is harmless.
+No GitHub mod catalog or GitHub-hosted mod download is used. OCTR's unrelated
+application-updater GitHub URLs remain unchanged.
+
+Text inside a missing ZIP cannot discover itself. The server exchanges the owner's
+descriptor with current lobby members. A page may have several ZIPs/versions: never
+choose the first/newest file silently. No arbitrary mirror, shortened URL, executable
+installer, login-only, removed, quarantined or archived upload is accepted.
+
+OFFICIAL API VERIFIED DURING DEVELOPMENT
+  GET https://gamebanana.com/apiv11/Mod/{id}/ProfilePage
+  _idRow, _aGame._idRow=26138, _aFiles[]:
+    _idRow, _sFile, _nFilesize, _sDownloadUrl, _sMd5Checksum,
+    _sAvResult=clean, _sAnalysisResult=ok, _bIsArchived
+  GET https://gamebanana.com/dl/{file_id}
+The latter was observed redirecting to filecache53.gamebanana.com. Redirects remain
+restricted to HTTPS gamebanana.com, files.gamebanana.com and filecacheN.gamebanana.com.
+API changes or unsupported hosts fail closed to normal gameplay fallback.
+Metadata and a HEAD redirect were checked live; no community mod was installed.
+
+SERVER ADAPTER: REQUIRED CONNECTIONS
+Copy integration/ryunet-modsync's .go files into an appropriate package in the server.
+Its isolated go.mod is for standalone tests; do not replace the server's go.mod.
+
+Construct one modsync.Coordinator. Mount modsync.Handler under /ryunet/modsync/v2/.
+The reverse proxy must terminate HTTPS; do not enable an HTTP fallback for this API.
+
+Handler.Authenticate(request):
+  Call the existing nickname proof verifier including replay/timestamp validation.
+  Return the authenticated account/member ID, never the nick query string alone.
+  The request method and EXACT request URI (including body_sha256) are signed using
+  the current X-RyuNET-Proof format. The adapter checks that SHA-256 matches the
+  bounded POST bytes. Preserve the signed path when configuring the reverse proxy.
+
+Handler.RoomFor(authenticatedID):
+  Resolve the CURRENT server-owned room and member list. Return a unique room ID,
+  a unique Round token for this race attempt, <=8 current member IDs and whether
+  countdown is active. Do not trust client-supplied membership or race tokens.
+
+Actual countdown/match-start gate:
+  Call coordinator.ShouldHold(authoritativeRoom, time.Now()) where the server would
+  otherwise release the race. If true, defer that release only. If false, follow
+  normal logic and allow the existing missing-character fallback. This call also
+  expires stale clients and deadlines even when they stop sending HTTP requests.
+  Call RemoveRoom on destruction; renew Round for every race attempt.
+  Add the server's usual authenticated-request rate limits to these routes.
+
+Do NOT merge the old v1 server's indefinite mandatory barrier unchanged. Its catalog
+pinning, readiness and older X-RyuNET-Key assumptions are not this optional v2 policy.
+No credentials, nickname keys or private server files are included in this handoff.
+
+HTTP CONTRACT
+GET /ryunet/modsync/v2/capabilities
+  {"protocol":2,"optional_fallback":true,"max_hold_seconds":20}
+POST /ryunet/modsync/v2/exchange?nick=NAME&body_sha256=HEX
+  X-RyuNET-Proof: existing method/URI signature
+  Body: {"protocol":2,"offers":[...],"report":{
+    "phase":"preparing|fallback|ready","session":"...","generation":"...",
+    "loaded":["sha256 of each actually usable package"]}}
+  Response: {"protocol":2,"session":"...","generation":"...",
+    "expires_at":UNIX_SECONDS,"offers":[...],"hold":true|false}
+  409 = authenticated but no current room; client continues polling, hidden in menus.
+  404/unsupported = feature unavailable; no impact on ordinary game launch.
+Maximum 32 package offers, 64 KiB request, 1 MiB JSON response; report refreshed ~2 s.
+Current outgoing inventory is explicitly enabled local ZIPs only, not loose PAKs or
+folders. Client preference is optional; a server must not infer all clients opted in.
+
+FILES AND OWNERSHIP
+scripts/mod_sync/models.py       Strict, immutable upload descriptors and limits
+scripts/mod_sync/transport.py    Bounded HTTPS, redirects, separate credential scope
+scripts/mod_sync/gamebanana.py   Official metadata resolver and creator pinning
+scripts/mod_sync/packages.py     Metadata/ZIP admission and upstream validation
+scripts/mod_sync/cache.py        Staging, checksums, explicit disabled import
+scripts/mod_sync/protocol.py     Authenticated v2 client adapter
+scripts/mod_sync/service.py      Background worker, cancellation and runtime seam
+scripts/mod_sync/status.py       Original atomic status-file protocol
+scripts/mod_sync_cli.py          Creator and manual-review commands
+gpu/shim/bbport_mod_sync*.h      Existing panel design and display-only state reader
+integration/ryunet-modsync/      Server handler/coordinator plus tests
+
+LIMITS AND OPERATION
+ZIP download <=512 MiB; expanded ZIP <=2 GiB; cache <=2 GiB. Downloads are serial;
+each has a 5-minute total budget and 10-second network I/O timeout. A game exit sets
+cancellation immediately; a blocked network operation may take its timeout to exit.
+Quota and staging operations are serialized across workers. The cache is local
+mod-state/sync/downloads, outside mods and original game archives.
+Players can open that folder through the launcher; no stale cache file is trusted
+without rechecking SHA-256. No automatic deletion of a player's existing mods.
+
+READY FOR RELEASE ONLY AFTER
+- Ryu wires and reviews auth/room/actual countdown hooks against current server code.
+- A native loaded-proof adapter or explicit restart/rejoin UX is complete and tested.
+- Build Windows launcher + GPU; verify focus loss, F11 and Alt+Enter in a real game.
+- Two PCs test new/old/off clients, download failure, server outage, player departure,
+  ambiguous versions, package conflicts, first race, next race and return to lobby.
+- Verify supported character packages/registration and fallback; do not claim all
+  arbitrary PAK mods are cosmetic or safe for online play.
+- Decide Linux runner/GTK support before advertising it.
+
+No production service, playable installation, original game archive, save, custom
+track or native-engine-rewrite file was changed to prepare this handoff.
