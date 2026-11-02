@@ -100,6 +100,9 @@ API changes or unsupported hosts fail closed to normal gameplay fallback.
 Metadata and a HEAD redirect were checked live; no community mod was installed.
 
 SERVER ADAPTER: REQUIRED CONNECTIONS
+Start with mod-sync-server-wiring.txt and the new Bridge wrapper. That addendum
+maps the observed old server's actual close guard, describes lock ordering and
+provides the recommended configuration/route/start/cleanup connections.
 Copy integration/ryunet-modsync's .go files into an appropriate package in the server.
 Its isolated go.mod is for standalone tests; do not replace the server's go.mod.
 

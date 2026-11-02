@@ -1,0 +1,73 @@
+SERVER WIRING ADDENDUM — 2 NOVEMBER 2026
+
+Current server source is unavailable (user reports its repository returns 404).
+The old locally retained server is a REFERENCE, not evidence of current production
+internals. No private server build or authentication store has been guessed.
+
+NEW IN THIS REVISION
+integration/ryunet-modsync/bridge.go is the integration entry point. It wraps the
+tested coordinator/HTTP handler and adds an administrator kill switch. It starts
+disabled. Repeated enable calls preserve hold deadlines. Disable releases the gate
+immediately; re-enable discards prior room readiness. No bridge lock is held while
+calling membership/authentication adapters, avoiding lock inversion with matchmaker
+operations. The actual close hook takes an already locked room snapshot directly.
+
+CONNECTIONS TO MAKE IN CURRENT SERVER
+1. Instantiate once during server initialization:
+
+   bridge, err := modsync.NewBridge(authenticateCurrentProof, lookupCurrentRoom)
+   // Handle err as a configuration error, not by weakening authentication.
+   bridge.SetEnabled(serverConfig.OptionalModSync)
+   mux.Handle("/ryunet/modsync/v2/", bridge)
+
+   authenticateCurrentProof(*http.Request) (string,error) calls YOUR CURRENT
+   X-RyuNET-Proof verifier with nonce replay protection and timestamp validation.
+   It returns the stable authenticated account ID. Do not return an unchecked nick.
+   lookupCurrentRoom(accountID) (modsync.Room,error) returns your current membership,
+   a room ID, a unique race-attempt Round, and countdown state.
+
+2. At the actual race-start/lobby-close transition, while the matchmaker owns its
+   normal room lock, construct a modsync.Room snapshot. Then:
+
+   if bridge.BeforeRaceStart(snapshot, time.Now()) {
+       // Defer this host close/start request using the existing retry mechanism.
+       // Do not mark it accepted or enter the race yet.
+   } else {
+       // Existing start logic and missing-character fallback continue unchanged.
+   }
+
+   Do not call lookupCurrentRoom again inside this lock. The wrapper deliberately
+   accepts the supplied snapshot and cannot recursively acquire membership locks.
+   The host must retry a deferred close; if it does not, arrange a server retry at
+   deadline. Returning false alone cannot send a new start message on its behalf.
+
+3. Call bridge.RoomDestroyed(roomID) when removing a room. Assign a new Round on
+   each race attempt, not each heartbeat or membership update. Wire the admin
+   setting to SetEnabled. Disabling the feature must not disable normal races.
+
+OLD SOURCE MAP (LOCATIONS OBSERVED, NOT A DROP-IN PATCH)
+server/auth.go: authHandler routes the old nitroPrefix before reading request Body.
+  Mount/dispatch the v2 handler before the generic auth handler consumes that body.
+  Keep the signed /ryunet/modsync/v2/... path intact through proxy forwarding.
+server/ctr_async.go: the wasOpen && !opening transition calls
+  nitroSync.blocksClose(r) immediately before accepting the host document.
+  This is the old equivalent of connection 2. Port to the current equivalent, not
+  an unrelated UI countdown. Do not run both v1 and v2 barriers on the same room.
+  Its !wasOpen && opening path increments r.nitroRound, illustrating a round token.
+server/ctr_modsync_public.go: the old service documents matchmaker.mu -> service.mu
+  lock ordering, and uses a GitHub catalog and older identity protocol. These old
+  catalog and identity implementations must NOT be copied into the new path.
+
+WHAT THE WRAPPER DOES NOT DO
+It does not invent the current server's auth function names or room structs. It does
+not claim a cached ZIP is loaded or bypass OCTR's fallback. It does not supply hot
+loading, authenticated auto-rejoin or a live native countdown UI adapter.
+See mod-sync-integration.txt for those remaining contracts and limits.
+
+VERIFICATION
+New tests cover disabled default, kill switch, preserving deadlines on repeated
+enable, discarding stale proofs, close-hook lock discipline, room cleanup and
+concurrent HTTP/configuration changes. Existing coordinator/HTTP tests remain.
+.github/workflows/mod-sync.yml runs Python checks on Windows/Linux, Go race/vet
+checks and headless ImGui tests on Linux. Remote CI results must be checked; adding
+a workflow alone is not evidence that every hosted runner has passed.

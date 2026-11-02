@@ -1,5 +1,13 @@
 MOD SYNC SOURCE VALIDATION — 2 NOVEMBER 2026
 
+SERVER ADAPTER REVISION
+  13 Go top-level tests now pass, including 4 new Bridge tests. Both go vet and
+  go test -race -count=1 ./... passed locally with Go 1.27.2 and the UCRT GCC toolchain.
+  The earlier 'race detector not run' entry below records the first handoff only.
+  New CI workflow added; hosted results are separate from these local results.
+  Current private server source remains unavailable; old source was inspected
+  read-only to document real integration locations, not assumed production parity.
+
 Base: OCTR v0.7.5 / 3885d1aea24d19ed9b31f96fba57a5cce92183cd.
 Validation used synthetic packages and local test servers, not a live game session.
 
