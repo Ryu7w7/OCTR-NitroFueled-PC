@@ -55,3 +55,19 @@ Antes de publicar: conectar la autenticación, las salas y el inicio real de car
 en el servidor; verificar la carga real del personaje; compilar; probar entre dos
 PC, con la opción activada y desactivada, y comprobar Alt+Tab, F11 y Alt+Enter.
 La integración automática del launcher GTK/run.sh de Linux aún no está implementada.
+
+DESCARGAS US/EU
+Para archivos regionales separados, escribe CUSA13795 (US) o CUSA14876 (EU) en
+la descripcion de cada archivo en GameBanana. Usa exactamente la misma etiqueta
+de version para ambas descargas de la misma publicacion. No se deduce la region
+a partir del nombre del ZIP ni se selecciona automaticamente la ultima version.
+El launcher lee la edicion real desde param.sfo. Si falta una alternativa unica,
+se usa el comportamiento normal de respaldo. El XML tambien debe coincidir con
+la edicion y la version 01.21; una etiqueta incorrecta no evita esta comprobacion.
+Al reconstruir un paquete formato 2, incluye gamebananapageurl.txt y regenera
+la lista de archivos y sus checksums antes de subir el nuevo ZIP.
+Para download/import de parches ejecutables, agrega --game "CARPETA_DEL_JUEGO".
+Usa el recibo JSON que esta junto al ZIP descargado de tu edicion.
+Una descarga regional tiene su propio hash. No demuestra que el mod de otra
+edicion este cargado: aun se requiere revisar y reiniciar. La confirmacion de
+carga entre ediciones distintas queda pendiente del adaptador de servidor/runtime.

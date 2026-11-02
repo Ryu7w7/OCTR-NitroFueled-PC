@@ -1027,7 +1027,7 @@ def main():
             sync_state = Path(env.get('BB_MODS_DIR', data / 'mods')).parent / 'mod-state/sync-runtime'
             with mod_sync_runtime_lock(sync_state):
                 sync_service = start_mod_sync(sync_config, data, env,
-                    lambda method, target: proof_header(env['BB_ONLINE_KEYHASH'], method, target), say)
+                    lambda method, target: proof_header(env['BB_ONLINE_KEYHASH'], method, target), say, game=game)
                 try:
                     try:
                         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

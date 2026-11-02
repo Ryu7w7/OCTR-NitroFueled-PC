@@ -183,3 +183,37 @@ READY FOR RELEASE ONLY AFTER
 
 No production service, playable installation, original game archive, save, custom
 track or native-engine-rewrite file was changed to prepare this handoff.
+
+REGIONAL DOWNLOADS (2 November 2026)
+The runner passes the actual game folder to sync, which reads TITLE_ID and APP_VER
+from param.sfo. Never infer the edition from a folder name or assume USA.
+GameBanana upload descriptions must explicitly contain CUSA13795 (US) or
+CUSA14876 (EU). Separate uploads need the exact same nonempty file version label.
+Selection stays on the advertised page and requires exactly one matching edition
+and release. Filenames, EU/USA nicknames, file order and newest upload are not used.
+An absent or ambiguous counterpart fails to normal fallback.
+Every executable patch alternative is checked against the local title and 01.21,
+after ordinary package/hash validation, including cache hits and explicit import.
+Unlabelled uploads cannot be automatically paired; their XML still cannot bypass
+the edition check. Mixed-edition XML inside one ZIP is conservatively rejected.
+Asset-only packages retain upstream asset validation; lack of XML does not prove
+full cross-edition gameplay compatibility.
+
+A substituted download is fetched from the official HTTPS API-selected file,
+checked against its API MD5, and receives its OWN computed SHA-256 receipt. Unlike
+the original offered ZIP, its SHA-256 is not pinned by a peer beforehand. The MD5
+identifies the public upload, not a publisher signature. Review/restart is required.
+The original offer hash is NEVER acknowledged as loaded because an alternative
+was downloaded. Protocol v2 still proves exact hashes, not equivalent releases.
+A future hot-load/rejoin adapter needs server-validated per-edition requirements
+before mixed-edition readiness can be claimed. Current staging/fallback works
+without that claim. Existing deadlines and Crash fallback are unchanged.
+CLI download/import: add --game PATH_TO_GAME for executable-patch mods. Import
+using the receipt beside the downloaded ZIP, not the other edition's source offer.
+
+Real reference inspected (not installed): https://gamebanana.com/mods/735343
+Replay Mode 0.2.0 Beta: US file 1873434, EU file 1873435. XML targets confirm
+CUSA13795/CUSA14876 at 01.21. These inspected uploads did not yet contain the page
+TXT; authors must rebuild the format-2 file/checksum manifest and re-upload.
+Do not just insert TXT into a previously checksummed ZIP or reuse old upload IDs.
+No third-party ZIP content is included in this source handoff.

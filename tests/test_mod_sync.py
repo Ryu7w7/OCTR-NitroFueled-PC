@@ -84,6 +84,64 @@ class SyncTests(unittest.TestCase):
         self.assertIn(mod_library.PREFIX + 'sync-fixture', json.loads(prefs.read_text())['disabled'])
         self.assertEqual(self.cache.import_for_review(self.offer, data / 'mods', data / 'patches'), installed)
 
+    def test_explicit_same_release_region_selection(self):
+        us = self.transport.profile['_aFiles'][0]
+        us.update(_sDescription='USA (CUSA13795)', _sVersion='0.2.0 Beta')
+        eu = dict(us, _idRow=10000, _sDownloadUrl='https://gamebanana.com/dl/10000',
+                  _sDescription='EU (CUSA14876)')
+        self.transport.profile['_aFiles'].append(eu)
+        self.assertEqual(self.api.for_title(self.offer, 'CUSA13795').file_id, 9999)
+        self.assertEqual(self.api.for_title(self.offer, 'CUSA14876').file_id, 10000)
+        eu['_sVersion'] = '0.3.0 Beta'
+        with self.assertRaises(ValueError): self.api.for_title(self.offer, 'CUSA14876')
+        eu['_sVersion'] = '0.2.0 Beta'
+        self.transport.profile['_aFiles'].append(dict(eu, _idRow=10001,
+            _sDownloadUrl='https://gamebanana.com/dl/10001'))
+        with self.assertRaises(ValueError): self.api.for_title(self.offer, 'CUSA14876')
+        with self.assertRaises(ValueError): self.api.for_title(self.offer, '')
+
+    def test_region_does_not_guess_from_filename_or_country_name(self):
+        us = self.transport.profile['_aFiles'][0]
+        us.update(_sDescription='CUSA13795', _sVersion='1.0')
+        self.transport.profile['_aFiles'].append(dict(us, _idRow=10000,
+            _sDownloadUrl='https://gamebanana.com/dl/10000', _sFile='eu-version.zip', _sDescription='EU'))
+        with self.assertRaises(ValueError): self.api.for_title(self.offer, 'CUSA14876')
+
+    def test_regional_download_has_own_receipt_not_source_identity(self):
+        us = self.transport.profile['_aFiles'][0]
+        us.update(_sDescription='CUSA13795', _sVersion='1.0')
+        # Different ZIP contents stand in for the EU asset upload.
+        (self.source / 'README.txt').write_text('EU fixture')
+        eu_zip = self.root / 'eu.zip'
+        build(self.source, eu_zip)
+        content = eu_zip.read_bytes()
+        eu = dict(us, _idRow=10000, _sDownloadUrl='https://gamebanana.com/dl/10000',
+                  _sDescription='CUSA14876', _nFilesize=len(content),
+                  _sMd5Checksum=hashlib.md5(content).hexdigest())
+        self.transport.profile['_aFiles'].append(eu)
+        self.transport.content = content
+        self.cache.title_id, self.cache.app_version = 'CUSA14876', '01.21'
+        result = self.stage()
+        self.assertEqual(result.read_bytes(), content)
+        receipt = Offer.from_dict(json.loads(result.with_suffix('.json').read_text()))
+        self.assertEqual(receipt.file_id, 10000)
+        self.assertEqual(receipt.sha256, sha(eu_zip))
+        self.assertNotEqual(receipt.sha256, self.offer.sha256)
+        self.assertFalse((self.cache.root / self.offer.cache_name).exists())
+
+    def test_patch_xml_target_checked_independently_of_upload_labels(self):
+        from mod_sync.packages import check_target, Package
+        xml = ('<Patch><TitleID><ID>CUSA14876</ID></TitleID>'
+               '<Metadata AppVer="01.21" /></Patch>')
+        fixture = self.root / 'target.zip'
+        with zipfile.ZipFile(fixture, 'w') as z: z.writestr('patch.xml', xml)
+        manifest = dict(self.manifest, patches=['patch.xml'])
+        package = Package(PAGE, manifest)
+        with patch('mod_sync.packages.mod_format.inspect_zip', return_value=(manifest, 'mod.json')):
+            check_target(fixture, package, 'CUSA14876', '01.21')
+            for title, version in [('CUSA13795', '01.21'), ('', ''), ('CUSA14876', '01.20')]:
+                with self.assertRaises(ValueError): check_target(fixture, package, title, version)
+
     def test_no_implicit_latest_selection(self):
         self.transport.profile['_aFiles'][0]['_idRow'] = 10000
         self.transport.profile['_aFiles'][0]['_sDownloadUrl'] = 'https://gamebanana.com/dl/10000'

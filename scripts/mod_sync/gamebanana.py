@@ -18,6 +18,8 @@ class Upload:
     size: int
     md5: str
     url: str
+    title_ids: tuple[str, ...] = ()
+    version: str = ""
 
 
 class GameBanana:
@@ -60,13 +62,41 @@ class GameBanana:
             url = f'https://gamebanana.com/dl/{ident}'
             if entry.get('_sDownloadUrl') != url:
                 raise ValueError('Unexpected GameBanana download URL')
-            result.append(Upload(ident, size, md5.lower(), url))
+            description = entry.get('_sDescription', '')
+            version = entry.get('_sVersion', '')
+            if not isinstance(description, str) or not isinstance(version, str):
+                raise ValueError('Invalid upload compatibility metadata')
+            titles = tuple(sorted(set(re.findall(r'\bCUSA[0-9]{5}\b', description))))
+            result.append(Upload(ident, size, md5.lower(), url, titles, version.strip()))
         return result
 
     def resolve(self, offer: Offer):
         matches = [f for f in self.uploads(offer.page_url) if f.file_id == offer.file_id]
         if len(matches) != 1 or matches[0].size != offer.bytes:
             raise ValueError('The exact advertised upload is no longer available')
+        return matches[0]
+
+    def for_title(self, offer: Offer, title_id: str):
+        """Select only an explicit, unique same-release edition on the SAME page.
+
+        Descriptions must contain title IDs; filenames and USA/EU nicknames are
+        never evidence. This chooses a staging candidate, not runtime equivalence.
+        The downloaded XML must independently match the actual game edition.
+        """
+        files = self.uploads(offer.page_url)
+        sources = [f for f in files if f.file_id == offer.file_id and f.size == offer.bytes]
+        if len(sources) != 1:
+            raise ValueError('Advertised upload is unavailable')
+        source = sources[0]
+        if source.title_ids and title_id not in ('CUSA13795', 'CUSA14876'):
+            raise ValueError('Cannot resolve a regional mod without a supported game edition')
+        if not source.title_ids or title_id in source.title_ids:
+            return source
+        if not source.version:
+            raise ValueError('Regional upload needs an explicit release version')
+        matches = [f for f in files if f.title_ids == (title_id,) and f.version == source.version]
+        if len(matches) != 1:
+            raise ValueError('No unique same-release upload for this game edition')
         return matches[0]
 
     def pin(self, package: Path):

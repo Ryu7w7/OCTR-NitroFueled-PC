@@ -41,3 +41,18 @@ This does not change your installed mods automatically or run downloaded install
 
 If a ZIP lacks gamebananapageurl.txt, its upload is ambiguous, or GameBanana removes
 the exact file, ordinary play still works. Ask its creator for a sync-ready release.
+
+REGIONAL DOWNLOADS (2 November 2026)
+The runner passes the actual game folder to sync, which reads TITLE_ID and APP_VER
+from param.sfo. Never infer the edition from a folder name or assume USA.
+GameBanana upload descriptions must explicitly contain CUSA13795 (US) or
+CUSA14876 (EU). Separate uploads need the exact same nonempty file version label.
+Selection stays on the advertised page and requires exactly one matching edition
+and release. Filenames, EU/USA nicknames, file order and newest upload are not used.
+An absent or ambiguous counterpart fails to normal fallback.
+Every executable patch alternative is checked against the local title and 01.21,
+after ordinary package/hash validation, including cache hits and explicit import.
+Unlabelled uploads cannot be automatically paired; their XML still cannot bypass
+the edition check. Mixed-edition XML inside one ZIP is conservatively rejected.
+Asset-only packages retain upstream asset validation; lack of XML does not prove
+full cross-edition gameplay compatibility.

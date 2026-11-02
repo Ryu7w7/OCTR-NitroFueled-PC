@@ -88,3 +88,33 @@ def validate_package(path: Path, staging_parent: Path) -> Package:
         else:
             mod_library.unpack_legacy(path, dest)
     return result
+
+
+def check_target(path: Path, package: Package, title_id: str, app_version: str):
+    """Check every executable-patch alternative before accepting a staged ZIP.
+
+    Assets without executable patches retain upstream's ordinary asset validation.
+    Mixed-edition executable alternatives require an explicit future selection
+    contract; do not silently select one using filenames or launcher settings.
+    """
+    if not package.manifest:
+        return
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(path) as archive:
+        _, location = mod_format.inspect_zip(path)
+        prefix = PurePosixPath(location).parent
+        patches = {name for _, manifest in mod_format.expanded_variants(package.manifest)
+                   for name in manifest.get('patches', [])}
+        for name in patches:
+            member = archive.getinfo(str(prefix / name))
+            if member.file_size > 8 * 1024**2:
+                raise ValueError('Executable patch exceeds sync inspection limit')
+            raw = archive.read(member)
+            if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
+                raise ValueError('XML entities are not supported in synced patches')
+            root = ET.fromstring(raw)
+            metadata = list(root.iter('Metadata'))
+            if (title_id not in ('CUSA13795', 'CUSA14876') or app_version != '01.21' or
+                    [node.text for node in root.findall('./TitleID/ID')] != [title_id] or
+                    not metadata or any(m.get('AppVer') != app_version for m in metadata)):
+                raise ValueError('Executable patch targets a different or unknown game edition/version')

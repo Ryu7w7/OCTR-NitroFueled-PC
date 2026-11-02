@@ -27,6 +27,8 @@ def main():
     install.add_argument('offer', type=Path)
     install.add_argument('--data', type=Path, required=True)
     install.add_argument('--patches', type=Path, help='defaults to DATA/patches')
+    stage.add_argument('--game', type=Path, help='game folder: read edition/version from param.sfo')
+    install.add_argument('--game', type=Path, help='required for executable patch packages')
     args = parser.parse_args()
     if args.command == 'pin':
         offer = GameBanana().pin(args.zip)
@@ -36,7 +38,10 @@ def main():
     if args.offer.stat().st_size > 4096:
         raise ValueError('Offer document exceeds limit')
     offer = Offer.from_dict(json.loads(args.offer.read_text(encoding='utf-8')))
-    cache = Cache(args.data / 'mod-state/sync/downloads')
+    from game_check import sfo_info
+    info = sfo_info(args.game) if args.game else {}
+    cache = Cache(args.data / 'mod-state/sync/downloads',
+                  title_id=info.get('TITLE_ID', ''), app_version=info.get('APP_VER', ''))
     if args.command == 'download':
         print('Downloaded for review:', cache.stage(offer, threading.Event()))
     else:

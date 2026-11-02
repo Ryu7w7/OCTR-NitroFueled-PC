@@ -186,7 +186,7 @@ class Service:
                     pass
 
 
-def start_for_runner(config, data, env, proof, log):
+def start_for_runner(config, data, env, proof, log, *, game=None):
     """Windows run.py integration; no traffic or status files when the toggle is off."""
     try:
         env.pop('BB_MOD_SYNC_STATUS', None)
@@ -204,7 +204,11 @@ def start_for_runner(config, data, env, proof, log):
         selection = Path(env.get('BB_PATCHES_CONFIG', Path(data) / 'patches.json'))
         if env.get('BB_MODS_ENABLED') == '0' and not env.get('BB_MOD_ARCHIVE_PLAN'):
             selection = None
-        service = Service(config, mods, selection, client, log=log)
+        from game_check import sfo_info
+        info = sfo_info(game) if game is not None else {}
+        cache = Cache(mods.parent / 'mod-state/sync/downloads',
+                      title_id=info.get('TITLE_ID', ''), app_version=info.get('APP_VER', ''))
+        service = Service(config, mods, selection, client, cache=cache, log=log)
         env['BB_MOD_SYNC_STATUS'] = str(service.status_path.resolve())
         return service.start()
     except Exception as error:
