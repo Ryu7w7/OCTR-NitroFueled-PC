@@ -1,0 +1,64 @@
+OPTIONAL GAMEBANANA MOD SYNC - REVIEW SUMMARY
+2 November 2026 | Draft PR #152
+
+This adds an optional Windows launcher integration for sharing exact GameBanana
+mod uploads with lobby members. It preserves OCTR's missing-character-to-Crash
+fallback. Downloads are staged and explicitly imported disabled; downloading a
+package is never reported as proof that the running game loaded it.
+
+Implemented
+- Opt-in launcher toggle, background worker and retained Nitro-style status bar.
+  Drawing is independent of input focus; this does not create a desktop overlay.
+- Canonical gamebananapageurl.txt discovery, exact upload resolution, bounded
+  HTTPS downloads, package checks and receipts. No GitHub mod download catalogue.
+- US/EU upload selection using explicit title IDs and matching release versions.
+  Executable patch targets are checked against the actual local game. Alternate
+  regional uploads get their own hashes; mixed-edition readiness is not assumed.
+- Closed-game receipt import from the launcher, followed by manual enable,
+  restart and rejoin. Safe hot loading is not implemented.
+- Standalone Go bridge for current-server authentication/membership adapters,
+  a fixed maximum 20-second hold, heartbeat expiry and an admin kill switch.
+  Disabled, failed, unavailable or late participants continue with normal fallback.
+- Duplicate JSON fields/member IDs rejected; expired room capacity is recovered.
+- English/Spanish quick starts, server wiring notes, protocol documentation,
+  a local HTTPS demo and a source-overlay/patch packager.
+
+Verified locally and/or in CI
+- 40 focused Python tests and 8 existing runner tests.
+- 16 Go tests with the race detector; go vet.
+- Real Python client to Go server over loopback HTTPS. Includes signatures,
+  replay rejection, deadline, disconnect, opt-out, admin disable and regional
+  hash mismatch fallback. Synthetic local accounts only; no production service.
+- Two headless C++/ImGui tests, including identical panel geometry across focus
+  loss/regain. Actual game focus/fullscreen acceptance still needs a live test.
+- Windows launcher source compiles/links with C++20, Win32 and D3D11. This is a
+  resource-less check executable, not the production GPU/distribution build.
+- Patch applies to clean upstream base 3885d1aea24d19ed9b31f96fba57a5cce92183cd;
+  every changed file and ZIP entry is byte/hash verified during packaging.
+
+Green CI for the latest functional commit, 174f2c4778001593a93f8a659630089917d1fb73:
+https://github.com/Venvvs/OCTR-NitroFueled-PC-Mod-Sync-System/actions/runs/41376682965
+
+Current-server handoff (still required)
+The current server source and private test lobby are unavailable. The user has
+confirmed that this should be a local handoff until access is available.
+1. Wire current authenticated identities, authoritative membership and rounds.
+2. Call the bridge at the actual start/close decision; implement deferred retry
+   and reflect the held countdown in clients. Do not only pause a displayed timer.
+3. Implement verified runtime loaded proofs at a safe boundary OR connect an
+   explicit restart/rejoin workflow. The default service cannot attest live loads.
+4. Verify with two real game clients, including mixed-region fallback, disabled
+   sync, failed/slow downloads, disconnects and actual focus/fullscreen changes.
+5. Build the production launcher/GPU distribution. Linux GTK/run.sh integration
+   remains outside this Windows integration; portable unit tests do not wire it.
+
+Review order
+  docs/mod-sync-integration.txt       contracts, boundaries and protocol
+  docs/mod-sync-server-wiring.txt     current-server connection points
+  docs/mod-sync-local-demo.txt        reproducible HTTPS integration check
+  docs/mod-sync-validation.txt        detailed evidence and limits
+  docs/mod-sync-quickstart-en.txt     user/author instructions
+  docs/mod-sync-quickstart-es.txt     Spanish instructions
+
+Keep this PR as a draft until the live acceptance work is completed. No playable
+installation, game archives, saves or installed mods were modified for this work.

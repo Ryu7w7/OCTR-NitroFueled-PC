@@ -1,0 +1,133 @@
+MOD SYNC SOURCE VALIDATION — 2 NOVEMBER 2026
+
+SERVER ADAPTER REVISION
+  13 Go top-level tests now pass, including 4 new Bridge tests. Both go vet and
+  go test -race -count=1 ./... passed locally with Go 1.27.2 and the UCRT GCC toolchain.
+  The earlier 'race detector not run' entry below records the first handoff only.
+  New CI workflow added; hosted results are separate from these local results.
+  Current private server source remains unavailable; old source was inspected
+  read-only to document real integration locations, not assumed production parity.
+
+Base: OCTR v0.7.5 / 3885d1aea24d19ed9b31f96fba57a5cce92183cd.
+Validation used synthetic packages and local test servers, not a live game session.
+
+PASS: 36 focused Python mod-sync tests (final revision).
+  Exact upload selection, checksums, revoked cache entries, changed files, limited
+  download sizes, byte progress, credentials/redirect separation, ZIP paths and
+  declared checksums, opt-out, unsupported server, cancellation, missing lobby,
+  active-game locks, disabled import, existing version protection, signed body
+  identity, clock correction and cached-versus-loaded readiness distinction.
+  Command: python -m unittest discover -s tests -p test_mod_sync.py
+
+PASS: broader package regression run: 125 tests, 123 passed and 2 Linux-only shader
+  tests skipped on Windows. This run preceded the final added clock-offset test;
+  the subsequent focused run includes that change and all 36 sync tests.
+  Command: python -m unittest discover -s tests -p "test_mod_*.py"
+
+PASS: 8 existing runner tests, including loopback HTTP/signature/filter behaviour.
+  Command: python -m unittest discover -s tests -p "test_run_*.py"
+  The initial restricted run could not reach its loopback server; it passed with
+  local network access enabled. Package hard-link fixtures likewise needed normal
+  filesystem permissions. Neither required any change to upstream test assertions.
+
+PASS: Go coordinator/HTTP tests: 9 top-level tests with additional table subcases.
+  Hold until loaded, opt-out, failure, expiry, room departure, fixed deadline,
+  generation/session mismatches, repeated holds, next race, foreign members,
+  malformed offers, multiple participants and authenticated body boundary.
+  Commands (integration/ryunet-modsync): go test -count=1 -v ./... ; go vet ./...
+  Go race detector not run; current server integration has not been compiled.
+
+PASS: two standalone C++20 tests, no visible window or game process:
+  tests/mod_sync_status.cpp: bounded state-file parser, stale messages, fallback.
+  tests/mod_sync_panel.cpp: pinned upstream ImGui f1cc2ae15e53a861a874c3034aae6798fde194ab.
+  The retained panel draws identical vertex counts with focus gained/lost/regained;
+  it captures neither mouse nor keyboard. Hidden state emits no geometry.
+  Built with C:/msys64/clang64/bin/clang++.exe and executed successfully.
+
+PASS: Python compileall and git diff --check.
+
+LIVE READ-ONLY CHECK
+  The implemented GameBanana resolver successfully read:
+    https://gamebanana.com/apiv11/Mod/735177/ProfilePage
+  It identified file 1872959, 30,253,774 bytes, at:
+    https://gamebanana.com/dl/1872959
+  A separate HEAD check followed that URL to filecache53.gamebanana.com.
+  No third-party ZIP was downloaded, extracted or installed for this check.
+
+PATCH/ZIP CHECK
+  scripts/package_mod_sync_handoff.py exports committed changes only, applies the
+  patch to a clean archive of the exact upstream base, compares every changed file
+  byte-for-byte with the source commit, then checks ZIP CRCs and all packaged bytes.
+  SOURCE-MANIFEST.json records base/source commits and SHA-256 for each shipped file.
+
+NOT VERIFIED
+  Full Windows launcher/GPU build; actual in-game Alt+Tab/fullscreen behaviour;
+  live two-PC sync; production authentication/room/countdown connections; runtime
+  mod hot-loading or restart/rejoin; native loaded proof; Linux GTK/run.sh hooks.
+  This is not a claim of release readiness or a fix installed in the playable port.
+
+REGIONAL DOWNLOADS (2 November 2026)
+The runner passes the actual game folder to sync, which reads TITLE_ID and APP_VER
+from param.sfo. Never infer the edition from a folder name or assume USA.
+GameBanana upload descriptions must explicitly contain CUSA13795 (US) or
+CUSA14876 (EU). Separate uploads need the exact same nonempty file version label.
+Selection stays on the advertised page and requires exactly one matching edition
+and release. Filenames, EU/USA nicknames, file order and newest upload are not used.
+An absent or ambiguous counterpart fails to normal fallback.
+Every executable patch alternative is checked against the local title and 01.21,
+after ordinary package/hash validation, including cache hits and explicit import.
+Unlabelled uploads cannot be automatically paired; their XML still cannot bypass
+the edition check. Mixed-edition XML inside one ZIP is conservatively rejected.
+Asset-only packages retain upstream asset validation; lack of XML does not prove
+full cross-edition gameplay compatibility.
+
+A substituted download is fetched from the official HTTPS API-selected file,
+checked against its API MD5, and receives its OWN computed SHA-256 receipt. Unlike
+the original offered ZIP, its SHA-256 is not pinned by a peer beforehand. The MD5
+identifies the public upload, not a publisher signature. Review/restart is required.
+The original offer hash is NEVER acknowledged as loaded because an alternative
+was downloaded. Protocol v2 still proves exact hashes, not equivalent releases.
+A future hot-load/rejoin adapter needs server-validated per-edition requirements
+before mixed-edition readiness can be claimed. Current staging/fallback works
+without that claim. Existing deadlines and Crash fallback are unchanged.
+CLI download/import: add --game PATH_TO_GAME for executable-patch mods. Import
+using the receipt beside the downloaded ZIP, not the other edition's source offer.
+
+Real reference inspected (not installed): https://gamebanana.com/mods/735343
+Replay Mode 0.2.0 Beta: US file 1873434, EU file 1873435. XML targets confirm
+CUSA13795/CUSA14876 at 01.21. These inspected uploads did not yet contain the page
+TXT; authors must rebuild the format-2 file/checksum manifest and re-upload.
+Do not just insert TXT into a previously checksummed ZIP or reuse old upload IDs.
+No third-party ZIP content is included in this source handoff.
+
+Regional revision: 40 focused Python tests passed; all 8 existing runner tests
+passed. Real public ZIPs inspected only, not installed or executed. No live
+mixed-edition lobby or runtime readiness claim is made by this revision.
+
+LOCAL INTEGRATION REVISION
+See docs/mod-sync-local-demo.txt for the runnable loopback HTTPS example and
+Python-to-Go acceptance test. CI runs the test with a fixed timeout.
+The Windows launcher now offers Review and import download, disabled while playing;
+it invokes the checked receipt importer with the actual selected game folder.
+Imported mods remain disabled. Enable/restart/rejoin remains a user-controlled flow.
+The Windows launcher sources compile and link locally with clang C++20, Win32 and
+D3D11; this check build omits distribution resources and is not a release artifact.
+Go tests with the race detector and go vet pass. The production GPU/game build and
+live lobby/focus acceptance tests remain unverified. No hot-load capability added.
+
+CI evidence for source 6f4c6d0b50b433b2684ce6ff0a6f4a03e3319166:
+https://github.com/Venvvs/OCTR-NitroFueled-PC-Mod-Sync-System/actions/runs/41375964237
+All jobs succeeded, including Python/Go HTTPS interoperability, Go race/vet,
+headless overlay and Windows/Linux Python tests. Local execution of the loopback
+interop test was not approved before the review system timed out twice; the CI
+result supplies its execution evidence. No production server was contacted.
+
+FINAL LOCAL ADMISSION CHECK (2 November 2026)
+The Python/Go loopback HTTPS acceptance test now also passed locally. Sixteen Go
+tests pass with -race; go vet passes. New coverage rejects duplicate JSON fields,
+excess nesting and duplicate/empty authoritative member IDs. Expired room entries
+are pruned before the capacity guard, so stale rooms cannot permanently prevent
+new sync sessions. The 20-second policy and original Crash fallback are unchanged.
+Production authentication/membership/start/rejoin wiring still requires the current
+private server source and a test service. No current source was available. Native
+safe-boundary hot loading and two-PC focus/mount acceptance remain unfinished.

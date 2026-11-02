@@ -1,0 +1,78 @@
+SINCRONIZACIÓN OPCIONAL DE MODS DE GAMEBANANA — GUÍA RÁPIDA
+
+PARA RYU / DESARROLLADORES
+Este paquete contiene código fuente para un fork de OCTR. No es un instalador
+terminado para jugadores. Consulta mod-sync-integration.txt para las conexiones
+pendientes del servidor y del motor, el protocolo y las limitaciones actuales.
+Base: OCTR v0.7.5, commit 3885d1aea24d19ed9b31f96fba57a5cce92183cd.
+Aplica el parche incluido sobre esa versión o copia los archivos de source-overlay
+sobre una copia limpia del código. Conserva LICENSE y compila el launcher y la GPU
+siguiendo el proceso normal de OCTR.
+
+PARA CREADORES DE MODS
+1. Crea o localiza la página de tu mod en la categoría de OCTR PC de GameBanana.
+2. Añade gamebananapageurl.txt junto a mod.json, o en la raíz de un ZIP de assets.
+3. Dentro escribe únicamente la URL completa de la página:
+   https://gamebanana.com/mods/ID_DE_TU_PAGINA
+4. Para el formato 2, vuelve a empaquetar con:
+   python scripts/package_mod.py TU_CARPETA --output TU_MOD.zip
+5. Sube exactamente ese ZIP a GameBanana. No lo vuelvas a comprimir después.
+6. Conserva ese mismo ZIP en la carpeta mods de OCTR y actívalo normalmente.
+7. Comprueba que coincide con el archivo publicado:
+   python scripts/mod_sync_cli.py pin TU_MOD.zip --out offer.json
+No metas offer.json dentro del ZIP: su SHA-256 identifica el ZIP completo.
+Si cambias algún archivo, vuelve a crear el paquete y publica una nueva versión.
+
+PARA PROBADORES, TRAS LA INTEGRACIÓN DEL SERVIDOR
+Activa GameBanana mod sync en la pestaña Mods del launcher de Windows. Se inicia
+al arrancar el juego. Si lo desactivas durante una partida, el proceso se detiene.
+Los servidores públicos de OCTR sin modificar todavía no ofrecen la API v2 necesaria.
+
+Se conserva la barra azul y amarilla. Debe seguir dibujándose aunque el juego pierda
+el foco. Está dentro de la ventana del juego; no se superpone a otras aplicaciones.
+La cuenta atrás puede esperar brevemente a los jugadores que participan. El límite
+es de 20 segundos. Si alguien desactiva la opción, falla una descarga o no puede cargar
+los mods a tiempo, la carrera continúa con el comportamiento habitual y Crash como
+sustituto del personaje que falta.
+
+LIMITACIÓN ACTUAL: LOS MODS NUEVOS SE DESCARGAN, PERO NO SE CARGAN EN VIVO
+Falta conectar el adaptador de carga del motor o el flujo de reinicio y regreso a la
+sala. Para revisar una descarga con este código:
+1. Termina la partida y cierra el juego.
+2. En Mods, abre Open mod downloads. Cada ZIP verificado tiene un recibo JSON al lado.
+3. Desde la carpeta del código de OCTR ejecuta:
+   python scripts/mod_sync_cli.py import "RUTA_AL_RECIBO.json" --data "CARPETA_DE_DATOS_OCTR"
+4. Recarga la lista de Mods, revisa el paquete y actívalo manualmente.
+5. Vuelve a iniciar el juego. Los conflictos y las versiones diferentes ya instaladas
+   se revisan manualmente: no se reemplazan sin avisar.
+No se ejecutan instaladores descargados ni se activan cambios de código automáticamente.
+
+Si falta gamebananapageurl.txt, hay varias descargas que coinciden o se elimina el
+archivo exacto de GameBanana, el juego normal sigue funcionando. Pide al creador una
+versión preparada para sincronizar.
+
+Antes de publicar: conectar la autenticación, las salas y el inicio real de carrera
+en el servidor; verificar la carga real del personaje; compilar; probar entre dos
+PC, con la opción activada y desactivada, y comprobar Alt+Tab, F11 y Alt+Enter.
+La integración automática del launcher GTK/run.sh de Linux aún no está implementada.
+
+DESCARGAS US/EU
+Para archivos regionales separados, escribe CUSA13795 (US) o CUSA14876 (EU) en
+la descripcion de cada archivo en GameBanana. Usa exactamente la misma etiqueta
+de version para ambas descargas de la misma publicacion. No se deduce la region
+a partir del nombre del ZIP ni se selecciona automaticamente la ultima version.
+El launcher lee la edicion real desde param.sfo. Si falta una alternativa unica,
+se usa el comportamiento normal de respaldo. El XML tambien debe coincidir con
+la edicion y la version 01.21; una etiqueta incorrecta no evita esta comprobacion.
+Al reconstruir un paquete formato 2, incluye gamebananapageurl.txt y regenera
+la lista de archivos y sus checksums antes de subir el nuevo ZIP.
+Para download/import de parches ejecutables, agrega --game "CARPETA_DEL_JUEGO".
+Usa el recibo JSON que esta junto al ZIP descargado de tu edicion.
+Una descarga regional tiene su propio hash. No demuestra que el mod de otra
+edicion este cargado: aun se requiere revisar y reiniciar. La confirmacion de
+carga entre ediciones distintas queda pendiente del adaptador de servidor/runtime.
+
+Ya puedes importar sin comandos: cierra el juego, abre Mods, pulsa Revisar e
+importar descarga y elige el recibo JSON junto al ZIP descargado. El mod queda
+sin activar. Revisalo, activalo, reinicia con Jugar y vuelve a entrar a la sala
+manualmente. Los errores aparecen en el registro del launcher.

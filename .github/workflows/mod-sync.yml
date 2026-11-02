@@ -1,0 +1,53 @@
+name: Mod sync integration checks
+on:
+  push:
+    branches: [feature/gamebanana-optional-mod-sync]
+  pull_request:
+    paths:
+      - 'scripts/mod_sync/**'
+      - 'scripts/mod_sync_cli.py'
+      - 'integration/ryunet-modsync/**'
+      - 'gpu/shim/bbport_mod_sync*.h'
+      - 'tests/*mod_sync*'
+      - 'run.py'
+      - '.github/workflows/mod-sync.yml'
+permissions:
+  contents: read
+jobs:
+  python:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests -p test_mod_sync.py -v
+      - run: python -m unittest discover -s tests -p test_run_*.py -v
+  server-and-overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Server tests and race detector
+        working-directory: integration/ryunet-modsync
+        run: |
+          go version
+          go test -race -count=1 ./...
+          go vet ./...
+      - name: Real Python to Go HTTPS integration
+        timeout-minutes: 2
+        run: |
+          mkdir -p out/mod-sync-tests
+          (cd integration/ryunet-modsync && go build -o ../../out/mod-sync-tests/modsync-demo ./cmd/modsync-demo)
+          python3 tests/mod_sync_interop.py out/mod-sync-tests/modsync-demo
+      - name: Fetch pinned ImGui only
+        run: git submodule update --init --depth 1 gpu/third_party/imgui
+      - name: Headless overlay checks
+        run: |
+          mkdir -p out/mod-sync-tests
+          g++ -std=c++20 tests/mod_sync_status.cpp -o out/mod-sync-tests/status
+          out/mod-sync-tests/status
+          g++ -std=c++20 -Igpu/third_party/imgui tests/mod_sync_panel.cpp gpu/third_party/imgui/imgui.cpp gpu/third_party/imgui/imgui_draw.cpp gpu/third_party/imgui/imgui_tables.cpp gpu/third_party/imgui/imgui_widgets.cpp -o out/mod-sync-tests/panel
+          out/mod-sync-tests/panel
