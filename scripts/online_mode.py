@@ -134,6 +134,11 @@ def cup_package(game, blob, source_blob, assets=None):
         path = pending.pop()
         if path in seen or path not in source_types:
             continue
+        # Package manifests can name languages absent from this regional dump.
+        # Keep English and non-language dependencies mandatory.
+        if (path not in files and source_types[path] == 'lang_file'
+                and path.endswith('.lng') and not path.endswith('_en.lng')):
+            continue
         seen.add(path)
         needed.add(path)
         pak, entry = files[path]
