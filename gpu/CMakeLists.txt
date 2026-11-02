@@ -306,6 +306,22 @@ endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
+if (NOT WIN32)
+    add_executable(native-shader-async-test EXCLUDE_FROM_ALL
+        ../tests/test_native_shader_async.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(native-shader-async-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(native-shader-async-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_native_shader_async.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(native-shader-async-test PRIVATE bbgpu)
+    add_executable(pipeline-cache-io-test EXCLUDE_FROM_ALL
+        ../tests/test_pipeline_cache_io.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(pipeline-cache-io-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(pipeline-cache-io-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_pipeline_cache_io.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(pipeline-cache-io-test PRIVATE bbgpu)
+endif()
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)
 add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
