@@ -114,3 +114,10 @@ The Windows launcher sources compile and link locally with clang C++20, Win32 an
 D3D11; this check build omits distribution resources and is not a release artifact.
 Go tests with the race detector and go vet pass. The production GPU/game build and
 live lobby/focus acceptance tests remain unverified. No hot-load capability added.
+
+CI evidence for source 6f4c6d0b50b433b2684ce6ff0a6f4a03e3319166:
+https://github.com/Venvvs/OCTR-NitroFueled-PC-Mod-Sync-System/actions/runs/41375964237
+All jobs succeeded, including Python/Go HTTPS interoperability, Go race/vet,
+headless overlay and Windows/Linux Python tests. Local execution of the loopback
+interop test was not approved before the review system timed out twice; the CI
+result supplies its execution evidence. No production server was contacted.

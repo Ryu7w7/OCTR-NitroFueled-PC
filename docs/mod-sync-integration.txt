@@ -36,14 +36,16 @@ about readiness, write into a live session, or attempt the old process-memory ha
 
 For seamless use in the same lobby, a verified safe-boundary loader must still be
 implemented. Otherwise connect a user-controlled close/review/enable/restart/rejoin
-flow. Neither seamless hot loading nor automated rejoin is implemented here.
+flow. The launcher now supports explicit receipt import followed by manual enable,
+restart and rejoin. Seamless hot loading and automated rejoin are not implemented.
 The Python service exposes loaded_provider(snapshot) specifically for a runtime
 adapter that can attest mounted + registered + usable exact package hashes. It is
 unset in the default runner. Only that adapter may produce a loaded acknowledgement.
 
 The portable Python core and Go component are cross-platform. This patch wires the
 Windows launcher/run.py and current Vulkan overlay. Linux GTK/run.sh lifecycle hooks
-have NOT been wired or tested. No full launcher/GPU binary was built in this handoff.
+have NOT been wired or tested. Windows launcher sources compile/link in a local
+check build; the full production GPU binary has not been built in this handoff.
 
 AGREED LOBBY POLICY
 1. Sync is optional. Off means no mod-sync HTTP traffic from this client.
