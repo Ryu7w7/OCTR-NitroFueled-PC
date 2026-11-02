@@ -73,6 +73,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func decodeRequest(raw []byte) (Request, error) {
 	var req Request
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	if err := uniqueJSON(strict, 0); err != nil {
+		return req, err
+	}
+	if _, err := strict.Token(); err != io.EOF {
+		return req, errors.New("trailing JSON data")
+	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(raw, &object) != nil || len(object) != 3 || object["protocol"] == nil || object["offers"] == nil || object["report"] == nil {
 		return req, errors.New("invalid request envelope")
@@ -81,4 +88,42 @@ func decodeRequest(raw []byte) (Request, error) {
 	decoder.DisallowUnknownFields()
 	err := decoder.Decode(&req)
 	return req, err
+}
+
+// encoding/json accepts duplicate keys by default. Reject them at every level
+// so signed payloads have the same interpretation in client and server tooling.
+func uniqueJSON(decoder *json.Decoder, depth int) error {
+	if depth > 32 {
+		return errors.New("JSON nesting limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	if delimiter != '{' && delimiter != '[' {
+		return errors.New("invalid JSON container")
+	}
+	keys := make(map[string]bool)
+	for decoder.More() {
+		if delimiter == '{' {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok || keys[key] {
+				return errors.New("duplicate JSON key")
+			}
+			keys[key] = true
+		}
+		if err := uniqueJSON(decoder, depth+1); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }

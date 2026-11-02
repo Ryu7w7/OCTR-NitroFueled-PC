@@ -121,3 +121,13 @@ All jobs succeeded, including Python/Go HTTPS interoperability, Go race/vet,
 headless overlay and Windows/Linux Python tests. Local execution of the loopback
 interop test was not approved before the review system timed out twice; the CI
 result supplies its execution evidence. No production server was contacted.
+
+FINAL LOCAL ADMISSION CHECK (2 November 2026)
+The Python/Go loopback HTTPS acceptance test now also passed locally. Sixteen Go
+tests pass with -race; go vet passes. New coverage rejects duplicate JSON fields,
+excess nesting and duplicate/empty authoritative member IDs. Expired room entries
+are pruned before the capacity guard, so stale rooms cannot permanently prevent
+new sync sessions. The 20-second policy and original Crash fallback are unchanged.
+Production authentication/membership/start/rejoin wiring still requires the current
+private server source and a test service. No current source was available. Native
+safe-boundary hot loading and two-PC focus/mount acceptance remain unfinished.

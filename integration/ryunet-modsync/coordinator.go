@@ -96,15 +96,26 @@ func validateRoom(room Room) error {
 	if room.ID == "" || room.Round == "" || len(room.ID) > 128 || len(room.Round) > 128 || len(room.Members) > 8 {
 		return errors.New("invalid authoritative room")
 	}
+	seen := make(map[string]bool)
+	for _, id := range room.Members {
+		if id == "" || len(id) > 128 || seen[id] {
+			return errors.New("invalid authoritative membership")
+		}
+		seen[id] = true
+	}
 	return nil
 }
 
-func (c *Coordinator) state(room Room, now time.Time) *roomState {
+func (c *Coordinator) prune(now time.Time) {
 	for id, state := range c.rooms {
 		if now.Sub(state.touched) > 10*time.Minute {
 			delete(c.rooms, id)
 		}
 	}
+}
+
+func (c *Coordinator) state(room Room, now time.Time) *roomState {
+	c.prune(now)
 	state := c.rooms[room.ID]
 	if state == nil || state.round != room.Round {
 		state = &roomState{round: room.Round, members: make(map[string]participant)}
@@ -213,6 +224,8 @@ func (c *Coordinator) Exchange(room Room, player string, req Request, now time.T
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Expired rooms must not permanently prevent new rooms reaching state().
+	c.prune(now)
 	if len(c.rooms) >= 4096 && c.rooms[room.ID] == nil {
 		return Reply{}, fmt.Errorf("sync capacity reached")
 	}
