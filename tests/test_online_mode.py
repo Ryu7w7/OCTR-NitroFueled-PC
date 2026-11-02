@@ -1,6 +1,7 @@
 """Native menu adapter checks; BB_TEST_GAME enables tests using a local game dump."""
 from paths import ROOT
 import os
+import json
 import struct
 import subprocess
 from pathlib import Path
@@ -15,6 +16,42 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_prepare_preserves_widescreen_lobby(self):
+        import archive_patch
+        from nitro_components import payload_bytes
+        game = Path(os.environ['BB_TEST_GAME'])
+        pak = game / 'archives/update2.pak'
+        entries = iga.pak_entries(pak)
+        index = next(i for i, entry in enumerate(entries)
+                     if entry[0].lower() == online_mode.LOBBY_ENTRY)
+        original = online_mode.current_entry(pak, entries, index, None)
+        data = ROOT / 'scripts/widescreen_data'
+        tested = 0
+        for manifest in (data / 'ultrawide-21x9/nitro-mod.json',
+                         data / 'ultrawide-32x9/nitro-mod.json', data / 'eu/assets.json'):
+            spec = json.loads(manifest.read_text())
+            for name, operations in spec.get('sets', spec.get('operationSets', {})).items():
+                for op in operations:
+                    if (op.get('archive') != 'update2.pak' or op.get('index') != index
+                            or op.get('asset', '').lower() != 'ui/octane_lobby_privategame.igz'):
+                        continue
+                    with self.subTest(manifest=manifest.name, variant=name), tempfile.TemporaryDirectory() as temp:
+                        out = Path(temp)
+                        wide = payload_bytes(op, manifest.parent, original)
+                        base = out / 'widescreen.bbpatch'
+                        archive_patch.write_entry_patch(base, pak, '/app0/archives/update2.pak', index, wide)
+                        elf = out / 'eboot.elf'
+                        elf.write_bytes(b'')
+                        with patch.object(online_mode, 'hook_site', return_value=0x1277e00):
+                            patches, _ = online_mode.prepare(game, out / 'online', elf, [base])
+                        result = next(p for p in patches if archive_patch.read(p)[1] == '/app0/archives/update2.pak')
+                        actual = online_mode.current_entry(pak, entries, index, result)
+                        self.assertEqual(actual, online_mode.lobby_card(wide))
+                        self.assertNotEqual(actual, online_mode.lobby_card(original))
+                        tested += 1
+        self.assertGreater(tested, 0)
+
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
         block = script[script.index('unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE'):
