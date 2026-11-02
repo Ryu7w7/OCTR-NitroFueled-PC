@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 import unittest
 import tempfile
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets
@@ -15,6 +15,42 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    def test_cup_package_regional_languages(self):
+        graph = 'ui/octane_cupselect.igz'
+        english = 'ui/octane_cupselect_en.lng'
+        portuguese = 'ui/octane_cupselect_pt.lng'
+        texture = 'textures/cup.igz'
+        rows = [('gui_project', graph), ('lang_file', english),
+                ('lang_file', portuguese), ('texture', texture)]
+        dependencies = b''.join(kind.encode() + b'\0' + path.encode() + b'\0'
+                                for kind, path in rows[1:])
+        for missing in (None, portuguese, english, texture):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                archives = Path(temp) / 'archives'
+                archives.mkdir()
+                for name in ('juicedomain_startscreen', 'update', 'update2'):
+                    (archives / (name + '.pak')).touch()
+                entries = [(online_mode.PACKAGE_PREFIX + path, 0)
+                           for _, path in rows if path != missing]
+                package, source, asset = MagicMock(), MagicMock(), MagicMock()
+                package.append.return_value = 0
+                package.string_index.side_effect = lambda value: rows.index(
+                    next(row for row in rows if value in row))
+                package.u64.return_value = 0
+                asset.fixup.return_value = ('TDEP', 3, 0, dependencies)
+                with patch.object(online_mode, 'Igz', side_effect=[package, source] + [asset] * 4), \
+                        patch.object(online_mode, 'package_rows', side_effect=[(0, []), (0, rows)]), \
+                        patch.object(iga, 'pak_entries', return_value=entries), \
+                        patch.object(iga, 'read_entry', return_value=b'asset'):
+                    if missing in (english, texture):
+                        with self.assertRaises(KeyError):
+                            online_mode.cup_package(temp, b'online', b'source')
+                    else:
+                        online_mode.cup_package(temp, b'online', b'source')
+                        included = [call.args[0] for call in package.string_index.call_args_list]
+                        for _, path in rows:
+                            self.assertEqual(path in included, path != missing)
+
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
         block = script[script.index('unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE'):
