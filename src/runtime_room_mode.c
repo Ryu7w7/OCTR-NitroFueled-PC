@@ -49,6 +49,7 @@ static void *publish(void *arg) {
     free(arg);
     const char *me = runtime_np_get_online_name();
     if (!me || !nickname_ok(me)) return NULL;
+    runtime_public_itemless_announce();
     char target[128], body[128];
     snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me, speed ? "speed" : "normal");
     const int status = runtime_ryunet_request("POST", target, body, sizeof body);
@@ -99,6 +100,7 @@ static int following(const Follow *f) {
 static void *follow(void *arg) {
     Follow *f = arg;
     int known = -1, warned = 0;
+    runtime_public_itemless_announce();
     for (unsigned asked = 0; following(f) && asked < 12u * 3600u / 2u; ++asked) {
         char target[128], body[128];
         snprintf(target, sizeof target, "/ryunet/room-mode?host=%s&format=text", f->host);
@@ -124,6 +126,7 @@ static void *follow(void *arg) {
 }
 
 void runtime_room_mode_joined(const char *session_id) {
+    runtime_public_itemless_party_ready();
     if (!session_id || strncmp(session_id, session_prefix, sizeof session_prefix - 1)) return;
     const char *host = session_id + sizeof session_prefix - 1;
     const char *me = runtime_np_get_online_name();

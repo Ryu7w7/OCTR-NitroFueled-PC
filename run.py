@@ -496,6 +496,7 @@ def setup_online(env, config, data):
 
     # Ignore the retired launcher toggle; the native selector owns this session's mode.
     env.pop('BB_SPEED_MODE', None)
+    env['BB_PUBLIC_ITEMLESS'] = '0'
 
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
@@ -528,6 +529,8 @@ def setup_online(env, config, data):
     # The server's announcements (used below); its answer also tells its clock, before anything
     # is signed.
     announced = server_settings(host, auth_port)
+    if announced.get('itemless_matchmaking') == 1:
+        env['BB_PUBLIC_ITEMLESS'] = '1'
     if SERVER_CLOCK_OFFSET:
         env['BB_ONLINE_CLOCK_OFFSET'] = str(SERVER_CLOCK_OFFSET)
         if abs(SERVER_CLOCK_OFFSET) > 60:
@@ -926,12 +929,12 @@ def main():
                             game, out / 'speed-mode', base)
                     except (ValueError, OSError, KeyError, IndexError) as error:
                         # a damaged game file stops Speed Mode only: online plays as before
-                        say(f'ITEMLESS (Experimental) not available: {error}')
+                        say(f'ITEMLESS not available: {error}')
                         archives = '|'.join(map(str, base))
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
-                        say(f'ITEMLESS (Experimental): {track_count} tracks prepared for private rooms')
+                        say(f'ITEMLESS: {track_count} tracks prepared for private rooms')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:

@@ -2,11 +2,14 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
-static int cup, private_room = 1, itemless;
+static int cup, private_room = 1, itemless, stale_private_ui, battle_menu;
+static unsigned char default_race[0xd50];
+static void *default_race_ptr = default_race;
 int runtime_speed_race_active(void) { return itemless; }
-int runtime_online_mode_in_private(void) { return private_room; }
-int runtime_online_mode_private_single_options(void) { return private_room && !cup; }
-int runtime_online_mode_private_cup(void) { return cup; }
+int runtime_online_mode_in_private(void) { return private_room || stale_private_ui; }
+int runtime_private_match_active(void) { return private_room; }
+int runtime_online_mode_private_single_options(void) { return private_room && !cup && !battle_menu; }
+int runtime_online_mode_private_cup(void) { return cup && !battle_menu; }
 static void *ABI kind(void *event) { (void)event; return (void *)1; }
 static int drops, calls;
 static void ABI drop(void *p, void *s) {
@@ -612,6 +615,46 @@ static void *ABI difficulty_context_mock(void) { return (void *)1; }
 static unsigned char ABI difficulty_owned_mock(void *context, void *object) {
     assert(context && object); return difficulty_owned;
 }
+static void test_difficulty_mode_scope(void) {
+    unsigned char game[0x150] = {0}, race[0xd50] = {0};
+    void *g = game, *r = race;
+    client = &g; manager = &r;
+    for (int mode = 0; mode <= 16; ++mode)
+        for (int next = 0; next <= 13; ++next)
+            for (int current = 0; current <= 13; ++current) {
+                put_int(game, 0x144, mode);
+                put_int(race, 0xd40, next); put_int(race, 0xd4c, current);
+                private_room = 1; cup = next == 6; battle_menu = next != 1 && next != 6;
+                assert(custom_ai_allowed() == ((mode == 8 && (current == 1 || current == 6)) ||
+                       (mode == 16 && (current == 1 || current == 6))));
+                assert(custom_ai_menu_allowed() == ((mode == 8 && (next == 1 || next == 6)) ||
+                       (mode == 16 && (next == 1 || next == 6))));
+                if (mode == 16) {
+                    private_room = 0;
+                    assert(!custom_ai_allowed() && !custom_ai_menu_allowed());
+                }
+            }
+    client = manager = NULL; private_room = 1; cup = battle_menu = 0;
+}
+
+static void test_private_difficulty_gate(void) {
+    unsigned char diff[32]={0}, options[0x30]={0};
+    void *d=diff,*s=options;
+    difficulty_manager=&d;settings=&s;native_difficulty=difficulty;
+    for (private_room=0;private_room<2;++private_room)
+        for(int ai=0;ai<2;++ai)
+            for(int level=0;level<6;++level) {
+                options[0x10]=ai;
+                put_int(diff,12,level>2?2:level);
+                ai_profile=level>2?level-2:0;
+                assert(runtime_private_difficulty_modified()==(private_room && ai && level>=2));
+            }
+    private_room=1; options[0x10]=1; put_int(diff,12,2); battle_menu=1;
+    for (cup=0;cup<2;++cup) assert(!runtime_private_difficulty_modified());
+    cup=battle_menu=0;
+    private_room=1;ai_profile=0;settings=difficulty_manager=NULL;
+}
+
 static void test_room_difficulty_restore(void) {
     unsigned char game[0x150] = {0}, diff[32] = {0}, ai[0x80] = {0};
     unsigned char entity[0x40] = {0}, wire[0x18] = {0}, actions = 1;
@@ -662,12 +705,12 @@ static void test_room_difficulty_restore(void) {
         runtime_race_options_map_loading("octane/t111_crash_cove/t111_crash_cove");
         entity[0x3b] = 0; ai_input(ai,&actions); assert(driving_level() == host);
     }
-    private_room=0; followed_ai_profile=3; followed_ai_base=2; lobby_personal_difficulty=1;
+    private_room=0; stale_private_ui=1; followed_ai_profile=3; followed_ai_base=2; lobby_personal_difficulty=1;
     put_int(diff,12,0); put_int(diff,16,1);
     difficulty_owned=0; assert(room_difficulty(diff)==1);
     difficulty_owned=1; assert(room_difficulty(diff)==0);
     assert(effective_profile()==0 && driving_level()==-1);
-    private_room=1;
+    private_room=1;stale_private_ui=0;
     runtime_race_options_leave_room(); client = difficulty_manager = NULL; ai_profile = 0;
     net_context = NULL; owns_object = NULL; native_difficulty = difficulty;
 }
@@ -700,7 +743,7 @@ static void test_authority_profile(void) {
         }
     }
     /* Public input never advertises/adopts custom profile bits, on either peer role. */
-    private_room=0; ai_profile=3; followed_ai_profile=3; followed_ai_base=2;
+    private_room=0; stale_private_ui=1; ai_profile=3; followed_ai_profile=3; followed_ai_base=2;
     entity[0x3b]=1; wire[0x10]=0x80; actions=9;
     ai_input(ai,&actions);
     assert(input_level==-1 && wire[0x10]==0x89);
@@ -708,7 +751,7 @@ static void test_authority_profile(void) {
     entity[0x3b]=0; wire[0x10]=0xc9; actions=0;
     ai_input(ai,&actions);
     assert(actions==9 && wire[0x10]==0xc9 && followed_ai_profile==-1);
-    private_room=1; entity[0x3b]=1;
+    private_room=1;stale_private_ui=0; entity[0x3b]=1;
     runtime_race_options_leave_room(); assert(followed_ai_profile == -1);
     put_int(game, 0x144, 8); ai_profile = 1; followed_ai_profile = 3;
     wire[0x10] = 0x80; actions = 1; ai_input(ai, &actions);
@@ -834,7 +877,7 @@ static void test_ai(void) {
         private_room=1; tune_ai(root);
         assert(effective_profile()==3 && selected_driving_level()==5);
         assert(real(values[0],0x14)==hard[0]*tuning[0].scale[2]);
-        private_room=0; followed_ai_profile=3; followed_ai_base=2;
+        private_room=0; stale_private_ui=1; followed_ai_profile=3; followed_ai_base=2;
         ai_input(public_ai,&action);
         assert(followed_ai_profile==-1 && followed_ai_base==-1);
         assert(effective_profile()==0 && selected_driving_level()==-1 && ai_profile==3);
@@ -861,6 +904,35 @@ static void test_ai(void) {
         }
     }
     itemless=0;
+    /* Every excluded Arcade mode and private Battle restores all native tuning. */
+    for (int mode = 8; mode <= 16; mode += 8) {
+        put_int(game, 0x144, mode);
+        for (int race = 0; race <= 13; ++race) {
+            put_int(*manager, 0xd4c, race);
+            ai_profile = 3; followed_ai_profile = -1;
+            tune_ai(root);
+            const int allowed = race == 1 || race == 6;
+            assert(custom_ai_allowed() == allowed);
+            assert(effective_profile() == (allowed ? 3 : 0));
+            if (!allowed) for (int i = 0; i < 9; ++i) {
+                assert(integer(values[i], 12) == 123 && integer(values[i], 16) == 456);
+                assert((tuning[i].integral ? (float)integer(values[i], 20) : real(values[i], 20)) == hard[i]);
+            }
+        }
+    }
+    put_int(*manager, 0xd4c, 1);
+    /* Reusing the extended selector in private Battle removes custom entries. */
+    self[0x1b9] = 1;
+    put_int(choices, 12, 4); put_int(available, 12, 4);
+    put_int(event, 0x18, 0);
+    put_int(game, 0x144, 8); put_int(*manager, 0xd40, 1);
+    difficulty_event(self, event, NULL);
+    assert(integer(choices, 12) == 7);
+    battle_menu = 1; put_int(game, 0x144, 16);
+    difficulty_event(self, event, NULL);
+    assert(integer(choices, 12) == 4 && integer(available, 12) == 4);
+    for (int i = 4; i < 7; ++i) assert(names[i] == NULL);
+    battle_menu = 0;
     /* A guest cannot replace an authority profile through a selection event. */
     self[0x1b9] = 1; followed_ai_profile = 3; ai_profile = 0;
     put_int(event, 0x18, 6);
@@ -1135,6 +1207,7 @@ static void test_targeting(void) {
     unsigned char handle[0x30] = {0}, rm[32] = {0}, list[40] = {0}, root[0x28] = {0}, limits[3][24] = {{0}};
     void *g=game, *d=diff, *m=race, *rm_ptr=rm, *root_ptr=root, *items[]={racer,other};
     client=&g; difficulty_manager=&d; manager=&m; racer_manager=&rm_ptr; ai_data=&root_ptr;
+    put_int(race, 0xd4c, 1);
     native_difficulty=difficulty; native_scan_targets=scan_mock; native_enemy_racer=enemy_mock;
     world_position=position_mock; ai_profile=0; followed_ai_profile=-1; peer_decision=0;
     put_int(game,0x144,8); put_ptr(self,0x18,entity); put_ptr(other,0x20,handle); put_ptr(handle,0x28,target);
@@ -1252,6 +1325,7 @@ static void test_all_items(void) {
 }
 
 int main(void) {
+    put_int(default_race, 0xd40, 1); put_int(default_race, 0xd4c, 1);
     unsigned char race[0xd50] = {0}, config[0x30] = {0}, self[0x1d0] = {0};
     unsigned char labels_list[40] = {0}, flags_list[40] = {0}, event[32] = {0};
     void *race_ptr = race, *config_ptr = config, *pool_ptr = NULL, *type_ptr = (void *)1;
@@ -1285,20 +1359,40 @@ int main(void) {
     team_event(self, event, NULL);
     assert(integer(config, 0x28) == 3 && integer(labels_list, 12) == 4 && drops == 1);
     assert(calls == 5);
+    manager = &default_race_ptr;
     test_ai();
+    manager = &default_race_ptr;
     test_dynamic_speed();
+    manager = &default_race_ptr;
     test_ai_physics();
+    manager = &default_race_ptr;
     test_reserves();
+    manager = &default_race_ptr;
     test_lines();
+    manager = &default_race_ptr;
     test_shortcuts();
+    manager = &default_race_ptr;
     test_route_variation();
+    manager = &default_race_ptr;
     test_drift_frequency();
+    manager = &default_race_ptr;
     test_authority_profile();
+    manager = &default_race_ptr;
+    test_difficulty_mode_scope();
+    manager = &default_race_ptr;
+    test_private_difficulty_gate();
+    manager = &default_race_ptr;
     test_room_difficulty_restore();
+    manager = &default_race_ptr;
     test_stuck_recovery();
+    manager = &default_race_ptr;
     test_ghost_traffic();
+    manager = &default_race_ptr;
     test_boxes();
+    manager = &default_race_ptr;
     test_targeting();
+    manager = &default_race_ptr;
     test_tt_technique();
+    manager = &default_race_ptr;
     test_all_items();
 }

@@ -1,4 +1,4 @@
-/* Preserve maintained boost only during racer contact in private Itemless. */
+/* Preserve maintained boost only during racer contact in an eligible Itemless race. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
