@@ -110,6 +110,8 @@ struct ShaderInfo {
     std::unordered_map<u64, VkShaderModule> variants; // integer inputs: uint mask | sint mask << 32
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     bool load_tried = false;
+    bool load_queued = false; // capture thread only; one job per module
+    std::atomic<bool> load_done{false}; // publishes reflection, module and layout together
     bool native = false; // a shader written for the PC (native/) in place of the translation
     bool reads_own_pixel = false; // a pixel shader sampling its targets' copies at its own pixel
 };
@@ -505,6 +507,10 @@ void LoadModule(ShaderInfo& s) {
         return;
     }
     s.load_tried = true;
+    struct Publish {
+        ShaderInfo& shader;
+        ~Publish() { shader.load_done.store(true, std::memory_order_release); }
+    } publish{s};
     // lab: a first draw with a new shader cost the capture thread 23-30 ms ("resolve") on a new
     // track; slow loads are logged by part (file, SPIR-V preparation, driver)
     using LoadClock = std::chrono::steady_clock;
@@ -556,12 +562,9 @@ void LoadModule(ShaderInfo& s) {
     } else {
         path = shader_root / "spirv" / (s.name + ".spv");
     }
-    std::ifstream f(path, std::ios::binary);
-    std::vector<char> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    s.code.resize(bytes.size() / 4);
-    std::memcpy(s.code.data(), bytes.data(), s.code.size() * 4);
+    s.code = Spirv::ReadFile(path);
     slow_load.read = LoadClock::now();
-    if (bytes.empty() || bytes.size() % 4 ||
+    if (s.code.empty() ||
         !Spirv::Prepare(s.code, StageSet(s), &s.bindings, &s.input_locations)) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
         std::printf("Native Vulkan: %s.spv missing or damaged\n", s.name.c_str());
@@ -672,7 +675,6 @@ ShaderInfo* Resolve(u64 handle, const char* stage) {
         const u64 hash = Fnv(bytes.data(), size);
         if (const auto f = shaders.find(hash); f != shaders.end()) {
             info = &f->second;
-            LoadModule(*info);
         } else {
             unknown_programs.fetch_add(1, std::memory_order_relaxed);
             std::printf("Native Vulkan: no translation for the %s program at %llx (%u bytes, hash "
@@ -2160,6 +2162,7 @@ static_assert(std::is_trivially_copyable_v<PipelineDesc>);
 constexpr u32 PipelineFileMagic = 0x44504242; // "BBPD"
 
 struct CompileJob {
+    ShaderInfo* module = nullptr; // module load, otherwise a pipeline compile
     u64 key = 0;
     PipelineState st;
     VertexInput vi; // st.vertices
@@ -2187,6 +2190,10 @@ void CompileThread() {
             job = std::move(compile_queue.front());
             compile_queue.pop_front();
         }
+        if (job->module) {
+            LoadModule(*job->module);
+            continue;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         const VkPipeline pipeline = MakePipeline(job->st, job->layout);
         compile_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2197,6 +2204,29 @@ void CompileThread() {
         std::lock_guard lk(compile_mutex);
         compiled.emplace_back(job->key, pipeline);
     }
+}
+
+/// A first-use shader follows the same async policy as its pipeline. The capture thread must
+/// not wait on shader file I/O or reflection while the game is submitting frames.
+bool ModuleReady(ShaderInfo& shader) {
+    if (shader.load_done.load(std::memory_order_acquire)) {
+        return true; // a failed load is complete too; Draw checks its module/layout
+    }
+    if (!drawing || !async_pipelines) {
+        LoadModule(shader);
+        return true;
+    }
+    if (!shader.load_queued) {
+        shader.load_queued = true;
+        auto job = std::make_unique<CompileJob>();
+        job->module = &shader;
+        {
+            std::lock_guard lk(compile_mutex);
+            compile_queue.push_front(std::move(job)); // first-use modules before warmup pipelines
+        }
+        compile_cv.notify_one();
+    }
+    return false;
 }
 
 /// Starts the compile threads: a few, leaving cores to the game. BB_VK_COMPILE_THREADS=<n>
@@ -4157,11 +4187,13 @@ void Report() {
             live_targets = targets.size();
             tx = Tex::GetStats();
             bf = Buf::GetStats();
-            if (drawing) {
-                std::lock_guard g(gpu_mutex);
-                gp = Gpu::GetStats();
-            }
             layouts = vertex_layouts.size();
+        }
+        // A recorder batch can wait for the GPU. Never hold up captures while waiting for
+        // its statistics: doing so stalls the capture queue every five-second report.
+        if (drawing) {
+            std::lock_guard g(gpu_mutex);
+            gp = Gpu::GetStats();
         }
         // saved without `mutex` (vkGetPipelineCacheData needs no lock of ours; compiles go on)
         if (save_cache) {
@@ -4455,6 +4487,18 @@ void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
     }
     if ((vs->kind != "vs" && vs->kind != "es") || (ps && ps->kind != "ps") || (gs && gs->kind != "gs")) {
         wrong_stage.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // Request every stage now, even when the first one is still loading.
+    bool ready = ModuleReady(*vs);
+    if (ps) {
+        ready &= ModuleReady(*ps);
+    }
+    if (gs) {
+        ready &= ModuleReady(*gs);
+    }
+    if (!ready) {
+        skipped_compiling.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     Target* colors[8]{};

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <vector>
 
 namespace BbNativeVk::Spirv {
@@ -31,6 +32,9 @@ struct Binding {
     bool arrayed;      // an image array
     std::uint32_t count;
 };
+
+/// Reads a complete word-aligned module in one block. Empty on a missing or truncated file.
+std::vector<std::uint32_t> ReadFile(const std::filesystem::path& path);
 
 /// Reads the descriptor bindings and the input locations (bit n: Location n is an input) and
 /// moves every descriptor to set `set`. False: not a SPIR-V module this can read.

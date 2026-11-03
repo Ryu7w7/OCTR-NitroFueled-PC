@@ -2,6 +2,7 @@
 #include "bbport_native_vk_spirv.h"
 
 #include <algorithm>
+#include <fstream>
 #include <initializer_list>
 #include <map>
 #include <unordered_map>
@@ -46,6 +47,21 @@ bool Walk(const std::vector<u32>& code, F&& f) {
     return true;
 }
 } // namespace
+
+std::vector<u32> ReadFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const auto size = file.tellg();
+    if (size < std::streamoff(5 * sizeof(u32)) || size % sizeof(u32) != 0) {
+        return {};
+    }
+    std::vector<u32> code(static_cast<std::size_t>(size) / sizeof(u32));
+    file.seekg(0);
+    // Avoid per-byte stream access and a second full copy on the capture thread.
+    if (!file.read(reinterpret_cast<char*>(code.data()), size) || code[0] != Magic) {
+        return {};
+    }
+    return code;
+}
 
 bool Prepare(std::vector<u32>& code, u32 set, std::vector<Binding>* bindings,
              u32* input_locations) {
