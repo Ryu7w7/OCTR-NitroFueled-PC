@@ -1699,6 +1699,10 @@ static int trophy_trp(int id, unsigned char **png, uint64_t *png_size) {
     return count;
 }
 static int trophy_count_from_trp(void) { return trophy_trp(-1,NULL,NULL); }
+static int trophy_spanish_language(void) {
+    const char *lang=getenv("BB_LANGUAGE");
+    return lang && (!strcmp(lang,"3") || !strcmp(lang,"20"));
+}
 static void trophy_load(void) {
     if (trophy_loaded) return;
     trophy_loaded=1;
@@ -1742,6 +1746,14 @@ static void trophy_load(void) {
         listed=CTR_TROPHY_COUNT;
     }
     if (trophy_platinum<0 && !listed && trophy_total>1) trophy_platinum=0; /* the usual id when the grades are unknown */
+    /* OCTR's own trophies (ctr_trophies.h), past the game's: their names in the game's language. */
+    for (int i=0;i<OCTR_TROPHY_COUNT;++i) {
+        const OctrTrophy *t=&octr_trophies[i];
+        if (t->id<0 || t->id>=TROPHY_MAX) continue;
+        trophy_grade[t->id]=t->grade;
+        free(trophy_names[t->id]); trophy_names[t->id]=strdup(trophy_spanish_language() ? t->name_es : t->name_en);
+        free(trophy_details[t->id]); trophy_details[t->id]=strdup(trophy_spanish_language() ? t->es : t->en);
+    }
     int before=0;
     for (int i=0;i<TROPHY_MAX;++i) before+=trophy_unlocked_at[i]!=0;
     printf("Runtime: trophies: %d in the game, %d unlocked before%s\n",trophy_total,before,
@@ -1801,6 +1813,20 @@ static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *
     }
     pthread_mutex_unlock(&trophy_lock);
     return 0;
+}
+/* The server's badges for this player (GET /ryunet/badges: {"badges":{"met_admin":...}}): OCTR's
+ * trophy of each one the player has, unlocked with its notice the first time. */
+void runtime_trophy_badges(const char *json) {
+    if (!json || !strstr(json,"\"badges\"")) return;
+    pthread_mutex_lock(&trophy_lock);
+    trophy_load();
+    for (int i=0;i<OCTR_TROPHY_COUNT;++i) {
+        const OctrTrophy *t=&octr_trophies[i];
+        char key[64];
+        snprintf(key,sizeof key,"\"%s\"",t->badge);
+        if (t->id>=0 && t->id<TROPHY_MAX && !trophy_unlocked_at[t->id] && strstr(json,key)) trophy_record(t->id,1);
+    }
+    pthread_mutex_unlock(&trophy_lock);
 }
 /* SceNpTrophyFlagArray: 128 bits, bit id%32 of word id/32; count: the game's trophies. */
 static ABI int32_t trophy_unlock_state(int32_t ctx,int32_t handle,uint32_t *flags,uint32_t *count) {

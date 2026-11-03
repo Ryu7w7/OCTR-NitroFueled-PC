@@ -153,6 +153,7 @@ const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_
 void runtime_savedata_configure(const char *title);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
 void runtime_trophy_configure(const char *title);
+void runtime_trophy_badges(const char *json); /* the server's badges: OCTR's trophies (ctr_trophies.h) */
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
 void runtime_thread_attach_host(const char *name);

@@ -56,3 +56,14 @@ static const CtrTrophy ctr_trophies[CTR_TROPHY_COUNT] = {
     {46, 'S', "Is everyone here?", "Desbloquea todos los personajes del plantel original.", "Unlock every character from the original roster."},
     {47, 'B', "Oh, Shiny!", "Completa todos los desafíos de cristales (CTR y CNK).", "Complete every Crystal Challenge (CTR and CNK)."},
 };
+
+/* OCTR's own trophies, past the game's (ids from 100: never part of its platinum). The RyuNET
+ * server gives them as badges (its badges.go, GET /ryunet/badges): the runtime asks while it
+ * plays online and shows the notice (src/runtime_friends.c); the launcher lists them too. */
+typedef struct { int id; char grade; const char *badge, *name_es, *name_en, *es, *en; } OctrTrophy;
+#define OCTR_TROPHY_COUNT 1
+static const OctrTrophy octr_trophies[OCTR_TROPHY_COUNT] = {
+    {100, 'G', "met_admin", "¡Encontraste al admin!", "Admin Spotted",
+     "Juega una partida online en la misma sala que Ryu7w7, el administrador de OCTR.",
+     "Play an online match in the same room as Ryu7w7, OCTR's administrator."},
+};
