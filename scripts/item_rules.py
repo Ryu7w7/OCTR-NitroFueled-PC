@@ -243,9 +243,21 @@ def prepare(game, out, rules, base, log=print):
 def main():
     import argparse
     import sys
-    p = argparse.ArgumentParser(description='Print the game\'s item rules (the "Original" preset) as JSON.')
+    p = argparse.ArgumentParser(description='Print the game\'s item rules (the "Original" preset) as JSON, '
+                                            'or apply rules (run.sh) and print the patch made.')
     p.add_argument('game')
+    p.add_argument('--apply', type=Path, metavar='RULES_JSON', help="the server's rules (run.py setup_online)")
+    p.add_argument('--out', type=Path)
+    p.add_argument('--base', type=Path, action='append', default=[], help='earlier archive patches, in order')
     args = p.parse_args()
+    if args.apply:
+        base = {}
+        for patch in args.base:  # a later patch of an archive keeps the earlier ones
+            base[archive_patch.read(patch)[1]] = patch
+        rules = json.loads(args.apply.read_text(encoding='utf-8'))
+        for path in prepare(args.game, args.out, rules, base, log=lambda m: print(m, file=sys.stderr)).values():
+            print(path)
+        return
     archive = Archive(resolve(Path(args.game) / 'archives' / ARCHIVE))
     json.dump(read_rules(bytes(archive.extract(entry_of(archive)))), sys.stdout, indent=1, ensure_ascii=False)
 

@@ -592,6 +592,19 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
     if (inventory && strcmp(inventory, "save") == 0 && hlen < (int)sizeof(header_buf) - 48) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Inventory: save\r\n");
     }
+    /* v0.8: this port's version (BB_OCTR_VERSION) and the server's item-box rules it plays with
+     * (BB_ITEM_RULES_ID: the id /ryunet/theme gave them, set by run.py/run.sh only once they
+     * were applied; "none" when the server has none). The server can refuse a login without
+     * them (its client_gate.go): older ports, or a game left with its own odds. */
+    if (c->is_plain_http) {
+        const char *version = getenv("BB_OCTR_VERSION"), *items = getenv("BB_ITEM_RULES_ID");
+        if (version && *version && strlen(version) < 48 && !strpbrk(version, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 80)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Client: octr/%s\r\n", version);
+        if (items && *items && strlen(items) < 48 && !strpbrk(items, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 80)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Items: %s\r\n", items);
+    }
     hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
 
     send(s, header_buf, hlen, 0);

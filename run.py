@@ -601,6 +601,12 @@ def setup_online(env, config, data):
     # (scripts/item_rules.py); none: the game's own.
     items = announced.get('items')
     rules_file = data / 'out' / 'item_rules' / 'server.json'
+    # The rules' id (server client_gate.go): the game sends it at login once they are applied
+    # (BB_ITEM_RULES_ID, set where they are); "none": the server has no rules to apply.
+    items_id = announced.get('items_id')
+    env['BB_ITEM_RULES_SERVER_ID'] = items_id if isinstance(items_id, str) and items_id.isalnum() else ''
+    if not (isinstance(items, dict) and items) and env['BB_ITEM_RULES_SERVER_ID']:
+        env['BB_ITEM_RULES_SERVER_ID'] = 'none'
     if isinstance(items, dict) and items:
         rules_file.parent.mkdir(parents=True, exist_ok=True)
         rules_file.write_text(json.dumps(items, sort_keys=True), encoding='utf-8')
@@ -855,10 +861,15 @@ def main():
         except (OSError, ValueError) as error:
             say(f'Button prompts: {error}; PlayStation buttons')
         # Item-box rules (scripts/item_rules.py): the server's, which setup_online saved.
+        env.pop('BB_ITEM_RULES_ID', None)
         try:
             rules_path = env.get('BB_ITEM_RULES')
             rules = json.loads(Path(rules_path).read_text(encoding='utf-8')) if rules_path else None
-            base_patches.update(item_rules.prepare(game, out, rules, base_patches, log=say))
+            made = item_rules.prepare(game, out, rules, base_patches, log=say)
+            base_patches.update(made)
+            server_id = env.get('BB_ITEM_RULES_SERVER_ID', '')
+            if server_id == 'none' or (server_id and made):
+                env['BB_ITEM_RULES_ID'] = server_id
         except (OSError, ValueError, KeyError, TypeError) as error:
             say(f"Item rules: {error}; the game's own odds")
         env.setdefault('BB_NEO', '0')
@@ -952,6 +963,7 @@ def main():
                 break
         say(f'SacredFire {version or "unknown version"}')
         update_notice(env, version)
+        env['BB_OCTR_VERSION'] = version.removeprefix('v').split('-')[0] if version else ''  # the game's login says it
         # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.

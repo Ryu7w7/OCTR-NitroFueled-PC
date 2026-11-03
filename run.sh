@@ -79,6 +79,8 @@ else
     probe=${BB_PROBE:-out/sacredfire}  # BB_PROBE: a wrapper (gdb) around it
     version=$(cat out/VERSION 2>/dev/null || true)
 fi
+# The game's login says this port's version (src/runtime_http.c, the server's client_gate.go).
+v=${version#v}; export BB_OCTR_VERSION=${v%%-*}
 # Mod packages (the launcher's Mods page: .pak, .zip and folders in the data folder's mods/,
 # switched in patches.json), as run.py: scripts/mod_packages.py prepares a separate mod session
 # (its own bbport.ini, saves and patches, the mods' files redirected by the engine, never a game
@@ -156,6 +158,17 @@ if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
+# Item-box rules (scripts/item_rules.py): the server's, which online_config.py saved, as run.py.
+# BB_ITEM_RULES_ID tells the server at login that they are applied (its client_gate.go).
+unset BB_ITEM_RULES_ID
+if [[ -n ${BB_ITEM_RULES:-} && -f $BB_ITEM_RULES ]]; then
+    item_patch=$("$PYTHON" scripts/item_rules.py "$game" --apply "$BB_ITEM_RULES" --out "$out" "${base_patches[@]}") &&
+        [[ -n $item_patch ]] && base_patches+=(--base "$item_patch") &&
+        [[ -n ${BB_ITEM_RULES_SERVER_ID:-} ]] && export BB_ITEM_RULES_ID=$BB_ITEM_RULES_SERVER_ID
+    [[ -n ${BB_ITEM_RULES_ID:-} ]] || echo "Item rules: not applied; the game's own odds" >&2
+elif [[ ${BB_ITEM_RULES_SERVER_ID:-} == none ]]; then
+    export BB_ITEM_RULES_ID=none
+fi
 # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
