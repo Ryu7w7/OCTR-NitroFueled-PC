@@ -309,18 +309,84 @@ int main(void) {
         SDL_CloseGamepad(gamepad); gamepad=NULL;
         for (int i=0;i<4;++i) assert(SDL_DetachVirtualJoystick(same[i]));
     }
-    /* A pad thread stuck in SDL (device detection): the game reads its last sample until that is
-     * PAD_STALE_US old, then idle gamepads, without waiting. */
+    /* A pad thread stuck in SDL (device detection): the game retains held buttons on every port,
+     * without inventing a release/press during short stalls, but expires after 3 s. */
     {
         pad_thread_state=1; /* as if the thread ran: reads only copy `snap` */
-        pad_neutral(&snap[0].data);
-        snap[0].data.buttons=BTN_CROSS; snap[0].has_pad=1; snap[0].keyboard=1;
-        snap_at=now_us();
-        assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS));
-        snap_at=now_us()-PAD_STALE_US-1000;
-        assert(pad_read_state(1,&data)==0 && !(data.buttons & BTN_CROSS) && data.left_x==128 && stale_noted);
-        snap_at=now_us();
-        assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS) && !stale_noted);
+        for (int p=0;p<PORTS;++p) {
+            pad_neutral(&snap[p].data);
+            snap[p].data.buttons=BTN_R1;
+            snap[p].data.left_x=200;
+            snap[p].has_pad=1;
+            snap[p].keyboard=0;
+            snap_at=now_us();
+            sample_host_from(&data,p);
+            assert(data.buttons==BTN_R1 && data.left_x==200);
+            const uint64_t stalls[]={PAD_STALE_US+1000,300000,500000};
+            for (size_t i=0;i<sizeof stalls/sizeof *stalls;++i) {
+                snap_at=now_us()-stalls[i];
+                sample_host_from(&data,p);
+                assert(data.buttons==BTN_R1 && data.left_x==200 && stale_noted);
+                assert(!expired_noted);
+            }
+            snap_at=now_us();
+            sample_host_from(&data,p);
+            assert(data.buttons==BTN_R1 && !stale_noted);
+            snap_at=now_us()-2000000u;
+            sample_host_from(&data,p);
+            assert(data.buttons==BTN_R1 && data.left_x==200 && !expired_noted);
+            snap_at=now_us()-PAD_EXPIRE_US;
+            sample_host_from(&data,p);
+            assert(!data.buttons && data.left_x==128 && expired_noted);
+            /* The safety fallback must not overwrite the worker's snapshot. */
+            assert(snap[p].data.buttons==BTN_R1);
+            snap_at=now_us();
+            sample_host_from(&data,p);
+            assert(!data.buttons && data.left_x==200 && !expired_noted);
+            /* Recovery cannot synthesize a second hop; a new physical press still works. */
+            sample_host_from(&data,p);
+            assert(!data.buttons);
+            snap[p].data.buttons=BTN_R1|BTN_CROSS;
+            sample_host_from(&data,p);
+            assert(data.buttons==BTN_CROSS); /* only the previously held button is blocked */
+            const int other=(p+1)%PORTS;
+            pad_neutral(&snap[other].data);
+            snap[other].data.buttons=BTN_R1;
+            snap[other].keyboard=0;
+            sample_host_from(&data,other);
+            assert(data.buttons==BTN_R1); /* timeout recovery belongs to one port */
+            snap[p].data.buttons=0;
+            sample_host_from(&data,p);
+            assert(!data.buttons && !rearm_buttons[p]);
+            snap[p].data.buttons=BTN_R1;
+            sample_host_from(&data,p);
+            assert(data.buttons==BTN_R1);
+            capture=1;
+            sample_host_from(&data,p);
+            assert(!data.buttons && data.left_x==128);
+            capture=0;
+            /* A real disconnect published by the worker releases the held input. */
+            pad_neutral(&snap[p].data);
+            snap[p].has_pad=0;
+            sample_host_from(&data,p);
+            assert(!data.buttons && data.left_x==128);
+            snap[p].data.buttons=BTN_L2|BTN_R2|BTN_TOUCHPAD;
+            snap[p].data.l2=snap[p].data.r2=255;
+            touch_click(&snap[p].data,0);
+            snap_at=now_us()-PAD_EXPIRE_US;
+            sample_host_from(&data,p);
+            assert(!data.buttons && !data.l2 && !data.r2 && !data.touch_count);
+            snap_at=now_us();
+            sample_host_from(&data,p);
+            assert(!data.buttons && !data.l2 && !data.r2 && !data.touch_count);
+            pad_neutral(&snap[p].data);
+            sample_host_from(&data,p);
+            assert(!rearm_buttons[p]);
+            snap[p].data.buttons=BTN_R1;
+            snap_at=0;
+            sample_host_from(&data,p);
+            assert(!data.buttons && data.left_x==128);
+        }
         pad_thread_state=-1;
     }
     SDL_Quit();
