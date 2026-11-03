@@ -426,7 +426,7 @@ void runtime_speed_mode_set(int enabled) {
     __atomic_store_n(&speed_mode_enabled, !!enabled, __ATOMIC_RELEASE);
 }
 
-static int runtime_speed_mode_enabled(void) {
+int runtime_speed_mode_enabled(void) {
     return __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
 }
 
