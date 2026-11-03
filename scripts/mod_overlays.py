@@ -36,10 +36,6 @@ def file_map(game, target, directories, replacements):
     Path(target).write_bytes(b'BBFILE01'+struct.pack('<I',len(records))+b''.join(records))
 
 
-# Assets no mod may replace (the rest of the mod still loads; the log says what was left out).
-# systemData.igz holds the item-box odds: the server's rules set them (scripts/item_rules.py),
-# and a mod's copy would change what a player draws online.
-PROTECTED = {'loosedata/systemdata.igz': 'the item-box odds come from the server'}
 
 
 def replaced_by_base(archive, base, indices):
@@ -55,8 +51,8 @@ def replaced_by_base(archive, base, indices):
 def compose(game, out, records, base_patches):
     """Append validated mod entries to built-in patches, one patch per guest archive.
 
-    A collision with a built-in entry is an error, never a silently dropped layer. A PROTECTED
-    asset of a mod is left out, and the log says so.
+    A collision with a built-in entry is an error, never a silently dropped layer. (A mod's
+    systemData.igz gets the server's item-box rules over it afterwards: scripts/item_rules.py.)
     Runtime bounds are checked here because its parser would otherwise ignore them.
     """
     made = dict(base_patches)
@@ -75,10 +71,6 @@ def compose(game, out, records, base_patches):
                 entry = archive.files[op['index']]
                 if entry['path'] != op['asset']:
                     raise ValueError('Archive asset/index mismatch: ' + op['asset'])
-                if entry['path'].lower() in PROTECTED:
-                    print('OCTR mods: ' + entry['path'] + ' from a mod is not used: ' +
-                          PROTECTED[entry['path'].lower()], flush=True)
-                    continue
                 if op['kind'] == 'localized_strings':
                     changes = texts.setdefault(op['index'], {})
                     for obj, fields in op['strings'].items():

@@ -860,18 +860,6 @@ def main():
             base_patches.update(button_prompts.prepare(game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f'Button prompts: {error}; PlayStation buttons')
-        # Item-box rules (scripts/item_rules.py): the server's, which setup_online saved.
-        env.pop('BB_ITEM_RULES_ID', None)
-        try:
-            rules_path = env.get('BB_ITEM_RULES')
-            rules = json.loads(Path(rules_path).read_text(encoding='utf-8')) if rules_path else None
-            made = item_rules.prepare(game, out, rules, base_patches, log=say)
-            base_patches.update(made)
-            server_id = env.get('BB_ITEM_RULES_SERVER_ID', '')
-            if server_id == 'none' or (server_id and made):
-                env['BB_ITEM_RULES_ID'] = server_id
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            say(f"Item rules: {error}; the game's own odds")
         env.setdefault('BB_NEO', '0')
         # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),
@@ -898,6 +886,19 @@ def main():
                 builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}
                 composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
                 archives = '|'.join(str(p) for p in composed.values())
+            # Item-box rules (scripts/item_rules.py): the server's, which setup_online saved, last:
+            # over every systemData.igz copy the game loads, a mod's included.
+            env.pop('BB_ITEM_RULES_ID', None)
+            try:
+                rules_path = env.get('BB_ITEM_RULES')
+                rules = json.loads(Path(rules_path).read_text(encoding='utf-8')) if rules_path else None
+                before = archives
+                archives = item_rules.with_rules(game, out, rules, archives, log=say)
+                server_id = env.get('BB_ITEM_RULES_SERVER_ID', '')
+                if server_id == 'none' or (server_id and rules and archives != before):
+                    env['BB_ITEM_RULES_ID'] = server_id
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                say(f"Item rules: {error}; the game's own odds")
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,

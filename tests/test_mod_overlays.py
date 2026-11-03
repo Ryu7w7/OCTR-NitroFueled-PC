@@ -49,11 +49,6 @@ class OverlayTests(unittest.TestCase):
             self.assertEqual(source.stat().st_size,before);self.assertEqual(source.read_bytes()[:4096],header)
             with self.assertRaisesRegex(ValueError,'OCTR setting also changes'):
                 compose(game,root/'conflict',[(op,folder)],made)
-            # A protected asset (the item-box odds): the mod's copy is left out, the built-in stays.
-            import mod_overlays
-            with patch.dict(mod_overlays.PROTECTED,{'ui/example.igz':'test reason'}):
-                kept=compose(game,root/'protected',[(op,folder)],{guest:builtin})
-            self.assertEqual(kept[guest],builtin)
     def test_file_map_redirects_host_reads_without_game_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);game=root/'game';game.mkdir();(game/'original').write_bytes(b'SOURCE')

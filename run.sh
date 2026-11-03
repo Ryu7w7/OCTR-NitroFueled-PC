@@ -158,17 +158,6 @@ if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
-# Item-box rules (scripts/item_rules.py): the server's, which online_config.py saved, as run.py.
-# BB_ITEM_RULES_ID tells the server at login that they are applied (its client_gate.go).
-unset BB_ITEM_RULES_ID
-if [[ -n ${BB_ITEM_RULES:-} && -f $BB_ITEM_RULES ]]; then
-    item_patch=$("$PYTHON" scripts/item_rules.py "$game" --apply "$BB_ITEM_RULES" --out "$out" "${base_patches[@]}") &&
-        [[ -n $item_patch ]] && base_patches+=(--base "$item_patch") &&
-        [[ -n ${BB_ITEM_RULES_SERVER_ID:-} ]] && export BB_ITEM_RULES_ID=$BB_ITEM_RULES_SERVER_ID
-    [[ -n ${BB_ITEM_RULES_ID:-} ]] || echo "Item rules: not applied; the game's own odds" >&2
-elif [[ ${BB_ITEM_RULES_SERVER_ID:-} == none ]]; then
-    export BB_ITEM_RULES_ID=none
-fi
 # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
@@ -193,6 +182,21 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
     "$PYTHON" scripts/mod_launch.py preflight --game "$game" --config "$BB_CONFIG" --settings "$settings" \
         --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
     strict_overlap=(--strict-overlap)
+fi
+# Item-box rules (scripts/item_rules.py): the server's, which online_config.py saved, as run.py:
+# last, over every systemData.igz copy the game loads (a mod's included). BB_ITEM_RULES_ID tells
+# the server at login that they are applied (its client_gate.go).
+unset BB_ITEM_RULES_ID
+if [[ -n ${BB_ITEM_RULES:-} && -f $BB_ITEM_RULES ]]; then
+    if with_rules=$("$PYTHON" scripts/item_rules.py "$game" --apply "$BB_ITEM_RULES" --out "$out" \
+            --archive-patches "${BB_ARCHIVE_PATCHES:-}") && [[ $with_rules != "${BB_ARCHIVE_PATCHES:-}" ]]; then
+        export BB_ARCHIVE_PATCHES=$with_rules
+        [[ -n ${BB_ITEM_RULES_SERVER_ID:-} ]] && export BB_ITEM_RULES_ID=$BB_ITEM_RULES_SERVER_ID
+    else
+        echo "Item rules: not applied; the game's own odds" >&2
+    fi
+elif [[ ${BB_ITEM_RULES_SERVER_ID:-} == none ]]; then
+    export BB_ITEM_RULES_ID=none
 fi
 # Prepare local TT references for Private Itemless AI guidance.
 unset BB_TT_REFERENCE
