@@ -108,6 +108,7 @@ int runtime_online_mode_private_cup_race(void); /* a race of a private room's CU
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
+int runtime_speed_mode_enabled(void);
 int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
 void runtime_race_options_map_loading(const char *map);

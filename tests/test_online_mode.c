@@ -96,6 +96,7 @@ static void ABI base_update(void *self, void *owner, float dt) {
     ++lobby_updates;
 }
 void runtime_speed_mode_set(int enabled) { speed = enabled; }
+int runtime_speed_mode_enabled(void) { return speed == 1; }
 int runtime_speed_race_active(void) { return speed == 1 && room_active; }
 static void ABI private_state(unsigned char *yes, unsigned char *no) {
     *yes = (unsigned char)private; *no = (unsigned char)!private;
@@ -196,7 +197,7 @@ static void direct_stub(unsigned char *at, void *function) {
 }
 static int received_mode;
 static void ABI receive_settings(unsigned char *event) { memcpy(&received_mode, event + 0x3c, 4); }
-static unsigned char test_zones[4][48], test_handles[4][48];
+static unsigned char test_zones[4][0x1c0], test_handles[4][48];
 static unsigned char lobby_zone[0x1b8], lobby_data[0x78];
 static void *test_cup, *test_cup_handle;
 static int published_tracks;
@@ -879,6 +880,14 @@ static void test_region(size_t shift) {
     speed = 1;
     card_event(NULL, &event, card);
     assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - ITEMLESS"));
+    room_active = 0; /* Empty lobby, or no recent peer traffic. */
+    card_event(NULL, &event, card);
+    assert(!runtime_speed_race_active());
+    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - ITEMLESS"));
+    runtime_online_mode_adopt(0);
+    card_event(NULL, &event, card);
+    assert(!strcmp(*(char **)(card_mode + 0x30), "CUP RACE - NORMAL"));
+    runtime_online_mode_adopt(1);
     assert(*(unsigned *)image_handle == 11); /* Repeated updates retain one reference. */
     /* A later native binding overwrites the card, with no input event afterward. */
     free_string(NULL, *(char **)(card_name + 0x30) - 16);
@@ -899,6 +908,7 @@ static void test_region(size_t shift) {
     card_update(NULL, card, 0.25f);
     assert(lobby_updates == 2 && *(unsigned *)image_handle == 11);
     assert(!*(unsigned *)(card_name + 12) && !*(unsigned *)(card_mode + 12));
+    room_active = 1;
     unsigned char system[0x190] = {0}, cup_list[40] = {0}, tracks[4][32] = {{0}};
     unsigned char selected_list[40] = {0}, packet[80] = {0};
     void *cup_items[] = {cup_data}, *track_items[4], *zone_items[4] = {0};
@@ -1227,6 +1237,15 @@ static void test_region(size_t shift) {
     *(int *)(private_settings + 0x28) = 1; /* Host selected No Teams. */
     received(packet);
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
+    room_active = 0;
+    runtime_online_mode_adopt(1);
+    card_event(NULL, &event, card);
+    assert(!runtime_speed_race_active());
+    assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - ITEMLESS"));
+    runtime_online_mode_adopt(0);
+    card_event(NULL, &event, card);
+    assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - NORMAL"));
+    room_active = 1;
     assert(*(int *)(private_settings + 0x28) == 1);
     unsigned char native_settings[0x40] = {0};
     put_pointer(image, 0x2ad4e30, native_settings);
