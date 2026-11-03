@@ -163,8 +163,9 @@ def environment(folder, temporal):
     env = {
         'BB_NATIVE_VK': '1', 'BB_VK_SHOW': '1', 'BB_VK_ALONE': '1', 'BB_VK_NATIVE_ONLY': '1',
         'BB_VK_EARLY_LABELS': '1',
-        # NVIDIA 610.88 crashed compiling two fur pipelines at once
-        'BB_VK_COMPILE_THREADS': '1',
+        # NVIDIA 610.88 crashed compiling two fur pipelines at once: the engine now builds pipelines
+        # that share a geometry shader one at a time on NVIDIA (BB_VK_SERIALIZE_GS), so the other
+        # pipelines compile on several threads again
         'BB_VK_SHADERS': str(folder),
     }
     if temporal in ('fsr3', 'dlss', 'fsr4'):
