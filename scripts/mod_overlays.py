@@ -6,7 +6,7 @@ import json, struct
 import archive_patch
 import mod_strings
 from archive_reader import Archive
-from mod_components import payload_bytes, under, sha_bytes, plain_path
+from mod_components import payload_bytes, under, sha_bytes, plain_path, long_path
 
 
 def file_map(game, target, directories, replacements):
@@ -24,9 +24,9 @@ def file_map(game, target, directories, replacements):
             raise ValueError('Conflicting file redirections: '+relative)
         seen.append(key)
         # The engine opens these with the usual Windows paths, not the library's long_path form.
-        source=plain_path(Path(source).resolve(strict=True))
+        source=plain_path(long_path(source).resolve(strict=True))
         if source.is_relative_to(plain_path(Path(game).resolve())):raise ValueError('Replacement must come from mod storage')
-        if not source.is_file():raise ValueError('Mod replacement is not a file: '+relative)
+        if not long_path(source).is_file():raise ValueError('Mod replacement is not a file: '+relative)
         a=relative.encode('utf-8');b=str(source).encode('utf-8')
         if not 0<len(a)<1024 or not 0<len(b)<4096 or b'\0' in a+b:
             raise ValueError('Mod file path exceeds engine limits')
