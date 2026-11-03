@@ -1537,8 +1537,9 @@ static void refresh_lobby_card(unsigned char *owner) {
         if (data) preview = pointer_at(data, 0x18);
     }
     char mode[48];
+    /* Show the chosen/adopted mode even before another player sends game traffic. */
     snprintf(mode, sizeof mode, "%s RACE - %s", cup_mode ? "CUP" : "SINGLE",
-             runtime_speed_race_active() ? "ITEMLESS" : "NORMAL");
+             runtime_speed_mode_enabled() ? "ITEMLESS" : "NORMAL");
     update_card(owner, name, mode, preview, 0);
 }
 

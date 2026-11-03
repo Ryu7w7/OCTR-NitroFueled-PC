@@ -2,8 +2,9 @@
 #include "../src/runtime_file.c"
 #include <assert.h>
 void runtime_cinematic_video(int delta) { (void)delta; }
-int runtime_private_room_active(void) { return 0; }
-int runtime_online_mode_in_private(void) { return 0; }
+static int private_room, private_match;
+int runtime_private_room_active(void) { return private_room; }
+int runtime_online_mode_in_private(void) { return private_match; }
 int runtime_online_mode_private_cup_race(void) { return 0; }
 int32_t *runtime_errno(void) { static int32_t value;return &value; }
 int runtime_guest_errno(int value) { return value; }
@@ -38,6 +39,16 @@ static void dump(const char *guest) {
     assert(!fclose(out));assert(!do_close(fd));
 }
 int main(int argc,char **argv) {
+    for (int selected=0;selected<2;++selected) {
+        runtime_speed_mode_set(selected);
+        for (private_room=0;private_room<2;++private_room)
+            for (private_match=0;private_match<2;++private_match) {
+                assert(runtime_speed_mode_enabled()==selected);
+                assert(runtime_speed_race_active()==(selected && private_room && private_match));
+            }
+    }
+    private_room=private_match=0;
+    runtime_speed_mode_set(0);
     assert(argc==4);runtime_file_configure(argv[1],argv[2]);
     if (!strncmp(argv[3],"dump=",5)) { dump(argv[3]+5);return 0; }
     if (!strncmp(argv[3],"menus-",6)) {
