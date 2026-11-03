@@ -45,6 +45,12 @@ class AppImageUpdateTests(unittest.TestCase):
         self.assertEqual(len(r["sha256"]), 64)
         self.assertIsNone(au.parse_release(json.dumps({"tag_name": "v0.5.5", "assets": []}).encode()))
 
+        unversioned = json.dumps({"tag_name": "v0.5.6", "assets": [
+            {"name": "SacredFire-x86_64.AppImage", "browser_download_url": "https://x/SacredFire-x86_64.AppImage", "size": 100}
+        ]}).encode()
+        r2 = au.parse_release(unversioned)
+        self.assertEqual((r2["tag"], r2["name"]), ("v0.5.6", "SacredFire-x86_64.AppImage"))
+
     def test_install_replaces_the_old_appimage(self):
         data = b"new appimage"
         with tempfile.TemporaryDirectory() as d:
@@ -54,11 +60,22 @@ class AppImageUpdateTests(unittest.TestCase):
             new = au.install(au.parse_release(release_json(data=data)), old,
                              progress=lambda done, total: seen.append((done, total)),
                              opener=lambda req, timeout: _Reply(data))
+            self.assertEqual(new, old.resolve())
             self.assertEqual(new.read_bytes(), data)
-            self.assertFalse(old.exists())
+            self.assertTrue(old.exists())
             self.assertEqual(seen[-1], (len(data), len(data)))
             if sys.platform != "win32":
                 self.assertTrue(new.stat().st_mode & 0o111)
+
+    def test_install_preserves_custom_appimage_name(self):
+        data = b"new appimage"
+        with tempfile.TemporaryDirectory() as d:
+            old = Path(d) / "sacredfire.appimage"
+            old.write_bytes(b"old")
+            new = au.install(au.parse_release(release_json(data=data)), old,
+                             opener=lambda req, timeout: _Reply(data))
+            self.assertEqual(new.name, "sacredfire.appimage")
+            self.assertEqual(new.read_bytes(), data)
 
     def test_a_bad_download_leaves_the_old_one(self):
         with tempfile.TemporaryDirectory() as d:

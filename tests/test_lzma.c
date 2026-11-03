@@ -45,25 +45,40 @@ int main(void) {
     const size_t size = 0x1586000, entry = 0x1584ed0, call = 0x14f46ca;
     unsigned char *image = map_rwx(size);
     assert(image != MAP_RWX_FAILED);
-    /* Worker registration is signature-gated and leaves smaller hosts untouched. */
+    /* Default and invalid settings retain four workers even on larger hosts (#155). */
     const size_t workers = 0x14e6548;
     const unsigned char worker_code[] = {
         0xbe,0xc0,0x03,0,0,0xba,0x64,0,0,0,0x48,0x89,0xdf,0xe8,0x56,0x0b,0x0a,0
     };
+    setenv("BB_LZMA_WORKERS", "6", 1);
     expand_decode_workers(image, size, 12, 0);
     assert(image[workers] == 0);
     memcpy(image + workers, worker_code, sizeof(worker_code));
     expand_decode_workers(image, size, 4, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
-    setenv("BB_LZMA_WORKERS", "4", 1); /* the player's opt-out keeps the game's four */
+    unsetenv("BB_LZMA_WORKERS");
     expand_decode_workers(image, size, 16, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
-    unsetenv("BB_LZMA_WORKERS");
+    const char *settings[] = {"", "4", "0", "8", "6garbage"};
+    for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); ++i) {
+        setenv("BB_LZMA_WORKERS", settings[i], 1);
+        expand_decode_workers(image, size, 16, 0);
+        assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
+    }
+    setenv("BB_LZMA_WORKERS", "6", 1);
     expand_decode_workers(image, workers, 12, 0);
     assert(!memcmp(image + workers, worker_code, sizeof(worker_code)));
     expand_decode_workers(image, size, 12, 0);
     assert(image[workers + 1] == 0xc0 && image[workers + 2] == 0x0f);
     assert(!memcmp(image + workers + 3, worker_code + 3, sizeof(worker_code) - 3));
+    unsetenv("BB_LZMA_WORKERS");
+    memcpy(image + workers - 0x10, worker_code, sizeof(worker_code));
+    expand_decode_workers(image, size, 16, 0x10);
+    assert(!memcmp(image + workers - 0x10, worker_code, sizeof(worker_code)));
+    setenv("BB_LZMA_WORKERS", "6", 1);
+    expand_decode_workers(image, size, 16, 0x10);
+    assert(image[workers - 0x10 + 2] == 0x0f);
+    unsetenv("BB_LZMA_WORKERS");
     runtime_lzma_patch(image, size);
     assert(!original_decode); /* unknown image */
     memcpy(image + entry, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x78", 17);
