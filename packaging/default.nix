@@ -93,12 +93,14 @@ let
   '';
   # Environment the closure needs on any host: icon themes, SVG icon loader, fonts (above) and
   # a UTF-8 locale built into glibc.
+  # NVIDIA dlopens libxcb-glx.so.0. libX11's RUNPATH does not make it visible to
+  # the driver: expose the bundled XCB directory explicitly, also on Wayland.
   common = ''
       --prefix XDG_DATA_DIRS : ${mangohud}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${gtk4}/share/gsettings-schemas/${gtk4.name} \
       --set-default GDK_PIXBUF_MODULE_FILE ${pkgs.librsvg}/${pkgs.gdk-pixbuf.moduleDir}.cache \
       --set-default FONTCONFIG_FILE ${fontsConf} \
       --set-default LC_ALL C.UTF-8 \
-      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libglvnd pkgs.libx11 pkgs.libxext ]} \
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libglvnd pkgs.libx11 pkgs.libxext pkgs.libxcb ]} \
       --set BB_VULKANINFO ${pkgs.vulkan-tools}/bin/vulkaninfo \
   '';
 in

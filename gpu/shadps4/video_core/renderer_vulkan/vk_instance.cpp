@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdio>
+#include <cstring>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -140,6 +141,27 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
         }
         std::printf("Vulkan: %zu GPU(s): %s\n", num_physical_devices, names.c_str());
         std::fflush(stdout);
+    }
+
+    const char* preference = std::getenv("BB_GPU_PREFERENCE");
+    const bool integrated = preference && std::strcmp(preference, "integrated") == 0;
+    const bool discrete = preference && std::strcmp(preference, "discrete") == 0;
+    if (integrated || discrete) {
+        const auto requested_type = integrated ? vk::PhysicalDeviceType::eIntegratedGpu
+                                              : vk::PhysicalDeviceType::eDiscreteGpu;
+        physical_device_index = -1;
+        for (size_t i = 0; i < physical_devices.size(); ++i) {
+            if (physical_devices[i].getProperties().deviceType == requested_type) {
+                physical_device_index = static_cast<s32>(i);
+                break;
+            }
+        }
+        if (physical_device_index < 0) {
+            std::fprintf(stderr, "STOP: no %s GPU is available. Choose another graphics card in the launcher.\n",
+                         integrated ? "integrated" : "dedicated");
+            std::exit(24);
+        }
+        std::printf("Vulkan: launcher requested %s GPU\n", preference);
     }
 
     if (physical_device_index < 0) {
