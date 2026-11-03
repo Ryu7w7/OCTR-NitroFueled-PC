@@ -20,7 +20,7 @@ def engine_features(executable,digest):
 
 def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21',game=None):
     from prepare import parse_self
-    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments
+    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments,optional_game_patch
     elf,*_=parse_self(((Path(game) if game is not None else profile/'game')/'eboot.bin').read_bytes())
     settings=read_settings(Path(config))  # run.py passes bbport.ini's path as text without a widescreen layout
     selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
@@ -30,7 +30,13 @@ def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_ve
         mod_content=path is not None and path.name=='OCTR-Mod-Content.xml'
         writes=compile_external([(key,path,meta)],eboot_segments(elf),elf,
             strict=mod_content,require_verification=mod_content)
-        if len(writes)!=len(list(meta.iter('Line'))):raise ValueError('Incomplete executable patch: '+key)
+        if len(writes)!=len(list(meta.iter('Line'))):
+            # A bundled game patch (60 FPS, motion blur) whose code this build of the update
+            # lacks starts without it, as without mods; anything else must apply whole.
+            if not writes and optional_game_patch(key):
+                print('OCTR mods: '+key+' is not in this game executable; starting without it',flush=True)
+                continue
+            raise ValueError('Incomplete executable patch: '+key)
         for offset,data in writes:
             for old,raw,owner in claims:
                 if offset<old+len(raw) and old<offset+len(data):raise ValueError('Overlapping executable patches: '+owner+' / '+key)

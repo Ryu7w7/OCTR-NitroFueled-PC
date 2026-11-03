@@ -80,8 +80,19 @@ is a concrete example containing29asset replacements and5executable writes.
 COMPOSITION AND DISABLING
 Independent assets in one archive can compose when declared as entry operations.
 A complete PAK conflicts with other mods changing that same archive. Replacing
-the same IGZ registry is blocked, not automatically merged. Shared character or
-track registrations need a creator-authored merged resource/compatibility mod.
+the same IGZ registry is blocked, not automatically merged. Track registrations
+need a creator-authored merged resource/compatibility mod.
+Racer registrations are merged (scripts/racer_registry.py): each racer mod ships an
+update archive (update4.pak, update5.pak...) holding the game's whole racer list
+(characterlisting.igz, looseData/systemData.igz, systemData_<language>.lng), and
+the game keeps only the last one it loads. With two or more such archives enabled,
+the launcher builds one registration from the game's own files plus every added
+racer, each taken from the mod that ships its driver<name>.pak (else from the last
+registration that has it), and serves it as the highest-numbered archive. A copy
+of another mod's racer inside a later archive therefore never hides that mod's
+newer version. Built-in edits of those game files (item rules, online racer list)
+are not in the merged file, as with a single racer mod. A racer whose records
+cannot be copied stops the launch with the mods named.
 Code write overlaps and skipped signatures block modded launch. The actual
 OCTR render/theme/online patches participate in strict executable validation.
 Requested widescreen layouts must remain valid for the selected asset set.
@@ -119,6 +130,6 @@ game and official v0.6 engine, including its seven executable writes and the sto
 arbitrary character/track mods and all DPI/resolution combinations are not claimed.
 The HUD package and proprietary game resources are not included in this change.
 No arbitrary character/track mod is certified merely because it imports.
-No multiplayer asset syncing, hot reload or automatic registry merger is included.
+No multiplayer asset syncing, hot reload or registry merger beyond racers is included.
 This implementation is for OCTR; no separate Nitro Launcher product is required.
 Linux run.sh integration and equivalent EU package authoring are not yet claimed.
