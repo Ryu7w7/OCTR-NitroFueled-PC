@@ -8,7 +8,7 @@ from unittest import mock
 
 
 def launcher_helpers(packaged=True):
-    tree = ast.parse((ROOT / "launcher/sacredfire_launcher.py").read_text())
+    tree = ast.parse((ROOT / "launcher/sacredfire_launcher.py").read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if
              isinstance(n, ast.FunctionDef) and n.name == "game_environment" or
              isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "DEFAULTS" for t in n.targets)]
