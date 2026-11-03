@@ -889,6 +889,16 @@ def main():
                 archives = '|'.join(str(p) for p in composed.values())
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
+            # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,
+            # src/runtime_race_options.c); without them it keeps the native route guidance.
+            env.pop('BB_TT_REFERENCE', None)
+            if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
+                tt = run_python('scripts/tt_reference.py', game, '--out', out / 'tt-reference',
+                                capture=True, check=False)
+                if tt.returncode == 0 and (out / 'tt-reference/reference.bin').is_file():
+                    env['BB_TT_REFERENCE'] = str((out / 'tt-reference/reference.bin').resolve())
+                else:
+                    say('Time Trial references not prepared: the AI keeps its native route guidance')
             if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
                 if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
                     base = [Path(p) for p in archives.split('|') if p]
