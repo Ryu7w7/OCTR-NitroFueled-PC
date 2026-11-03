@@ -103,6 +103,7 @@ void runtime_online_mode_leave_cup(void);
 int runtime_online_mode_private_speed(void);
 int runtime_online_mode_private_cup(void);
 int runtime_online_mode_in_private(void);
+int runtime_online_mode_private_cup_race(void); /* a race of a private room's CUP is loading or running */
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
@@ -143,6 +144,7 @@ int runtime_pad_user_present(int user);
 void runtime_services_user_change(int user, int login);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
+const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_DIR or the user folder */
 void runtime_savedata_configure(const char *title);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
 void runtime_trophy_configure(const char *title);

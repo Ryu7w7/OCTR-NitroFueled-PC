@@ -114,8 +114,6 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     ini=setup/'bbport.ini';ini.write_text(''.join(k+'='+v+'\n' for k,v in settings.items()),encoding='utf-8')
     baseline=nx.prepare(root,state,game,empty,setup/'selection.json',ini,environment)
     setup_user=setup/'user';setup_user.mkdir()
-    # Copy only this independent launcher's profile, never another installation.
-    if (state/'user').exists():copy_tree(state/'user',setup_user)
     data=baseline['profile']/'runtime';(data/'out').mkdir(parents=True,exist_ok=True)
     for name in ('aerolib.inl','import_names.txt'):
         # run.sh keeps them in the data folder's out/, next to mod-state/.
@@ -124,7 +122,8 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     env={k:v for k,v in environment.items() if not k.startswith('BB_')}
     # Linux: BB_PREBUILT keeps run.sh on the package's engine (else it would build one); the
     # screen and controller choices let it be played on a Steam Deck in game mode.
-    kept=('BB_LANGUAGE','BB_ONLINE_NAME','BB_USER_NAME')+(() if os.name=='nt' else ('BB_PREBUILT','BB_FULLSCREEN','BB_DISPLAY','BB_GAMEPAD'))
+    # BB_PROGRESS_DIR: the agreement accepted here goes to the player's own save.
+    kept=('BB_LANGUAGE','BB_ONLINE_NAME','BB_USER_NAME','BB_PROGRESS_DIR')+(() if os.name=='nt' else ('BB_PREBUILT','BB_FULLSCREEN','BB_DISPLAY','BB_GAMEPAD'))
     for key in kept:
         if key in environment:env[key]=environment[key]
     env.update(BB_MOD_PACKAGES_SKIP='1',BB_GAME_DIR=str(baseline['game']),BB_USER_DIR=str(setup_user),BB_DATA_DIR=str(data),
@@ -146,8 +145,5 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     # Promote only verified, unmodified shader cache; no modded cache is ever reused.
     cache=state/'extensions/vanilla-cache'/plan['engine']
     copy_tree(setup_user/'cache',cache);copy_tree(setup_user/'cache',user/'cache')
-    from mod_session import sync_saves
-    sync_saves(setup_user/'savedata',state/'user/savedata',state/'extensions/save-backups')
-    if (setup_user/'savedata').exists():copy_tree(setup_user/'savedata',user/'savedata')
     status('preparing','Shader setup complete. Starting your selected mods…')
     return True

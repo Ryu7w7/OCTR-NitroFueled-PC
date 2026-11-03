@@ -88,7 +88,7 @@ static void remove_tree(const char *path);
  * time the game asks for them in a run, so picking up a second controller makes no lasting profile.
  * Player 1 keeps savedata/1. */
 static void root(int32_t user, const char *title, char *out, size_t size) {
-    const char *dir=runtime_file_user_dir();
+    const char *dir=runtime_file_progress_dir();
     if (user>=2 && user<=4) {
         static int emptied[5];
         char guest[700];

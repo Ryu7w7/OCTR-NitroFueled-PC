@@ -213,6 +213,7 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--displays")) {
         return list_displays();
     }
+    const int gpus_mode = argc > 1 && !strcmp(argv[1], "--gpus");
     const int live_mode = argc > 1 && !strcmp(argv[1], "--live-resolution");
     const int device_mode = argc > 1 && !strcmp(argv[1], "--device");
     const VkApplicationInfo app = {
@@ -242,10 +243,36 @@ int main(int argc, char **argv) {
         vkDestroyInstance(instance, NULL);
         return 1;
     }
-    /* Match vk_instance.cpp's default ranking or its explicit BB_GPU_ID index. */
+    /* --gpus: one line per Vulkan GPU, "<kind>\t<Vulkan version>\t<name>" (kind: discrete,
+     * integrated, virtual, cpu or other): the launchers' graphics card list (BB_GPU_NAME). */
+    if (gpus_mode) {
+        for (uint32_t i = 0; i < count; ++i) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(devices[i], &props);
+            const char *kind = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"
+                             : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated"
+                             : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "virtual"
+                             : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "cpu" : "other";
+            printf("%s\t%u.%u\t%s\n", kind, VK_API_VERSION_MAJOR(props.apiVersion),
+                   VK_API_VERSION_MINOR(props.apiVersion), props.deviceName);
+        }
+        free(devices);
+        vkDestroyInstance(instance, NULL);
+        return 0;
+    }
+    /* Match vk_instance.cpp: BB_GPU_NAME, its explicit BB_GPU_ID index or its default ranking. */
     VkPhysicalDevice selected = devices[0];
     const char *gpu_id = getenv("BB_GPU_ID");
-    if (gpu_id && atoi(gpu_id) >= 0) {
+    const char *gpu_name = getenv("BB_GPU_NAME");
+    int named = 0;
+    if (gpu_name && *gpu_name) {
+        for (uint32_t i = 0; i < count && !named; ++i) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(devices[i], &props);
+            if (!strcmp(props.deviceName, gpu_name)) { selected = devices[i]; named = 1; }
+        }
+    }
+    if (!named && gpu_id && atoi(gpu_id) >= 0) {
         const unsigned long index = strtoul(gpu_id, NULL, 10);
         if (index >= count) {
             fputs("GPU scene scaling: BB_GPU_ID is outside the device list\n", stderr);
@@ -254,7 +281,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         selected = devices[index];
-    } else {
+    } else if (!named) {
         for (uint32_t i = 1; i < count; ++i)
             if (better_device(devices[i], selected)) selected = devices[i];
     }

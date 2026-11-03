@@ -143,10 +143,28 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
         std::fflush(stdout);
     }
 
+    // The launcher's graphics card (BB_GPU_NAME: a name from bb-gpu-capabilities --gpus), or a
+    // kind of GPU (BB_GPU_PREFERENCE=integrated|discrete). One that is not there (another PC, a
+    // driver that failed to load) is reported and the usual automatic choice is made instead.
+    const char* wanted_name = std::getenv("BB_GPU_NAME");
     const char* preference = std::getenv("BB_GPU_PREFERENCE");
     const bool integrated = preference && std::strcmp(preference, "integrated") == 0;
     const bool discrete = preference && std::strcmp(preference, "discrete") == 0;
-    if (integrated || discrete) {
+    if (wanted_name && *wanted_name) {
+        physical_device_index = -1;
+        for (size_t i = 0; i < physical_devices.size(); ++i) {
+            if (std::strcmp(physical_devices[i].getProperties().deviceName.data(), wanted_name) == 0) {
+                physical_device_index = static_cast<s32>(i);
+                break;
+            }
+        }
+        if (physical_device_index >= 0) {
+            std::printf("Vulkan: the launcher chose %s\n", wanted_name);
+        } else {
+            std::printf("Vulkan: the launcher's GPU (%s) is not available; choosing automatically\n",
+                        wanted_name);
+        }
+    } else if (integrated || discrete) {
         const auto requested_type = integrated ? vk::PhysicalDeviceType::eIntegratedGpu
                                               : vk::PhysicalDeviceType::eDiscreteGpu;
         physical_device_index = -1;
@@ -157,12 +175,13 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
             }
         }
         if (physical_device_index < 0) {
-            std::fprintf(stderr, "STOP: no %s GPU is available. Choose another graphics card in the launcher.\n",
-                         integrated ? "integrated" : "dedicated");
-            std::exit(24);
+            std::printf("Vulkan: no %s GPU found; choosing automatically\n",
+                        integrated ? "integrated" : "dedicated");
+        } else {
+            std::printf("Vulkan: launcher requested %s GPU\n", preference);
         }
-        std::printf("Vulkan: launcher requested %s GPU\n", preference);
     }
+    std::fflush(stdout);
 
     if (physical_device_index < 0) {
         std::vector<

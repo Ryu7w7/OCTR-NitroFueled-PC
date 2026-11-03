@@ -293,12 +293,33 @@ class PackageTests(unittest.TestCase):
             self.package(ident,m,{'payload.txt':b'x'})
         self.enable('one','two')
         with self.assertRaisesRegex(ValueError,'Mod conflicts'):self.prepare()
-    def test_save_progress_only_commits_to_private_profile_after_success(self):
+    def test_mod_session_plays_on_the_players_own_save(self):
+        """Saves and trophies go to the player's user/ (BB_PROGRESS_DIR), with or without mods."""
         self.package();self.enable('sample');self.prepare();session,state=adapter.ACTIVE
-        save=session/'user/savedata/progress';save.parent.mkdir(parents=True);save.write_bytes(b'progress')
-        adapter.finish(1);self.assertFalse((state/'user/savedata/progress').exists())
-        adapter.finish(0);self.assertEqual((state/'user/savedata/progress').read_bytes(),b'progress')
-        self.assertFalse((self.port/'user').exists())
+        self.assertEqual(Path(self.environment['BB_PROGRESS_DIR']),(self.port/'user').resolve())
+        self.assertEqual(Path(self.environment['BB_USER_DIR']),session/'user')
+        self.assertFalse((session/'user/savedata').exists());self.assertFalse((state/'user').exists())
+        adapter.finish(1);self.assertTrue((session/'result.json').exists())
+    def test_old_mod_save_profile_merged_once(self):
+        import time
+        main=self.port/'user/savedata/1/CUSA13795/savedata0/save';main.parent.mkdir(parents=True);main.write_bytes(b'main')
+        old=self.port/'mod-state/user/savedata/1/CUSA13795/savedata0/save';old.parent.mkdir(parents=True);old.write_bytes(b'mods')
+        later=time.time()+60;os.utime(old,(later,later))
+        self.package();self.enable('sample');self.prepare()
+        self.assertEqual(main.read_bytes(),b'mods')  # the newer one, made with mods
+        backups=self.port/'mod-state/save-backups'
+        kept=[p.read_bytes() for p in backups.rglob('save')]
+        self.assertIn(b'main',kept);self.assertIn(b'mods',kept)
+        self.assertFalse((self.port/'mod-state/user').exists())
+        main.write_bytes(b'newer main');self.prepare()  # once: nothing left to merge
+        self.assertEqual(main.read_bytes(),b'newer main')
+    def test_old_mod_save_profile_older_than_main_kept_aside(self):
+        main=self.port/'user/savedata/1/save';main.parent.mkdir(parents=True);main.write_bytes(b'main')
+        old=self.port/'mod-state/user/savedata/1/save';old.parent.mkdir(parents=True);old.write_bytes(b'mods')
+        os.utime(old,(1,1))
+        self.package();self.enable('sample');self.prepare()
+        self.assertEqual(main.read_bytes(),b'main')
+        self.assertIn(b'mods',[p.read_bytes() for p in (self.port/'mod-state/save-backups').rglob('save')])
     def test_compatible_resolution_preserved(self):
         m={'variantSettings':{'output_res':{'default':'5120x1440','allowed':['5120x1440','3840x1080']}}}
         settings,changes=choose([m],{'output_res':'3840x1080'})

@@ -143,6 +143,13 @@ void runtime_file_unmount(const char *guest) {
 }
 static char user_root[512]="user";
 const char *runtime_file_user_dir(void) { return user_root; }
+/* Saves and trophies: BB_PROGRESS_DIR when set, else the user folder. A mod session has its own
+ * user folder (its shader cache is never the vanilla one) but plays on the player's own saves and
+ * trophies (scripts/mod_packages.py), so progress made with mods stays when they are turned off. */
+const char *runtime_file_progress_dir(void) {
+    const char *dir=getenv("BB_PROGRESS_DIR");
+    return dir && *dir ? dir : user_root;
+}
 void runtime_file_configure(const char *app0,const char *user) {
     char path[600];
     snprintf(user_root,sizeof(user_root),"%s",user);
@@ -476,9 +483,11 @@ int runtime_speed_race_active(void) {
      * v0.7.5: the game's own private-match flag too. The session flag outlived a private
      * menu (no DELETE), so a remembered Itemless choice reached public races (no items,
      * Tiger Temple's door open).
+     * v0.8: or a private CUP's race, during which the game's flag does not hold (Itemless was
+     * off in private CUPs).
      */
     return runtime_speed_mode_enabled() && runtime_private_room_active() &&
-           runtime_online_mode_in_private();
+           (runtime_online_mode_in_private() || runtime_online_mode_private_cup_race());
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {

@@ -5,7 +5,7 @@ from functools import lru_cache
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from mod_components import copy_tree,save_json,apply_shader,under
 from mod_library import scan,PREFIX
-from mod_session import launch_lock,sync_saves
+from mod_session import launch_lock,adopt_mod_profile
 ACTIVE=None
 
 @lru_cache(maxsize=8)
@@ -42,10 +42,10 @@ KEEP_SESSIONS = 3
 
 
 def prune_sessions(sessions, keep=KEEP_SESSIONS):
-    """Deletes old mod sessions (each one a copy of user/: saves and shader cache), keeping the
-    `keep` latest. Only sessions that ended normally go: their saves were synced to the mod
-    profile (finish). One that crashed or is unfinished stays, as it may hold the only copy of
-    its saves. Returns the deleted folders."""
+    """Deletes old mod sessions (settings, logs and shader cache), keeping the `keep` latest.
+    Saves are never in them: a session plays on the player's own (BB_PROGRESS_DIR). A session
+    from before v0.7.6 that crashed or is unfinished stays, as its saves may be the only copy.
+    Returns the deleted folders."""
     sessions = Path(sessions)
     if not sessions.is_dir():
         return []
@@ -56,7 +56,7 @@ def prune_sessions(sessions, keep=KEEP_SESSIONS):
             ended = json.loads((session / 'result.json').read_text()).get('exit_code') == 0
         except (OSError, ValueError, AttributeError):
             ended = False
-        if ended:
+        if ended or not (session / 'user/savedata').is_dir():
             shutil.rmtree(session, ignore_errors=True)
             deleted.append(session)
     return deleted
@@ -66,7 +66,6 @@ def finish(code):
     if ACTIVE is None:return
     session,state=ACTIVE
     save_json(session/'result.json',{'exit_code':code})
-    if code==0:sync_saves(session/'user/savedata',state/'user/savedata',state/'save-backups')
 
 def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     global ACTIVE
@@ -123,11 +122,14 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         prune_sessions(state/'sessions')
         session=state/'sessions'/uuid.uuid4().hex;session.mkdir(parents=True)
         user=session/'user';user.mkdir()
-        canonical=state/'user';original_user=Path(environment.get('BB_USER_DIR',Path(data)/'user'))
-        if not canonical.exists() and original_user.exists():copy_tree(original_user,canonical)
-        if canonical.exists():copy_tree(canonical,user)
+        # One save for the player, with or without mods: the session writes saves and trophies to
+        # the player's own folder. The separate mod profile of earlier versions is merged once.
+        progress=Path(environment.get('BB_USER_DIR',Path(data)/'user')).resolve();progress.mkdir(parents=True,exist_ok=True)
+        for message in adopt_mod_profile(state,progress):log('OCTR mod saves: '+message)
+        environment['BB_PROGRESS_DIR']=str(progress)
         cache=state/'extensions/vanilla-cache'/plan['engine']
         if cache.exists():copy_tree(cache,user/'cache')
+        elif (progress/'cache').exists():copy_tree(progress/'cache',user/'cache')  # the player's shaders so far
         if environment.get('BB_CLEAR_SHADER_CACHE')=='1' and (user/'cache').exists():
             # Preserve a requested reset for inspection; never clear another profile.
             (user/'cache').rename(session/'cache-before-reset')
@@ -145,10 +147,10 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         # Discord invites are written by the launcher beside its original config,
         # including while the game runs with this session's isolated settings.
         environment['BB_LAUNCHER_CONFIG']=str(Path(config).resolve())
-        environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
+        environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PROGRESS_DIR=str(progress),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
         mod_file_paths.configure(environment)
         log('OCTR mod session: '+', '.join(names)+' at '+str(plan['selection_settings'].get('output_res')))
-        log('Separate mod saves and logs: '+str(session))
+        log('Mod session (settings, logs, shader cache): '+str(session)+'; saves and trophies: '+str(progress))
         ACTIVE=(session,state);atexit.register(lock.__exit__,None,None,None)
         return plan['game'],str(ini)
     except BaseException:

@@ -1667,7 +1667,7 @@ void runtime_trophy_configure(const char *title) {
     if (title && *title) snprintf(trophy_title,sizeof(trophy_title),"%s",title);
 }
 static void trophy_path(char *out, size_t size, const char *file) {
-    snprintf(out,size,"%s/trophies/%s/%s",runtime_file_user_dir(),trophy_title[0] ? trophy_title : "UNKNOWN",file);
+    snprintf(out,size,"%s/trophies/%s/%s",runtime_file_progress_dir(),trophy_title[0] ? trophy_title : "UNKNOWN",file);
 }
 /* The game's trophy00.trp (big-endian header, 64-byte entries at 0x60: 32-byte name, offset,
  * size): the number of trophies (TROPnnn.PNG entries) or, with `id` >= 0, that trophy's picture

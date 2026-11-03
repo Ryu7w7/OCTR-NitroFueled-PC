@@ -13,6 +13,15 @@ class Archive:
   if len(b)<56 or u(0)!=0x1a414749:
    b.close();self._file.close()
    raise ValueError(f'{self.path.name} is not a game archive (a damaged or incomplete copy of the game)')
+  try:
+   self._index(b,u)
+  except (struct.error,UnicodeDecodeError) as error:
+   # An index that points past the file: an incomplete copy (an interrupted download or
+   # extraction) or a file changed by another tool.
+   size=len(b);b.close();self._file.close()
+   raise ValueError(f'{self.path.name} is damaged or incomplete ({size:,} bytes; its index reads past '
+                    f'its end): copy it again from your dump') from error
+ def _index(self,b,u):
   self.version=u(4);count=u(12);self.sector=u(16);names=struct.unpack_from('<Q',b,40)[0]
   self.files=[]
   for i in range(count):
