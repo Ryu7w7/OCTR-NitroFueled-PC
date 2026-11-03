@@ -39,6 +39,11 @@ start prepares the game's shaders for your GPU from your own dump (a few seconds
 [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
 compile them; the few the recipe lacks are compiled when first seen and cached.
 
+Time Trial on recognized USA/EU 1.21 executables credits every challenge beaten by a finish:
+N. Tropy, Oxide, Velo and developer times, even with no ghost selected. Times must be strictly
+faster; existing progress is kept. Rewards still require completing their required tracks.
+Other executable layouts keep the game's original progression.
+
 | Release | What it brought |
 |---|---|
 | [v0.7.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.5) | Another player's racer from a mod you don't have shows as Crash instead of freezing the lobby at 0; Itemless no longer carries over to public races (no items, Tiger Temple's door open); Discord invites with mods on (Vo1dTear); a clear message when an antivirus blocks the game |
