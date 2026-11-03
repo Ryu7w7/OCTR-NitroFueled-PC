@@ -33,6 +33,26 @@ class RuntimeModFileTests(unittest.TestCase):
                 result=subprocess.run([str(self.binary),str(game),str(user),'menus-on' if skip else 'menus-off'],
                                       env=env,capture_output=True,text=True)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+    def test_large_archive_patch(self):
+        """A mod pack's overlay: more ranges than the old 4096 and entries read from the file."""
+        import archive_patch
+        with tempfile.TemporaryDirectory(dir=self.folder) as tmp:
+            root=Path(tmp);game=root/'game';(game/'archives').mkdir(parents=True)
+            user=root/'user';user.mkdir()
+            archive=game/'archives/update.pak';archive.write_bytes(bytes(range(256))*4096)
+            size=archive.stat().st_size
+            ranges=[(i*97,bytes([i&255])*16) for i in range(5000)]
+            ranges+=[(size+i*300000,os.urandom(200000+i)) for i in range(6)]
+            patch=root/'update.bbpatch';archive_patch.write(patch,archive,'/app0/archives/update.pak',ranges)
+            expected=archive_patch.view(archive,patch,0,size+6*300000)
+            env=os.environ.copy()
+            for key in ('BB_MOD_FILE_MAP','BB_MOD_FILE_DIRS','BB_PRIVATE_ARCHIVE_PATCHES'):env.pop(key,None)
+            env.update(BB_ARCHIVE_PATCHES=str(patch),BB_TEST_DUMP=str(root/'dump.bin'))
+            result=subprocess.run([str(self.binary),str(game),str(user),'dump=/app0/archives/update.pak'],
+                                  env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('5006 ranges',result.stdout)
+            self.assertEqual((root/'dump.bin').read_bytes(),expected)
     def test_enabled_disabled_and_invalid_map_preserve_source(self):
         game=self.folder/'game';game.mkdir()
         user=self.folder/'user';user.mkdir()

@@ -81,7 +81,9 @@ def compose(game, out, records, base_patches):
         target = out / (sha_bytes(guest.encode()) + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, made.get(guest))
         _, _, ranges = archive_patch.read(target)
-        if len(ranges) > 4096 or target.stat().st_size >= 64 * 1024**2:
+        # src/runtime_file.c: MAX_PATCH_RANGES (2 per replaced entry); the size has no limit, as
+        # the engine reads large entries from the file when the game needs them.
+        if len(ranges) > 65536:
             raise ValueError('Mod archive overlay exceeds engine limits: ' + name)
         made[guest] = target
     if len(made) > 32:

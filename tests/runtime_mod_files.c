@@ -24,8 +24,21 @@ static void content(const char *path,const char *expected) {
     assert(do_read(fd,bytes,sizeof(bytes)-1)==(int64_t)strlen(expected));
     assert(!strcmp(bytes,expected));assert(!do_close(fd));
 }
+/* What the game reads of a patched archive, written to BB_TEST_DUMP: read in odd-sized pieces,
+ * so pieces start and end inside the patch's ranges. */
+static void dump(const char *guest) {
+    GuestStat st;assert(!do_stat(guest,&st));
+    int fd=(int)do_open(guest,0,0);assert(fd>=3);
+    FILE *out=fopen(getenv("BB_TEST_DUMP"),"wb");assert(out);
+    static char piece[7777];int64_t done=0,n;
+    while ((n=do_read(fd,piece,sizeof(piece)))>0) { assert(fwrite(piece,1,(size_t)n,out)==(size_t)n);done+=n; }
+    assert(n==0 && done==st.size);
+    char at[100];assert(do_pread(fd,at,sizeof(at),st.size-50)==50);  /* positioned, at the end */
+    assert(!fclose(out));assert(!do_close(fd));
+}
 int main(int argc,char **argv) {
     assert(argc==4);runtime_file_configure(argv[1],argv[2]);
+    if (!strncmp(argv[3],"dump=",5)) { dump(argv[3]+5);return 0; }
     if (!strncmp(argv[3],"menus-",6)) {
         int skip=!strcmp(argv[3],"menus-on");
         for (size_t i=0;i<2;++i) {

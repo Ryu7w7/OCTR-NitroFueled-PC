@@ -72,10 +72,13 @@ static int fullscreen_video(const char *guest) {
  * the game sees the archive that much longer. A patch applies only to an archive of the size it was
  * made for. scripts/online_playlist.py makes one (every track in the online race playlist), and
  * scripts/widescreen.py one per archive of a 21:9 or 32:9 layout; one archive has one patch. */
-typedef struct { uint64_t offset; uint32_t length; const uint8_t *data; } PatchRange;
+/* A range's bytes: in memory (data) when small, such as an entry's 16-byte record; otherwise read
+ * from the patch file (fd) at file_at when the game reads them, so mods with large assets need no
+ * copy of them in memory. */
+typedef struct { uint64_t offset, file_at; uint32_t length; const uint8_t *data; } PatchRange;
 typedef struct ArchivePatch {
     char guest[256]; uint64_t size, virtual_size;
-    int count, slot;
+    int count, slot, fd, in_order;
     PatchRange *ranges;
     const struct ArchivePatch *private_view;
 } ArchivePatch;
@@ -348,25 +351,56 @@ static pthread_once_t archive_patches_once=PTHREAD_ONCE_INIT;
 static uint64_t le64(const uint8_t *p) { uint64_t v=0; for (int i=7;i>=0;--i) v=v<<8|p[i]; return v; }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
 
-/* "BBPAK001" u64 size, u32 n, path[n], u32 count, count x {u64 offset, u32 length, bytes}. */
-static int parse_archive_patch(const uint8_t *b,size_t len,ArchivePatch *out) {
-    if (len<24 || memcmp(b,"BBPAK001",8)) return 0;
-    size_t at=8;
-    out->size=le64(b+at); at+=8;
-    uint32_t n=le32(b+at); at+=4;
-    if (n==0 || n>=sizeof(out->guest) || at+n+4>len) return 0;
-    memcpy(out->guest,b+at,n); out->guest[n]=0; at+=n;
-    uint32_t count=le32(b+at); at+=4;
-    if (count==0 || count>4096) return 0; /* a layout replaces up to 152 entries of an archive: 2 ranges each */
+/* "BBPAK001" u64 size, u32 n, path[n], u32 count, count x {u64 offset, u32 length, bytes}.
+ * Mods replace many entries of one archive (a track pack: thousands, hundreds of MB): up to 65536
+ * ranges, 2 per replaced entry (scripts/mod_overlays.py checks the same bound). */
+#define MAX_PATCH_RANGES 65536
+#define PATCH_RANGE_IN_MEMORY 4096
+static int read_exact(int fd,void *buffer,size_t size,uint64_t at) {
+    for (size_t done=0; done<size;) {
+        ssize_t n=pread(fd,(char *)buffer+done,size-done,(int64_t)(at+done));
+        if (n<=0) return 0;
+        done+=(size_t)n;
+    }
+    return 1;
+}
+static void free_archive_patch(ArchivePatch *p) {
+    if (p->ranges) for (int i=0;i<p->count;++i) free((void *)p->ranges[i].data);
+    free(p->ranges);
+    if (p->fd>=0) close(p->fd);
+    memset(p,0,sizeof(*p)); p->fd=-1;
+}
+static int parse_archive_patch(int fd,uint64_t len,ArchivePatch *out) {
+    uint8_t head[20];
+    out->fd=fd;
+    if (len<24 || !read_exact(fd,head,sizeof(head),0) || memcmp(head,"BBPAK001",8)) return 0;
+    out->size=le64(head+8);
+    uint32_t n=le32(head+16);
+    uint64_t at=20;
+    if (n==0 || n>=sizeof(out->guest) || at+n+4>len || !read_exact(fd,out->guest,n,at)) return 0;
+    out->guest[n]=0; at+=n;
+    uint8_t word[12];
+    if (!read_exact(fd,word,4,at)) return 0;
+    uint32_t count=le32(word); at+=4;
+    if (count==0 || count>MAX_PATCH_RANGES) return 0;
     out->ranges=calloc(count,sizeof(PatchRange));
     if (!out->ranges) return 0;
     out->virtual_size=out->size;
+    out->in_order=1;
     for (uint32_t i=0;i<count;++i) {
-        if (at+12>len) return 0;
+        if (at+12>len || !read_exact(fd,word,12,at)) return 0;
         PatchRange *r=&out->ranges[i];
-        r->offset=le64(b+at); r->length=le32(b+at+8); at+=12;
-        if (r->length>len-at) return 0;
-        r->data=b+at; at+=r->length;
+        r->offset=le64(word); r->length=le32(word+8); at+=12;
+        if (r->length>len-at || r->offset+r->length<r->offset) return 0;
+        r->file_at=at;
+        if (r->length<=PATCH_RANGE_IN_MEMORY) {
+            uint8_t *data=malloc(r->length ? r->length : 1);
+            if (!data) return 0;
+            r->data=data; out->count=(int)i+1; /* freed with the patch if a later range fails */
+            if (!read_exact(fd,data,r->length,at)) return 0;
+        }
+        at+=r->length;
+        if (i && r->offset<out->ranges[i-1].offset+out->ranges[i-1].length) out->in_order=0;
         if (r->offset+r->length>out->virtual_size) out->virtual_size=r->offset+r->length;
     }
     out->count=(int)count;
@@ -378,24 +412,22 @@ static void load_archive_patch_list(const char *key,ArchivePatch *patches,int *c
     if (!list || !*list) return;
     char *copy=strdup(list), *save=NULL;
     for (char *item=strtok_r(copy,"|",&save); item && *count<MAX_ARCHIVE_PATCHES; item=strtok_r(NULL,"|",&save)) {
-        FILE *fp=fopen(item,"rb");
-        if (!fp) { printf("Runtime: archive patch %s not readable\n",item); continue; }
-        uint8_t *blob=NULL; size_t len=0;
-        if (!fseek(fp,0,SEEK_END)) {
-            long size=ftell(fp);
-            if (size>0 && size<(64L<<20) && !fseek(fp,0,SEEK_SET) && (blob=malloc((size_t)size)))
-                len=fread(blob,1,(size_t)size,fp);
+        int fd=open(item,O_RDONLY|O_BINARY|O_CLOEXEC);
+        HostStat st;
+        if (fd<0 || host_fstat(fd,&st)) {
+            printf("Runtime: archive patch %s not readable\n",item);
+            if (fd>=0) close(fd);
+            continue;
         }
-        fclose(fp);
         ArchivePatch *p=&patches[*count];
-        if (blob && parse_archive_patch(blob,len,p)) {
+        if (parse_archive_patch(fd,(uint64_t)st.st_size,p)) {
             p->slot=slot_base+(*count)++;
-            /* The blob stays: the ranges point into it. */
+            /* The file stays open: the large ranges are read from it. */
             printf("Runtime: archive patch for %s (%d ranges, the game sees %llu bytes)\n",p->guest,p->count,
                    (unsigned long long)p->virtual_size);
         } else {
             printf("Runtime: archive patch %s is damaged: not used\n",item);
-            free(p->ranges); memset(p,0,sizeof(*p)); free(blob);
+            free_archive_patch(p);
         }
     }
     free(copy);
@@ -765,11 +797,21 @@ static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t si
         if ((uint64_t)n<from_archive) total=from_archive=(uint64_t)n;
     }
     if (total>from_archive) memset((char *)buffer+from_archive,0,total-from_archive);
-    for (int i=0;i<p->count;++i) {
+    int first=0;
+    if (p->in_order) { /* the first range that ends past off (scripts/archive_patch.py sorts them) */
+        int hi_index=p->count;
+        while (first<hi_index) {
+            int mid=first+(hi_index-first)/2;
+            if (p->ranges[mid].offset+p->ranges[mid].length<=off) first=mid+1; else hi_index=mid;
+        }
+    }
+    for (int i=first;i<p->count;++i) {
         const PatchRange *r=&p->ranges[i];
+        if (p->in_order && r->offset>=off+total) break;
         uint64_t lo=r->offset>off ? r->offset : off, hi=r->offset+r->length<off+total ? r->offset+r->length : off+total;
         if (lo<hi) {
-            memcpy((char *)buffer+(lo-off),r->data+(lo-r->offset),hi-lo);
+            if (r->data) memcpy((char *)buffer+(lo-off),r->data+(lo-r->offset),hi-lo);
+            else if (!read_exact(p->fd,(char *)buffer+(lo-off),hi-lo,r->file_at+(lo-r->offset))) return -EIO;
             /* The log says once that the game read each range (the patch is in use). */
             static unsigned char seen[MAX_ARCHIVE_PATCHES*2][64];
             const int k=p->slot;

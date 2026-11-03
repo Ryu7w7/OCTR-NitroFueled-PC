@@ -2531,6 +2531,25 @@ bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
 void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
 
+/// "Add to Steam" and its confirmation (Steam is closed first), on the Play tab and in Settings.
+void SteamButton() {
+    auto& a = g_app;
+    if (ImGui::Button(T("Añadir a Steam", "Add to Steam"))) ImGui::OpenPopup("steam_add");
+    if (ImGui::BeginPopupModal("steam_add", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextUnformatted(T("Si Steam está abierto, se cerrará para añadir el juego (vuelve a abrirlo después).",
+                                 "If Steam is open, it will be closed to add the game (open it again afterwards)."));
+        if (ImGui::Button(T("Añadir", "Add"))) {
+            std::string message;
+            AddToSteam(message);
+            a.notice = message;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
     const bool pressed = ImGui::InvisibleButton("##primary_play", size);
     const ImVec2 a = ImGui::GetItemRectMin();
@@ -2735,6 +2754,8 @@ void PlayTab() {
                 a.notice = err;
             }
         }
+        ImGui::SameLine();
+        SteamButton();
     }
 
     std::string status;
@@ -5169,7 +5190,7 @@ struct SteamShortcut {
     std::vector<std::string> tags;
 };
 
-[[maybe_unused]] std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
+std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
     std::vector<SteamShortcut> list;
     size_t i = 0;
     auto read_sz = [&]() -> std::string {
@@ -5235,7 +5256,20 @@ struct SteamShortcut {
     return list;
 }
 
-[[maybe_unused]] std::vector<uint8_t> SerializeShortcuts(const std::vector<SteamShortcut>& list) {
+/// The shortcuts a shortcuts.vdf holds, counted from its raw "appname" keys: a file ParseShortcuts
+/// reads differently is left alone rather than rewritten without the player's other games.
+size_t CountShortcuts(const std::vector<uint8_t>& buf) {
+    static constexpr char key[] = "\x01appname";
+    size_t count = 0;
+    for (size_t i = 0; i + sizeof key <= buf.size(); ++i) {
+        size_t k = 0;
+        while (k < sizeof key - 1 && ::tolower(buf[i + k]) == key[k]) ++k;
+        if (k == sizeof key - 1 && buf[i + k] == 0) ++count;
+    }
+    return count;
+}
+
+std::vector<uint8_t> SerializeShortcuts(const std::vector<SteamShortcut>& list) {
     std::vector<uint8_t> out;
     auto write_byte = [&](uint8_t b) { out.push_back(b); };
     auto write_sz = [&](const std::string& s) {
@@ -5288,7 +5322,8 @@ struct SteamShortcut {
         write_byte(8);
         write_byte(8);
     }
-    write_byte(8);
+    write_byte(8);  // the "shortcuts" map
+    write_byte(8);  // the file's root: Steam discards a file without it
     return out;
 }
 
@@ -5400,7 +5435,10 @@ void MigrateOldLauncher() {
     }
 }
 
-[[maybe_unused]] bool AddToSteam(std::string& out_msg) {
+/// Adds the launcher to Steam as a non-Steam game started with --launch (the game directly, no
+/// launcher window: Steam's recording and overlay see the game) with the steamgrid artwork.
+/// Steam is closed first when it runs, as it rewrites shortcuts.vdf on exit.
+bool AddToSteam(std::string& out_msg) {
     App& a = g_app;
     fs::path steam_path = FindSteamPath();
     if (steam_path.empty()) {
@@ -5414,27 +5452,36 @@ void MigrateOldLauncher() {
         return false;
     }
 
-    bool steam_was_running = false;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe{sizeof pe};
-        if (Process32FirstW(snap, &pe)) {
-            do {
-                if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
-                    steam_was_running = true;
-                    break;
-                }
-            } while (Process32NextW(snap, &pe));
+    const auto steam_running = [] {
+        bool running = false;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe{sizeof pe};
+            if (Process32FirstW(snap, &pe)) {
+                do {
+                    if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
+                        running = true;
+                        break;
+                    }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
         }
-        CloseHandle(snap);
-    }
-
+        return running;
+    };
+    const bool steam_was_running = steam_running();
     if (steam_was_running) {
+        // Steam writes its own list when it exits: the file is changed only once it is gone.
         fs::path steam_exe = steam_path / L"steam.exe";
-        if (fs::is_regular_file(steam_exe, ec)) {
+        if (fs::is_regular_file(steam_exe, ec))
             RunCaptured(steam_exe.wstring(), Quote(steam_exe.wstring()) + L" -shutdown", steam_path, 4000);
-            Sleep(1500);
+        for (int waited = 0; waited < 300 && steam_running(); ++waited) Sleep(100);
+        if (steam_running()) {
+            out_msg = T("Steam no se cerró a tiempo y no se cambió nada. Ciérralo (menú Steam > Salir) y vuelve a intentarlo.",
+                        "Steam did not close in time and nothing was changed. Quit it (Steam menu > Exit) and try again.");
+            return false;
         }
+        Sleep(500);
     }
 
     fs::path assets_dir;
@@ -5466,7 +5513,7 @@ void MigrateOldLauncher() {
     const std::string id32 = std::to_string(appid);
     const std::string id64 = std::to_string(((uint64_t)appid << 32) | 0x02000000);
 
-    int profiles_updated = 0;
+    int profiles_updated = 0, profiles_skipped = 0;
     for (const auto& entry : fs::directory_iterator(userdata, fs::directory_options::skip_permission_denied, ec)) {
         if (!entry.is_directory()) continue;
         const std::string dirname = entry.path().filename().string();
@@ -5497,10 +5544,18 @@ void MigrateOldLauncher() {
         std::vector<SteamShortcut> shortcuts;
         if (fs::is_regular_file(vdf_path, ec)) {
             std::ifstream f(vdf_path, std::ios::binary);
-            if (f) {
-                std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                shortcuts = ParseShortcuts(buf);
+            if (!f) {
+                ++profiles_skipped;
+                continue;
             }
+            std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            shortcuts = ParseShortcuts(buf);
+            if (shortcuts.size() != CountShortcuts(buf)) {
+                ++profiles_skipped;  // not read whole: writing it back would lose the player's other games
+                continue;
+            }
+            // The player's other non-Steam games, as they were, in case anything goes wrong.
+            fs::copy_file(vdf_path, config_dir / L"shortcuts.vdf.octr-backup", fs::copy_options::overwrite_existing, ec);
         }
 
         bool found = false;
@@ -5529,11 +5584,22 @@ void MigrateOldLauncher() {
         }
 
         auto serialized = SerializeShortcuts(shortcuts);
-        std::ofstream out(vdf_path, std::ios::binary | std::ios::trunc);
-        if (out) {
-            out.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
-            profiles_updated++;
+        const fs::path temp = config_dir / L"shortcuts.vdf.octr-new";
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            if (out) out.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
+            if (!out) {
+                fs::remove(temp, ec);
+                ++profiles_skipped;
+                continue;
+            }
         }
+        if (!MoveFileExW(temp.c_str(), vdf_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fs::remove(temp, ec);
+            ++profiles_skipped;
+            continue;
+        }
+        profiles_updated++;
     }
 
     if (profiles_updated > 0) {
@@ -5545,6 +5611,14 @@ void MigrateOldLauncher() {
                         "Successfully added to Steam with custom artwork!\nOpen Steam to see the game in your library.");
         }
         return true;
+    } else if (profiles_skipped > 0) {
+        out_msg = T("No se pudo añadir a Steam: su lista de juegos no-Steam tiene un formato que el launcher no "
+                    "reconoce, y no se tocó. Añádelo a mano: \"Añadir un juego que no es de Steam\", elige "
+                    "este launcher y escribe --launch en Opciones de lanzamiento.",
+                    "Could not add to Steam: its list of non-Steam games has a format the launcher does not "
+                    "recognize, and it was left untouched. Add it by hand: \"Add a Non-Steam Game\", pick this "
+                    "launcher and write --launch in Launch Options.");
+        return false;
     } else {
         out_msg = T("No se encontró ningún perfil de usuario en Steam.", "No user profiles found in Steam.");
         return false;
@@ -6499,7 +6573,7 @@ void ToolsTab() {
                  T("Para reportar fallos o tirones: adjunta el archivo de logs\\ en un issue.",
                    "To report crashes or stutter: attach the file from logs\\ to an issue."));
 
-    ImGui::SeparatorText(T("Acceso directo", "Desktop shortcut"));
+    ImGui::SeparatorText(T("Accesos directos", "Shortcuts"));
     if (ImGui::Button(T("Crear acceso directo en el Escritorio", "Create Desktop Shortcut"))) {
         std::string err;
         if (CreateDesktopShortcut(err)) {
@@ -6511,6 +6585,13 @@ void ToolsTab() {
     }
     HelpMarker(T("Crea un acceso directo en tu Escritorio para iniciar directamente el juego con su icono sin abrir la ventana del launcher.",
                  "Creates a shortcut on your Desktop to start the game directly with its icon without the launcher window."));
+    SteamButton();
+    HelpMarker(T("Lo añade a tu biblioteca de Steam como juego no-Steam, con sus portadas. Abre el juego directo, "
+                 "sin la ventana del launcher, así que la grabación y el overlay de Steam ven el juego. Tus "
+                 "ajustes, el online y los mods se mantienen.",
+                 "Adds it to your Steam library as a non-Steam game, with its artwork. It opens the game "
+                 "directly, without the launcher window, so Steam's recording and overlay see the game. Your "
+                 "settings, online and mods still apply."));
 
     ImGui::SeparatorText(T("Caché de shaders", "Shader cache"));
     ImGui::PushTextWrapPos(0.0f);
