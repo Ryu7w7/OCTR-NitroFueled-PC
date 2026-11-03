@@ -1,12 +1,13 @@
 """Native menu adapter checks; BB_TEST_GAME enables tests using a local game dump."""
 from paths import ROOT
 import os
+import json
 import struct
 import subprocess
 from pathlib import Path
 import unittest
 import tempfile
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets
@@ -15,6 +16,78 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    def test_cup_package_regional_languages(self):
+        graph = 'ui/octane_cupselect.igz'
+        english = 'ui/octane_cupselect_en.lng'
+        portuguese = 'ui/octane_cupselect_pt.lng'
+        texture = 'textures/cup.igz'
+        rows = [('gui_project', graph), ('lang_file', english),
+                ('lang_file', portuguese), ('texture', texture)]
+        dependencies = b''.join(kind.encode() + b'\0' + path.encode() + b'\0'
+                                for kind, path in rows[1:])
+        for missing in (None, portuguese, english, texture):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                archives = Path(temp) / 'archives'
+                archives.mkdir()
+                for name in ('juicedomain_startscreen', 'update', 'update2'):
+                    (archives / (name + '.pak')).touch()
+                entries = [(online_mode.PACKAGE_PREFIX + path, 0)
+                           for _, path in rows if path != missing]
+                package, source, asset = MagicMock(), MagicMock(), MagicMock()
+                package.append.return_value = 0
+                package.string_index.side_effect = lambda value: rows.index(
+                    next(row for row in rows if value in row))
+                package.u64.return_value = 0
+                asset.fixup.return_value = ('TDEP', 3, 0, dependencies)
+                with patch.object(online_mode, 'Igz', side_effect=[package, source] + [asset] * 4), \
+                        patch.object(online_mode, 'package_rows', side_effect=[(0, []), (0, rows)]), \
+                        patch.object(iga, 'pak_entries', return_value=entries), \
+                        patch.object(iga, 'read_entry', return_value=b'asset'):
+                    if missing in (english, texture):
+                        with self.assertRaises(KeyError):
+                            online_mode.cup_package(temp, b'online', b'source')
+                    else:
+                        online_mode.cup_package(temp, b'online', b'source')
+                        included = [call.args[0] for call in package.string_index.call_args_list]
+                        for _, path in rows:
+                            self.assertEqual(path in included, path != missing)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_prepare_preserves_widescreen_lobby(self):
+        import archive_patch
+        from nitro_components import payload_bytes
+        game = Path(os.environ['BB_TEST_GAME'])
+        pak = game / 'archives/update2.pak'
+        entries = iga.pak_entries(pak)
+        index = next(i for i, entry in enumerate(entries)
+                     if entry[0].lower() == online_mode.LOBBY_ENTRY)
+        original = online_mode.current_entry(pak, entries, index, None)
+        data = ROOT / 'scripts/widescreen_data'
+        tested = 0
+        for manifest in (data / 'ultrawide-21x9/nitro-mod.json',
+                         data / 'ultrawide-32x9/nitro-mod.json', data / 'eu/assets.json'):
+            spec = json.loads(manifest.read_text())
+            for name, operations in spec.get('sets', spec.get('operationSets', {})).items():
+                for op in operations:
+                    if (op.get('archive') != 'update2.pak' or op.get('index') != index
+                            or op.get('asset', '').lower() != 'ui/octane_lobby_privategame.igz'):
+                        continue
+                    with self.subTest(manifest=manifest.name, variant=name), tempfile.TemporaryDirectory() as temp:
+                        out = Path(temp)
+                        wide = payload_bytes(op, manifest.parent, original)
+                        base = out / 'widescreen.bbpatch'
+                        archive_patch.write_entry_patch(base, pak, '/app0/archives/update2.pak', index, wide)
+                        elf = out / 'eboot.elf'
+                        elf.write_bytes(b'')
+                        with patch.object(online_mode, 'hook_site', return_value=0x1277e00):
+                            patches, _ = online_mode.prepare(game, out / 'online', elf, [base])
+                        result = next(p for p in patches if archive_patch.read(p)[1] == '/app0/archives/update2.pak')
+                        actual = online_mode.current_entry(pak, entries, index, result)
+                        self.assertEqual(actual, online_mode.lobby_card(wide))
+                        self.assertNotEqual(actual, online_mode.lobby_card(original))
+                        tested += 1
+        self.assertGreater(tested, 0)
+
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
         block = script[script.index('unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE'):

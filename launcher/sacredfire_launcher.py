@@ -146,6 +146,7 @@ DEFAULTS = {
     "language": "1",
     "fullscreen": False,
     "present_mode": "Mailbox",
+    "gpu_preference": "auto",
     "gamepad": "",
     "gamepad_name": "",
     "neo": False,
@@ -307,6 +308,7 @@ def save_ini(values, lines):
 def game_environment(s):
     """Environment for run.sh from the launcher settings."""
     env = dict(os.environ)
+    env["BB_GPU_PREFERENCE"] = s.get("gpu_preference", "auto")
     env["BB_GAME_DIR"] = str(Path(s["game_dir"]).expanduser())
     if s["user_dir"]:
         env["BB_USER_DIR"] = s["user_dir"]
@@ -1229,6 +1231,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(performance)
 
         screen = Adw.PreferencesGroup(title=tr("Display"))
+        self.gpu_row = combo_row(
+            tr("Graphics card"),
+            tr("Applied on the next game start. The selected GPU must support Vulkan 1.3."),
+            [(tr("Automatic"), "auto"), (tr("Integrated GPU"), "integrated"),
+             (tr("Dedicated GPU"), "discrete")], self.settings.get("gpu_preference", "auto"))
+        screen.add(self.gpu_row)
         self.renderer_row = combo_row(
             tr("Graphics engine"),
             tr("Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
@@ -1573,6 +1581,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["neo"] = self.neo_row.get_active()
         s["fullscreen"] = self.fullscreen_row.get_active()
         s["present_mode"] = combo_value(self.present_row)
+        s["gpu_preference"] = combo_value(self.gpu_row)
         s["mangohud"] = self.mangohud_row.get_active()
         s["frame_stats"] = self.stats_row.get_active()
         s["save_log"] = self.save_log_row.get_active()

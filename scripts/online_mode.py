@@ -13,6 +13,7 @@ import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets
 from mod_file_paths import resolve, records
 from mod_overlays import file_map
+from mod_components import long_path
 from patches import load_segments
 
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
@@ -134,13 +135,18 @@ def cup_package(game, blob, source_blob, assets=None):
         path = pending.pop()
         if path in seen or path not in source_types:
             continue
+        # Package manifests can name languages absent from this regional dump.
+        # Keep English and non-language dependencies mandatory.
+        if (path not in files and source_types[path] == 'lang_file'
+                and path.endswith('.lng') and not path.endswith('_en.lng')):
+            continue
         seen.add(path)
         needed.add(path)
         pak, entry = files[path]
         # The Arcade domain archive is released when entering Online. Keep its
         # required files available through the runtime's existing loose-file map.
         if assets is not None and pak == resolve(Path(game) / 'archives/juicedomain_startscreen.pak'):
-            target = assets / path
+            target = long_path(assets / path)
             target.parent.mkdir(parents=True, exist_ok=True)
             with pak.open('rb') as f:
                 target.write_bytes(iga.read_entry(f, *entry[1:]))
@@ -250,6 +256,8 @@ def lobby_card(blob):
     if hashlib.sha256(blob).hexdigest() not in {
         'bc50c63007445a18a1d57c9c4b1176428330e6686bb4943a86f09463d922f6ea',
         'a468bac4f2141363d934a3ea2cb6540908e0d6481214890ed8a3807caa191c37',
+        'bcce57356cb91b670e8e976a3e8db45db7594cb84f108823b903a74ba6713726',  # USA widescreen
+        '63c880cd5278e9e169e765ddbd05299420b9bf896c80f8a1d017bdf1df3aa82c',  # EU widescreen
     }:
         raise ValueError('unsupported native private lobby card')
     g = Igz(blob)
@@ -330,7 +338,8 @@ def prepare(game, out, elf, bases):
     payload = rebuild(current_entry(pak, entries, index, base))
     with pak.open('rb') as f:
         lobby_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_ENTRY)
-        lobby = lobby_card(iga.read_entry(f, *entries[lobby_index][1:]))
+        # Preserve the widescreen lobby layout before adding Online's tags/order.
+        lobby = lobby_card(current_entry(pak, entries, lobby_index, base))
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         package = cup_package(game, iga.read_entry(f, *entries[package_index][1:]),
@@ -339,13 +348,13 @@ def prepare(game, out, elf, bases):
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()
     mapped = dict(mapped)
-    for asset in assets.rglob('*'):
+    for asset in long_path(assets).rglob('*'):
         if asset.is_file():
-            mapped.setdefault(asset.relative_to(assets).as_posix(), asset)
+            mapped.setdefault(asset.relative_to(long_path(assets)).as_posix(), asset)
     file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
              [(Path(relative), source) for relative, source in mapped.items()])
     target = out / 'online-mode.bbpatch'
-    archive_patch.write_entries_patch(target, pak, guest, {index: payload, lobby_index: lobby, package_index: package}, base, override={index})
+    archive_patch.write_entries_patch(target, pak, guest, {index: payload, lobby_index: lobby, package_index: package}, base, override={index, lobby_index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)
