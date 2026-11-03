@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- GPL-2.0-or-later. Adapted from tcosi's widescreen projection copy.
      Four projection-row X components use (16/9)/(16/10). All scalar loads
-     and the jump stay inside this replacement; original GUI/HUD code stays.
+     and the jump stay inside this replacement. A separate GUI VFX write
+     compensates normalized X before unprojection; see 16x10-vfx.s.
      scripts/aspect_ratio.py supplies the edition and selected display size. -->
 <Patch>
   <TitleID>
     <ID>CUSA13795</ID>
   </TitleID>
-  <Metadata Title="Crash Team Racing Nitro-Fueled" Name="16:10 display and camera (experimental)" Author="tcosi (projection); OCTR contributors" PatchVer="1.0" AppVer="01.21" AppElf="eboot.bin" isEnabled="true">
+  <Metadata Title="Crash Team Racing Nitro-Fueled" Name="16:10 display, camera and HUD" Author="tcosi (projection); OCTR contributors" PatchVer="1.1" AppVer="01.21" AppElf="eboot.bin" isEnabled="true">
     <PatchList>
       <Line Type="bytes" Address="0xf18695" Value="c601010f1043700f1141100f1141500f1083800000000f1141200f1141600f1083900000000f1141300f1141700f1083a00000000f1141400f1181800000000f1083b0000000f30f59054e0000000f1181900000000f1083c0000000f30f5905380000000f1181a00000000f1083d0000000f30f5905220000000f1181b00000000f1083e0000000f30f59050c0000000f1181c0000000e90c000000e4388e3f9090909090909090" Signature="c6 01 01 c5 f8 10 43 70 c5 f8 11 41 10 c5 f8 10 83 80 00 00 00 c5 f8 11 41 20 c5 f8 10 83 90 00 00 00 c5 f8 11 41 30 c5 f8 10 83 a0 00 00 00 c5 f8 11 41 40 c5 f8 10 43 70 c5 f8 11 41 50 c5 f8 10 83 80 00 00 00 c5 f8 11 41 60 c5 f8 10 83 90 00 00 00 c5 f8 11 41 70 c5 f8 10 83 a0 00 00 00 c5 f8 11 81 80 00 00 00 c5 f8 10 83 b0 00 00 00 c5 f8 11 81 90 00 00 00 c5 f8 10 83 c0 00 00 00 c5 f8 11 81 a0 00 00 00 c5 f8 10 83 d0 00 00 00 c5 f8 11 81 b0 00 00 00 c5 f8 10 83 e0 00 00 00 c5 f8 11 81 c0 00 00 00" />
+      <!-- GUI VFX: inverse normalized X before camera unprojection. See 16x10-vfx.s. -->
+      <Line Type="bytes" Address="0x659458" Value="c5c814f7c5c816f4c5ca593582000000c4e35921e200c4e35921e310c4e35921e520c5da592568000000c5fa7e06c5f859c6c5f858c4c5f81102c5fa7e4610c5f859c6c5f858c4c5f8114210c5fa7e4620c5f859c6c5f858c4c5f8114220eb3690909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090909090906666663f" Signature="c5 ca 59 85 90 fe ff ff c5 c2 59 8d 94 fe ff ff c5 fa 58 c2 c5 f2 58 cb c4 e3 59 0d c0 01 c4 e3 79 21 c1 10 c4 e3 79 21 c5 20 c5 f8 11 85 90 fe ff ff c5 ca 59 85 a0 fe ff ff c5 c2 59 8d a4 fe ff ff c5 fa 58 c2 c5 f2 58 cb c4 e3 59 0d c0 01 c4 e3 79 21 c1 10 c4 e3 79 21 c5 20 c5 f8 11 85 a0 fe ff ff c5 ca 59 85 b0 fe ff ff c5 c2 59 8d b4 fe ff ff c5 fa 58 c2 c5 f2 58 cb c4 e3 59 0d c0 01 c4 e3 79 21 c1 10 c4 e3 79 21 c5 20 c5 f8 11 85 b0 fe ff ff" />
     </PatchList>
   </Metadata>
 </Patch>

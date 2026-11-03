@@ -2,8 +2,8 @@
 
 bbport.ini uses aspect_ratio=16x9|16x10|21x9|32x9 and aspect_output=WxH.
 The older widescreen_layout / widescreen_output settings are still accepted.
-16:10 prepares display and camera patches here; the corrected 21:9/32:9
-menus and HUD continue through widescreen.py.
+16:10 prepares display/camera patches and its HUD asset corrections here;
+the corrected 21:9/32:9 menus and HUD continue through widescreen.py.
 
 GPL-2.0-or-later.
 """
@@ -16,6 +16,7 @@ from pathlib import Path
 from struct import error as struct_error
 
 import archive_patch
+import aspect_hud
 import patches
 import widescreen
 from nitro_components import read_ini
@@ -68,7 +69,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
         target = xml.find('./TitleID/ID')
         meta = xml.find('Metadata')
         lines = xml.find('./Metadata/PatchList')
-        if (target is None or meta is None or lines is None or len(lines) != 1 or
+        if (target is None or meta is None or lines is None or len(lines) != 2 or
                 meta.get('AppVer') != APP_VERSION or meta.get('AppElf') != 'eboot.bin'):
             raise ValueError('Unexpected 16:10 projection XML')
         target.text = title_id
@@ -82,6 +83,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
             if not line.get('Signature'):
                 raise ValueError(f'{line.get("Address")} has no signature')
             patches.locate(line, int(line.get('Address'), 0) - patches.EBOOT_BASE, elf)
+        hud = aspect_hud.prepare(game, out, base_patches)
     except (OSError, ET.ParseError, ValueError, struct_error) as error:
         say(f'16:10 not used ({error}): 16:9')
         return None
@@ -98,8 +100,9 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
     effective_config = root / 'bbport.ini'
     effective_config.write_text('\n'.join(kept + [f'{k}={v}' for k, v in effective.items()]) + '\n',
                                 encoding='utf-8')
-    say(f'16:10 at {output}, internal {internal}p: experimental display and camera; original menus and HUD')
-    return {'config': effective_config, 'patches_dir': patches_dir, 'archive_patches': {},
+    say(f'16:10 at {output}, internal {internal}p: display and camera; '
+        f'{"corrected collectibles and boost gauge" if hud else "original HUD (no archives)"}')
+    return {'config': effective_config, 'patches_dir': patches_dir, 'archive_patches': hud,
             'env': {'BB_TEMPORAL': 'off', 'BB_HUD_SCALE': ''}}
 
 
