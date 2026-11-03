@@ -469,30 +469,37 @@ int runtime_speed_mode_enabled(void) {
     return __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
 }
 
+/* A private room's race: the game's persistent private session (CPartyManager, which holds
+ * across scene changes), the lobby scene's own private flag (v0.7.5: the RyuNET session flag
+ * outlived a private menu, so a remembered Itemless choice reached public races), or a private
+ * CUP's race (v0.8: the lobby's flag does not hold during it). */
+static int private_race_session(void) {
+    return runtime_private_match_active() || runtime_online_mode_in_private() ||
+           runtime_online_mode_private_cup_race();
+}
+
 int runtime_speed_race_active(void) {
-    /* PUBLIC_SPEED_STEP_3: after implementing server-confirmed room state, replace
-     * only the room predicate below with:
-     *   (runtime_private_room_active() || runtime_public_speed_confirmed())
-     * Proposed API: true only for the current authenticated Speed lobby with a
-     * compatible content version. A UI selection or advertised capability alone
-     * is insufficient. Clear confirmation on leave, disconnect, failed join,
-     * migration or replacement of the lobby; re-confirm before loading assets.
-     * This predicate gates both archive assets and seasonal pickup spawning.
-     * Keep runtime_speed_mode_enabled() so remembered private selection alone
-     * cannot enable Speed outside an active eligible room.
-     * v0.7.5: the game's own private-match flag too. The session flag outlived a private
-     * menu (no DELETE), so a remembered Itemless choice reached public races (no items,
-     * Tiger Temple's door open).
-     * v0.8: or a private CUP's race, during which the game's flag does not hold (Itemless was
-     * off in private CUPs).
-     */
-    return runtime_speed_mode_enabled() && runtime_private_room_active() &&
-           (runtime_online_mode_in_private() || runtime_online_mode_private_cup_race());
+    /* A server-confirmed public Itemless lobby, or Itemless chosen for the private room. This
+     * predicate gates both archive assets and seasonal pickup spawning; a remembered private
+     * selection alone never enables it outside an active eligible room. */
+    return runtime_public_itemless_active() ||
+           (runtime_speed_mode_enabled() && runtime_private_room_active() && private_race_session());
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
-    return normal && normal->private_view && runtime_speed_race_active()
-               ? normal->private_view : normal;
+    if (!normal || !normal->private_view) return normal;
+    const int selected = runtime_speed_mode_enabled();
+    const int room = runtime_private_room_active();
+    const int private = private_race_session();
+    const int public = runtime_public_itemless_active();
+    const int active = runtime_speed_race_active();
+    /* Log the actual asset decision, not just the menu's selected label. */
+    static int previous = -1;
+    const int state = selected | (room << 1) | (private << 2) | (public << 3);
+    if (__atomic_exchange_n(&previous, state, __ATOMIC_RELAXED) != state)
+        fprintf(stderr, "ITEMLESS assets: selected=%d session_peer=%d private_session=%d public_confirmed=%d view=%s archive=%s\n",
+                selected, room, private, public, active ? "ITEMLESS" : "NORMAL", normal->guest);
+    return active ? normal->private_view : normal;
 }
 
 /* The patch for this guest file, when there is one made for an archive of this size. */

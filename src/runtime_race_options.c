@@ -118,8 +118,20 @@ static ResolveHandle race_resolve_handle;
 
 static void tune_ai(void *root);
 static int custom_ai_allowed(void) {
-    const int mode=client && *client ? integer(*client,0x144) : 0;
-    return mode==8 || (mode==16 && runtime_online_mode_in_private());
+    const int mode = client && *client ? integer(*client, 0x144) : 0;
+    const int race = manager && *manager ? integer(*manager, 0xd4c) : 0;
+    return (mode == 8 && (race == 1 || race == 6)) ||
+           (mode == 16 && runtime_private_match_active() && (race == 1 || race == 6));
+}
+
+static int custom_ai_menu_allowed(void) {
+    const int mode = client && *client ? integer(*client, 0x144) : 0;
+    if (mode == 16)
+        return runtime_private_match_active() &&
+               (runtime_online_mode_private_single_options() || runtime_online_mode_private_cup());
+    /* The menu edits the next race; the previous race can still be Battle. */
+    const int next = manager && *manager ? integer(*manager, 0xd40) : 0;
+    return mode == 8 && (next == 1 || next == 6);
 }
 
 void runtime_race_options_leave_room(void) {
@@ -143,11 +155,18 @@ void runtime_race_options_map_loading(const char *map) {
 static int ABI room_difficulty(void *self) {
     const int online = client && *client && integer(*client, 0x144) == 16;
     const int base = followed_ai_base;
-    if (online && !runtime_online_mode_in_private())
-        return integer(self, owns_object(net_context(), self) ? 12 : 16);
-    if (online && lobby_personal_difficulty) return integer(self, 12);
-    if (online && base >= 0 && base <= 2) return base;
+    if (online && lobby_personal_difficulty && custom_ai_menu_allowed()) return integer(self, 12);
+    if (online && custom_ai_allowed() && base >= 0 && base <= 2) return base;
     return integer(self, owns_object(net_context(), self) ? 12 : 16);
+}
+
+int runtime_private_difficulty_modified(void) {
+    /* Hard and the three extended profiles all use native Hard (2). */
+    return runtime_private_match_active() &&
+           (runtime_online_mode_private_single_options() || runtime_online_mode_private_cup()) &&
+           settings && *settings &&
+           ((unsigned char *)*settings)[0x10] && difficulty_manager && *difficulty_manager &&
+           native_difficulty && native_difficulty(*difficulty_manager) == 2;
 }
 
 static int effective_profile(void) {
@@ -330,7 +349,7 @@ static int physics_ai_level(void *kart) {
     if (!kart || !client || !*client || !manager || !*manager ||
         (integer(*manager,0xd4c)!=1 && integer(*manager,0xd4c)!=6)) return -1;
     int mode=integer(*client,0x144);
-    if (mode!=8 && (mode!=16 || !runtime_online_mode_in_private())) return -1;
+    if (mode!=8 && (mode!=16 || !runtime_private_match_active())) return -1;
     for (unsigned i=0;i<8;++i)
         if (ai_physics[i].kart==kart && ai_physics[i].entity==ptr(kart,0x18))
             return selected_driving_level(); /* Replicated AI physics needs the same profile on peers. */
@@ -1218,7 +1237,7 @@ static unsigned char ABI item_decision(unsigned char *self, unsigned char *racer
     unsigned char result = native_item_decision(self, racer, category);
     const int level = driving_level();
     unsigned char *entity = ptr(self, 0x18);
-    if (client && *client && integer(*client,0x144)==16 && !runtime_online_mode_in_private()) return result;
+    if (client && *client && integer(*client,0x144)==16 && !runtime_private_match_active()) return result;
     if (level < 0 || level > 5 || !racer || racer[0x8c] || runtime_speed_race_active() ||
         !manager || !*manager || (integer(*manager, 0xd4c) != 1 && integer(*manager, 0xd4c) != 6) ||
         !entity || (integer(*client, 0x144) == 16 && !(entity[0x3b] & 1))) return result;
@@ -1268,7 +1287,7 @@ static void *baseline_objects[sizeof tuning / sizeof tuning[0]];
 static unsigned baseline_bits[sizeof tuning / sizeof tuning[0]][3];
 static int applied_driving = -1;
 
-/* Custom tuning belongs to Arcade and Private only. Other modes restore
+/* Custom tuning belongs to Arcade/Private Single and Cup. Other modes restore
  * every original column, including public matchmaking after a private race. */
 static const float start_boost_chance[] = {.40f, .60f, .80f, .87f, .93f, .97f};
 static const float start_late_failure[] = {.40f, .05f, .12f, .08f, .04f, .01f};
@@ -1332,8 +1351,8 @@ static void *ABI get_ai_data(void) {
 }
 
 static void ABI difficulty_event(unsigned char *self, unsigned char *event, void *owner) {
-    /* Remove appended choices if a selector is reused outside Arcade/Private. */
-    if (!custom_ai_allowed() || !self[0x1b9]) {
+    /* Remove appended choices when leaving the supported race menus. */
+    if (!custom_ai_menu_allowed() || !self[0x1b9]) {
         const int count=3+(self[0x1b9]!=0);
         void *options=ptr(self,0x1a8), *available=ptr(self,0x1b0);
         if (options && available && integer(options,12)==count+3 && integer(available,12)==count+3) {
