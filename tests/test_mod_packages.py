@@ -306,6 +306,32 @@ class PackageTests(unittest.TestCase):
             self.package(ident,m,{'payload.txt':b'x'})
         self.enable('one','two')
         with self.assertRaisesRegex(ValueError,'Mod conflicts'):self.prepare()
+    def test_two_racer_mods_get_one_registration(self):
+        # Each racer mod's update archive carries the whole registration; the session serves one
+        # with both racers, in the higher archive (racer_registry.py; its own tests cover the merge).
+        import racer_registry as rr
+        from test_racer_registry import GAME,MIKU,OLD_MIKU,GWEN,registration,skins
+        from graphics_tab import write_archive
+        class Template:flags=1
+        def pak(entries):
+            path=self.root/'pak.tmp'
+            write_archive(path,[(rr.PREFIX+p,p,i<<8,d) for i,(p,d) in enumerate(entries.items())],Template)
+            return path.read_bytes()
+        (self.game/'archives').mkdir();(self.game/'archives/update2.pak').write_bytes(pak(registration(GAME)))
+        for ident,number,racers in (('miku',4,GAME+[MIKU]),('gwen',5,GAME+[OLD_MIKU,GWEN])):
+            data=pak(registration(racers));extra=b'racer'
+            m=self.manifest(ident)|{'requiresCapabilities':['game-files'],'operations':[
+                {'kind':'game_file','target':'archives/update%d.pak'%number,'original_sha256':None,'patched_sha256':sha_bytes(data),'payload':'update.pak'},
+                {'kind':'game_file','target':'archives/driver%s.pak'%ident,'original_sha256':None,'patched_sha256':sha_bytes(extra),'payload':'racer.pak'}]}
+            self.package(ident,m,{'update.pak':data,'racer.pak':extra})
+        self.enable('miku','gwen');self.prepare()
+        import mod_file_paths
+        with patch.object(mod_file_paths,'_settings',self.environment):
+            merged=rr.read_archive(mod_file_paths.resolve(self.game/'archives/update5.pak'))
+            first=rr.read_archive(mod_file_paths.resolve(self.game/'archives/update4.pak'))
+        self.assertEqual(rr.driver_names(merged[rr.SYSTEM]),['DriverCrash','DriverCoco','DriverMiku','DriverGwen'])
+        self.assertEqual(skins(merged,'DriverMiku'),['Miku','Miku Project Diva'])
+        self.assertEqual(rr.driver_names(first[rr.SYSTEM]),['DriverCrash','DriverCoco','DriverMiku'])
     def test_save_progress_only_commits_to_private_profile_after_success(self):
         self.package();self.enable('sample');self.prepare();session,state=adapter.ACTIVE
         save=session/'user/savedata/progress';save.parent.mkdir(parents=True);save.write_bytes(b'progress')
