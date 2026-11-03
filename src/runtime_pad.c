@@ -745,8 +745,9 @@ static void read_gamepad(PadData *d, SDL_Gamepad *g, PadCal *cal) {
  * slow HID device its name, after any controller connects or turns off) while it holds SDL's
  * joystick lock; the game, reading the pad through SDL, froze until it was done. The bb:pad thread
  * now updates SDL and samples every port's gamepad into `snap`; the game's threads copy that
- * (snap_lock) and never wait on SDL. While an update is stuck, the gamepads read as idle after
- * PAD_STALE_US, and the keyboard and the game carry on. */
+ * (snap_lock) and never wait on SDL. While an update is stuck, retain the last sample so held
+ * buttons are not released and pressed again. After 3 seconds, neutralize as a safety fallback;
+ * detected disconnects are applied as soon as the worker publishes them. */
 typedef struct { PadData data; int has_pad, keyboard; } PortSnap;
 static pthread_mutex_t snap_lock=PTHREAD_MUTEX_INITIALIZER; /* snap, snap_at, rumble_want */
 static PortSnap snap[PORTS];
@@ -754,7 +755,8 @@ static uint64_t snap_at;            /* now_us() of the last sample; 0 until the 
 static uint8_t snap_connected_count;
 static struct { uint16_t low, high; int pending; } rumble_want[PORTS]; /* the game's last request */
 static int pad_thread_state;        /* 0 not started, 1 running; -1: no thread, pad_read_state polls (tests) */
-#define PAD_STALE_US 250000u
+#define PAD_STALE_US 250000u       /* diagnostic threshold, not a disconnect */
+#define PAD_EXPIRE_US 3000000u     /* bound held input when the worker stops responding */
 #define PAD_POLL_NS 2000000u
 static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high);
 /* One sample of every port's gamepad, and the rumble asked since the last one. */
@@ -818,20 +820,24 @@ static void *pad_thread(void *unused) {
     for (;;) {
         const uint64_t start=now_us();
         if (sdl_ready>0) SDL_UpdateJoysticks(); /* the window thread's event pump no longer does */
-        const uint64_t took=now_us()-start;
-        if (took>=PAD_STALE_US) {
-            printf("Runtime: SDL took %.1f s to update the controllers (detecting devices); they read as idle meanwhile\n",
-                   (double)took/1e6);
+        const uint64_t updated=now_us();
+        pad_poll();
+        const uint64_t polled=now_us();
+        if (polled-start>=PAD_STALE_US) {
+            printf("Runtime: slow controller cycle: SDL update %.1f ms, poll/publish %.1f ms\n",
+                   (double)(updated-start)/1000.0,(double)(polled-updated)/1000.0);
             fflush(stdout);
         }
-        pad_poll();
         SDL_DelayNS(PAD_POLL_NS);
     }
     return NULL;
 }
-/* A port's sample for the game: its gamepad from the pad thread's last sample (idle once that is
- * PAD_STALE_US old), then the keyboard. Called under read_lock, never under lock. */
-static int stale_noted;
+/* A port's sample for the game: its gamepad from the pad thread's last sample, then the keyboard.
+ * Snapshot age diagnoses a slow poll; it does not imply a button release or disconnect. */
+static int stale_noted, expired_noted;
+/* After the safety release, require a physical release before accepting the same button again.
+ * Per-port and protected by read_lock, like sample_host_from's other game-side state. */
+static uint32_t rearm_buttons[PORTS];
 static void sample_host_from(PadData *d, int p) {
     if (pad_thread_state<0) pad_poll();
     PortSnap s;
@@ -842,12 +848,30 @@ static void sample_host_from(PadData *d, int p) {
     pthread_mutex_unlock(&snap_lock);
     const uint64_t now=now_us();
     const int stale=at && now-at>PAD_STALE_US;
+    const int expired=at && now-at>=PAD_EXPIRE_US;
     if (stale && !stale_noted) {
-        printf("Runtime: controller updates stalled (SDL is busy detecting devices): gamepads read as idle\n");
+        printf("Runtime: controller snapshot older than 250 ms; retaining input for up to 3 s\n");
+        fflush(stdout);
+    }
+    if (expired && !expired_noted) {
+        puts("Runtime: controller snapshot expired after 3 s; releasing gamepad input");
         fflush(stdout);
     }
     stale_noted=stale;
-    if (!at || stale) { pad_neutral(&s.data); s.has_pad=0; }
+    expired_noted=expired;
+    if (expired) rearm_buttons[p]|=s.data.buttons;
+    else if (at) rearm_buttons[p]&=s.data.buttons;
+    if (!at || expired) { pad_neutral(&s.data); s.has_pad=0; }
+    else {
+        s.data.buttons&=~rearm_buttons[p];
+        if (rearm_buttons[p]&BTN_L2) s.data.l2=0;
+        if (rearm_buttons[p]&BTN_R2) s.data.r2=0;
+        if (rearm_buttons[p]&BTN_TOUCHPAD) {
+            s.data.touch_count=0;
+            s.data.touch_held_time=0;
+            memset(s.data.touches,0,sizeof s.data.touches);
+        }
+    }
     if (!at) s.keyboard=0; /* the controls are loaded with the first sample */
     *d=s.data;
     d->connected_count=count ? count : 1;
