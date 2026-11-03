@@ -125,6 +125,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
     runtime=sha(engine(root))
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
+    added={}  # mod -> the archives it adds (whole files, new or replaced game files)
     for name in names:
         folder=package_folder(mod_root,name)
         if extended(folder):
@@ -150,9 +151,12 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     raise ValueError(name+': executable patch targets a different game edition/version')
                 patches.append((patch_path,name))
             whole.extend((under(folder,r['file']),r['file']) for r in m['files'] if r['file'].startswith('archives/'))
+            added[name]=[r['file'] for r in m['files'] if r['file'].startswith('archives/')]+\
+                [op['target'] for op in m.get('operations',[]) if op['kind']=='game_file']
             packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant})
         else:
             files=list(mods.mod_files(folder));whole.extend((source,path.as_posix()) for path,source in files)
+            added[name]=[path.as_posix() for path,_ in files]
             packages.append({'id':name,'files':[[p.as_posix(),sha(s)] for p,s in files]})
     effective.update(settings)
     for name in names:
@@ -162,7 +166,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             if effective.get(key) not in values:raise ValueError(name+': '+key+' must be one of '+', '.join(values))
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
-        'patch_compiler':sha(root/'scripts/patches.py'),
+        'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]
     # New namespace: old full-game profiles must never be reused by this loader.
@@ -190,6 +194,16 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                         if sha_bytes(data)!=op['patched_sha256']:raise ValueError('Replacement checksum mismatch')
                     # Only the mod's replacement content, never an unchanged game file.
                     dest=under(staging/'files',op['target']);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+            # Racers of several mods: one registration (racer_registry.py) in the highest update archive.
+            import racer_registry
+            sources=[];whole_sources={target.casefold():source for source,target in whole}
+            for name in names:
+                for target in added.get(name,[]):
+                    if racer_registry.update_number(target) is None:continue
+                    staged=under(staging/'files',target)
+                    sources.append((name,target,staged if staged.is_file() else whole_sources[target.casefold()],added[name]))
+            merged=racer_registry.prepare(game,staging/'files',sources,log)
+            if merged:save_json(staging/'registry.json',{'target':merged})
             records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind'] in ('archive_asset','localized_strings')]
             save_json(staging/'archive-plan.json',records)
             from mod_overlays import compose
@@ -209,7 +223,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
         except BaseException:
             log('Incomplete preparation preserved at '+str(staging));raise
     # Full PAKs/loose files are read directly from mod storage by the engine.
-    replacements=[(Path(target),source) for source,target in whole]
+    registry=json.loads((cache/'registry.json').read_text())['target'].casefold() if (cache/'registry.json').exists() else None
+    replacements=[(Path(target),source) for source,target in whole if target.casefold()!=registry]
     replacements.extend((p.relative_to(cache/'files'),p) for p in regular_tree(cache/'files'))
     from mod_overlays import file_map
     file_map(game,cache/'file-map.bin',cache/'directories',replacements)

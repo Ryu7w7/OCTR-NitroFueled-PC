@@ -44,6 +44,7 @@ import online_mode  # noqa: E402
 import perf_report  # noqa: E402
 import native_shaders  # noqa: E402
 import aspect_ratio  # noqa: E402
+import patches  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
@@ -1034,12 +1035,19 @@ def main():
             # Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too
             # (objects moving on their own: the crowd, plants; bb_motion_blur.h)
             env['BB_NO_MOTION_BLUR'] = '1' if ini_has(config, 'patch_no_motion_blur=1') else '0'
+            applied = patches.applied_game_patches(out)  # None: an older compile, trusted
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
-            elif ini_has(config, 'patch_60fps=1'):
+            elif ini_has(config, 'patch_60fps=1') and (applied is None or 'patch_60fps' in applied):
                 # The game's own limiter paces frames; a 60 Hz vblank would quantize late frames.
                 env['BB_VBLANK_HZ'] = '480'
                 say('60 FPS patch on: virtual vblank 480 Hz')
+            elif ini_has(config, 'patch_60fps=1'):
+                # The patch was skipped (its code is not in this build of the update): the game
+                # still waits for vblanks at 30 FPS, and a 480 Hz vblank would run it 8 times fast.
+                env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
+                say('60 FPS patch: not applied (see "Patches: skipped" above); the game runs at '
+                    'its own 30 FPS with a 60 Hz vblank')
             else:
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.

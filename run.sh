@@ -292,9 +292,15 @@ fi
 # With the 60 FPS patch the game's own limiter paces frames; a 60 Hz virtual vblank would
 # quantize a slightly late frame to 30 FPS (measured: 40-44 FPS alternating 16.7/33 ms).
 # A 480 Hz vblank lets frames flip as they come (menus 60 FPS instead of 50).
+# Only when patches.py really applied it (out/patches-applied.json): skipped (its code is not in
+# this build of the update), the game still waits for vblanks at 30 FPS and 480 Hz runs it fast.
 if [[ -f $BB_CONFIG ]] && grep -qx 'patch_60fps=1' "$BB_CONFIG"; then
-    export BB_VBLANK_HZ=${BB_VBLANK_HZ:-480}
-    echo "60 FPS patch on: virtual vblank ${BB_VBLANK_HZ} Hz"
+    if "$PYTHON" -c 'import sys; sys.path.insert(0, "scripts"); import patches; a = patches.applied_game_patches(sys.argv[1]); sys.exit(0 if a is None or "patch_60fps" in a else 1)' "$out"; then
+        export BB_VBLANK_HZ=${BB_VBLANK_HZ:-480}
+        echo "60 FPS patch on: virtual vblank ${BB_VBLANK_HZ} Hz"
+    else
+        echo '60 FPS patch: not applied (see "Patches: skipped" above); the game runs at its own 30 FPS with a 60 Hz vblank'
+    fi
 fi
 # Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too (objects
 # moving on their own: the crowd, plants; bb_motion_blur.h), as run.py.
