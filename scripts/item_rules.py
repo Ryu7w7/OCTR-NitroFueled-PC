@@ -26,9 +26,16 @@ set raw values (f32 or u32) at offsets of the entry's data section, only for the
 
 The patch for update2.pak keeps the other features' patch for it (scripts/archive_patch.py); the
 archive itself is never changed.
+
+Mods: a racer mod ships its own update archive (update4.pak...) with the whole systemData.igz,
+and the game uses the newest copy it loads. The rules go into every copy the game can load
+(update2.pak and the mods' update archives, as the mod session redirects them), over what the
+game reads there now (a mod's or another feature's replacement): the odds are always the
+server's, and the mods' racers stay.
 """
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -207,37 +214,92 @@ def apply(blob, rules):
     return bytes(data), notes
 
 
+UPDATE = re.compile(r'update(\d*)\.pak\Z', re.I)
+
+
+def loaded_copies(game):
+    """{archive name: host file} of the update archives (2 and later) the game loads: the game's
+    own and those a mod session adds or replaces (scripts/mod_file_paths.py)."""
+    from mod_file_paths import records
+    found = {}
+    for path in sorted((Path(game) / 'archives').glob('*.pak')):
+        m = UPDATE.match(path.name)
+        if m and int(m.group(1) or 1) >= 2:
+            found[path.name] = resolve(path)
+    source, files = records()
+    if source is not None:
+        for relative, host in files.items():
+            name = relative.split('/', 1)[1] if relative.lower().startswith('archives/') else ''
+            m = UPDATE.match(name)
+            if m and '/' not in name and int(m.group(1) or 1) >= 2:
+                found = {k: v for k, v in found.items() if k.lower() != name.lower()}
+                found[name] = Path(host)
+    return found
+
+
+def current(archive, path, entry, base_patch):
+    """The entry as the game reads it now: base_patch's replacement for it, else the archive's."""
+    if base_patch is not None:
+        record_at = 0x38 + 4 * len(archive.files) + 16 * entry['index']
+        for offset, data in archive_patch.read(base_patch)[2]:
+            if offset == record_at and len(data) == 16:
+                low, extra, length, _mode = struct.unpack('<4I', data)
+                return archive_patch.view(path, base_patch, low | ((extra & 0xFF) << 32), length)
+    return bytes(archive.extract(entry))
+
+
 def prepare(game, out, rules, base, log=print):
-    """{guest archive: patch file} for update2.pak with the rules (empty without rules), keeping the
-    patch base ({guest: patch file}) has for it. Kept between launches while the archive, the
-    rules and the base patch are the same."""
+    """{guest archive: patch file} with the rules in every systemData.igz copy the game loads
+    (loaded_copies; empty without rules), each over the patch base ({guest: patch file}) has for
+    its archive. Kept between launches while the archives, the rules and the base patches are
+    the same."""
     if not rules:
         return {}
-    path = resolve(Path(game) / 'archives' / ARCHIVE)
-    if not path.is_file():
-        return {}
-    guest = f'/app0/archives/{ARCHIVE}'
     folder = Path(out) / 'item_rules'
-    target = folder / 'update2.bbpatch'
-    base_patch = base.get(guest)
-    stamp = {'archive': [path.stat().st_size, path.stat().st_mtime_ns],
-             'rules': hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest(),
-             'base': hashlib.sha256(Path(base_patch).read_bytes()).hexdigest() if base_patch else None}
-    stamp_file = folder / 'stamp.json'
-    try:
-        if json.loads(stamp_file.read_text(encoding='utf-8')) == stamp and target.is_file():
-            return {guest: target}
-    except (OSError, ValueError):
-        pass
-    archive = Archive(path)
-    entry = entry_of(archive)
-    changed, notes = apply(bytes(archive.extract(entry)), rules)
-    for note in notes:
-        log(f'Item rules: {note}')
-    folder.mkdir(parents=True, exist_ok=True)
-    archive_patch.write_entries_patch(target, path, guest, {entry['index']: changed}, base_patch)
-    stamp_file.write_text(json.dumps(stamp), encoding='utf-8')
-    return {guest: target}
+    made = {}
+    digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
+    for name, path in loaded_copies(game).items():
+        if not path.is_file():
+            continue
+        guest = f'/app0/archives/{name}'
+        target = folder / (Path(name).stem.lower() + '.bbpatch')
+        base_patch = base.get(guest)
+        stamp = {'archive': [str(path), path.stat().st_size, path.stat().st_mtime_ns], 'rules': digest,
+                 'base': hashlib.sha256(Path(base_patch).read_bytes()).hexdigest() if base_patch else None}
+        stamp_file = folder / (Path(name).stem.lower() + '.stamp.json')
+        try:
+            if json.loads(stamp_file.read_text(encoding='utf-8')) == stamp and target.is_file():
+                made[guest] = target
+                continue
+        except (OSError, ValueError):
+            pass
+        archive = Archive(path)
+        try:
+            entry = next((f for f in archive.files if f['path'].lower() == ENTRY), None)
+            if entry is None:
+                continue  # an update archive without the item tables
+            changed, notes = apply(current(archive, path, entry, base_patch), rules)
+        finally:
+            archive.data.close()
+            archive._file.close()
+        for note in notes:
+            log(f'Item rules: {note}')
+        if name.lower() != ARCHIVE:
+            log(f"Item rules: also in {name} (a mod's copy of systemData.igz)")
+        folder.mkdir(parents=True, exist_ok=True)
+        # override: base may replace this entry (a mod's copy): the rules go over it
+        archive_patch.write_entries_patch(target, path, guest, {entry['index']: changed}, base_patch,
+                                          override={entry['index']})
+        stamp_file.write_text(json.dumps(stamp), encoding='utf-8')
+        made[guest] = target
+    return made
+
+
+def with_rules(game, out, rules, archives, log=print):
+    """BB_ARCHIVE_PATCHES ('|'-separated patch files) with the rules applied over it (prepare)."""
+    base = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p}
+    base.update(prepare(game, out, rules, base, log=log))
+    return '|'.join(str(p) for p in base.values())
 
 
 def main():
@@ -248,15 +310,12 @@ def main():
     p.add_argument('game')
     p.add_argument('--apply', type=Path, metavar='RULES_JSON', help="the server's rules (run.py setup_online)")
     p.add_argument('--out', type=Path)
-    p.add_argument('--base', type=Path, action='append', default=[], help='earlier archive patches, in order')
+    p.add_argument('--archive-patches', default='', help="BB_ARCHIVE_PATCHES; prints it with the rules")
     args = p.parse_args()
     if args.apply:
-        base = {}
-        for patch in args.base:  # a later patch of an archive keeps the earlier ones
-            base[archive_patch.read(patch)[1]] = patch
         rules = json.loads(args.apply.read_text(encoding='utf-8'))
-        for path in prepare(args.game, args.out, rules, base, log=lambda m: print(m, file=sys.stderr)).values():
-            print(path)
+        print(with_rules(args.game, args.out, rules, args.archive_patches,
+                         log=lambda m: print(m, file=sys.stderr)))
         return
     archive = Archive(resolve(Path(args.game) / 'archives' / ARCHIVE))
     json.dump(read_rules(bytes(archive.extract(entry_of(archive)))), sys.stdout, indent=1, ensure_ascii=False)

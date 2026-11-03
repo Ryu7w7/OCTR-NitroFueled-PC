@@ -78,9 +78,41 @@ class ItemRulesTests(unittest.TestCase):
             size, patched_guest, ranges = archive_patch.read(first[guest])
             self.assertEqual(patched_guest, guest)
             self.assertTrue(ranges)
-            stamp = Path(out, 'item_rules', 'stamp.json').read_text(encoding='utf-8')
+            stamp = Path(out, 'item_rules', 'update2.stamp.json').read_text(encoding='utf-8')
             self.assertEqual(item_rules.prepare(GAME, out, rules, {}), first)  # kept
-            self.assertEqual(json.loads(stamp), json.loads(Path(out, 'item_rules', 'stamp.json').read_text(encoding='utf-8')))
+            self.assertEqual(json.loads(stamp), json.loads(Path(out, 'item_rules', 'update2.stamp.json').read_text(encoding='utf-8')))
+
+    def test_a_racer_mods_copy_gets_the_rules(self):
+        """A racer mod's update4.pak brings its own systemData.igz, which the game uses: the
+        server's rules go into it too, and into update2.pak."""
+        import struct
+        import mod_file_paths
+        from unittest.mock import patch
+        from mod_overlays import file_map
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            names = struct.pack('<I', 4) + b'kind\0loosedata/systemdata.igz\0'
+            head = bytearray(2048)
+            struct.pack_into('<5I', head, 0, 0x1a414749, 13, 0, 1, 2048)
+            struct.pack_into('<QI', head, 40, 76, len(names))
+            struct.pack_into('<4I', head, 60, 2048, 0, len(self.blob), 0xffffffff)
+            head[76:76 + len(names)] = names
+            mod = tmp / 'mod' / 'update4.pak'
+            mod.parent.mkdir()
+            mod.write_bytes(bytes(head) + self.blob)
+            mapping = tmp / 'map'
+            file_map(GAME, mapping, tmp / 'dirs', [(Path('archives/update4.pak'), mod)])
+            rules = {'cooldowns': {'Warp Orb': 10}}
+            env = {'BB_MOD_FILE_MAP': str(mapping), 'BB_MOD_SOURCE_GAME': str(Path(GAME).resolve())}
+            with patch.object(mod_file_paths, '_settings', env):
+                made = item_rules.prepare(GAME, tmp / 'out', rules, {})
+            self.assertIn('/app0/archives/update4.pak', made)
+            self.assertIn(f'/app0/archives/{item_rules.ARCHIVE}', made)
+            record = archive_patch.view(mod, made['/app0/archives/update4.pak'], 60, 16)
+            low, extra, length, _ = struct.unpack('<4I', record)
+            seen = archive_patch.view(mod, made['/app0/archives/update4.pak'], low | ((extra & 0xFF) << 32), length)
+            self.assertEqual(item_rules.read_rules(seen)['cooldowns']['Warp Orb'], 10)
+            self.assertEqual(self.original['cooldowns']['Warp Orb'], 40)
 
 
 if __name__ == '__main__':
