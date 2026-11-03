@@ -5035,7 +5035,7 @@ const char* PollGamepadButton() {
             s_getState = (PFN_LauncherXInputGetState)GetProcAddress(s_xinput, "XInputGetState");
         }
     }
-    if (!s_getState) return nullptr;
+    if (!s_getState || GetForegroundWindow() != g_app.hwnd) return nullptr;  // only while in front
 
     for (DWORD i = 0; i < 4; ++i) {
         LauncherXInputState state{};
@@ -7533,6 +7533,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_resize_w = g_resize_h = 0;
             CreateRenderTarget();
         }
+        // The controller drives the launcher only while it is the window in front: XInput is
+        // read whatever window has the focus, so playing moved the launcher's menus too.
+        if (GetForegroundWindow() == hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
