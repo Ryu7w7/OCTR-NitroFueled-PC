@@ -1,4 +1,9 @@
 {
+ "Dedicated GPU": "GPU dedicada",
+ "Integrated GPU": "GPU integrada",
+ "Automatic": "Automática",
+ "Applied on the next game start. The selected GPU must support Vulkan 1.3.": "Se aplica al iniciar el juego. La GPU seleccionada debe admitir Vulkan 1.3.",
+ "Graphics card": "Tarjeta gráfica",
  "\n— the game exited (code {}) —\n": "\n— el juego terminó (código {}) —\n",
  " (default)": " (predeterminado)",
  "(none)": "(ninguno)",
