@@ -4,10 +4,25 @@
 #include <cstdint>
 #include <cstddef>
 #include <setjmp.h>
+#include "../src/runtime_friends.h"
+#include "../src/runtime_net_ping.h"
 // Renderer tests have no guest process. Clock/host-thread services work; guest accesses abort.
 extern "C" {
 thread_local sigjmp_buf* runtime_fault_recover = nullptr;
 uint32_t runtime_disabled_optimizations = 0;
+void (*runtime_thread_started_hook)(const char*) = nullptr;
+int runtime_memory_is_mapped(uintptr_t, uint64_t) { return 0; }
+int runtime_graphics_tab_ready = 0;
+unsigned runtime_friends_serial() { return 0; }
+void runtime_friends_view(RfView* out) { *out = {}; }
+void runtime_friends_action(const char*, const char*) { std::abort(); }
+void runtime_friends_search(const char*) { std::abort(); }
+void runtime_friends_report(const char*, const char*, const char*) { std::abort(); }
+void runtime_friends_set_hidden(int) { std::abort(); }
+void runtime_friends_join(const char*) { std::abort(); }
+int runtime_friends_take_event(char*) { return 0; }
+int runtime_friends_take_message(char*) { return 0; }
+int runtime_net_ping_view(PingPeer*, int) { return 0; }
 uint64_t runtime_experiment_bits = 0;
 uint64_t runtime_tsc_frequency() { return 1000000000; }
 int runtime_file_translate(const char*, char*, size_t) { std::abort(); }

@@ -237,11 +237,10 @@ static void expand_decode_workers(unsigned char *image, size_t size, long cpus, 
         0xbe,0xc0,0x03,0x00,0x00,0xba,0x64,0x00,0x00,0x00,
         0x48,0x89,0xdf,0xe8,0x56,0x0b,0x0a,0x00
     };
-    /* Register the queue with six existing low-priority workers before any jobs are queued.
-     * From 8 hardware threads (12 in PR #115's first version; loads are where they work).
-     * BB_LZMA_WORKERS=4 keeps the game's four. */
+    /* Extra concurrent loads increase pressure on the game's fixed GlobalChunk pool (#155).
+     * Keep four by default; six workers require an explicit experimental opt-in. */
     const char *workers = getenv("BB_LZMA_WORKERS");
-    if ((workers && !strcmp(workers, "4")) || cpus < 8 || size < WORKERS + sizeof(signature) ||
+    if (!workers || strcmp(workers, "6") || cpus < 8 || size < WORKERS + sizeof(signature) ||
         memcmp(image + WORKERS, signature, sizeof(signature))) return;
     uint32_t mask = 0xfc0; /* Worker bits 6..11; preserve the main/gameplay workers. */
     memcpy(image + WORKERS + 1, &mask, sizeof(mask));
