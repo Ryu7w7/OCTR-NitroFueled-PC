@@ -2,8 +2,11 @@
 #include "../src/runtime_file.c"
 #include <assert.h>
 void runtime_cinematic_video(int delta) { (void)delta; }
-int runtime_private_room_active(void) { return 0; }
-int runtime_online_mode_in_private(void) { return 0; }
+static int private_room, private_match, public_room;
+int runtime_public_itemless_active(void) { return public_room; }
+int runtime_private_room_active(void) { return private_room; }
+int runtime_online_mode_in_private(void) { return 0; } /* Lobby scene is gone in a race. */
+int runtime_private_match_active(void) { return private_match; }
 int32_t *runtime_errno(void) { static int32_t value;return &value; }
 int runtime_guest_errno(int value) { return value; }
 void runtime_memory_note_write(uintptr_t address,uint64_t size) { (void)address;(void)size; }
@@ -25,7 +28,31 @@ static void content(const char *path,const char *expected) {
     assert(!strcmp(bytes,expected));assert(!do_close(fd));
 }
 int main(int argc,char **argv) {
+    for (int selected=0; selected<2; ++selected) {
+        runtime_speed_mode_set(selected);
+        for (private_room=0; private_room<2; ++private_room)
+            for (private_match=0; private_match<2; ++private_match)
+                for (public_room=0; public_room<2; ++public_room)
+                    assert(runtime_speed_race_active()==(public_room || (selected && private_room && private_match)));
+    }
+    private_room=private_match=public_room=0;
+    runtime_speed_mode_set(0);
     assert(argc==4);runtime_file_configure(argv[1],argv[2]);
+    if (!strcmp(argv[3], "itemless-race")) {
+        runtime_speed_mode_set(1);
+        private_room=private_match=1;
+        assert(!runtime_online_mode_in_private());
+        content("/app0/archives/race.pak", "ITEMLESS");
+        private_match=0; /* Public Normal, despite remembered selection and peers. */
+        content("/app0/archives/race.pak", "NORMAL__");
+        public_room=1;
+        content("/app0/archives/race.pak", "ITEMLESS");
+        public_room=0;private_match=1;private_room=0;
+        content("/app0/archives/race.pak", "NORMAL__");
+        private_room=1;runtime_speed_mode_set(0);
+        content("/app0/archives/race.pak", "NORMAL__");
+        return 0;
+    }
     if (!strncmp(argv[3],"menus-",6)) {
         int skip=!strcmp(argv[3],"menus-on");
         for (size_t i=0;i<2;++i) {

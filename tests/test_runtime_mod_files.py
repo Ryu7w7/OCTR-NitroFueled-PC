@@ -33,6 +33,25 @@ class RuntimeModFileTests(unittest.TestCase):
                 result=subprocess.run([str(self.binary),str(game),str(user),'menus-on' if skip else 'menus-off'],
                                       env=env,capture_output=True,text=True)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+    def test_itemless_race_after_lobby_scene_unloads(self):
+        import struct
+        with tempfile.TemporaryDirectory(dir=self.folder) as tmp:
+            root=Path(tmp);game=root/'game';(game/'archives').mkdir(parents=True)
+            user=root/'user';user.mkdir()
+            (game/'archives/race.pak').write_bytes(b'SOURCE__')
+            env=os.environ.copy()
+            for key in ('BB_MOD_FILE_MAP','BB_MOD_FILE_DIRS'):
+                env.pop(key,None)
+            path=b'/app0/archives/race.pak'
+            for key, data in (('BB_ARCHIVE_PATCHES',b'NORMAL__'),('BB_PRIVATE_ARCHIVE_PATCHES',b'ITEMLESS')):
+                patch=root/key
+                patch.write_bytes(b'BBPAK001'+struct.pack('<QI',8,len(path))+path+
+                                  struct.pack('<IQI',1,0,len(data))+data)
+                env[key]=str(patch)
+            result=subprocess.run([str(self.binary),str(game),str(user),'itemless-race'],
+                                  env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
     def test_enabled_disabled_and_invalid_map_preserve_source(self):
         game=self.folder/'game';game.mkdir()
         user=self.folder/'user';user.mkdir()

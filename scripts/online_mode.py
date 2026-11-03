@@ -21,6 +21,7 @@ RACE_MUSIC_ENTRY = 'temporary/octane/data/ps4/output/vsc/common/race/common_race
 TIMER_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_returntolobby_timer.igz'
 LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategame.igz'
 SETTINGS_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategamesettings.igz'
+PUBLIC_LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_matchmaking.igz'
 GRAPH_SHA256 = {
     '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
     'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
@@ -170,7 +171,7 @@ def team_ranking_header(blob):
 
 
 def team_selector_legend(blob):
-    """Mark only the selector's Back legend; Battle still uses the native node."""
+    """Mark Ready/Back so private Team Race can show the current native action."""
     g = Igz(blob)
     x = g.fixup('EXNM')
     methods = [g.strings[a] for a, b in struct.iter_unpack('<II', x[3][:x[1] * 8])
@@ -183,19 +184,20 @@ def team_selector_legend(blob):
             continue
         pins = g.u64(node + 0x20)
         button = g.u64(pins + 8)
-        if g.u32(node + 0x10) != 4 or kinds.get(button) != 'igVscConstEnumAccessor' or g.u32(button + 16) != 2:
+        if g.u32(node + 0x10) != 4 or kinds.get(button) != 'igVscConstEnumAccessor' or g.u32(button + 16) not in (1, 2):
             continue
-        moved = g.append(g.data[pins:pins + 32] + bytes(8))
+        count = 6 if g.u32(button + 16) == 1 else 5
+        moved = g.append(g.data[pins:pins + 32] + bytes((count - 4) * 8))
         for i in range(4):
             if g.u64(moved + i * 8):
                 g.add_site('ROFS', moved + i * 8)
-        g.set_u32(node + 0x10, 5)
-        g.set_u32(node + 0x14, 5)
-        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 40)
+        g.set_u32(node + 0x10, count)
+        g.set_u32(node + 0x14, count)
+        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | (count * 8))
         g.set_u64(node + 0x20, moved)
         marked += 1
-    if marked != 1:
-        raise ValueError('unsupported native team selector Back legend')
+    if marked != 2:
+        raise ValueError('unsupported native team selector Ready/Back legends')
     return g.build()
 
 
@@ -645,6 +647,29 @@ def lobby_card(blob):
     return g.build()
 
 
+def public_lobby_card(blob):
+    if hashlib.sha256(blob).hexdigest() not in {
+        'b57ea5c3a619e01b2439b08d2c4e07905b6aad4b8c1efd35f8c5aa00e015c492',
+        'df61f393a9da879a82154a634d1431b2bba31e303543ad106a3b2ef5edd28bb8',
+    }:
+        raise ValueError('unsupported native public lobby card')
+    g = Igz(blob)
+    root = 0x5f0
+    behaviors = g.u64(root + 0xe8)
+    slots = g.u64(behaviors + 0x20)
+    values = [g.u64(slots + i * 8) for i in range(g.u32(behaviors + 12))]
+    types = dict(g.objects())
+    hooks = [v for v in values if types.get(v) == 'CGuiBehaviorReturnToMainMenuOnDisconnect']
+    if len(hooks) != 1 or g.u64(root + 0x28):
+        raise ValueError('unsupported public lobby event order or marker')
+    # Decorate vote cards after the native bindings, using the existing runtime hook.
+    for i, value in enumerate([v for v in values if v != hooks[0]] + hooks):
+        g.set_u64(slots + i * 8, value)
+    g.set_u64(root + 0x28, g.string_index('OCTR_PUBLIC_LOBBY'))
+    g.add_site('RSTT', root + 0x28)
+    return g.build()
+
+
 def current_entry(pak, entries, index, base):
     """The entry's bytes as the game reads them now: base's own replacement (a widescreen layout's
     menu/HUD fix, kept uncompressed) when it already has one for this entry, else the archive's
@@ -713,6 +738,8 @@ def prepare(game, out, elf, bases):
         lobby = lobby_card(iga.read_entry(f, *entries[lobby_index][1:]))
         lobby_root_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
         lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
+        public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
+        public_lobby = public_lobby_card(iga.read_entry(f, *entries[public_index][1:]))
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
@@ -745,7 +772,7 @@ def prepare(game, out, elf, bases):
     archive_patch.write_entries_patch(target, pak, guest,
                                       {index: payload, lobby_index: lobby, package_index: package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
-                                       lobby_root_index: lobby_root, music_index: music}, base,
+                                       lobby_root_index: lobby_root, music_index: music, public_index: public_lobby}, base,
                                       override={index, settings_index, ranking_ui_index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')

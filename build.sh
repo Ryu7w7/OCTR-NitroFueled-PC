@@ -129,6 +129,10 @@ if [[ ${1:-} == --test ]]; then
     out/tt-reference-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_itemless.c -o out/itemless-test
     out/itemless-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_public_itemless.c -o out/public-itemless-test
+    out/public-itemless-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c -o out/private-peer-test
+    out/private-peer-test
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -Igpu/shim -Igpu/shadps4 tests/test_graphics_tab.cpp -o out/graphics-tab-test
     out/graphics-tab-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_lzma.c $(pkg-config --cflags --libs liblzma) -o out/lzma-test

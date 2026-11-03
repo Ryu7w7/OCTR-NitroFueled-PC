@@ -16,7 +16,23 @@ from prepare import parse_self
 
 class OnlineModeTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
-    def test_team_selector_back_legend(self):
+    def test_team_slot_ready_tick_is_name_child(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower().endswith('/octane_teamselect.igz'))
+        with pak.open('rb') as f:
+            g = Igz(iga.read_entry(f, *entry[1:]))
+        slots = [o for o, kind in g.objects() if kind == 'CGuiBehaviorOctaneTeamSelectPlayerSlot']
+        self.assertTrue(slots)
+        for slot in slots:
+            name = g.u64(slot + 0x10)
+            children = g.u64(name + 0x48)
+            self.assertEqual(g.u32(children + 12), 1)
+            tick = g.u64(g.u64(children + 0x20))
+            self.assertEqual(g.u64(tick + 0x40), name)
+            self.assertEqual(struct.unpack_from('<f', g.data, tick + 0x70)[0], .5)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_team_selector_ready_unready_legends(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
         entry = next(e for e in iga.pak_entries(pak) if e[0].lower().endswith('/octane_teamselect_root.igz'))
         with pak.open('rb') as f:
@@ -27,12 +43,13 @@ class OnlineModeTests(unittest.TestCase):
             if kind != 'igVscCppActionNode' or old.u32(node + 0x10) == new.u32(node + 0x10):
                 continue
             changed.append(node)
-            self.assertEqual(new.u32(node + 0x10), 5)
+            button = old.u32(old.u64(old.u64(node + 0x20) + 8) + 16)
+            self.assertEqual(new.u32(node + 0x10), 6 if button == 1 else 5)
             a, b = old.u64(node + 0x20), new.u64(node + 0x20)
             self.assertEqual(old.data[a:a+32], new.data[b:b+32])
-            self.assertEqual(new.u32(new.u64(b+8)+16), 2)
+            self.assertIn(new.u32(new.u64(b+8)+16), (1, 2))
             self.assertEqual(new.u64(b+32), 0)
-        self.assertEqual(len(changed), 1)
+        self.assertEqual(len(changed), 2)
         elf = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())[0]
         shift = 0x1277e00 - online_mode.hook_site(elf)
         from patches import load_segments
@@ -109,6 +126,22 @@ class OnlineModeTests(unittest.TestCase):
                 field = original.u64(accessor + 0x10)
                 marked.append(handles[original.u64(field + 0x50)])
             self.assertCountEqual(marked, [(0x8305d2d3, 0x4305904b), (0x789c92ee, 0x4305904b)])
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_public_vote_card_marker_and_binding_order(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.PUBLIC_LOBBY_ENTRY)
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entry[1:])
+        old, new = Igz(blob), Igz(online_mode.public_lobby_card(blob))
+        self.assertEqual(new.string_at(0x5f0 + 0x28), 'OCTR_PUBLIC_LOBBY')
+        self.assertEqual(new.string_at(0x2100 + 0x28), 'MapVoteResultModeName')
+        self.assertEqual(new.string_at(0x51e0 + 0x28), '[ModeName]')
+        def behaviors(g):
+            seq = g.u64(0x5f0 + 0xe8)
+            slots = g.u64(seq + 0x20)
+            return [g.u64(slots + i * 8) for i in range(g.u32(seq + 12))]
+        self.assertCountEqual(behaviors(old), behaviors(new))
+        self.assertEqual(dict(new.objects())[behaviors(new)[-1]], 'CGuiBehaviorReturnToMainMenuOnDisconnect')
 
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
@@ -195,6 +228,43 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                 self.assertEqual(new.u64(new.u64(offset + 0x20)), 0)
                 self.assertEqual(old.data[offset + 0x28:offset + size], new.data[offset + 0x28:offset + size])
         self.assertEqual(len(changed), 3)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_native_finish_time_requires_complete_laps(self):
+        elf, _, headers, *_ = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())
+        def read(address, size):
+            segment = next(p for p in headers if p['type'] in (1, 0x61000010) and
+                           p['vaddr'] <= address < p['vaddr'] + p['filesz'])
+            at = segment['offset'] + address - segment['vaddr']
+            return elf[at:at + size]
+        # Battle marker initialization flag and native per-frame event dispatch.
+        self.assertEqual(read(0x9d6a95, 11), bytes.fromhex('41 8a 45 28 41 88 86 88 00 00 00'))
+        code = read(0x9d6813, 7)
+        self.assertEqual(0x9d681a + struct.unpack('<i', code[3:])[0], 0x2abfc40)
+        self.assertEqual(struct.unpack('<Q', read(0x2545940, 8))[0], 0x9d67e0)
+        self.assertEqual(struct.unpack('<Q', read(0x2545948, 8))[0], 0x273fb0)
+        self.assertEqual(read(0x9b8d59, 9), bytes.fromhex('41 80 bc 24 8c 00 00 00 00'))
+        self.assertEqual(read(0x9b8d6a, 8), bytes.fromhex('49 8b 84 24 90 00 00 00'))
+        # Timer reads configured lap count from the same settings object as Team scoring.
+        code = read(0x9b8d79, 7)
+        self.assertEqual(0x9b8d80 + struct.unpack('<i', code[3:])[0], 0x2ad4e30)
+        self.assertEqual(read(0x9b8d95, 6), bytes.fromhex('41 8b 47 0c 39 c3'))
+        self.assertEqual(read(0x9b8dcb, 16), bytes.fromhex('41 8b 47 0c ff c8 48 98 48 8b 4b 20 44 8b 2c 81'))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_finish_and_team_rows_bind_background_separately_from_name(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        for name in ('octane_race_ranking', 'octane_battleteam_ranking'):
+            entry = next(e for e in iga.pak_entries(pak) if e[0].endswith('/ui/' + name + '.igz'))
+            with pak.open('rb') as f:
+                g = Igz(iga.read_entry(f, *entry[1:]))
+            behavior = next(o for o, t in g.objects() if t == 'CGuiBehaviorOctaneRaceRankingSelectItem')
+            label, background = g.u64(behavior + 0xa8), g.u64(behavior + 0xc0)
+            base = g.u64(background + 0x40)
+            self.assertNotEqual(base, g.u64(label + 0x40))
+            self.assertEqual(g.u64(base + 0x38), g.u64(background + 0x38))
+            self.assertEqual(g.string_at(label + 0x28), '[PlayerTagText]')
+            self.assertEqual(dict(g.objects())[base], 'igGuiPlaceable')
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
     def test_team_header_preserves_native_gradient_and_hides_extra_label(self):
