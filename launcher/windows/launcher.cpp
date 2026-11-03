@@ -193,6 +193,7 @@ std::string DetectWindowsLocale() {
     if (locale.rfind(L"ja", 0) == 0) return "ja";
     if (locale.rfind(L"zh", 0) == 0) return "zh_CN";
     if (locale.rfind(L"ru", 0) == 0) return "ru";
+    if (locale.rfind(L"id", 0) == 0) return "id";
     return "en";
 }
 
@@ -6187,6 +6188,7 @@ bool ReadTrophyTsv(const fs::path& file, const std::string& language, TrophySet&
 void WriteTrophyTsv(const TrophySet& t) {
     std::string out = "#lang\t" + t.language + "\n#title\t" + Sanitize(t.title_name) + "\n";
     for (const auto& tr : t.list)
+        if (tr.id < 100)  // OCTR's own (ctr_trophies.h) are not the game's: the runtime counts these
         out += std::to_string(tr.id) + "\t" + std::string(1, tr.grade ? tr.grade : '?') + "\t" + (tr.hidden ? "1" : "0") + "\t" +
                Sanitize(tr.name) + "\t" + Sanitize(tr.detail) + "\n";
     std::error_code ec;
@@ -6305,6 +6307,17 @@ void LoadTrophies() {
                 t.note = T("La clave de trofeos no descifra este juego: revisa que sea la de tu PS4 (32 cifras hexadecimales).",
                            "The trophy key does not decrypt this game: check it is your PS4's (32 hex digits).");
             }
+        }
+    }
+    // OCTR's own trophies, past the game's (src/ctr_trophies.h; the server gives them).
+    if (!t.list.empty() && (t.title_id == "CUSA13795" || t.title_id == "CUSA14876")) {
+        for (const auto& o : octr_trophies) {
+            Trophy tr;
+            tr.id = o.id;
+            tr.grade = o.grade;
+            tr.name = T(o.name_es, o.name_en);
+            tr.detail = T(o.es, o.en);
+            t.list.push_back(std::move(tr));
         }
     }
     ReadUnlocked(t);
@@ -6687,11 +6700,12 @@ void ToolsTab() {
 
     ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
     const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
-                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский"};
-    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru"};
+                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский", "Bahasa Indonesia"};
+    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru", "id"};
+    constexpr int language_count = int(sizeof language_codes / sizeof *language_codes);
     int selected_language = 0;
-    for (int i = 0; i < 10; ++i) if (g_language == language_codes[i]) selected_language = i;
-    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 10)) {
+    for (int i = 0; i < language_count; ++i) if (g_language == language_codes[i]) selected_language = i;
+    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, language_count)) {
         g_language = language_codes[selected_language];
         ApplyLauncherLanguage();
         SaveLauncher();
