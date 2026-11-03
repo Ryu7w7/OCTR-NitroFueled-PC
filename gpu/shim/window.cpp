@@ -62,6 +62,41 @@ SDL_DisplayID ChooseDisplay() {
     return display;
 }
 
+// SacredFire: a borderless window covers its whole display, as "borderless" means in PC games.
+// Without this the option only took the frame off the window and left it at its windowed size
+// (80% of the screen at most). The windowed size and place come back when the option is turned off.
+SDL_Rect windowed_rect{};
+bool windowed_rect_saved = false;
+
+void CoverDisplay(SDL_Window* window) {
+    SDL_Rect bounds{};
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+    if (!display || !SDL_GetDisplayBounds(display, &bounds) || bounds.w <= 0 || bounds.h <= 0) {
+        return;
+    }
+    int x = 0, y = 0, w = 0, h = 0;
+    SDL_GetWindowPosition(window, &x, &y);
+    SDL_GetWindowSize(window, &w, &h);
+    if (x == bounds.x && y == bounds.y && w == bounds.w && h == bounds.h) {
+        return;
+    }
+    if (!windowed_rect_saved) {
+        windowed_rect = {x, y, w, h};
+        windowed_rect_saved = true;
+    }
+    SDL_SetWindowPosition(window, bounds.x, bounds.y);
+    SDL_SetWindowSize(window, bounds.w, bounds.h);
+}
+
+void RestoreWindowed(SDL_Window* window) {
+    if (!windowed_rect_saved) {
+        return;
+    }
+    windowed_rect_saved = false;
+    SDL_SetWindowSize(window, windowed_rect.w, windowed_rect.h);
+    SDL_SetWindowPosition(window, windowed_rect.x, windowed_rect.y);
+}
+
 } // namespace
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
@@ -109,6 +144,17 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
                             BbSettings::Get().borderless.load(std::memory_order_relaxed);
     if (borderless) {
         SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_BORDERLESS_BOOLEAN, true);
+        SDL_Rect bounds{};
+        if (!fullscreen && SDL_GetDisplayBounds(display, &bounds) && bounds.w > 0 && bounds.h > 0) {
+            // The windowed size above is what turning the option off goes back to.
+            windowed_rect = {bounds.x + (bounds.w - width_) / 2, bounds.y + (bounds.h - height_) / 2,
+                             width_, height_};
+            windowed_rect_saved = true;
+            SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, bounds.x);
+            SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, bounds.y);
+            SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, bounds.w);
+            SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, bounds.h);
+        }
     }
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
@@ -301,13 +347,25 @@ bool WindowSDL::PollEvents() {
                 LOG_ERROR(Frontend, "Failed to set fullscreen {}: {}", want, SDL_GetError());
             }
         }
-        // Borderless switch
+        // Borderless switch. A borderless window covers its display (CoverDisplay); leaving
+        // fullscreen while it is on covers the display again instead of going back to the
+        // windowed size.
         static int cur_borderless = -1;
+        static bool was_fullscreen = have;
         const bool want_borderless = BbSettings::Get().borderless.load(std::memory_order_relaxed);
-        if (cur_borderless != int(want_borderless)) {
+        const bool now_fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+        if (cur_borderless != int(want_borderless) || (was_fullscreen && !now_fullscreen)) {
             cur_borderless = int(want_borderless);
             SDL_SetWindowBordered(window, !want_borderless);
+            if (!now_fullscreen) {
+                if (want_borderless) {
+                    CoverDisplay(window);
+                } else {
+                    RestoreWindowed(window);
+                }
+            }
         }
+        was_fullscreen = now_fullscreen;
     }
     {
         std::scoped_lock lock{text_mutex};
