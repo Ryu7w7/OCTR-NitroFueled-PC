@@ -1208,9 +1208,12 @@ static void ABI leader_event(unsigned char *self, void *event, void *owner) {
     team_leader_border(self);
 }
 
+static void gold_name(unsigned char *placeable, int allowed);
+static int gold_allowed(void);
 static void ABI leader_update(unsigned char *self, unsigned char *owner, float dt) {
     original_leader_update(self, owner, dt);
     team_leader_border(self);
+    gold_name(pointer_at(self, 0x20), gold_allowed()); /* _playerTagText */
 }
 
 static void ABI race_team_setup(unsigned char *self) {
@@ -1970,8 +1973,68 @@ struct TeamNameLayout { void *slot, *name; float original_y, applied_y; };
 static struct TeamNameLayout team_name_layouts[8];
 
 /* Native PLAYER n is a local controller index, not a shared lobby identity. */
+
+/* ---- v0.8: the administrator's name in gold --------------------------------------------------
+ * Ryu7w7 (BB_ADMIN_NICK) shows in gold, a color no player has, wherever these behaviors draw a
+ * player's name: the lobby's player slots, the race leaders list, the tag over each kart and the
+ * results list. Never in Battle or a team race, where the names carry their team's color.
+ * Offsets from the game's own field metadata (src/runtime_meta_dump.c, USA 1.21): igGuiPlaceable
+ * _displayText +0x30 (its text), _color +0xc0 (RGBA floats, a tint over the whole element). A
+ * placeable a list reuses for another player gets its own color back. */
+typedef struct { unsigned char *placeable; float color[4]; } GoldName;
+static GoldName gold_names[32];
+static BehaviorUpdate original_marker_update, original_results_item_update;
+
+static const char *admin_nick(void) {
+    const char *nick = getenv("BB_ADMIN_NICK");
+    return nick && *nick ? nick : "Ryu7w7";
+}
+
+static int gold_allowed(void) {
+    if (battle_selected() || private_team_race()) return 0;
+    int teams = 1;
+    if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+    return !(runtime_online_mode_in_private() && teams >= 2 && teams <= 4 && !runtime_online_mode_private_cup());
+}
+
+static void gold_name(unsigned char *placeable, int allowed) {
+    if (!placeable) return;
+    const char *text = (const char *)pointer_at(placeable, 0x30);
+    const int admin = allowed && text && !strcasecmp(text, admin_nick());
+    GoldName *entry = NULL, *free_entry = NULL;
+    for (unsigned i = 0; i < sizeof gold_names / sizeof *gold_names; ++i) {
+        if (gold_names[i].placeable == placeable) entry = gold_names + i;
+        else if (!gold_names[i].placeable && !free_entry) free_entry = gold_names + i;
+    }
+    float *color = (float *)(placeable + 0xc0);
+    if (admin) {
+        if (!entry) {
+            if (!free_entry) return;
+            entry = free_entry;
+            entry->placeable = placeable;
+            memcpy(entry->color, color, sizeof entry->color);
+        }
+        const float gold[3] = {1.0f, 0.80f, 0.20f};
+        memcpy(color, gold, sizeof gold); /* alpha kept: fades still work */
+    } else if (entry) {
+        memcpy(color, entry->color, 3 * sizeof(float));
+        entry->placeable = NULL;
+    }
+}
+
+static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {
+    original_marker_update(self, owner, dt);
+    gold_name(pointer_at(self, 0x50), gold_allowed() && !self[0x88]); /* _playerTagPlaceable, _isBattle */
+}
+
+static void ABI results_item_update(unsigned char *self, unsigned char *owner, float dt) {
+    original_results_item_update(self, owner, dt);
+    gold_name(pointer_at(self, 0xa8), gold_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
+}
+
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
     original_team_slot_update(self, owner, dt);
+    gold_name(pointer_at(self, 0x10), gold_allowed()); /* _namePlaceable */
     int mode = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
     if (mode != 1 || runtime_online_mode_private_cup() || (!private_team_selector_active && !is_private())) return;
@@ -2581,6 +2644,18 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         !write_code(image + 0x2546018, &leader_tick, sizeof leader_tick)) return 0;
     const EventHandler ranking_replacement = ranking_row_event;
     if (!write_code(image + 0x25436c8, &ranking_replacement, sizeof ranking_replacement)) return 0;
+    /* The admin's gold name (above): the kart tags' and the results rows' own updates, each the
+     * behavior's vtable +0xd8 like the slots' and leaders' (only when they are the game's). */
+    unsigned char *marker_native = pointer_at(image, 0x2545950), *results_native = pointer_at(image, 0x25436d8);
+    if (marker_native > image && marker_native < image + 0x2400000 &&
+        results_native > image && results_native < image + 0x2400000) {
+        original_marker_update = (BehaviorUpdate)marker_native;
+        original_results_item_update = (BehaviorUpdate)results_native;
+        const BehaviorUpdate marker_tick = marker_update, results_tick = results_item_update;
+        if (!write_code(image + 0x2545950, &marker_tick, sizeof marker_tick) ||
+            !write_code(image + 0x25436d8, &results_tick, sizeof results_tick)) return 0;
+        printf("Native Online: %s's name in gold (lobby, race, results)\n", admin_nick());
+    }
     const NativeEvent results_replacement = race_results_received;
     if (!write_code(image + 0x254c430, &results_replacement, sizeof results_replacement)) return 0;
     jump_to(jump, (void *)clear_participants);
