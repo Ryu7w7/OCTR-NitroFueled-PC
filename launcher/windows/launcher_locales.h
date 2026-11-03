@@ -6,6 +6,7 @@
 inline const std::map<std::string, std::map<std::string, std::string>>& GeneratedLocales() {
     static const std::map<std::string, std::map<std::string, std::string>> table = {
         {"id", {
+            {"Modding Discord (help making mods)", "Discord modding (bantuan membuat mod)"},
             {"Could not save launcher.ini.", "Tidak dapat menyimpan launcher.ini."},
             {"Could not save bbport.ini.", "Tidak dapat menyimpan bbport.ini."},
             {"Your nickname is missing.", "Nickname belum diisi."},
@@ -473,6 +474,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Updated to %s. Your settings, friends, patches and saves are kept.", "Diperbarui ke %s. Pengaturan, teman, patch dan save-mu tetap disimpan."},
         }},
         {"pt_BR", {
+            {"Modding Discord (help making mods)", "Discord de modding (ajuda para criar mods)"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: valide seus recordes (em breve, competitivo com ranks e MMR)"},
             {"Open page", "Abrir página"},
             {"Your account is banned from online play.", "Sua conta está banida do online."},
@@ -861,6 +863,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Pare o jogo e saia"},
         }},
         {"fr", {
+            {"Modding Discord (help making mods)", "Discord de modding (aide pour créer des mods)"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank : faites valider vos records (bientôt, compétitif avec rangs et MMR)"},
             {"Open page", "Ouvrir la page"},
             {"Your account is banned from online play.", "Votre compte est banni du jeu en ligne."},
@@ -1249,6 +1252,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Arrêtez le jeu et quittez"},
         }},
         {"de", {
+            {"Modding Discord (help making mods)", "Modding-Discord (Hilfe beim Erstellen von Mods)"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: lass deine Bestzeiten bestätigen (bald: Ranglistenspiele mit Rängen und MMR)"},
             {"Open page", "Seite öffnen"},
             {"Your account is banned from online play.", "Dein Konto ist vom Online-Spiel gesperrt."},
@@ -1637,6 +1641,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Stoppen Sie das Spiel und beenden Sie"},
         }},
         {"it", {
+            {"Modding Discord (help making mods)", "Discord di modding (aiuto per creare mod)"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: fai convalidare i tuoi record (presto, competitivo con gradi e MMR)"},
             {"Open page", "Apri pagina"},
             {"Your account is banned from online play.", "Il tuo account è bannato dall'online."},
@@ -2025,6 +2030,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "Interrompi il gioco ed esci"},
         }},
         {"ja", {
+            {"Modding Discord (help making mods)", "MOD制作Discord（MOD作りのサポート）"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: 記録の認定（近日、ランクと MMR による対戦モード）"},
             {"Open page", "ページを開く"},
             {"Your account is banned from online play.", "あなたのアカウントはオンラインから BAN されています。"},
@@ -2413,6 +2419,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "ゲームを停止して終了します"},
         }},
         {"zh_CN", {
+            {"Modding Discord (help making mods)", "MOD 制作 Discord（制作 MOD 的帮助）"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank：验证你的纪录（即将推出：带段位和 MMR 的排位赛）"},
             {"Open page", "打开页面"},
             {"Your account is banned from online play.", "你的账号已被禁止在线游戏。"},
@@ -2801,6 +2808,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Stop the game and quit", "停止游戏并退出"},
         }},
         {"ru", {
+            {"Modding Discord (help making mods)", "Discord моддинга (помощь в создании модов)"},
             {"Crash Team Rank: validate your records (ranked play with MMR coming)", "Crash Team Rank: подтверждение рекордов (скоро — рейтинговая игра с рангами и MMR)"},
             {"Open page", "Открыть страницу"},
             {"Your account is banned from online play.", "Ваш аккаунт заблокирован в онлайне."},

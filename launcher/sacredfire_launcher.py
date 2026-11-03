@@ -467,6 +467,7 @@ def write_patch_config(enabled, disabled):
 MOD_PREFIX = "OCTR-Mod-Library.xml/Mod: "
 MOD_EXTENSIONS = (".pak", ".zip", ".xml")
 GAMEBANANA = "https://gamebanana.com/games/26138"  # the game's page, where the community shares mods
+MODDING_DISCORD = "https://discord.gg/434Rx9hq6T"  # the modding community: help making mods
 MOD_GUIDE_URL = "https://github.com/Brony666/OCTR-NitroFueled-PC/blob/main/docs/mod-packaging.html"
 
 
@@ -2053,7 +2054,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         add_files.add_suffix(folder_button)
         intro.add(add_files)
         self.mods_controls = [add_button, folder_button]
-        for title, url in ((tr("Find mods on GameBanana"), GAMEBANANA), (tr("Read the packaging guide"), None)):
+        for title, url in ((tr("Find mods on GameBanana"), GAMEBANANA),
+                           (tr("Modding Discord (help making mods)"), MODDING_DISCORD),
+                           (tr("Read the packaging guide"), None)):
             row = Adw.ActionRow(title=title, activatable=True)
             row.add_suffix(Gtk.Image(icon_name="web-browser-symbolic" if url else "help-about-symbolic"))
             row.connect("activated", lambda _r, url=url: self.open_mod_link(url))

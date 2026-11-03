@@ -318,5 +318,6 @@
  "Button prompts": "Значки кнопок",
  "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "Кнопки, которые игра показывает в меню и подсказках. Xbox: A, B, X, Y, LB, RB, LT, RT и View. Применяется при нажатии «Играть».",
  "Ping counter in the corner": "Счётчик пинга в углу",
- "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "В онлайн-комнате — пинг каждого игрока в мс под счётчиком FPS. Также в меню игры (Insert или L3+R3), вкладка «Комната»."
+ "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "В онлайн-комнате — пинг каждого игрока в мс под счётчиком FPS. Также в меню игры (Insert или L3+R3), вкладка «Комната».",
+ "Modding Discord (help making mods)": "Discord моддинга (помощь в создании модов)"
 }

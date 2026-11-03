@@ -4187,6 +4187,10 @@ void ModsTab() {
     const char* gamebanana=T("Buscar mods en GameBanana","Find mods on GameBanana");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
     if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
+    // The modding community's Discord server: help making and packaging mods.
+    const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
+    if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);
