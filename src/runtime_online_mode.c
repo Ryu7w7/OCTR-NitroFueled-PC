@@ -685,6 +685,7 @@ static void ABI race_ui(unsigned char *self) {
     }
 }
 
+static void gold_project(unsigned char *project);
 static void ABI cup_project_event(void *self, void *event) {
     GetType event_type = (GetType)pointer_at(pointer_at(event, 0), 0);
     const int team_finish = team_race_ui_owner && event_type(event) == *race_finished_type;
@@ -731,6 +732,7 @@ static void ABI cup_project_event(void *self, void *event) {
         }
     }
     original_project_event(self, event);
+    gold_project(self);
     if (trace_score_event) trace_team_score("event-after", self, event_type(event));
     if (team_ranking_project && self == handle_object(&team_ranking_project)) refresh_team_results();
 }
@@ -2014,12 +2016,115 @@ static void gold_name(unsigned char *placeable, int allowed) {
             entry->placeable = placeable;
             memcpy(entry->color, color, sizeof entry->color);
         }
+        static int told;
+        if (!told) { told = 1; printf("Native Online: %s's name drawn in gold\n", admin_nick()); }
         const float gold[3] = {1.0f, 0.80f, 0.20f};
         memcpy(color, gold, sizeof gold); /* alpha kept: fades still work */
     } else if (entry) {
         memcpy(color, entry->color, 3 * sizeof(float));
         entry->placeable = NULL;
     }
+}
+
+/* Lists a script fills (the lobby's members, the pause menu's racers) have no behavior of
+ * their own: through every placeable of a GUI project (_children +0x48: an igObjectList, count
+ * +0x0c, data +0x20; a nested composition behind the handle at +0x38, its root at +0x20), the
+ * texts that are the admin's name go gold (gold_project below). */
+static unsigned gold_visited;
+static int gold_debug; /* BB_GOLD_DEBUG=1: the walked trees, logged */
+static int gold_texts; /* BB_GOLD_DEBUG=1: every text the walks meet, once */
+static void gold_log_text(const unsigned char *placeable, const char *text, int depth) {
+    static char seen[512][48];
+    static unsigned seen_count;
+    if (!text || !*text || seen_count >= 512) return;
+    for (unsigned i = 0; i < seen_count; ++i)
+        if (!strncmp(seen[i], text, sizeof seen[i] - 1)) return;
+    snprintf(seen[seen_count++], sizeof seen[0], "%s", text);
+    const char *name = pointer_at(placeable, 0x28);
+    const float *c = (const float *)(placeable + 0xc0);
+    printf("Gold text: depth %d %s \"%.60s\" color %.2f %.2f %.2f\n", depth, name ? name : "-", text,
+           c[0], c[1], c[2]);
+}
+static void gold_tree(unsigned char *placeable, int depth, int allowed) {
+    if (!placeable || depth > 32 || gold_visited > 4096) return;
+    ++gold_visited;
+    gold_name(placeable, allowed);
+    /* a placeable hosting another composition (a nested menu: the members list, a row) */
+    unsigned char *composition = handle_object((void **)(placeable + 0x38));
+    if (gold_texts) gold_log_text(placeable, pointer_at(placeable, 0x30), depth);
+    if (gold_debug) {
+        const char *name = pointer_at(placeable, 0x28), *text = pointer_at(placeable, 0x30);
+        const float *c = (const float *)(placeable + 0xc0);
+        printf("Gold tree: %*s%s \"%.40s\" color %.2f %.2f %.2f %.2f%s\n", depth * 2, "",
+               name ? name : "-", text ? text : "", c[0], c[1], c[2], c[3],
+               composition && pointer_at(composition, 0) == composition_vtable ? " [composition]" : "");
+    }
+    if (composition && pointer_at(composition, 0) == composition_vtable)
+        gold_tree(pointer_at(composition, 0x20), depth + 1, allowed);
+    unsigned char *list = pointer_at(placeable, 0x48);
+    if (!list) return;
+    uint32_t count;
+    memcpy(&count, list + 0x0c, 4);
+    unsigned char **items = (unsigned char **)pointer_at(list, 0x20);
+    if (!items || count > 512) return;
+    for (uint32_t i = 0; i < count; ++i) gold_tree(items[i], depth + 1, allowed);
+}
+
+static uint64_t gold_now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+#endif
+}
+
+/* Every GUI project (an igGuiProject: +0x10 its root placeable, whose +0x38 holds the menu's
+ * composition) passes its events through cup_project_event: the lobby's members, the pause
+ * menu's racers, the results. Each project's tree is walked at most every 150 ms. */
+static void gold_project(unsigned char *project) {
+    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    if (!root) return;
+    static struct { unsigned char *root; uint64_t at; } roots[32];
+    static unsigned next_root;
+    const uint64_t now = gold_now_ms();
+    unsigned i = 0;
+    while (i < 32 && roots[i].root != root) ++i;
+    if (i == 32) {
+        i = next_root++ % 32;
+        roots[i].root = root;
+        roots[i].at = 0;
+    }
+    if (roots[i].at && now - roots[i].at < 150) return;
+    const int first = !roots[i].at;
+    roots[i].at = now ? now : 1;
+    gold_visited = 0;
+    static int debug_walks;
+    const char *debug = getenv("BB_GOLD_DEBUG");
+    gold_texts = debug && debug[0] == '1';
+    gold_debug = first && gold_texts && debug_walks++ < 60;
+    if (gold_debug) printf("Gold tree: project %p\n", (void *)project);
+    gold_tree(root, 0, gold_allowed());
+    gold_debug = 0;
+}
+
+/* The lobby's members list and the pause menu's racers (ui/Octane_LobbyMembers): an igGuiList
+ * whose rows (igGuiListItemList, not _children) each carry a CGuiBehaviorOctaneLobbyMemberItem
+ * (vtable 0x2774cc0, USA 1.21). Its event handler (+0xc8) writes the player's name into the
+ * placeable at +0x10 (_playerName) and plays the LocalPlayer / OtherMember animation that colors
+ * it; its update (+0xd8) is the base one, called every frame. Both put the gold back on. */
+static EventHandler original_member_event;
+static BehaviorUpdate original_member_update;
+
+static void ABI member_event(unsigned char *self, void *event, void *owner) {
+    original_member_event(self, event, owner);
+    gold_name(pointer_at(self, 0x10), gold_allowed());
+}
+
+static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
+    original_member_update(self, owner, dt);
+    gold_name(pointer_at(self, 0x10), gold_allowed());
 }
 
 static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -2655,6 +2760,17 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         if (!write_code(image + 0x2545950, &marker_tick, sizeof marker_tick) ||
             !write_code(image + 0x25436d8, &results_tick, sizeof results_tick)) return 0;
         printf("Native Online: %s's name in gold (lobby, race, results)\n", admin_nick());
+    }
+    /* the members rows' behavior: only when its slots hold the game's own functions */
+    unsigned char *member_event_native = pointer_at(image, 0x2774d88), *member_update_native = pointer_at(image, 0x2774d98);
+    if (member_event_native == image + 0x1281810 && member_update_native == image + 0x273fc0) {
+        original_member_event = (EventHandler)member_event_native;
+        original_member_update = (BehaviorUpdate)member_update_native;
+        const EventHandler member_handler = member_event;
+        const BehaviorUpdate member_tick = member_update;
+        if (!write_code(image + 0x2774d88, &member_handler, sizeof member_handler) ||
+            !write_code(image + 0x2774d98, &member_tick, sizeof member_tick)) return 0;
+        puts("Native Online: the lobby members list shows the admin's name in gold");
     }
     const NativeEvent results_replacement = race_results_received;
     if (!write_code(image + 0x254c430, &results_replacement, sizeof results_replacement)) return 0;
