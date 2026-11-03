@@ -146,7 +146,8 @@ DEFAULTS = {
     "language": "1",
     "fullscreen": False,
     "present_mode": "Mailbox",
-    "gpu_preference": "auto",
+    "gpu": "",               # the graphics card by name (bb-gpu-capabilities --gpus); "" automatic
+    "gpu_preference": "auto",  # earlier choice by kind: integrated, discrete (used without "gpu")
     "gamepad": "",
     "gamepad_name": "",
     "neo": False,
@@ -308,7 +309,12 @@ def save_ini(values, lines):
 def game_environment(s):
     """Environment for run.sh from the launcher settings."""
     env = dict(os.environ)
-    env["BB_GPU_PREFERENCE"] = s.get("gpu_preference", "auto")
+    env.pop("BB_GPU_NAME", None)
+    env.pop("BB_GPU_PREFERENCE", None)
+    if s.get("gpu"):
+        env["BB_GPU_NAME"] = s["gpu"]  # one that is gone falls back to automatic (vk_instance.cpp)
+    elif s.get("gpu_preference") in ("integrated", "discrete"):
+        env["BB_GPU_PREFERENCE"] = s["gpu_preference"]
     env["BB_GAME_DIR"] = str(Path(s["game_dir"]).expanduser())
     if s["user_dir"]:
         env["BB_USER_DIR"] = s["user_dir"]
@@ -348,6 +354,32 @@ def connected_gamepads():
     except (OSError, subprocess.SubprocessError):
         return []
     return [tuple(line.split("\t", 1)) for line in run.stdout.splitlines() if "\t" in line]
+
+
+def connected_gpus():
+    """(name, label) of the GPUs Vulkan sees (bb-gpu-capabilities --gpus: kind, Vulkan version,
+    name), with the driver setup the game gets (bbport_vulkan.py wraps the launcher too)."""
+    tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    try:
+        run = subprocess.run([str(tool), "--gpus"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in run.stdout.splitlines():
+        parts = line.strip().split("\t", 2)
+        if len(parts) < 3:
+            continue
+        kind, version, name = parts
+        label = name + {"discrete": tr(" (dedicated)"), "integrated": tr(" (integrated)"),
+                        "cpu": tr(" (software, very slow)")}.get(kind, "")
+        try:
+            major, minor = (int(x) for x in version.split(".")[:2])
+        except ValueError:
+            major, minor = 0, 0
+        if (major, minor) < (1, 3):
+            label += tr(" - Vulkan {}, not enough for the game").format(version)
+        found.append((name, label))
+    return found
 
 
 def connected_displays():
@@ -1231,11 +1263,16 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(performance)
 
         screen = Adw.PreferencesGroup(title=tr("Display"))
+        gpus = connected_gpus()
+        gpu_choices = [(tr("Automatic"), "")] + gpus
+        if self.settings.get("gpu") and self.settings["gpu"] not in [n for n, _ in gpus]:
+            gpu_choices.append((tr("{} (not detected)").format(self.settings["gpu"]), self.settings["gpu"]))
         self.gpu_row = combo_row(
             tr("Graphics card"),
-            tr("Applied on the next game start. The selected GPU must support Vulkan 1.3."),
-            [(tr("Automatic"), "auto"), (tr("Integrated GPU"), "integrated"),
-             (tr("Dedicated GPU"), "discrete")], self.settings.get("gpu_preference", "auto"))
+            tr("On laptops with two GPUs, choose the dedicated one (NVIDIA or AMD) if the game starts on the "
+               "integrated one. Automatic uses the dedicated GPU when it has Vulkan 1.3. Applied when the game "
+               "starts. If your dedicated GPU is not listed, update its driver."),
+            gpu_choices, self.settings.get("gpu", ""))
         screen.add(self.gpu_row)
         self.renderer_row = combo_row(
             tr("Graphics engine"),
@@ -1581,7 +1618,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["neo"] = self.neo_row.get_active()
         s["fullscreen"] = self.fullscreen_row.get_active()
         s["present_mode"] = combo_value(self.present_row)
-        s["gpu_preference"] = combo_value(self.gpu_row)
+        s["gpu"] = combo_value(self.gpu_row)
+        s["gpu_preference"] = "auto"
         s["mangohud"] = self.mangohud_row.get_active()
         s["frame_stats"] = self.stats_row.get_active()
         s["save_log"] = self.save_log_row.get_active()

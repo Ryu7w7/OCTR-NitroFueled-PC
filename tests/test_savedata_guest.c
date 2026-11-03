@@ -5,7 +5,7 @@
 #include <assert.h>
 
 static char user_dir[256];
-const char *runtime_file_user_dir(void) { return user_dir; }
+const char *runtime_file_progress_dir(void) { return user_dir; }
 int runtime_file_mount(const char *guest, const char *host) { (void)guest; (void)host; return 0; }
 void runtime_file_unmount(const char *guest) { (void)guest; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {

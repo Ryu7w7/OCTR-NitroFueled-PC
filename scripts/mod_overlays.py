@@ -36,10 +36,27 @@ def file_map(game, target, directories, replacements):
     Path(target).write_bytes(b'BBFILE01'+struct.pack('<I',len(records))+b''.join(records))
 
 
+# Assets no mod may replace (the rest of the mod still loads; the log says what was left out).
+# systemData.igz holds the item-box odds: the server's rules set them (scripts/item_rules.py),
+# and a mod's copy would change what a player draws online.
+PROTECTED = {'loosedata/systemdata.igz': 'the item-box odds come from the server'}
+
+
+def replaced_by_base(archive, base, indices):
+    """Of these entry indices, those the built-in patch base already replaces (its 16-byte
+    record ranges, scripts/archive_patch.py)."""
+    if base is None:
+        return set()
+    count = len(archive.files)
+    taken = {o for o, d in archive_patch.read(base)[2] if len(d) == 16}
+    return {i for i in indices if 0x38 + 4 * count + 16 * i in taken}
+
+
 def compose(game, out, records, base_patches):
     """Append validated mod entries to built-in patches, one patch per guest archive.
 
-    A collision with a built-in entry is an error, never a silently dropped layer.
+    A collision with a built-in entry is an error, never a silently dropped layer. A PROTECTED
+    asset of a mod is left out, and the log says so.
     Runtime bounds are checked here because its parser would otherwise ignore them.
     """
     made = dict(base_patches)
@@ -58,6 +75,10 @@ def compose(game, out, records, base_patches):
                 entry = archive.files[op['index']]
                 if entry['path'] != op['asset']:
                     raise ValueError('Archive asset/index mismatch: ' + op['asset'])
+                if entry['path'].lower() in PROTECTED:
+                    print('OCTR mods: ' + entry['path'] + ' from a mod is not used: ' +
+                          PROTECTED[entry['path'].lower()], flush=True)
+                    continue
                 if op['kind'] == 'localized_strings':
                     changes = texts.setdefault(op['index'], {})
                     for obj, fields in op['strings'].items():
@@ -75,9 +96,14 @@ def compose(game, out, records, base_patches):
                 if index in entries:
                     raise ValueError('Duplicate mod archive entry: ' + archive.files[index]['path'])
                 entries[index] = mod_strings.apply(archive.extract(archive.files[index]), changes)
+            guest = '/app0/archives/' + name
+            for index in sorted(replaced_by_base(archive, made.get(guest), entries)):
+                raise ValueError('A mod replaces ' + archive.files[index]['path'] + ', which an OCTR '
+                                 'setting also changes; turn that setting or the mod off')
         finally:
             archive.data.close(); archive._file.close()
-        guest = '/app0/archives/' + name
+        if not entries:
+            continue
         target = out / (sha_bytes(guest.encode()) + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, made.get(guest))
         _, _, ranges = archive_patch.read(target)

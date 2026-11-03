@@ -717,6 +717,8 @@ struct App {
     // Monitors and controllers (bb-gpu-capabilities).
     std::vector<std::pair<std::string, std::string>> displays;  // value (number), label
     std::vector<std::pair<std::string, std::string>> gamepads;  // GUID, name
+    struct Gpu { std::string kind, vulkan, name; };              // bb-gpu-capabilities --gpus
+    std::vector<Gpu> gpus;
     std::thread probe;
     std::atomic<bool> probe_done{false};
 
@@ -1604,6 +1606,7 @@ void StartGame() {
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
+    SetEnv(L"BB_GPU_NAME", a.launcher.Get("gpu"));  // the graphics card, by name (empty: automatic)
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
@@ -2049,9 +2052,20 @@ void StartProbe() {
             const auto t = line.find('\t');
             if (t != std::string::npos) pads.emplace_back(line.substr(0, t), line.substr(t + 1));
         }
+        std::vector<App::Gpu> gpus;
+        const Captured g = RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --gpus", app.bin, 10000);
+        std::stringstream gs(g.output);
+        while (std::getline(gs, line)) {
+            line = Trim(line);
+            const auto t1 = line.find('\t');
+            const auto t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+            if (t2 == std::string::npos) continue;
+            gpus.push_back({line.substr(0, t1), line.substr(t1 + 1, t2 - t1 - 1), line.substr(t2 + 1)});
+        }
         std::scoped_lock lock{app.mutex};
         app.displays = std::move(displays);
         app.gamepads = std::move(pads);
+        app.gpus = std::move(gpus);
         app.probe_done = true;
     });
 }
@@ -2833,7 +2847,7 @@ std::string GameTemporal() {
 }
 
 /// v0.7.4: FSR 4's model files (the fsr4_shaders folder next to the launcher, where sacredfire.exe
-/// looks for them); without them the launcher does not offer it.
+/// looks for them; not included). Without them FSR 4 is still listed, and the game uses FSR 3.
 bool Fsr4FilesPresent() {
     static const bool present = [] {
         std::error_code ec;
@@ -2893,6 +2907,72 @@ void RenderResCombo() {
 
 // Aspect ratio is independent of the corrected widescreen layouts: 16:10 prepares the
 // display/camera in scripts/aspect_ratio.py; 21:9/32:9 keep tcosi's menus and HUD.
+/// Windows' own graphics preference for the game (Settings > Display > Graphics), so a laptop's
+/// switchable graphics runs it on the chosen GPU: 2 high performance, 1 power saving, 0 removes
+/// the launcher's entry (Windows decides again).
+void SetWindowsGpuPreference(int preference) {
+    const std::wstring exe = (g_app.bin / L"sacredfire.exe").wstring();
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    if (preference) {
+        const std::wstring value = L"GpuPreference=" + std::to_wstring(preference) + L";";
+        RegSetValueExW(key, exe.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       DWORD((value.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, exe.c_str());
+    }
+    RegCloseKey(key);
+}
+
+std::string GpuLabel(const App::Gpu& gpu) {
+    std::string label = gpu.name;
+    if (gpu.kind == "discrete") label += T(" (dedicada)", " (dedicated)");
+    else if (gpu.kind == "integrated") label += T(" (integrada)", " (integrated)");
+    else if (gpu.kind == "cpu") label += T(" (por software, muy lenta)", " (software, very slow)");
+    const auto dot = gpu.vulkan.find('.');
+    const int major = std::atoi(gpu.vulkan.c_str()), minor = dot == std::string::npos ? 0 : std::atoi(gpu.vulkan.c_str() + dot + 1);
+    if (major < 1 || (major == 1 && minor < 3))
+        label += std::string(T(" - Vulkan ", " - Vulkan ")) + gpu.vulkan + T(", no sirve para el juego", ", not enough for the game");
+    return label;
+}
+
+/// The graphics card: automatic (the engine prefers a dedicated GPU with Vulkan 1.3) or one of
+/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic).
+void GpuCombo() {
+    App& a = g_app;
+    std::scoped_lock lock{a.mutex};
+    const std::string current = a.launcher.Get("gpu");
+    std::string preview = T("Automática", "Automatic");
+    bool listed = false;
+    for (const auto& gpu : a.gpus)
+        if (gpu.name == current) { preview = GpuLabel(gpu); listed = true; }
+    if (!current.empty() && !listed) preview = current + T(" (no detectada)", " (not detected)");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+    if (ImGui::BeginCombo(T("Tarjeta gráfica", "Graphics card"), preview.c_str())) {
+        if (ImGui::Selectable(T("Automática", "Automatic"), current.empty())) {
+            a.launcher.Set("gpu", "");
+            SaveLauncher();
+            SetWindowsGpuPreference(0);
+        }
+        for (const auto& gpu : a.gpus) {
+            if (ImGui::Selectable(GpuLabel(gpu).c_str(), gpu.name == current)) {
+                a.launcher.Set("gpu", gpu.name);
+                SaveLauncher();
+                SetWindowsGpuPreference(gpu.kind == "discrete" ? 2 : gpu.kind == "integrated" ? 1 : 0);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker(T("En notebooks con dos GPU, elige la dedicada (NVIDIA o AMD) si el juego arranca con la integrada. "
+                 "Automática usa la dedicada cuando tiene Vulkan 1.3. Se aplica al iniciar el juego. Si no ves tu "
+                 "GPU dedicada en la lista, actualiza su driver.",
+                 "On laptops with two GPUs, choose the dedicated one (NVIDIA or AMD) if the game starts on the "
+                 "integrated one. Automatic uses the dedicated GPU when it has Vulkan 1.3. Applied when the game "
+                 "starts. If your dedicated GPU is not listed, update its driver."));
+}
+
 void AspectRatioSettings() {
     App& a = g_app;
     std::string mode = a.game.Get("aspect_ratio", a.game.Get("widescreen_layout", "16x9"));
@@ -3030,12 +3110,8 @@ void SettingsTab() {
                "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
                "Needs a restart."));
     {
-        // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time. FSR 4 only with its
-        // model files (Fsr4FilesPresent).
-        static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
-                                               {"AMD FSR 1", "AMD FSR 1", "fsr1"},
-                                               {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
-                                               {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
+        // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time. FSR 4 runs with its
+        // model files (Fsr4FilesPresent); without them the line below says what is missing.
         static constexpr Choice kTemporalFsr4[] = {{"Desactivado", "Off", "off"},
                                                    {"AMD FSR 1", "AMD FSR 1", "fsr1"},
                                                    {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
@@ -3047,9 +3123,7 @@ void SettingsTab() {
         const bool fsr4 = Fsr4FilesPresent();
         const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
                                                      temporal == "off" ? "off" : "fsr1", 16.0f)
-                            : fsr4 ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
-                                                     temporal.c_str(), 16.0f)
-                                   : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal,
+                                   : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
                                                      temporal.c_str(), 16.0f);
         if (picked) {
             a.game.Erase("fsr1");
@@ -3060,8 +3134,14 @@ void SettingsTab() {
             ImGui::TextColored(kGrey, "%s", T("FSR 3, FSR 4 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
                                               "FSR 3, FSR 4 and DLSS do not work with the native engine: FSR 1 is used."));
         } else if (temporal == "fsr4" && !fsr4) {
-            ImGui::TextColored(kGrey, "%s", T("Faltan los archivos de FSR 4 (carpeta fsr4_shaders): se usa FSR 3.",
-                                              "FSR 4's files are missing (fsr4_shaders folder): FSR 3 is used."));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
+            ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
+                                              "fsr4_shaders junto al launcher. Mientras falten, se usa FSR 3. También "
+                                              "necesita una gráfica con soporte INT8.",
+                                              "FSR 4 needs its files, which do not come with the game: put the "
+                                              "fsr4_shaders folder next to the launcher. While they are missing, FSR 3 "
+                                              "is used. It also needs a GPU with INT8 support."));
+            ImGui::PopTextWrapPos();
         }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
@@ -3142,6 +3222,7 @@ void SettingsTab() {
             ImGui::EndCombo();
         }
     }
+    GpuCombo();
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
     ChoiceCombo(T("Presentación", "Presentation"), "present_mode", kPresentModes, "Mailbox");
 

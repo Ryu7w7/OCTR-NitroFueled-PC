@@ -21,9 +21,14 @@ def launcher_helpers(packaged=True):
 class LauncherGpuTests(unittest.TestCase):
     def test_all_gpu_choices_reach_the_renderer(self):
         scope = launcher_helpers()
-        for choice in ("auto", "integrated", "discrete"):
-            settings = {**scope["DEFAULTS"], "gpu_preference": choice}
-            env = scope["game_environment"](settings)
+        env = scope["game_environment"]({**scope["DEFAULTS"], "gpu": "NVIDIA GeForce GTX 1650"})
+        self.assertEqual(env["BB_GPU_NAME"], "NVIDIA GeForce GTX 1650")
+        self.assertNotIn("BB_GPU_PREFERENCE", env)
+        env = scope["game_environment"](dict(scope["DEFAULTS"]))
+        self.assertNotIn("BB_GPU_NAME", env)
+        self.assertNotIn("BB_GPU_PREFERENCE", env)
+        for choice in ("integrated", "discrete"):  # a choice saved by the earlier selector
+            env = scope["game_environment"]({**scope["DEFAULTS"], "gpu_preference": choice})
             self.assertEqual(env["BB_GPU_PREFERENCE"], choice)
 
     def test_gpu_choice_keeps_packaged_libraries_and_driver_configuration(self):

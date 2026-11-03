@@ -1031,6 +1031,9 @@ static int is_private(void) {
 
 /* The game's own private-match flag (0 before the selector hook is installed). */
 int runtime_online_mode_in_private(void) { return private_state ? is_private() : 0; }
+/* A private room's CUP race (set by its map load, cleared by the next one): the game's private
+ * flag does not hold during these races, so the CUP code, and Itemless, use this one. */
+int runtime_online_mode_private_cup_race(void) { return private_cup_race_active; }
 
 static void ABI select_mode(void *sender, int index) {
     if (customized_selector == 2) {
