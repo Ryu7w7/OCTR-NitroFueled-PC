@@ -318,5 +318,6 @@
  "Button prompts": "ボタン表示",
  "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "ゲームがメニューや案内で表示するボタン。Xbox: A、B、X、Y、LB、RB、LT、RT、View。「プレイ」を押したときに適用されます。",
  "Ping counter in the corner": "画面の隅にPingを表示",
- "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "オンラインルームで各プレイヤーのPing（ms）をFPSカウンターの下に表示します。ゲーム内メニュー（Insert または L3+R3）の「ルーム」タブにもあります。"
+ "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "オンラインルームで各プレイヤーのPing（ms）をFPSカウンターの下に表示します。ゲーム内メニュー（Insert または L3+R3）の「ルーム」タブにもあります。",
+ "Modding Discord (help making mods)": "MOD制作Discord（MOD作りのサポート）"
 }
