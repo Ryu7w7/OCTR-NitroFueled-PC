@@ -181,6 +181,15 @@ if [[ -n ${BB_MOD_SESSION:-} ]]; then
         --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
     strict_overlap=(--strict-overlap)
 fi
+# Prepare local TT references for Private Itemless AI guidance.
+unset BB_TT_REFERENCE
+if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
+    if "$PYTHON" scripts/tt_reference.py "$game" --out "$out/tt-reference"; then
+        export BB_TT_REFERENCE="$out/tt-reference/reference.bin"
+    else
+        echo "TT reference preparation failed; AI retains native route guidance." >&2
+    fi
+fi
 unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
     if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
