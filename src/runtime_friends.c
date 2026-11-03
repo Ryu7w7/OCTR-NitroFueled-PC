@@ -5,6 +5,7 @@
 #include "runtime_friends.h"
 #include "runtime_http.h"
 #include "runtime_net.h"
+void runtime_trophy_badges(const char *json); /* runtime_services.c */
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -352,7 +353,7 @@ static void *friends_thread(void *arg) {
 #endif
     char me[RF_NAME];
     clean_name(me, runtime_np_get_online_name());
-    time_t next_refresh = 0;
+    time_t next_refresh = 0, next_badges = 0;
     for (;;) {
         char action[12] = "", who[RF_NAME] = "", query[RF_NAME] = "";
         char report_reason[12] = "", report_comment[RF_REPORT_COMMENT] = "";
@@ -403,6 +404,13 @@ static void *friends_thread(void *arg) {
         } else if (refresh_now) {
             refresh(me);
             next_refresh = time(NULL) + REFRESH_SECONDS;
+            /* OCTR's trophies the server gives (badges: a room with the admin...), once a minute. */
+            if (time(NULL) >= next_badges) {
+                next_badges = time(NULL) + 60;
+                char target[96], body[1024];
+                snprintf(target, sizeof target, "/ryunet/badges?name=%s", me);
+                if (runtime_ryunet_request("GET", target, body, sizeof body) == 200) runtime_trophy_badges(body);
+            }
             static int migrated;
             if (!migrated && s_view.state == RF_READY) {
                 migrated = 1;
