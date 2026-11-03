@@ -426,32 +426,31 @@ void runtime_speed_mode_set(int enabled) {
     __atomic_store_n(&speed_mode_enabled, !!enabled, __ATOMIC_RELEASE);
 }
 
-static int runtime_speed_mode_enabled(void) {
+int runtime_speed_mode_enabled(void) {
     return __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
 }
 
 int runtime_speed_race_active(void) {
-    /* PUBLIC_SPEED_STEP_3: after implementing server-confirmed room state, replace
-     * only the room predicate below with:
-     *   (runtime_private_room_active() || runtime_public_speed_confirmed())
-     * Proposed API: true only for the current authenticated Speed lobby with a
-     * compatible content version. A UI selection or advertised capability alone
-     * is insufficient. Clear confirmation on leave, disconnect, failed join,
-     * migration or replacement of the lobby; re-confirm before loading assets.
-     * This predicate gates both archive assets and seasonal pickup spawning.
-     * Keep runtime_speed_mode_enabled() so remembered private selection alone
-     * cannot enable Speed outside an active eligible room.
-     * v0.7.5: the game's own private-match flag too. The session flag outlived a private
-     * menu (no DELETE), so a remembered Itemless choice reached public races (no items,
-     * Tiger Temple's door open).
-     */
-    return runtime_speed_mode_enabled() && runtime_private_room_active() &&
-           runtime_online_mode_in_private();
+    /* Use the persistent native party session, not the unloaded lobby scene. */
+    return runtime_public_itemless_active() ||
+           (runtime_speed_mode_enabled() && runtime_private_room_active() &&
+            runtime_private_match_active());
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
-    return normal && normal->private_view && runtime_speed_race_active()
-               ? normal->private_view : normal;
+    if (!normal || !normal->private_view) return normal;
+    const int selected = runtime_speed_mode_enabled();
+    const int room = runtime_private_room_active();
+    const int private = runtime_private_match_active();
+    const int public = runtime_public_itemless_active();
+    const int active = public || (selected && room && private);
+    /* Log the actual asset decision, not just the menu's selected label. */
+    static int previous = -1;
+    const int state = selected | (room << 1) | (private << 2) | (public << 3);
+    if (__atomic_exchange_n(&previous, state, __ATOMIC_RELAXED) != state)
+        fprintf(stderr, "ITEMLESS assets: selected=%d session_peer=%d private_session=%d public_confirmed=%d view=%s archive=%s\n",
+                selected, room, private, public, active ? "ITEMLESS" : "NORMAL", normal->guest);
+    return active ? normal->private_view : normal;
 }
 
 /* The patch for this guest file, when there is one made for an archive of this size. */

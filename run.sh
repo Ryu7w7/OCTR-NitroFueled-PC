@@ -221,7 +221,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             case $key in
                 archive_patches) export BB_ARCHIVE_PATCHES=$value ;;
                 private_archive_patches) export BB_PRIVATE_ARCHIVE_PATCHES=$value ;;
-                'ITEMLESS (Experimental): private overlays prepared for '* ) echo "$key" ;;
+                'ITEMLESS: private overlays prepared for '* ) echo "$key" ;;
             esac
         done <<< "$speed_result"
     fi

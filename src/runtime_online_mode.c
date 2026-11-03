@@ -92,6 +92,9 @@ static SetSeason hide_placeable;
 static void **gui_manager, **race_finished_type, **local_racers_finished_type;
 static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
+static void *lobby_members_project;
+static void *hidden_lobby_members_root;
+static int lobby_members_was_hidden;
 static unsigned char *team_race_ui_owner;
 static int team_score_opened, team_score_finished, team_effects_played;
 static NativeEvent native_win_confetti, release_result_sound;
@@ -126,11 +129,16 @@ typedef unsigned char (ABI *ReadyFind)(void *, void *, unsigned, unsigned char *
 static ControllerPlayer controller_player;
 static FindPlayer find_player;
 static ReadyFind ready_find;
+typedef void (ABI *AddLegend)(void *, int, char **, unsigned char);
+static AddLegend add_legend;
+static int team_legend_state = -1, team_legend_controller = 1;
+
 static void *ranking_row_vtable;
 static EventHandler original_leader_event, original_marker_event;
 typedef void *(ABI *LookupHero)(void *, const char *);
 static LookupHero lookup_hero;
 static BehaviorUpdate original_leader_update;
+static void **marker_initialize_type;
 static const char *team_names[] = {"BLUE", "RED", "GREEN", "YELLOW"};
 typedef int (ABI *RacerFaction)(void *);
 static RacerFaction racer_faction;
@@ -397,6 +405,24 @@ static void assign_handle(unsigned char *field, void *value) {
     memcpy(field, &value, sizeof value);
 }
 
+static void refresh_lobby_members_visibility(void) {
+    unsigned char *project = handle_object(&lobby_members_project);
+    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    if (!root) { hidden_lobby_members_root = NULL; return; }
+    if (private_team_selector_active) {
+        if (hidden_lobby_members_root != root) {
+            unsigned flags;
+            memcpy(&flags, root + 12, 4);
+            lobby_members_was_hidden = !!(flags & 0x400);
+            hidden_lobby_members_root = root;
+        }
+        hide_placeable(root, 1);
+    } else if (hidden_lobby_members_root == root) {
+        hide_placeable(root, lobby_members_was_hidden);
+        hidden_lobby_members_root = NULL;
+    }
+}
+
 /* The native private-settings event carries mode 6 for CUP. Its map is the
  * selected first track, unique among Arcade cups; no invented playlist is sent. */
 static unsigned char *cup_for_first_track(const char *map) {
@@ -445,6 +471,7 @@ static int adopt_native_cup(unsigned char *cup) {
 
 void runtime_online_mode_leave_cup(void) {
     private_team_selector_active = 0;
+    refresh_lobby_members_visibility();
     assign_handle((unsigned char *)&active_team_selector_project, NULL);
     private_single_race_active = 0;
     /* Host loss can leave the native standings open. Keep their CUP mode until
@@ -637,6 +664,10 @@ static void ABI open_race_project(void **result, void *manager, const char *name
         printf("Native private TEAM: opening selector mode=%d private=%d\n", mode, private_team_selector_active);
     }
     open_project(result, manager, name, options, player, context, delay);
+    if (name && !strcasecmp(name, "Octane_LobbyMembers")) {
+        assign_handle((unsigned char *)&lobby_members_project, result ? *result : NULL);
+    }
+    refresh_lobby_members_visibility();
     if (opening_team_race_ui && name && !strcmp(name, "Octane_Race_Ranking")) {
         /* Use the native ranking creation point, before the intro/input layer.
          * A resolved project opened inside RaceFinished is not proof its VSC
@@ -731,6 +762,7 @@ static void ABI cup_project_event(void *self, void *event) {
         }
     }
     original_project_event(self, event);
+    refresh_lobby_members_visibility();
     if (trace_score_event) trace_team_score("event-after", self, event_type(event));
     if (team_ranking_project && self == handle_object(&team_ranking_project)) refresh_team_results();
 }
@@ -845,6 +877,19 @@ static struct CupTotal racer_identity(unsigned char *racer) {
     return result;
 }
 
+/* Native finish-time rows require all configured laps and a valid final time.
+ * Race teardown sets the finished flag even for racers that timed out. */
+static int team_racer_finished(unsigned char *racer) {
+    unsigned char *laps = pointer_at(racer, 0x90);
+    int required = 0, completed = 0, time = -1;
+    if (race_settings && *race_settings) memcpy(&required, *race_settings + 12, 4);
+    if (laps) memcpy(&completed, laps + 12, 4);
+    const int *times = laps ? pointer_at(laps, 0x20) : NULL;
+    if (!racer[0x8c] || required <= 0 || completed < required || !times) return 0;
+    memcpy(&time, times + required - 1, sizeof time);
+    return time > 0;
+}
+
 /* Recompute from the host's complete finish order, so repeat packets cannot
  * add points twice. Keep native individual race positions and timing intact. */
 static void apply_team_results(unsigned char *event) {
@@ -882,8 +927,8 @@ static void apply_team_results(unsigned char *event) {
         rank_team[position] = team;
         results[position] = key;
         results[position].finish_position = position + 1;
-        results[position].points = awards[position];
-        totals[team] += awards[position];
+        results[position].points = runtime_speed_mode_enabled() && !team_racer_finished(racer) ? 0 : awards[position];
+        totals[team] += results[position].points;
     }
     int maximum = 0, leaders = 0;
     for (int team = 0; team < teams; ++team)
@@ -892,14 +937,15 @@ static void apply_team_results(unsigned char *event) {
         if (totals[team] == maximum) ++leaders;
     /* Host finish order is a validated permutation: the first tied team's
      * finisher decides head-to-head, independently of team ID or GUI order. */
-    for (int position = 0; position < count; ++position)
-        if (totals[rank_team[position]] == maximum) {
+    team_winner = -1;
+    for (int position = 0; maximum > 0 && position < count; ++position)
+        if (results[position].points > 0 && totals[rank_team[position]] == maximum) {
             team_winner = rank_team[position];
             break;
         }
-    team_tiebreak = leaders > 1;
+    team_tiebreak = maximum > 0 && leaders > 1;
     printf("Native private TEAM: winner=%s points=%d head_to_head=%d\n",
-           team_names[team_winner], maximum, team_tiebreak);
+           team_winner >= 0 ? team_names[team_winner] : "NONE", maximum, team_tiebreak);
     memcpy(team_totals, totals, sizeof totals);
     memcpy(team_results, results, sizeof results);
     team_result_count = count;
@@ -919,23 +965,58 @@ static void apply_team_results(unsigned char *event) {
 static void team_ranking_row(unsigned char *self) {
     unsigned char *racer = handle_object((void **)(self + 0x78));
     if (!racer) return;
-    team_color(pointer_at(self, 0xa8), racer_team(racer));
+    const int finished = team_racer_finished(racer);
+    unsigned char *name = pointer_at(self, 0xa8);
+    unsigned char *highlight = pointer_at(self, 0xc0);
+    if (highlight) {
+        /* Keep native local-player visibility, but suppress its bright layer for DNF. */
+        const float opacity = finished ? 1.0f : 0.0f;
+        memcpy(highlight + 0xe0, &opacity, sizeof opacity);
+        unsigned flags;
+        memcpy(&flags, highlight + 12, 4); flags |= 0x1000;
+        memcpy(highlight + 12, &flags, 4);
+    }
+    unsigned highlight_flags = 0x400;
+    if (highlight) memcpy(&highlight_flags, highlight + 12, 4);
+    float text_color[] = {1, 1, 1, 1};
+    /* Native finish-time text uses this serialized RGBA color for the local row. */
+    if (finished && !(highlight_flags & 0x400))
+        for (int c = 0; c < 4; ++c) text_color[c] = self[0xda + c] / 255.0f;
+    const int team = racer_team(racer);
+    unsigned char *position = pointer_at(self, 0xb8);
+    team_color(position, team);
+    unsigned char *position_text = position ? sprite_asset(position) : NULL;
+    if (position_text) {
+        const int gradient = 0; /* Native local-player gradient otherwise masks the team tint. */
+        memcpy(position_text + 0x40, &gradient, sizeof gradient);
+    }
+    if (name) {
+        memcpy(name + 0xc0, text_color, sizeof text_color);
+        unsigned flags;
+        memcpy(&flags, name + 12, 4); flags |= 0x1000;
+        memcpy(name + 12, &flags, 4);
+    }
     unsigned char *avatar = pointer_at(self, 0x98);
     const char *avatar_name = avatar ? pointer_at(avatar, 0x28) : NULL;
     if (avatar_name && !strcmp(avatar_name, "OCTR_TEAM_AVATAR")) {
         hide_placeable(avatar, 0);
-        unsigned char *row = pointer_at(avatar, 0x40);
-        if (row) {
-            /* Match RaceRanking NotFinished. The patched entrance retains
-             * position/scale tracks and no longer overwrites this alpha. */
-            const float opacity = racer[0x8c] ? 1.0f : 0.6f;
-            memcpy(row + 0xe0, &opacity, sizeof opacity);
-            unsigned flags;
-            memcpy(&flags, row + 12, 4); flags |= 0x1000;
-            memcpy(row + 12, &flags, 4);
-        }
+    }
+    unsigned char *row = name ? pointer_at(name, 0x40) : NULL;
+    if (row) {
+        /* Fade the shared parent once: every icon, label, background and point inherits it. */
+        const float opacity = finished ? 1.0f : 0.6f;
+        memcpy(row + 0xe0, &opacity, sizeof opacity);
+        unsigned flags;
+        memcpy(&flags, row + 12, 4); flags |= 0x1000;
+        memcpy(row + 12, &flags, 4);
     }
     unsigned char *engine = pointer_at(self, 0xa0);
+    if (engine) {
+        memcpy(engine + 0xc0, text_color, sizeof text_color);
+        unsigned flags;
+        memcpy(&flags, engine + 12, 4); flags |= 0x1000;
+        memcpy(engine + 12, &flags, 4);
+    }
     const char *engine_name = engine ? pointer_at(engine, 0x28) : NULL;
     if (engine_name && !strcmp(engine_name, "OCTR_TEAM_ENGINE")) {
         hide_placeable(engine, 0);
@@ -954,7 +1035,19 @@ static void team_ranking_row(unsigned char *self) {
     }
     const struct CupTotal key = racer_identity(racer);
     /* The separate finish-time panel retains native time/status columns. */
-    if (!pointer_at(self, 0xd0)) return;
+    unsigned char *score = pointer_at(self, 0xd0);
+    if (!score) return;
+    memcpy(score + 0xc0, text_color, sizeof text_color);
+    const float opacity = 1.0f;
+    memcpy(score + 0xe0, &opacity, sizeof opacity);
+    unsigned char *score_asset = sprite_asset(score);
+    if (score_asset) {
+        const int gradient = 0;
+        memcpy(score_asset + 0x40, &gradient, sizeof gradient);
+    }
+    unsigned score_flags;
+    memcpy(&score_flags, score + 12, 4); score_flags |= 0x1000;
+    memcpy(score + 12, &score_flags, 4);
     for (int i = 0; i < team_result_count; ++i) {
         const struct CupTotal *result = team_results + i;
         if (key.human != result->human || key.id != result->id || key.online_id != result->online_id)
@@ -964,7 +1057,6 @@ static void team_ranking_row(unsigned char *self) {
         unsigned char *position = pointer_at(self, 0xb8);
         if (position) set_text(position, text);
         snprintf(text, sizeof text, "%d POINT", result->points);
-        unsigned char *score = pointer_at(self, 0xd0);
         if (score) {
             const float scale[] = {.75f, .75f, 1.0f};
             memcpy(score + 0x84, scale, sizeof scale);
@@ -977,7 +1069,22 @@ static void team_ranking_row(unsigned char *self) {
 static void ABI ranking_row_event(unsigned char *self, void *event, void *owner) {
     const int team_race = opening_team_race_ui || team_ranking_project != NULL;
     if (team_race) self[0xd8] = 0;
+    unsigned char *extras[2] = {NULL, NULL};
+    const char *tags[] = {"OCTR_TEAM_AVATAR", "OCTR_TEAM_ENGINE"};
+    if (!team_race) for (int i = 0; i < 2; ++i) {
+        unsigned char *icon = pointer_at(self, 0x98 + i * 8);
+        const char *name = icon ? pointer_at(icon, 0x28) : NULL;
+        if (name && !strcmp(name, tags[i])) {
+            /* Shared Battle assets contain our extras; native binding reveals them. */
+            extras[i] = icon;
+            hide_placeable(icon, 1);
+            void *empty = NULL;
+            memcpy(self + 0x98 + i * 8, &empty, sizeof empty);
+        }
+    }
     original_ranking_row_event(self, event, owner);
+    for (int i = 0; i < 2; ++i)
+        if (extras[i]) memcpy(self + 0x98 + i * 8, &extras[i], sizeof extras[i]);
     if (team_race) team_ranking_row(self);
 }
 
@@ -1025,22 +1132,23 @@ static void team_result_rows(unsigned char *row, int depth) {
     if (own_name && (!strcmp(own_name, "[WinnerNameText]") || !strcmp(own_name, "[WinsText]") ||
                      !strcmp(own_name, "OCTR_TEAM_POINTS"))) {
         const int best = team_winner;
-        if (best < 0 || best >= 4) return;
+        if (best >= 4 || !team_result_count) return;
         const int local = local_race_team();
         char title[128];
         float y;
         if (!strcmp(own_name, "[WinsText]")) {
-            snprintf(title, sizeof title, "%s", local < 0 ? "RESULT" : local == best ? "WINS" : "LOSE");
+            snprintf(title, sizeof title, "%s", best < 0 || local < 0 ? "RESULT" : local == best ? "WINS" : "LOSE");
             y = -19.0f;
             /* Keep the native text material's gradient, without team tint. */
         } else if (!strcmp(own_name, "OCTR_TEAM_POINTS")) {
-            snprintf(title, sizeof title, "%d POINTS%s", team_totals[best], team_tiebreak ? " (H2H)" : "");
+            snprintf(title, sizeof title, "%d POINTS%s", best >= 0 ? team_totals[best] : 0, team_tiebreak ? " (H2H)" : "");
             y = 9.0f;
             const float scale[] = {0.08081815f, 0.11369143f, 1.0f};
             memcpy(row + 0x84, scale, sizeof scale);
             hide_placeable(row, 0);
         } else {
-            snprintf(title, sizeof title, "%s TEAM WINS", team_names[best]);
+            if (best < 0) snprintf(title, sizeof title, "NO FINISHERS");
+            else snprintf(title, sizeof title, "%s TEAM WINS", team_names[best]);
             y = -4.0f;
             const float white[] = {1, 1, 1, 1};
             memcpy(row + 0xc0, white, sizeof white);
@@ -1099,7 +1207,7 @@ static void ABI team_legend_node(void *context, unsigned char *pins) {
     int count = 0, mode = 0;
     if (pins) memcpy(&count, pins, 4);
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
-    if (count == 5 && mode == 1 && !runtime_online_mode_private_cup() &&
+    if ((count == 5 || count == 6) && mode == 1 && !runtime_online_mode_private_cup() &&
         (private_team_selector_active || is_private())) return;
     original_team_legend_node(context, pins);
 }
@@ -1123,6 +1231,9 @@ static void play_team_result_effects(void) {
     if (!controller) controller = 1;
     int id = controller_player(controller);
     if (id < 0 && controller != 1) id = controller_player(1);
+    void *players = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    unsigned char *local_player = players && id >= 0 ? find_player(players, id) : NULL;
+    if (!local_player) return;
     unsigned char *list = pointer_at(*racer_manager, 0x10);
     int count = 0;
     if (list) memcpy(&count, list + 12, 4);
@@ -1131,9 +1242,8 @@ static void play_team_result_effects(void) {
     for (int i = 0; i < count; ++i) {
         unsigned char *racer = items[i];
         unsigned char *player = racer ? handle_object((void **)(racer + 0x10)) : NULL;
-        int player_id = -1;
-        if (player) memcpy(&player_id, player + 0xc8, 4);
-        if (!player || player_id != id) continue;
+        /* Controller IDs are local; the network slot can differ on a guest. */
+        if (!player || player != local_player) continue;
         const int team = racer_team(racer);
         unsigned char *kart = handle_object((void **)(racer + 0x20));
         if (team < 0 || team >= 4 || !kart) return;
@@ -1182,25 +1292,50 @@ static void team_leader_border(unsigned char *self) {
     hide_placeable(border, 0);
 }
 
-static void ABI marker_event(unsigned char *self, void *event, void *owner) {
-    original_marker_event(self, event, owner);
+static void team_marker(unsigned char *self) {
     if (!team_leaders_project && !opening_team_race_ui) return;
     unsigned char *racer = handle_object((void **)(self + 0x70));
-    unsigned char *label = pointer_at(self, 0x50);
-    if (!racer || !label) return;
-    if (!handle_object((void **)(racer + 0x10))) {
-        /* Native creates markers for AI too, but supplies an empty player name.
-         * Resolve the same localized character name as native race rankings. */
-        unsigned char *driver = handle_object((void **)(racer + 0x18));
-        unsigned char *definition = driver ? pointer_at(driver, 0x40) : NULL;
-        const char *hero = definition ? pointer_at(definition, 0x90) : NULL;
-        void *catalog = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x18) : NULL;
-        void *record = hero && catalog ? lookup_hero(catalog, hero) : NULL;
-        const char *name = record ? pointer_at(record, 0x18) : NULL;
-        if (name && *name) set_text(label, name);
+    unsigned char *label = pointer_at(self, 0x50), *arrow = pointer_at(self, 0x48);
+    if (!racer || !label || !arrow) return;
+    self[0x88] = 1; /* Use native Battle projection and faction updates. */
+    team_color(arrow, racer_team(racer));
+    const float opaque = 1.0f, white[] = {1, 1, 1, 1};
+    memcpy(arrow + 0xe0, &opaque, 4);
+    hide_placeable(arrow, 0);
+    /* The native leader decoration is a second icon; Team Race uses one arrow. */
+    unsigned char *children = pointer_at(arrow, 0x48);
+    int count = 0;
+    if (children) memcpy(&count, children + 12, 4);
+    void **items = children ? pointer_at(children, 0x20) : NULL;
+    for (int i = 0; items && i < count && i < 16; ++i) hide_placeable(items[i], 1);
+    const int human = handle_object((void **)(racer + 0x10)) != NULL;
+    hide_placeable(label, !human);
+    if (!human) set_text(label, "");
+    memcpy(label + 0xc0, white, sizeof white);
+    /* Place the name below the existing arrow using its own native geometry. */
+    float y, height, pivot, scale, text_height, text_pivot;
+    memcpy(&y, arrow + 0x64, 4); memcpy(&height, arrow + 0x94, 4);
+    memcpy(&pivot, arrow + 0x70, 4); memcpy(&scale, arrow + 0x88, 4);
+    memcpy(&text_height, label + 0x94, 4); memcpy(&text_pivot, label + 0x70, 4);
+    y += height * scale * (1.0f - pivot) + text_height * (text_pivot + 0.2f);
+    memcpy(label + 0x64, &y, 4);
+    unsigned flags;
+    memcpy(&flags, label + 12, 4); flags |= 0x1000;
+    memcpy(label + 12, &flags, 4);
+}
+
+static void ABI marker_event(unsigned char *self, void *event, void *owner) {
+    const int team = team_leaders_project || opening_team_race_ui;
+    GetType event_type = event ? (GetType)pointer_at(pointer_at(event, 0), 0) : NULL;
+    const int initializing = team && event_type && event_type(event) == *marker_initialize_type;
+    unsigned char saved = 0;
+    if (initializing) {
+        saved = ((unsigned char *)event)[0x28];
+        ((unsigned char *)event)[0x28] = 1; /* Skip the Race layout that hides the Battle arrow. */
     }
-    /* Preserve the native camera projection and offscreen marker visibility. */
-    team_color(label, racer_team(racer));
+    original_marker_event(self, event, owner);
+    if (initializing) ((unsigned char *)event)[0x28] = saved;
+    team_marker(self);
 }
 
 static void ABI leader_event(unsigned char *self, void *event, void *owner) {
@@ -1489,7 +1624,7 @@ static void ABI level_button_event(unsigned char *self, void *event, void *owner
 static void update_card(unsigned char *row, const char *cup_name, const char *mode, void *preview, int depth) {
     if (!row || depth > 16) return;
     const char *name = pointer_at(row, 0x28);
-    if (name && !strcmp(name, "[ModeName]")) set_text(row, mode);
+    if (name && (!strcmp(name, "[ModeName]") || !strcmp(name, "MapVoteResultModeName"))) set_text(row, mode);
     else if (name && !strcmp(name, "[MapName]") && cup_name) set_text(row, cup_name);
     else if (name && !strcmp(name, "OCTR_PRIVATE_PREVIEW") && preview) {
         unsigned char *sprite = sprite_asset(row);
@@ -1518,11 +1653,22 @@ static void ABI lobby_event(unsigned char *self, void *event, void *owner) {
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
     original_lobby_update(self, owner, dt);
     refresh_lobby_card(owner);
+    runtime_public_itemless_update();
 }
 
 static void refresh_lobby_card(unsigned char *owner) {
-    if (!owner || !runtime_online_mode_in_private() || battle_selected()) return;
+    if (!owner) return;
     const char *tag = pointer_at(owner, 0x28);
+    if (tag && !strcmp(tag, "OCTR_PUBLIC_LOBBY")) {
+        /* Party members can retain private scene/selector state in public. */
+        int type = 0;
+        if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);
+        if (type != 2)
+            update_card(owner, NULL, runtime_public_itemless_active() ?
+                        "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL", NULL, 0);
+        return;
+    }
+    if (battle_selected() || !runtime_online_mode_in_private()) return;
     if (!tag || strcmp(tag, "OCTR_PRIVATE_LOBBY")) return;
     const int cup_mode = runtime_online_mode_private_cup();
     unsigned char *cup = cup_mode ? current_cup() : NULL;
@@ -1537,8 +1683,9 @@ static void refresh_lobby_card(unsigned char *owner) {
         if (data) preview = pointer_at(data, 0x18);
     }
     char mode[48];
+    /* The lobby label reflects the selected mode before any race traffic exists. */
     snprintf(mode, sizeof mode, "%s RACE - %s", cup_mode ? "CUP" : "SINGLE",
-             runtime_speed_race_active() ? "ITEMLESS" : "NORMAL");
+             runtime_speed_mode_enabled() ? "ITEMLESS" : "NORMAL");
     update_card(owner, name, mode, preview, 0);
 }
 
@@ -1627,6 +1774,13 @@ static int battle_selected(void) {
 int runtime_online_mode_private_cup(void) {
     return private_cup_race_active || (runtime_online_mode_in_private() && !battle_selected() &&
         (remote_cup_selected >= 0 ? remote_cup_selected : private_cup_selected));
+}
+
+int runtime_online_mode_private_teams(void) {
+    if (!runtime_online_mode_private_single_options() || !race_settings || !*race_settings) return 0;
+    int teams = 1;
+    memcpy(&teams, *race_settings + 0x28, sizeof teams);
+    return teams == 2 || teams == 4;
 }
 
 int runtime_online_mode_private_single_options(void) {
@@ -1744,7 +1898,7 @@ static void ABI private_start_query(void *context, unsigned char *pins, unsigned
 
 /* Also protect direct/native start callers before the network broadcast. */
 static void ABI private_start_gate(unsigned char *self) {
-    if (!self[0x42] && reject_private_team_start()) return;
+    if (!self[0x42] && (reject_private_team_start() || !runtime_private_party_check())) return;
     original_lobby_start(self);
 }
 
@@ -1769,18 +1923,8 @@ static void ABI select_mode(void *sender, int index) {
     }
     selector_mode_index = index;
     const int private = is_private();
-    /* PUBLIC_SPEED_STEP_2: integration sketch, NOT implemented protocol APIs.
-     * After STEP_1 and authenticated queue separation are implemented:
-     *
-     *   if (!private && index == 1 && !runtime_public_speed_available()) return;
-     *   runtime_public_speed_request(!private && index == 1);
-     *   const int speed = index == 1 && (private || runtime_public_speed_available());
-     *
-     * Submit that request when Go To Lobby starts the actual search, not here.
-     * Keep original_choice's Race mapping: this is a local game type, NOT a
-     * separate server queue. Reject a failed Speed search instead of falling
-     * back to Normal. See docs/SPEED_MODE_MATCHMAKING_PROPOSAL.md.
-     */
+    if (!private && index == 1 && !runtime_public_itemless_available()) return;
+    runtime_public_itemless_select(!private && index == 1);
     const int speed = index == 1 && private;
     if (private) {
         private_speed_selected = speed;
@@ -1791,7 +1935,8 @@ static void ABI select_mode(void *sender, int index) {
     }
     if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed, private);
     runtime_speed_mode_set(speed);
-    printf("Native Online mode: %s\n", speed ? "ITEMLESS" : index == 2 ? "BATTLE" : "NORMAL");
+    printf("Native Online mode: %s (%s)\n", index == 1 ? "ITEMLESS" : index == 2 ? "BATTLE" : "NORMAL",
+           private ? "private" : "public");
     original_choice(sender, index == 2 ? 1 : 0);
 }
 
@@ -1810,23 +1955,18 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         unsigned char *available, *items;
         memcpy(&available, self + 0x1b0, sizeof available);
         memcpy(&items, available + 0x20, sizeof items);
-        /* PUBLIC_SPEED_STEP_1: once the negotiated server capability AND client
-         * queue integration exist, this becomes:
-         *   items[1] = is_private() || runtime_public_speed_available();
-         * That API is proposed, not implemented. Keep separate private/public
-         * remembered choices; private_speed_selected must not initialize a public
-         * Speed search merely because its option has become available.
-         */
-        items[1] = (unsigned char)is_private();
+        const int private = is_private();
+        items[1] = (unsigned char)(private || runtime_public_itemless_available());
+        runtime_public_itemless_reset();
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
-        const int index = type == 2 ? 2 : (items[1] && private_speed_selected ? 1 : 0);
+        const int index = type == 2 ? 2 : (items[1] && (private ? private_speed_selected : runtime_public_itemless_selected()) ? 1 : 0);
         selector_mode_index = index;
         memcpy(self + 0x190, &index, sizeof index);
-        runtime_speed_mode_set(index == 1);
+        runtime_speed_mode_set(private && index == 1);
         /* The asset already supplies all options. Keep the base selector initialization. */
         base_event(self, event, owner);
-        race_type_visibility(self, owner, items[1] && index != 2);
+        race_type_visibility(self, owner, private && index != 2);
     } else {
         const int previous = customized_selector;
         customized_selector = race ? 2 : count == 3;
@@ -1968,6 +2108,7 @@ static struct TeamNameLayout team_name_layouts[8];
 /* Native PLAYER n is a local controller index, not a shared lobby identity. */
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
     original_team_slot_update(self, owner, dt);
+    refresh_lobby_members_visibility();
     int mode = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
     if (mode != 1 || runtime_online_mode_private_cup() || (!private_team_selector_active && !is_private())) return;
@@ -2004,6 +2145,59 @@ static void ABI team_slot_update(unsigned char *self, unsigned char *owner, floa
         memcpy(&flags, name + 12, 4); flags |= 0x1000;
         memcpy(name + 12, &flags, 4);
     }
+    /* The native ready tick is the name's sole child, in text-local coordinates. */
+    unsigned char *children = pointer_at(name, 0x48);
+    int count = 0;
+    if (children) memcpy(&count, children + 12, 4);
+    unsigned char *tick = count == 1 ? pointer_at(pointer_at(children, 0x20), 0) : NULL;
+    if (tick) {
+        float tick_height, tick_scale, tick_pivot;
+        memcpy(&tick_height, tick + 0x94, 4);
+        memcpy(&tick_scale, tick + 0x88, 4);
+        memcpy(&tick_pivot, tick + 0x70, 4);
+        const float tick_y = height * .5f + tick_height * tick_scale * (tick_pivot - .5f);
+        memcpy(tick + 0x64, &tick_y, 4);
+        unsigned flags;
+        memcpy(&flags, tick + 12, 4); flags |= 0x1000;
+        memcpy(tick + 12, &flags, 4);
+    }
+}
+
+static int selector_player_ready(unsigned char *self, unsigned char *player) {
+    if (!player) return -1;
+    void *key = NULL;
+    make_handle(&key, player);
+    if (!key) return -1;
+    uint32_t low, high;
+    memcpy(&low, (unsigned char *)key + 0x10, 4);
+    memcpy(&high, (unsigned char *)key + 0x20, 4);
+    uint64_t hash = (uint64_t)high << 32 | low;
+    hash = hash * 0x40000 + ~hash;
+    hash = (hash >> 31 ^ hash) * 21;
+    hash = (hash >> 11 ^ hash) * 65;
+    unsigned char *ready = NULL;
+    const int found = ready_find(pointer_at(self, 0x60), &key,
+                                (unsigned)(hash >> 22) ^ (unsigned)hash, &ready);
+    assign_handle((unsigned char *)&key, NULL);
+    return found && ready ? !!*ready : -1;
+}
+
+static void refresh_team_legend(unsigned char *self) {
+    unsigned char *project = handle_object(&active_team_selector_project);
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    unsigned char *player = list ? find_player(list, controller_player(team_legend_controller)) : NULL;
+    const int ready = selector_player_ready(self, player);
+    unsigned char *remove = gui_manager && *gui_manager ? pointer_at(*gui_manager, 0xf0) : NULL;
+    if (!project || !remove || ready < 0 || ready == team_legend_state) return;
+    ProjectEvent dispatch = (ProjectEvent)pointer_at(pointer_at(project, 0), 0xb0);
+    team_legend_state = ready; /* Native legend events may reenter this behavior. */
+    for (int button = 1; button <= 2; ++button) {
+        memcpy(remove + 0x18, &button, 4);
+        dispatch(project, remove);
+    }
+    char *label = intern_string(*string_pool, ready ? "UNREADY" : "READY");
+    add_legend(project, ready ? 2 : 1, &label, 1);
+    if (label) drop_string(*string_pool, label - 16);
 }
 
 static void ABI team_selector_event(unsigned char *self, void *event, void *owner) {
@@ -2021,38 +2215,26 @@ static void ABI team_selector_event(unsigned char *self, void *event, void *owne
         const int id = controller_player(controller);
         void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
         unsigned char *player = list ? find_player(list, id) : NULL;
-        unsigned char *ready = NULL;
-        int found = 0, team = -1, teams = 0, capacity = 0;
-        if (player) {
-            void *key = NULL;
-            make_handle(&key, player);
-            if (key) {
-                uint32_t low, high;
-                memcpy(&low, (unsigned char *)key + 0x10, 4);
-                memcpy(&high, (unsigned char *)key + 0x20, 4);
-                uint64_t hash = (uint64_t)high << 32 | low;
-                hash = hash * 0x40000 + ~hash;
-                hash = (hash >> 31 ^ hash) * 21;
-                hash = (hash >> 11 ^ hash) * 65;
-                found = ready_find(pointer_at(self, 0x60), &key, (unsigned)(hash >> 22) ^ (unsigned)hash, &ready);
-                assign_handle((unsigned char *)&key, NULL);
-            }
-            memcpy(&team, player + 0xe4, 4);
-        }
+        const int ready = selector_player_ready(self, player), found = ready >= 0;
+        int team = -1, teams = 0, capacity = 0;
+        if (player) memcpy(&team, player + 0xe4, 4);
+        if (controller > 0) team_legend_controller = controller;
         memcpy(&teams, self + 0x7c, 4);
         memcpy(&capacity, self + 0x80, 4);
         printf("Native private TEAM input: signal=%d controller=%d player=%d found=%d ready=%d team=%d teams=%d capacity=%d\n",
-               signal, controller, id, found, found && ready ? *ready : -1, team, teams, capacity);
+               signal, controller, id, found, ready, team, teams, capacity);
         /* Native Cancel exits when not ready. Private match selection is locked
          * to this screen: only the native ready -> unready transition is legal. */
-        if (signal == 9 && (!found || !ready || !*ready)) return;
+        if (signal == 9 && ready <= 0) { refresh_team_legend(self); return; }
     }
     original_team_selector_event(self, event, owner);
     if (kind == *gui_uninitialize_type) {
+        team_legend_state = -1; team_legend_controller = 1;
         private_team_selector_active = 0;
         assign_handle((unsigned char *)&active_team_selector_project, NULL);
     }
     if (kind == *initialize_type && team_race) {
+        team_legend_state = -1; team_legend_controller = 1;
         private_team_selector_active = 1;
         unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
         int disabled_depth = 0;
@@ -2088,6 +2270,8 @@ static void ABI team_selector_event(unsigned char *self, void *event, void *owne
             printf("Native private TEAM: input flags=%02x controller_mask=%02x\n", project[0x34], mask);
         }
     }
+    if (team_race && private_team_selector_active) refresh_team_legend(self);
+    refresh_lobby_members_visibility();
 }
 
 static size_t team_countdown_stub(unsigned char *code, unsigned char *image, size_t shift) {
@@ -2454,7 +2638,9 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     controller_player = (ControllerPlayer)(image + 0x97f160);
     find_player = (FindPlayer)(image + 0xc02600);
     ready_find = (ReadyFind)(image + 0x9c32c0);
+    add_legend = (AddLegend)(image + 0xa09d30);
     original_marker_event = (EventHandler)(image + 0x9d67e0);
+    marker_initialize_type = (void **)(image + 0x2abfc40);
     lookup_hero = (LookupHero)(image + (0xf9c610 - shift));
     original_leader_event = (EventHandler)(image + 0x9de1b0);
     original_leader_update = (BehaviorUpdate)(image + 0x9dedb0);
