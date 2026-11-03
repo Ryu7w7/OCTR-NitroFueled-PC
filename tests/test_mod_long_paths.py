@@ -36,6 +36,23 @@ class LongPathTests(unittest.TestCase):
             self.assertEqual(copy.read_bytes(), b'igz')
             shutil.rmtree(long_path(Path(temp)) / ('d' * 120))
 
+    def test_file_map_accepts_long_source(self):
+        from mod_overlays import file_map
+        from mod_file_paths import read_map
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            game = root / 'game'
+            game.mkdir()
+            source = long_path(root / ('a' * 120) / ('b' * 120) / 'cup.igz')
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b'cup')
+            mapping = root / 'cup-files.map'
+            file_map(game, mapping, root / 'dirs', [(Path('ui/cup.igz'), source)])
+            stamp = mapping.stat()
+            _, files = read_map(str(mapping), str(game), stamp.st_mtime_ns, stamp.st_size)
+            self.assertEqual(files['ui/cup.igz'], plain_path(source))
+            shutil.rmtree(long_path(root / ('a' * 120)))
+
 
 if __name__ == '__main__':
     unittest.main()
