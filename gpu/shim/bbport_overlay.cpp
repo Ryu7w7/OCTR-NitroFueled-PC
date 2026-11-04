@@ -24,6 +24,7 @@
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_spectate.h"
+#include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
@@ -636,6 +637,58 @@ void ReportTab() {
         return;
     }
     ReportSection(view, g_report_who);
+}
+
+// Spectator build: the races in RaceReplay (src/runtime_replay.c records them), newest first.
+void ReplaysTab() {
+    static RrListEntry list[RR_LIST_MAX];
+    static int listed = -1;
+    static double listed_at = -100.0;
+    const double now = ImGui::GetTime();
+    if (listed < 0 || now - listed_at > 3.0) {
+        listed = runtime_replay_list(list, RR_LIST_MAX);
+        listed_at = now;
+    }
+    ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                 "Every race is recorded. Watch one from the main menu: L1 / R1 lap, L2 / R2 racer, "
+                                 "Square pause, Up / Down speed, Left / Right rewind and fast forward; leave with the pause "
+                                 "menu's Quit.",
+                                 "Каждая гонка записывается."));
+    const bool can_start = runtime_replay_can_start() != 0;
+    if (runtime_replay_playing()) {
+        ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("A replay is on.", "Идёт повтор."));
+    } else if (!can_start) {
+        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("Replays start from the menus, not during a race.",
+                                                                   "Повторы запускаются из меню, не во время гонки."));
+    }
+    if (!listed) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("No races recorded yet.", "Записанных гонок пока нет."));
+        return;
+    }
+    if (ImGui::BeginTable("##replays", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        for (int i = 0; i < listed; ++i) {
+            const RrListEntry& e = list[i];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(!can_start);
+            if (ImGui::SmallButton(BbSettings::MenuText("Watch", "Смотреть")) && runtime_replay_play_file(e.file)) {
+                SetOpen(false);
+            }
+            ImGui::EndDisabled();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.track);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.player);
+            ImGui::TableNextColumn();
+            if (e.place) ImGui::Text("#%d", e.place);
+            else ImGui::TextDisabled("-");
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s  %d:%02d", e.when, (int)e.duration / 60, (int)e.duration % 60);
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
 }
 
 void FriendsTab() {
@@ -1263,6 +1316,10 @@ void Menu() {
     }
     if (ImGui::BeginTabItem(BbSettings::MenuText("Room", "Комната"))) {
         RoomTab();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Replays", "Повторы"))) {
+        ReplaysTab();
         ImGui::EndTabItem();
     }
     {
