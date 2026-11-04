@@ -52,8 +52,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--aerolib', type=Path, default=None)
+    p.add_argument('--boot-dir', type=Path, default=None)
     args = p.parse_args()
-    link = json.loads((args.out / 'link.json').read_text())
+    link = json.loads(((args.boot_dir or args.out) / 'link.json').read_text())
     names = aerolib_names(args.aerolib or args.out / 'aerolib.inl')
     lines = generate(link['unresolved_imports'], names)
     target = args.out / 'import_names.txt'

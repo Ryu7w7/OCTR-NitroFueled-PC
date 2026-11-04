@@ -14,15 +14,16 @@ class ProfileTests(unittest.TestCase):
     def test_linux_launch_passes_dlc_directory(self):
         # Run the actual profile invocation with a recorder in place of Python.
         script = (ROOT / 'run.sh').read_text()
-        start = script.index('"$PYTHON" scripts/content_profile.py')
+        start = script.index('startup_python scripts/content_profile.py')
         command = script[start:].split('\n#', 1)[0]
+        wrapper = script[script.index('startup_python() {'):].split('\n}\n', 1)[0] + '\n}\n'
         for override in ('', '/custom DLC/packages'):
             with self.subTest(override=override):
                 env = dict(os.environ, BB_DLC_DIR=override)
                 result = subprocess.run(
                     ['bash', '-eu', '-c',
                      'record() { printf "%s\\0" "$@"; }\n'
-                     'PYTHON=record; game="/game dump"; data="/user data"; out="$data/out"\n' + command],
+                     'PYTHON=record; game="/game dump"; data="/user data"; out="$data/out"\n' + wrapper + command],
                     env=env, capture_output=True, check=True)
                 args = result.stdout.decode().rstrip('\0').split('\0')
                 self.assertEqual(args[args.index('--dlc-dir') + 1], override or '/user data/dlc')

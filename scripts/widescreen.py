@@ -206,7 +206,7 @@ def misfit(xml, out):
     return None
 
 
-def prepare(game, out, config, env, title_id, app_version, base_patches):
+def prepare(game, out, config, env, title_id, app_version, base_patches, *, boot_dir=None):
     """The launch with the layout bbport.ini picks: a dict with `config` (the settings file
     scripts/patches.py and the render path read), `patches_dir` (the executable variant),
     `archive_patches` ({guest: file}, replacing base_patches' for the same archives) and `env`;
@@ -253,7 +253,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
             xml.append(port_meta(meta, port) if eu else meta)
     if not eu:
         correct_markers(xml, shaders[0]['factor'])
-    reason = misfit(xml, out)
+    reason = misfit(xml, boot_dir if boot_dir is not None else out)
     if reason:
         say(f'{label} not used (the executable is not a 1.21 build the layout fits: {reason}): 16:9')
         return None
@@ -288,6 +288,7 @@ def main():
     p = argparse.ArgumentParser(description='The 21:9 or 32:9 layout of a launch (run.sh).')
     p.add_argument('game')
     p.add_argument('--out', required=True)
+    p.add_argument('--boot-dir', help='verified boot inputs (default: --out)')
     p.add_argument('--settings', required=True, help='bbport.ini')
     p.add_argument('--title-id', default=TITLE_ID)
     p.add_argument('--app-version', default=APP_VERSION)
@@ -296,7 +297,7 @@ def main():
     global MESSAGES
     MESSAGES = sys.stderr
     base = {archive_patch.read(path)[1]: Path(path) for path in a.base}
-    layout = prepare(a.game, a.out, a.settings, dict(os.environ), a.title_id, a.app_version, base)
+    layout = prepare(a.game, a.out, a.settings, dict(os.environ), a.title_id, a.app_version, base, boot_dir=a.boot_dir)
     print(f'settings={layout["config"] if layout else a.settings}')
     print(f'patches_dir={layout["patches_dir"] if layout else ""}')
     print(f'archive_patches={archive_list(base, layout)}')
