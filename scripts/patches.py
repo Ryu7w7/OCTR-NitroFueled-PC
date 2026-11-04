@@ -224,14 +224,49 @@ def read_settings(path):
     return settings
 
 
-def eboot_segments(elf):
-    """(start, end) of eboot.elf's load segments: patches must land inside one."""
+# Mod code area: the executable segment is mapped up to the next segment (the USA/EU 1.21 code
+# ends at 0x233c078 and the next segment starts at 0x2400000: about 780 KB of zeros), so patch mods
+# can place their code there instead of squeezing it into the code segment's last padding.
+MOD_CODE_AREA_MAX=1024*1024
+
+
+def code_extension(loads):
+    """End of the executable load segment once extended to the next load segment, from
+    [(type, flags, vaddr, memsz)] (types 1 and 0x61000010); None when there is no such gap."""
+    page=0x4000
+    for kind,flags,vaddr,memsz in loads:
+        if kind!=1 or not flags&1: continue
+        end=vaddr+memsz
+        following=[v for k,_,v,_ in loads if k in (1,0x61000010) and v>=end]
+        if not following: return None
+        limit=min(following)
+        if limit-end>MOD_CODE_AREA_MAX or limit%page: return None
+        return limit
+    return None
+
+
+def program_loads(elf):
+    """[(type, flags, vaddr, memsz)] of eboot.elf's program headers."""
     phoff,=struct.unpack_from('<Q',elf,0x20)
     phentsize,phnum=struct.unpack_from('<HH',elf,0x36)
-    segments=[]
+    out=[]
     for i in range(phnum):
-        kind,_,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
-        if kind==1: segments.append((vaddr,vaddr+memsz))
+        kind,flags,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
+        out.append((kind,flags,vaddr,memsz))
+    return out
+
+
+def eboot_segments(elf):
+    """(start, end) of eboot.elf's load segments: patches must land inside one. The executable one
+    reaches up to the next segment (code_extension)."""
+    loads=program_loads(elf)
+    extended=code_extension(loads)
+    segments=[]
+    for kind,flags,vaddr,memsz in loads:
+        if kind!=1: continue
+        end=vaddr+memsz
+        if flags&1 and extended: end=extended
+        segments.append((vaddr,end))
     return segments
 
 
@@ -517,6 +552,9 @@ def compile_external(selected, segments, elf=None, strict=False, require_verific
                     for start,pos,size in load_segments(elf):
                         if start<=offset and offset+len(data)<=start+size:
                             original=elf[pos+offset-start:pos+offset-start+len(data)];break
+                    # Past a segment's file bytes (its zero fill, or the mod code area) memory starts as zeros.
+                    if original is None and not any(start<=offset<start+size for start,_,size in load_segments(elf)):
+                        original=bytes(len(data))
                     if original is None or hashlib.sha256(original).hexdigest()!=expected:
                         raise ValueError('executable code signature mismatch at '+str(line.get('Address')))
                 ours.append((offset,data))
