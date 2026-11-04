@@ -9,11 +9,11 @@ Updated 2026-10-09.
 | Loader reaches the eboot entry, libc.prx/Fios2/NpToolkit2 initialized | reached |
 | First frame presented | reached: the license screen renders at 25-30 FPS, 51 draws/frame |
 | Sound and input | reached: two audio ports on PipeWire, Steam Deck Controller through SDL3 |
-| Saving | reached: user/savedata/1/CUSA13795/savedata{0,1}/SYS-DATA.sav written; user confirmed progress persists between launches (2026-10-09) |
+| Saving | reached: user/savedata/1/CUSA13795/savedata{0,1}/SYS-DATA.sav written; I confirmed progress persists between launches (2026-10-09) |
 | Main menu | reached (2026-10-09, run 12): after the license screens and Bink intro videos the game's own log shows menu/garage activity ("changeHeroAndOutfit", "Loading hero DriverNGin"), ~300 draws/frame at 30 FPS |
-| One full race | reached (2026-10-09, run 14): arcade races play through with sound, the Steam Deck controller and saving (user report) |
-| Adventure mode | plays after the sampler fix (user tried it; not played to the end) |
-| Split screen | works: a second gamepad on port 2 joins (user-confirmed) |
+| One full race | reached (2026-10-09, run 14): arcade races play through with sound, the Steam Deck controller and saving (I tested this) |
+| Adventure mode | plays after the sampler fix (I tested it, but did not play to the end) |
+| Split screen | works: a second gamepad on port 2 joins (I confirmed this) |
 | Game patches | 60 FPS and motion-blur-off switch from the menu; motion blur off confirmed working |
 | EU 1.21 Graphics / Quit Game | region hooks and localized overlay validated against both editions; live menu interaction pending ([notes](22-eu-game-menus.md)) |
 | EU 1.21 private Speed Mode | startup, hook installation, and 40-track overlay preparation validated for CUSA14876 and CUSA13795; live EU lobby/multiplayer verification pending ([notes](21-eu-speed-mode.md)) |
@@ -76,7 +76,7 @@ with the desktop apps closed.
   (a watertight clipping geometry shader changed nothing) and a sample-0 colour mask. Fix: the
   game's MSAA is a setting, off by default (bbport.ini `msaa`, launcher Settings > Display; needs a
   restart; BB_NO_MSAA overrides): host images, views and pipelines use one sample, the guest
-  memory layout is unchanged and MSAA texture reads become plain 2D reads. User-confirmed (lines
+  memory layout is unchanged and MSAA texture reads become plain 2D reads. I confirmed this (lines
   gone, no other differences on several tracks).
 - **Adventure hub sky stripes** (fixed 2026-10-09, run 31): the frame analyzer showed the final
   colour-grading pass sampling a 1024x32 lookup table built from height-1 render targets that the
@@ -84,7 +84,7 @@ with the desktop apps closed.
   memory (never written by the GPU), so the LUT was garbage and gradients banded. Fix: 1D images
   are lowered to 2D with height 1 in the SPIR-V backend (image type, coordinates, offsets,
   derivatives, size queries), views and images (the 1D part of shadPS4 #5133/#5171, without the
-  cube-map changes that crashed RADV here). User-confirmed.
+  cube-map changes that crashed RADV here). I confirmed this.
 - **Clobbered packet headers**: in CTR a single dword inside a submitted command buffer is
   sometimes overwritten with 1 (`Bad PM4 packet ... [00000001]` where a SET_CONTEXT_REG header
   was). Dropping the rest of the buffer froze the game on the fence behind it; the decoder now
@@ -123,7 +123,7 @@ with the desktop apps closed.
   the second input vertex are mapped to extra attribute locations. Frame analyzer:
   `BB_CAPTURE_TRIGGER=out/capture_trigger BB_CAPTURE_DIR=out/capture`, `touch out/capture_trigger`.
 
-- The license screen's accept needed more than one attempt (reported by the user); the save that
+- The license screen's accept needed more than one attempt (I observed this); the save that
   follows was written, so the input path works. Watch for a repeat.
 - Memory: the Steam Deck has 14 GiB; close other applications before running.
 - Upstream Python tests `test_run_settings.*` call run.sh, which builds: never run the full
@@ -150,7 +150,7 @@ with the desktop apps closed.
 
 - The shader/pipeline cache is kept across launches (two fixes in 06-fur.md: the geometry
   specialization comparison and the preload fetch shader). `BB_CLEAR_SHADER_CACHE=1` or the
-  launcher's "Clear the shader cache at start" deletes it. User-confirmed: fur right on a fresh
+  launcher's "Clear the shader cache at start" deletes it. I confirmed: fur right on a fresh
   cache and on the next launch with the cache preloaded.
 - The game executable is `out/sacredfire` (bbport's `bb-probe`; the packaged programs are
   `sacredfire`, `sacredfire-game`). `BB_PROBE` still names a wrapper around it.

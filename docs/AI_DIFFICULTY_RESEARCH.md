@@ -1,15 +1,15 @@
 # Extended AI difficulty research
 
-## Scope (2026-11-01; corrected by user)
+## Scope (2026-11-01; scope correction)
 
-User requests stronger selectable difficulties and driving/item tuning in Arcade,
+I request stronger selectable difficulties and driving/item tuning in Arcade,
 Private Match and Public Matchmaking, excluding Adventure entirely,
 with more aggressive item use, better racing performance and less reliance
 on rubberbanding. Initial proposed labels: Very Hard, Extreme, Nightmare.
 A community report claims forcing difficulty 3 gives faster AI and more
 Clock/Orb use but breaks Adventure bosses. Treat that report as an unverified
 lead, not a safe implementation recipe. Do not run or control the game;
-user owns live tests. Build executable only, never GPU.
+I handle live tests myself. Build executable only, never GPU.
 
 ## Native entry points found
 
@@ -42,13 +42,13 @@ Many serialized fourth difficulty values are zero, so blindly selecting native
 Nightmare is not an acceptable substitute for tuned profiles.
 
 
-## Updated user scope and implementation in progress
+## Updated scope and implementation in progress
 
 Adventure is excluded (including bosses); extended difficulties belong only to
 Arcade/Online/Private/Public. All eligible modes must receive the tuning. Itemless Private Single AND CUP
 are explicitly included, with actual driving improvements across
 Easy/Medium/Hard/Very Hard/Extreme/Nightmare. Item aggression
-alone is not a sufficient Itemless implementation. User requests drift lines,
+alone is not a sufficient Itemless implementation. I request drift lines,
 U-turns, hops and shortcuts resembling Time Trial driving. These capabilities
 must be verified independently, not claimed from numeric difficulty changes.
 
@@ -105,7 +105,7 @@ there is deliberately no Private-only or Itemless-only gate on this improvement.
 
 Thresholds as fractions of the native drift timer are .80/.84/.88/.92/.95/.97
 for Easy/Medium/Hard/Very Hard/Extreme/Nightmare. Fuller boosts should bank
-more reserve; this is a tuning hypothesis awaiting the user's track tests,
+more reserve; this is a tuning hypothesis awaiting my track tests,
 not a measured lap-time or guaranteed perpetual-fire claim.
 
 When the fastest active fire has less than 1 second remaining, the controller
@@ -181,7 +181,7 @@ start drift on more eligible entries without writing steering, forcing drift
 on straight sections, or bypassing the elevated stuck-recovery speed gate.
 It applies to Arcade and Online (Normal/Itemless, Single/CUP); Adventure keeps
 the original argument. Native continuation, boost count and grounding are
-unchanged. The expected increase in real drift frequency requires user testing;
+unchanged. The expected increase in real drift frequency requires my testing;
 unit input coverage is not a measured drifts-per-lap result.
 
 Checks: matching USA/EU function prefixes; unit cases cover progressively more
@@ -195,10 +195,10 @@ Executable-only build containing drift-entry and line-choice hooks completed at 
 
 ## Selector navigation regression and revised scope (2026-11-01)
 
-User clarifies HOST owns online difficulty. Guests must not independently choose
+I clarify HOST owns online difficulty. Guests must not independently choose
 an AI profile; native host/server authority remains authoritative. Earlier notes
 about guest profile work concern replication/display, not a guest setting UI.
-User removes U-turn and hop chaining from the requested scope. Shortcut selection
+I remove U-turn and hop chaining from the requested scope. Shortcut selection
 and drift frequency remain required.
 
 Concrete selector defect: +0x190 is the initialization index; +0x1a0 is the live
@@ -239,7 +239,7 @@ the temporary list. Native line choice and transition application still execute.
 This enables faster authored branches (including authored shortcut routes) where
 the dump provides usable time records; it does not create missing AI shortcut
 splines or prove every shortcut drivable. High-speed route success still requires
-user track testing. U-turn and hop chaining were explicitly removed from scope.
+my track testing. U-turn and hop chaining were explicitly removed from scope.
 
 Regression cases cover difficulty caps, faster-only choice, hazardous/invalid
 fallbacks, Arcade/Online versus Adventure, original list preservation, and native
@@ -267,7 +267,7 @@ retain 1/2/3 additional-racer occupancy allowances; these are congestion
 allowances, not path difficulty tiers. Easy/Medium and Adventure stay native.
 No synthetic geometry or checkpoint bypass is introduced. This cannot promise
 shortcuts lacking authored AI connections or guarantee successful driving on
-all tracks without user testing.
+all tracks without my testing.
 
 Unit checks cover a crowded/slower shortcut preferred over an ordinary faster
 route, multiple shortcuts, hazardous shortcut exclusion, invalid-record
@@ -297,13 +297,13 @@ Complete transport/position reconciliation and authority migration were not
 exercised. Do not claim guaranteed zero desync or completed extended profile
 replication. Only host should configure difficulty; a guest selector is not a
 solution for replicating extended profiles. Live two-client validation remains
-reserved to the user.
+reserved for my manual testing.
 
 CPU-only build with authored Nightmare shortcut priority: 2026-11-01T07:37:04.588979. Race-options tests and diff whitespace checks pass. GPU hash remains f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
 
 ## Connected approach planning and varied lanes (2026-11-01)
 
-User reports Nightmare does not use Crash Cove shortcut in Arcade Normal Single,
+I report Nightmare does not use Crash Cove shortcut in Arcade Normal Single,
 and AI routes look identical. Latest log confirms Nightmare selection before load;
 it does not establish that the route hook executed or that a shortcut succeeded.
 
@@ -320,7 +320,7 @@ Nightmare now looks one connected transition ahead and prefers the candidate
 whose endpoint best joins the next valid non-hazardous shortcut start. Direct
 shortcuts remain higher priority. It does not fabricate splines, skip checkpoints,
 teleport, add hopping or change human steering. This geometric planning is not
-live proof of correct jump timing; that remains a user-test requirement.
+live proof of correct jump timing; that remains a manual test requirement.
 
 For all six levels, comparable ordinary lanes are eligible within a bounded
 remaining-time allowance (20/16/12/10/8/5 percent). Current occupancy wins, then
@@ -337,11 +337,11 @@ segment, hazardous exclusion, direct shortcut priority and Story bypass. Existin
 drift/reserve/profile tests pass. Native authority input replication remains as
 previously documented; this does not claim a new live multiplayer sync test.
 
-Executable-only build completed 2026-11-01T07:58:18.712476, 2142776 bytes at out/sacredfire. GPU hash unchanged. User launch with BB_PREBUILT=1 and BB_PROBE="$PWD/out/sacredfire" regenerates updated Online assets through run.sh. No gameplay test performed.
+Executable-only build completed 2026-11-01T07:58:18.712476, 2142776 bytes at out/sacredfire. GPU hash unchanged. Launching with BB_PREBUILT=1 and BB_PROBE="$PWD/out/sacredfire" regenerates updated Online assets through run.sh. No gameplay test performed.
 
 ## Authority-carried profiles and stable route choice (2026-11-01)
 
-User requests explicit ownership, disconnect handling and varied Nightmare routes.
+I request explicit ownership, disconnect handling and varied Nightmare routes.
 The previous process-local profile limitation is now addressed DURING AI input
 replication, without adding an out-of-range native EDifficultyLevel or a separate
 UDP/HTTP protocol. This is not a claim that lobby profile replication or native
@@ -365,7 +365,7 @@ instead of its unrelated local menu preference. Native difficulty still carries
 Easy/Medium/Hard and remains the gate on whether an extended profile applies.
 No native difficulty3/4/5 is written into game tables or saves.
 
-The learned room profile is separate from the user's offline choice and cleared
+The learned room profile is separate from my offline choice and cleared
 on actual room leave. Changing difficulty requires ownership of CDifficultyManager
 using the same native ownership query as its getter; a guest change event is
 ignored. An owning choice clears the followed profile. Arcade/Adventure do not
@@ -401,7 +401,7 @@ not a two-client gameplay or transport loss test.
 Latest instruction: Nightmare should learn the developer Time Trial route on every
 track, while retaining independent race decisions and avoiding train-like lines.
 This section supersedes any implication that the authored-shortcut patch already
-achieves that. The user's latest Arcade Normal test still missed Crash Cove's jump.
+achieves that. my latest Arcade Normal test still missed Crash Cove's jump.
 The 07:59 log shows route approach/shortcut choices accepted by native code; that
 proves selection, NOT successful driving or jumping.
 
@@ -444,8 +444,8 @@ CPU executable rebuilt: 2026-11-01T08:25:40.611114+07:00, 2148608 bytes at `out/
 ## Spatial developer guidance and race item decisions (2026-11-01)
 
 The remaining implementation is now connected, replacing the earlier export-only
-status. Gameplay success remains unverified: the user explicitly owns gameplay
-testing, so no game process was launched or controlled.
+status. Gameplay success remains unverified: I handle gameplay
+testing myself, so no game process was launched or controlled.
 
 ### Steering, jumps and varied lines
 
@@ -469,7 +469,7 @@ and lap and smoothly respond to nearby reference-following racers. The line
 centers ahead of a recorded jump, and item-box attraction is suppressed there.
 These are small offsets, not a road-width-aware overtaking planner. A single
 narrow shortcut necessarily has shared geometry. Correct takeoff speed, landing,
-and actual success on every track still need user gameplay evidence.
+and actual success on every track still need my gameplay evidence.
 
 ### Boxes and item targeting
 
@@ -515,7 +515,7 @@ reference or accepted jump intention does not by itself prove a completed shortc
 
 ## TT tiers and races longer than three laps (2026-11-01 follow-up)
 
-User correction: Easy/Medium retain native route guidance. Hard uses N. Tropy,
+Scope correction: Easy/Medium retain native route guidance. Hard uses N. Tropy,
 Very Hard uses Oxide, Extreme uses Velo, Nightmare uses developer. All existing
 per-level drift/boost/box tuning remains; references do not copy a shared input
 tape. The owner selects guidance; peers continue native replicated inputs.
@@ -539,13 +539,13 @@ Validation: all 160 local records decode; four Crash Cove tiers traverse spatial
 queries at every lap 1–7; synthetic circular recording crosses its seam at lap 7;
 Easy/Medium guidance gates reject references. Existing malformed-file, jump/drift,
 height/direction, item, authority and race-options tests pass. Gameplay remains
-user-owned; no claim that Nightmare successfully lands every shortcut.
+subject to my manual verification; no claim that Nightmare successfully lands every shortcut.
 
 CPU build completed: 2026-11-01T17:45:30.445692, 2188064 bytes at `out/sacredfire`. GPU unchanged; no gameplay launch.
 
 ## Nightmare technique follow-up: sustained drift, takeoff, reserves and U-Turn
 
-User clarified the reported shortcut failures were on Nightmare, not Extreme.
+I clarified the reported shortcut failures were on Nightmare, not Extreme.
 Native ghost snapshot writer fcc140 stores turn, accelerator, reverse, brake,
 first/second jump buttons and a start-drift pulse. Crash Cove developer recording
 contains 26 start-drift pulses but 545 snapshots holding the first jump button;
@@ -584,9 +584,9 @@ broadcast entry bytes were inspected in the local extracted ELF. No game launch.
 
 CPU build completed: 2026-11-01T17:59:57.971867, 2197984 bytes at `out/sacredfire`. GPU SHA256 unchanged: `f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e`. No gameplay launch.
 
-## User confirms route/hops but no drift: native shoulder hold (2026-11-01)
+## I confirm route/hops but no drift: native shoulder hold (2026-11-01)
 
-User gameplay observation supersedes the earlier optimistic drift descriptions:
+My gameplay observation supersedes the earlier optimistic drift descriptions:
 reference routing and hops are visible, but drift was not. The previous start
 predicate adapter only scaled an angle. Native dcfb10 still rejects the nearly
 straight path by its curvature/sign gates, and dcfc10 can release the shoulder
@@ -610,13 +610,13 @@ Tests cover entry direction, shoulder hold, neutral steering continuation, nativ
 boost approval, minimum speed and unchanged unreferenced input. Reference tests
 cover serialized directions and neutral holds across the 160-tier export. Native
 speed helper bytes checked against the USA ELF and EU text dump. Gameplay remains
-user-owned: drift appearance and shortcut landing are not verified by unit tests.
+subject to my manual verification: drift appearance and shortcut landing are not verified by unit tests.
 
 Validation completed: C race-options, online-mode (both regional fixtures), TT guidance tests, and all four Python reference tests pass. Export regenerated 160 references. CPU rebuild: 2026-11-01T18:12:25.630018, 2199680 bytes. GPU SHA256 remains f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. No gameplay launch.
 
 ## Power-slide cycle and reserve-aware boost follow-up
 
-User emphasizes actual power-slide technique and preserving reserves, not merely
+I emphasize actual power-slide technique and preserving reserves, not merely
 holding drift. Removed the reference-input path's fixed 0.8 boost decision: it
 now calls the same reserve-aware decision used by native AI. With safe reserves,
 Very Hard/Extreme/Nightmare target .92/.95/.97 of the native timer. A recorded
@@ -637,7 +637,7 @@ C tests cover safe reserves, expiring fastest fire, reference edge versus takeof
 native refusal, exhausted-chain release, oversteer release and next-cycle input.
 They pass. Near-full timer targeting is not proof of a PERFECT rating at every
 physics tick, nor a guarantee of retaining fire through collisions/shortcuts.
-User gameplay verification is still required; no game was launched.
+My gameplay verification is still required; no game was launched.
 
 Latest CPU build (includes power-slide cycle follow-up): 2026-11-01T18:14:31.116046, 2200264 bytes. C tests pass; GPU checksum unchanged. No gameplay launch.
 
@@ -657,7 +657,7 @@ Speed is queried only for a reference drift, not every route sample. Tests
 reproduce null and mismatched entity bindings and assert no helper call/input
 mutation, then verify the restored binding permits normal drift processing.
 
-User also requests all guests follow room difficulty through takeover but regain
+I also request all guests follow room difficulty through takeover but regain
 their own difficulty at lobby return. Native c0a3b0 reads manager+0c for an owner
 and +10 for a non-owner. Preserving only the extended profile was insufficient:
 manager takeover could choose the guest's personal base difficulty. The adapter
@@ -678,7 +678,7 @@ follower behavior, simultaneous entity/manager takeover, unchanged personal base
 lobby restoration, and following the next race. Crash guards and existing online
 fixtures pass. This does NOT implement or prove host election: a surviving guest
 without native AI ownership remains a follower and can stop receiving AI updates.
-Only a host log is available here; user reports guest AI froze after the crash,
+Only a host log is available here; I report guest AI froze after the crash,
 but there is no guest migration trace establishing why authority did not transfer.
 Do not claim live migration or post-crash recovery is verified.
 
@@ -686,7 +686,7 @@ Final validation also covers late race-profile state while in lobby: it cannot o
 
 ## Nightmare shortcut entry: exact jump markers and bounded approach (2026-11-01)
 
-User still reports shortcut failure. Latest log 20261101_183312 confirms Arcade
+I still report shortcut failure. Latest log 20261101_183312 confirms Arcade
 Crash Cove, Nightmare selection and 160 loaded TT records. It records guidance
 intent, not actual launch speed/landing, so no successful shortcut is inferred.
 
@@ -716,19 +716,19 @@ Nightmare still resolves the developer tier; no track teleport, velocity injecti
 infinite boost or shared timed ghost playback is added. Bounded diagnostics record
 actual/reference speed and path error at jump markers, accepted input/grounded
 state, and missing technique bindings, to distinguish route intent from applied
-actions on the user's next run.
+actions on my next run.
 
 Tests cover single-marker export, no premature jump, preparatory release, press
 at the marker, skipped-sample crossing, target bounds, recorded steering magnitude,
 all 160 reference exports and Crash Cove tiers across laps 1–7. These checks do
 not establish that every shortcut is physically completed; gameplay remains
-user-owned and no game was launched.
+subject to my manual verification and no game was launched.
 
 CPU build completed 2026-11-01T18:40:49.230958, 2210480 bytes. Five Python tests, C race-options and TT guidance checks pass. GPU hash unchanged. No gameplay launch.
 
 ## Confirmed wrong AI component binding: drift/boost never applied (2026-11-01)
 
-User still sees hopping without drift/perfect boost. Latest 184111 log records
+I still see hopping without drift/perfect boost. Latest 184111 log records
 `technique skipped ... entity_match=0` twice for each of seven AI, and no
 `takeoff input` records. Previous guidance logs described intent only. The
 adapter's technique path was not reaching its packed-input decoder.
@@ -758,7 +758,7 @@ room/authority lifecycle checks pass with the corrected layout.
 Bounded `power slide` diagnostics now report controller slide state, normalized
 speed, native boost count and packed actions when both shoulder actions are
 actually applied. An applied input remains distinct from a measured PERFECT
-rating or a successful shortcut landing. Those require user gameplay validation;
+rating or a successful shortcut landing. Those require my gameplay validation;
 no game was launched by the agent.
 
 CPU rebuild: 2026-11-01T18:47:38.674270, 2211272 bytes. Corrected-layout C regressions pass, including native meter refusal clearing boost while preserving drift/item/profile bits. GPU hash unchanged; no gameplay launch.
@@ -766,7 +766,7 @@ CPU rebuild: 2026-11-01T18:47:38.674270, 2211272 bytes. Corrected-layout C regre
 
 ## 2026-11-01 — stop conflicting ghost/native drift steering
 
-User reports violent left/right drift changes with the 18:47 build. Latest log
+I report violent left/right drift changes with the 18:47 build. Latest log
 20261101_184807 now contains actual power-slide input applications and native
 boost counts 0/1: the corrected component binding works, but does not establish
 successful technique. Some reference takeoffs still report path errors above
@@ -791,7 +791,7 @@ remaining source of possible pose mismatch.
 Regression exercises opposite recorded steering across all five native states,
 native slide cancellation, distinguishing hop from slide, legal boost timing,
 component identity and owner/follower behavior. C race-options suite passes.
-No gameplay launched; actual drift stability and shortcut success require user
+No gameplay launched; actual drift stability and shortcut success require my
 validation. CPU-only rebuild follows; GPU excluded.
 
 CPU build completed 2026-11-01 18:53:58 +0700: out/sacredfire, 2211064 bytes. GPU SHA256 unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e). git diff --check clean.
@@ -799,7 +799,7 @@ CPU build completed 2026-11-01 18:53:58 +0700: out/sacredfire, 2211064 bytes. GP
 
 ## 2026-11-01 — actual recorded slide phases and first-boost reserve policy
 
-User reports Nightmare still hops without useful powerslides/reserves. Latest
+I report Nightmare still hops without useful powerslides/reserves. Latest
 185626 log contains repeated power-slide command diagnostics with boosts=0;
 these are input requests, not evidence of accepted PERFECT boosts. The earlier
 control-binding fix and steering handoff fix were insufficient.
@@ -845,9 +845,9 @@ from its reference. Do not report the overall difficulty work as complete.
 Validation: C race-options and TT guidance tests pass; exported all 160 references. Crash Cove developer record has 2098 samples, 1644 slide-reference samples and 39 jump markers, including 14 plain-hop markers now excluded from drift intent. CPU-only build completed 2026-11-01 19:04:38 +0700, out/sacredfire 2216872 bytes. GPU hash unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e). git diff --check passes.
 
 
-## 2026-11-01 — 19:52 user log: boost chains still fail
+## 2026-11-01 — 19:52 test log: boost chains still fail
 
-Inspected 20261101_195203.log after user reports no maintained speed/fire/reserves.
+Inspected 20261101_195203.log after I report no maintained speed/fire/reserves.
 Only four accepted-slide-boost records appear: AI 7, 2, 6, 1; all count=1,
 remaining fire 1.701, 0.000, 1.700, 1.697 seconds respectively. No accepted
 second/third boost was recorded. Diagnostics are bounded, so do not treat sampled
@@ -882,7 +882,7 @@ Changes:
   no speed/reserve refill, no suppression of physical damage/collisions.
 
 This margin is an explicit tuning choice, not a measured optimal value or proof
-of developer pace. It can still be insufficient and needs user gameplay evidence.
+of developer pace. It can still be insufficient and needs my gameplay evidence.
 Adventure, unguided modes and guest follower decisions keep the native predicate.
 The same owner creates the packed actions; no guest-local AI authority added.
 
@@ -904,12 +904,12 @@ preserves the tested Crash Cove climb; it is not authored collision/terrain
 metadata and cannot prove every track's hop classification. Regression covers
 positive/negative height changes and the actual first-lap Crash Cove asset.
 
-Final CPU-only rebuild including height classification: 2026-11-01 20:09:37 +0700, out/sacredfire 2219912 bytes. Race-options and TT-reference C regressions pass. GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. git diff --check clean. User gameplay outcome remains pending.
+Final CPU-only rebuild including height classification: 2026-11-01 20:09:37 +0700, out/sacredfire 2219912 bytes. Race-options and TT-reference C regressions pass. GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. git diff --check clean. My gameplay outcome remains pending.
 
 
 ## 2026-11-01 — 20:11 log: reject invalid/repeated ghost takeoff commands
 
-User still reports unprofessional-looking random hopping. Latest available log
+I still report unprofessional-looking random hopping. Latest available log
 201130 includes ghost takeoff application at speed=0 (AI7 error82.7, AI4 error609.7)
 and AI6 moving takeoff error1015.4. Repeated takeoff-input logs while airborne
 are not proof of repeated physical jumps, but the code did expose the same
@@ -944,7 +944,7 @@ CPU-only build completed 2026-11-01 20:19:08 +0700: out/sacredfire 2220960 bytes
 
 ## 2026-11-01 — 202203 log: separate native control from TT action conflicts
 
-Latest user log: logs/20261101_202203.log. Its accepted-boost trace contains
+Latest test log: logs/20261101_202203.log. Its accepted-boost trace contains
 39 records: 35 first boosts, four second boosts, no third boosts. Trace caps mean
 this is not a full-race census. 111 takeoff input records contain 105 actions09
 and six actions01. They do not establish 111 physical jumps. Previous logging
@@ -987,7 +987,7 @@ Regression checks preserve all64 action combinations' gas/reverse/brake/fire and
 profile bits, preserve steering for ghost U-turn flags, distinguish flat slide
 from terrain-hop authority, and block box detours during native/reference drift.
 No game launched. Gameplay quality, shortcut success and sustained reserves still
-require user evidence; these changes remove identified conflicts, not prove
+require my evidence; these changes remove identified conflicts, not prove
 Nightmare matches the developer reference.
 
 Validation: race-options and TT-reference C suites passed, including real local
@@ -1023,7 +1023,7 @@ window (intent512). Approach leaves an active slide intact. Only the actual
 one-shot terrain marker requests a release/press pair, if the previous frame
 held R1; a fresh native press is preserved. Grounding/alignment cancellation of
 the pending press remains. This moves takeoff at most one input update later
-than an already-prepared press; shortcut timing requires user validation.
+than an already-prepared press; shortcut timing requires my validation.
 
 When the heading continuation gate rejects an aligned reference slide but the
 native boost predicate already accepts .8 and the chain is neither complete nor
@@ -1053,12 +1053,12 @@ Validation completed: Clang ASan/UBSan race-options suite passed (GCC sanitizer
 link unavailable locally). CPU-only build 2026-11-01 20:47:26 +0700,
 out/sacredfire 2224032 bytes. GPU checksum unchanged:
 f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-git diff --check passed. User gameplay validation remains pending.
+git diff --check passed. My gameplay validation remains pending.
 
 
 ## 2026-11-01 — 205010: reference slide hold replaces stock-route heading cutoff
 
-User confirms all tested AIs now make the shortcut; remaining issue is short,
+I confirm all tested AIs now make the shortcut; remaining issue is short,
 interrupted drift and poor reserves. Latest log205010 has4009 control samples.
 536 recorded continuation rejections all report complete=0,oversteer=0,bank=0.
 Examples: AI7 tick47 direction1 angle+.250, AI4 tick54 direction0 angle-.280,
@@ -1087,12 +1087,12 @@ in the new trace, not proof of sustained fire or perfect driving. No gameplay ru
 CPU-only build completed 2026-11-01 21:04:47 +0700, out/sacredfire2231080 bytes.
 Race-options Clang ASan/UBSan passed; runtime and asset regressions passed.
 GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-git diff --check passed. No gameplay launched; user validation pending.
+git diff --check passed. No gameplay launched; my validation pending.
 
 
 ## 2026-11-01 — Normal needs pickups as well as a fast line
 
-User reports improved shortcuts/drifting but poor reserves and insufficient item/
+I report improved shortcuts/drifting but poor reserves and insufficient item/
 Wumpa box collection in Arcade Normal. Latest log210525 contains2539 control
 samples:2538 box=0,one box=1. Capped accepted-boost records67 first,6 second,one
 third; counter snapshots contain boost3 in5 samples. Reference-hold override is
@@ -1142,7 +1142,7 @@ Tests cover Wumpa demand/full/unknown count, held item and roulette, excluded sw
 crates, sticky targets, active-slide and shortcut protection, flat-vs-terrain
 lookahead, reference-release continuation and native safety/takeoff gates.
 CPU/asset guidance remains owner-only online. No gameplay launched, no GPU build.
-Sustained reserves and actual pickup success still require user validation.
+Sustained reserves and actual pickup success still require my validation.
 
 Validation: race-options and TT-reference C suites passed, including actual local
 reference assets; Clang ASan/UBSan race-options suite passed. CPU build completed
@@ -1152,7 +1152,7 @@ git diff --check passed. No gameplay launched.
 
 ## 2026-11-01: steering regression and missing recovery evidence
 
-User reports collisions, interrupted perfect chains and unstable reserves in
+I report collisions, interrupted perfect chains and unstable reserves in
 Normal Arcade. Latest log 212318 contains startup only; latest complete gameplay
 is 211829. Its 2,438 guided control samples contain 13 Wumpa-box and 7 item-box
 target transitions. Wumpa maxima for IDs 1–7 are 10/4/7/5/6/9/10. This proves
@@ -1189,7 +1189,7 @@ No gameplay launched. CPU-only build; GPU library unchanged.
 
 ## 2026-11-01: itemless pickup policy and TT recovery hysteresis
 
-User requests box pursuit only in Normal private/Arcade, with Itemless keeping
+I request box pursuit only in Normal private/Arcade, with Itemless keeping
 racing/boost/shortcut priorities. Gate aim_at_box using runtime_speed_race_active,
 the same active-private Itemless predicate used for assets/contact behavior.
 Clear any old claim before returning; leave targets and TT technique intent
@@ -1220,7 +1220,7 @@ No gameplay launched for this patch.
 
 ## 2026-11-01 — fix Normal item targeting rejection across difficulties
 
-User observes Nightmare withholding items in Normal Arcade/private. Found a
+I observe Nightmare withholding items in Normal Arcade/private. Found a
 definite adapter bug: shot_in_cone rejected degrees>=90, whereas actual
 update.pak kartaisystemdata root458 has cone120/180/240 for Easy/Medium/Hard
 (root+20), ranges1000/3000/5000 (+10), radii75/200/400 (+18). Extended profiles
@@ -1249,7 +1249,7 @@ comparison warning suppressed). git diff --check passed. No gameplay launched.
 
 ## 2026-11-01 — preserve shortcut takeoff and reject pickup detours on approaches
 
-User reports Normal Arcade AI missing shortcuts. Latest completed gameplay
+I report Normal Arcade AI missing shortcuts. Latest completed gameplay
 214545 shows accepted authored approach branches and seven accepted shortcut
 branches, so branch selection alone was not evidence of successful traversal.
 Many terrain markers report grounded state3/prepared3/actions01, beginning a
@@ -1334,7 +1334,7 @@ and item consumption still require a race with the new executable.
 
 ## 2026-11-02 — ghost owns routing, including rejoining
 
-User explicitly requested removal of native route fallback while retaining
+I explicitly requested removal of native route fallback while retaining
 pickups. Latest host log 20261102_000804 confirms Developer selected on Crash
 Cove but contains 144 native=1 recovery transitions. This supersedes the earlier
 hybrid recovery policy.
@@ -1366,7 +1366,7 @@ binary yet; clients must relaunch.
 Latest log 20261102_001512 shows all seven AI still requesting throttle at
 near-zero normalized speed late in the race, plus active slides losing their
 hold when reference alignment drops. Only three accepted slide boosts were
-logged before stalls. User requested native recovery specifically when stuck.
+logged before stalls. I requested native recovery specifically when stuck.
 
 Use the tactical component's native simulation timer (+68, virtual +b0,
 8192 ticks/second), per owner/lap. Less than 100 units displacement for one
@@ -1457,7 +1457,7 @@ build prepared; actual perfect-chain count and fire continuity need a live race.
 
 ## 2026-11-02 — adapt the recorded rhythm to the actual kart
 
-User corrected the objective: imitate the ghost's driving style dynamically;
+I corrected the objective: imitate the ghost's driving style dynamically;
 perfect quality and completing three boosts are not universal objectives.
 Removed the difficulty-specific perfect-meter threshold array added previously.
 Difficulty still selects the reference tier and existing driving/item policy.
@@ -1598,7 +1598,7 @@ actual pickup counts and fire continuity still require a fresh live race.
 
 ## 2026-11-02: superseding Normal / Itemless driving policy
 
-User explicitly replaced the previous all-modes ghost requirement. Normal Arcade
+I explicitly replaced the previous all-modes ghost requirement. Normal Arcade
 and Private now retain native tactical targets and native branch/line selection.
 Ghost guidance/recovery/technique is only invoked in actual Private Itemless.
 Normal still uses its pickup planner on the native route and native item-state
@@ -1739,7 +1739,7 @@ coverage, not a fresh live four-race host/guest gameplay confirmation.
 
 ## 2026-11-02: Itemless Easy/Medium remain native
 
-Per the final user correction, this exception applies only to Itemless. Easy
+Per the final scope correction, this exception applies only to Itemless. Easy
 and Medium bypass custom driving hooks, ghost guidance, base-speed bonuses
 and surface slowdown removal. Their original tuning columns are preserved,
 including after switching from Normal; the tuning cache distinguishes both

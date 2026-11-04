@@ -279,7 +279,7 @@ the package with:
 ./Bloodborne-bbport-x86_64.AppImage --vulkan-info 2>&1 | tee bbport-vulkan.log
 ```
 
-A user reported successful startup with FSR 3 on a GTX 1060 6GB (Fedora 44, NVIDIA
+Successful startup was reported with FSR 3 on a GTX 1060 6GB (Fedora 44, NVIDIA
 580.178.04); selecting FSR 4 caused a black window. Use FSR 3 on this configuration.
 
 MangoHud is bundled in the AppImage; enable its checkbox in the launcher. If MangoHud is also
