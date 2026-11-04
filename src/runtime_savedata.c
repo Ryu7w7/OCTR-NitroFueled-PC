@@ -76,6 +76,7 @@ static size_t mounts_done, memory_writes;
 void runtime_savedata_configure(const char *title) {
     if (title && *title) snprintf(title_id,sizeof(title_id),"%s",title);
 }
+const char *runtime_savedata_title(void) { return title_id; }
 
 static int make_dirs(const char *path) {
     char buffer[700];

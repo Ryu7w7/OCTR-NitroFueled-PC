@@ -121,6 +121,8 @@ struct Values {
     std::atomic<bool> friends_hide_activity{false};
     std::atomic<bool> friends_hide_me{false};
     std::atomic<bool> friends_no_notices{false};
+    /// Spectator build: share my races with my friends (src/runtime_spectate.c).
+    std::atomic<bool> spectate_share{true};
     std::atomic<int> notice_position{NoticeTopRight};
     /// SacredFire: frames per second the present thread lets through (0: no limit). The 60 FPS
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.

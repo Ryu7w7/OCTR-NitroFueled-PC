@@ -517,6 +517,101 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     return status;
 }
 
+int runtime_ryunet_transfer(const char *method, const char *target, const void *data, size_t size,
+                            char **reply, size_t *reply_size, size_t max_reply) {
+    *reply = NULL;
+    *reply_size = 0;
+    const char *host = getenv("BB_ONLINE_SERVER");
+    const char *port = getenv("BB_ONLINE_HTTP_PORT");
+    if (!host || !*host) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in sin;
+    memcpy(&sin, res->ai_addr, sizeof sin);
+    freeaddrinfo(res);
+    char address[INET_ADDRSTRLEN] = "";
+    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    const size_t cap = max_reply + 4096; /* the answer's headers too */
+    char *buffer = malloc(cap + 1);
+    if (!buffer) return 0;
+    size_t got = 0;
+    const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
+    for (int tried = 0; tried < RYUNET_FORMS; tried++) {
+        const int form = (first + tried) % RYUNET_FORMS;
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) break;
+#ifdef _WIN32
+        DWORD timeout = 30000;
+#else
+        struct timeval timeout = {30, 0};
+#endif
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+        if (connect(s, (const struct sockaddr *)&sin, sizeof sin) != 0) {
+            closesocket(s);
+            break;
+        }
+        char host_header[96];
+        snprintf(host_header, sizeof host_header, "%s", form == 0 ? host
+                                                       : form == 1 && address[0] ? address
+                                                                                 : "lavender-ps4-auth3.prod.demonware.net");
+        char proof[160], request[4096];
+        const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
+        const int n = snprintf(request, sizeof request,
+                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n"
+                               "Content-Type: application/octet-stream\r\n%s%s%s\r\n",
+                               method, target, host_header, size, signed_ok ? "X-RyuNET-Proof: " : "",
+                               signed_ok ? proof : "", signed_ok ? "\r\n" : "");
+        int sent_ok = n > 0 && n < (int)sizeof request && send(s, request, n, 0) == n;
+        for (size_t done = 0; sent_ok && done < size;) {
+            const size_t chunk = size - done > 65536 ? 65536 : size - done;
+            const int w = send(s, (const char *)data + done, (int)chunk, 0);
+            if (w <= 0) sent_ok = 0;
+            else done += (size_t)w;
+        }
+        if (!sent_ok) {
+            closesocket(s);
+            break;
+        }
+        got = 0;
+        for (int r; got < cap && (r = recv(s, buffer + got, (int)(cap - got > 65536 ? 65536 : cap - got), 0)) > 0;)
+            got += (size_t)r;
+        closesocket(s);
+        buffer[got] = '\0';
+        if (!ryunet_intercepted(buffer, (int)(got > 0x7fffffff ? 0x7fffffff : got), form)) {
+            ryunet_note_server_clock(buffer);
+            ryunet_keep_form(form);
+            break;
+        }
+        got = 0;
+    }
+    int status = 0;
+    if (got < 12 || strncmp(buffer, "HTTP/", 5) != 0 ||
+        sscanf(strchr(buffer, ' ') ? strchr(buffer, ' ') : buffer, "%d", &status) != 1) {
+        free(buffer);
+        return 0;
+    }
+    const char *start = strstr(buffer, "\r\n\r\n");
+    if (start) {
+        start += 4;
+        const size_t body = got - (size_t)(start - buffer);
+        if (body > 0) {
+            char *out = malloc(body + 1);
+            if (out) {
+                memcpy(out, start, body);
+                out[body] = '\0';
+                *reply = out;
+                *reply_size = body;
+            }
+        }
+    }
+    free(buffer);
+    return status;
+}
+
 /* One exchange of a request: its answer in resp (NUL-terminated) and its length, or -1 when
  * the server could not be reached. form is how a request to the RyuNET server names it
  * (ryunet_form_names); address is the server's. */
