@@ -78,7 +78,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     from patches import external_patches,external_selection,read_settings
     import mods
     import mod_content as nx
-    for key in ('BB_MOD_FILE_MAP','BB_MOD_FILE_DIRS','BB_MOD_SOURCE_GAME','BB_MOD_ARCHIVE_PLAN'):
+    for key in ('BB_MOD_FILE_MAP','BB_MOD_FILE_DIRS','BB_MOD_SOURCE_GAME','BB_MOD_ARCHIVE_PLAN','BB_MOD_PACKAGES_USED'):
         environment.pop(key,None)
     import mod_file_paths
     mod_file_paths.configure({})
@@ -113,6 +113,9 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
+        # The performance report's mods (scripts/perf_report.py): BB_MODS_ENABLED=0 below only
+        # keeps loose mods out, so the packages in use are named here.
+        if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)
         original=json.loads(selection.read_text()) if selection.exists() else {'enabled':[],'disabled':[]}
         if catalog['messages'] and any(key.startswith(PREFIX) and key.removeprefix(PREFIX) not in catalog['entries'] for key in original.get('enabled',[])):
             raise ValueError('An enabled mod could not be validated; check the OCTR mod messages')
