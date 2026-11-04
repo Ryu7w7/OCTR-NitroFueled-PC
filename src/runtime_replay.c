@@ -10,6 +10,7 @@
  * jumps to it through small trampolines in the mod code area after its code segment (scripts/patches.py
  * code_extension). Battle modes and the adventure hub are not recorded. */
 #include "runtime_replay.h"
+#include "runtime_replay_internal.h"
 #include "runtime.h"
 
 #include <dirent.h>
@@ -634,8 +635,25 @@ static void save(void) {
     fflush(stdout);
 }
 
+/* ---- shared with the player (runtime_replay_internal.h) ---- */
+unsigned char *rr_game(size_t offset) { return G(offset); }
+void *rr_ptr(size_t offset) { return PTR(offset); }
+void *rr_handle_object(void **slot) { return handle_object(slot); }
+void *rr_kart_of(int i, int *player_id) { return kart_of(i, player_id); }
+void *rr_component(void *kart, int meta_at) { return component(kart, meta_at); }
+void *rr_find_component(void *entity, void *meta) { return game_find_component(entity, meta, 0); }
+void *rr_running_boost(void *boosts) { return running_boost(boosts); }
+float rr_boost_length(void *boost) {
+    return AT(AT(boost, 0x10, void *), 0x1c, float) + AT(boost, 0x28, float) + game_maintained(boost);
+}
+void *rr_world(void) { return world(); }
+float rr_race_clock(void) { return race_clock(); }
+void *rr_game_data(int list, const char *name) { return game_data(list, name); }
+void rr_race_dir(char *out, size_t size) { race_dir(out, size); }
+
 /* ---- hooks: the game calls these on its own threads ---- */
 void ABI runtime_replay_level_end(void) {
+    runtime_replay_play_level_end();
     if (!rr.recording) return;
     rr.recording = 0;
     rr.race = 0;
@@ -645,6 +663,10 @@ void ABI runtime_replay_level_end(void) {
 
 void ABI runtime_replay_race_frame(void *race) {
     if (!race) return;
+    if (runtime_replay_playing()) {             /* a replay is shown: nothing is recorded */
+        runtime_replay_play_frame();
+        return;
+    }
     char *game = PTR(D_GAME), *frame = PTR(D_FRAME);
     const int mode = game ? AT(game, 0xd4c, int32_t) : -1;
     if ((mode >= 9 && mode <= 13) || mode == 7 || mode <= 0) return;   /* battle modes, the adventure hub */
@@ -713,7 +735,9 @@ void ABI runtime_replay_item_made(void *object, int type) {
  * push r15") and go on in the game's function. The factory hook calls the factory with the caller's
  * arguments (one on the stack), then tells the handler the new item. */
 void *runtime_replay_cont_race_frame, *runtime_replay_cont_level_exit, *runtime_replay_cont_item_used,
-     *runtime_replay_item_factory;
+     *runtime_replay_item_factory, *runtime_replay_cont_level_start, *runtime_replay_native_pad_read,
+     *runtime_replay_ai_body, *runtime_replay_ai_no_entity;
+void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
 
 #define RR_SAVE                                                                                       \
     "push %rax\n push %rcx\n push %rdx\n push %rsi\n push %rdi\n push %r8\n push %r9\n push %r10\n"   \
@@ -737,6 +761,20 @@ __asm__(".text\n"
         RR_ENTRY_STUB(runtime_replay_stub_race_frame, runtime_replay_race_frame, runtime_replay_cont_race_frame)
         RR_ENTRY_STUB(runtime_replay_stub_level_exit, runtime_replay_level_end, runtime_replay_cont_level_exit)
         RR_ENTRY_STUB(runtime_replay_stub_item_used, runtime_replay_item_used, runtime_replay_cont_item_used)
+        RR_ENTRY_STUB(runtime_replay_stub_level_start, runtime_replay_level_start, runtime_replay_cont_level_start)
+        /* replaces "call pad_read" (every frame): the game's call, then the player's tick */
+        ".globl runtime_replay_stub_pad_read\n"
+        "runtime_replay_stub_pad_read:\n"
+        "push %rdi\n call *runtime_replay_native_pad_read(%rip)\n pop %rdi\n push %rax\n"
+        RR_SAVE "call runtime_replay_tick\n" RR_RESTORE "pop %rax\n ret\n"
+        /* replaces "test rax, rax; je +6" in an AI kart's input delegate (rdi = its CKartAIComponent): in a
+         * replay (handler 0) the function returns at once, the kart gets the recorded inputs */
+        ".globl runtime_replay_stub_ai_input\n"
+        "runtime_replay_stub_ai_input:\n"
+        RR_SAVE "call runtime_replay_ai_input\n test %eax, %eax\n" RR_RESTORE
+        "jz 1f\n test %rax, %rax\n jz 2f\n jmp *runtime_replay_ai_body(%rip)\n"
+        "2: jmp *runtime_replay_ai_no_entity(%rip)\n"
+        "1: pop %rbx\n pop %r14\n pop %rbp\n ret\n"
         ".globl runtime_replay_stub_item_made\n"
         "runtime_replay_stub_item_made:\n"
         "push %rbx\n push %r12\n push %r13\n mov %rdi, %rbx\n mov %ecx, %r12d\n sub $8, %rsp\n"
@@ -744,7 +782,8 @@ __asm__(".text\n"
         "mov (%rbx), %rdi\n mov %r12d, %esi\n call runtime_replay_item_made\n mov %r13, %rax\n"
         "pop %r13\n pop %r12\n pop %rbx\n ret\n");
 extern void runtime_replay_stub_race_frame(void), runtime_replay_stub_level_exit(void),
-    runtime_replay_stub_item_used(void), runtime_replay_stub_item_made(void);
+    runtime_replay_stub_item_used(void), runtime_replay_stub_item_made(void), runtime_replay_stub_level_start(void),
+    runtime_replay_stub_pad_read(void), runtime_replay_stub_ai_input(void);
 
 static int writable(void *address, size_t length) {
 #ifdef _WIN32
@@ -788,6 +827,14 @@ static unsigned char *function_at(size_t usa, int eu) {
     return NULL;
 }
 
+int rr_redirect_call(unsigned char *site, const unsigned char *expected, void (*target)(void)) {
+    int32_t d;
+    memcpy(&d, site + 1, 4);
+    if (site[0] != 0xe8 || site + 5 + d != expected) return 0;
+    unsigned char *t = trampoline(target);
+    return t && rel32(site, 0xe8, t);
+}
+
 static int hook_entry(size_t usa, void (*stub)(void), void **cont) {
     unsigned char *at = function_at(usa, 1), *t = at ? trampoline(stub) : NULL;
     if (!t) return 0;
@@ -811,6 +858,7 @@ int runtime_replay_start(unsigned char *base, size_t size) {
     game_current_zone = (current_zone_fn *)zone;
     unsigned char *factory = function_at(0xe36a00, 1);
     if (!factory) return 0;
+    const int eu = memcmp(G(0xea2d90), PROLOGUE, 6) != 0;  /* EU 1.21: most functions 0x10 lower */
     runtime_replay_item_factory = factory;
     int hooks = hook_entry(0xea2d90, runtime_replay_stub_race_frame, &runtime_replay_cont_race_frame) &&
                 hook_entry(0xf9b450, runtime_replay_stub_level_exit, &runtime_replay_cont_level_exit) &&
@@ -833,9 +881,79 @@ int runtime_replay_start(unsigned char *base, size_t size) {
                 break;
             }
         }
+    /* the player: its functions and call sites, the ghost manager's level start, an AI kart's input, the pad read */
+    static const unsigned char AI_INPUT[5] = {0x48, 0x85, 0xc0, 0x74, 0x06};   /* test rax, rax; je +6 */
+    unsigned char *ai_site = G(0xdcb641), *pad_site = G(0x3d4954), *pad_fn = G(0x3d4dd0);
+    int32_t pad_d;
+    memcpy(&pad_d, pad_site + 1, 4);
+    int player = runtime_replay_play_install(eu) && !memcmp(ai_site, AI_INPUT, 5) && pad_site[0] == 0xe8 &&
+                 pad_site + 5 + pad_d == pad_fn &&
+                 hook_entry(0xf9b250, runtime_replay_stub_level_start, &runtime_replay_cont_level_start);
+    unsigned char *ai_t = player ? trampoline(runtime_replay_stub_ai_input) : NULL;
+    if (ai_t) {
+        runtime_replay_ai_body = ai_site + 5;
+        runtime_replay_ai_no_entity = ai_site + 11;
+        runtime_replay_native_pad_read = pad_fn;
+        player = rel32(ai_site, 0xe9, ai_t) && rr_redirect_call(pad_site, pad_fn, runtime_replay_stub_pad_read);
+    }
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
-    printf("Native Replay: races are recorded (%d of 4 item sites)\n", sites);
+    printf("Native Replay: races are recorded (%d of 4 item sites)%s (%s)\n", sites,
+           player && ai_t ? ", replays play from the menu's Replays tab" : ", the player could not be installed", eu ? "EU" : "USA");
     return 1;
+}
+
+/* ---- the menu's list (runtime_replay_list.h) ---- */
+#include "runtime_replay_list.h"
+
+static long long seconds_of(const uint8_t *date) {
+    const long long month = date[1], year = 2000 + date[0] - (month <= 2), era = year / 400, yoe = year - era * 400;
+    const long long doy = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + date[2] - 1;
+    const long long days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    return days * 86400 + date[3] * 3600 + date[4] * 60 + date[5];
+}
+
+static int newer_first(const void *a, const void *b) {
+    const long long x = ((const RrListEntry *)a)->sort, y = ((const RrListEntry *)b)->sort;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+int runtime_replay_list(RrListEntry *out, int max) {
+    char dir[700], path[800];
+    race_dir(dir, sizeof dir);
+    DIR *d = opendir(dir);
+    int n = 0;
+    RrListEntry *all = d ? calloc(RR_LIST_MAX * 2, sizeof *all) : NULL;
+    for (struct dirent *e; all && n < RR_LIST_MAX * 2 && (e = readdir(d));) {
+        const size_t len = strlen(e->d_name);
+        if (len < 5 || len >= sizeof all->file || strcmp(e->d_name + len - 4, ".crr")) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        FILE *f = fopen(path, "rb");
+        struct rr_header h;
+        const int ok = f && fread(&h, 1, sizeof h, f) == sizeof h && !memcmp(h.magic, RR_MAGIC, 8);
+        if (f) fclose(f);
+        if (!ok) continue;
+        RrListEntry *x = &all[n++];
+        snprintf(x->file, sizeof x->file, "%s", e->d_name);
+        h.track[sizeof h.track - 1] = h.player[sizeof h.player - 1] = 0;
+        copy_text(x->track, h.track[0] ? h.track : h.level, sizeof x->track);
+        copy_text(x->player, h.player, sizeof x->player);
+        snprintf(x->when, sizeof x->when, "20%02u-%02u-%02u %02u:%02u", h.date[0], h.date[1], h.date[2], h.date[3], h.date[4]);
+        for (int r = 0; r < RR_RACERS; r++) {
+            x->racers += h.racer[r].kind != RR_EMPTY;
+            if (h.racer[r].kind == RR_LOCAL && h.player[0] && !strncmp(h.racer[r].name, h.player, sizeof h.racer[r].name))
+                x->place = h.racer[r].finished;
+        }
+        x->laps = h.laps;
+        x->mode = h.mode;
+        x->duration = h.duration;
+        x->sort = seconds_of(h.date);
+    }
+    if (d) closedir(d);
+    if (all) qsort(all, (size_t)n, sizeof *all, newer_first);
+    if (n > max) n = max;
+    if (all) memcpy(out, all, (size_t)n * sizeof *out);
+    free(all);
+    return n;
 }
