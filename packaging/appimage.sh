@@ -42,7 +42,7 @@ root=$PWD
 } > packaging/runtime-paths.nix
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-(cd "$work" && nix bundle --impure --bundler github:ralismark/nix-appimage \
+(cd "$work" && nix bundle --impure --bundler "path:$root/packaging" \
     --expr "import $root/packaging {}")
 mkdir -p dist
 # The bundler names its output after the package's main program (sacredfire.AppImage).
