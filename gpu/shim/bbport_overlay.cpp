@@ -23,6 +23,7 @@
 #include "bbport_perf.h"
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
+#include "../../src/runtime_spectate.h"
 #include "../../src/runtime_net_ping.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
@@ -424,6 +425,7 @@ void PollFriends() {
     if (!privacy_sent) { // the server learns "appear offline" once per game
         privacy_sent = true;
         runtime_friends_set_hidden(s.friends_hide_me);
+        runtime_spectate_set_share(s.spectate_share);
     }
     // The server administrators' messages: always shown, whatever the
     // friends options say.
@@ -785,6 +787,9 @@ void FriendsTab() {
         if (f.online) {
             ImGui::SameLine();
             if (ImGui::Button(BbSettings::MenuText("Invite", "Пригласить"))) act("invite", f.name);
+            ImGui::SameLine();
+            // Spectator build: the friend's newest shared race, watched from REPLAYS.
+            if (ImGui::Button(BbSettings::MenuText("Spectate", "Смотреть"))) runtime_spectate_watch(f.name);
         }
         ImGui::SameLine();
         if (confirm_remove == f.name) {
@@ -797,6 +802,26 @@ void FriendsTab() {
         }
         ImGui::PopID();
     };
+    {   // Spectator build: the last Spectate request
+        int spectate = RS_IDLE;
+        char who[32] = "";
+        runtime_spectate_status(&spectate, who, sizeof who);
+        const char* line = nullptr;
+        switch (spectate) {
+        case RS_FETCHING: line = BbSettings::MenuText("Downloading %s's last race...", "Загрузка последней гонки %s..."); break;
+        case RS_READY: line = BbSettings::MenuText("%s's last race is ready: main menu > REPLAYS (top of the list).",
+                                                   "Последняя гонка %s готова: главное меню > REPLAYS (вверху)."); break;
+        case RS_NONE: line = BbSettings::MenuText("%s has no recent race to watch.", "У %s нет недавних гонок."); break;
+        case RS_REFUSED: line = BbSettings::MenuText("%s does not share races with you.", "%s не делится гонками с вами."); break;
+        case RS_FAILED: line = BbSettings::MenuText("Could not download %s's race.", "Не удалось загрузить гонку %s."); break;
+        default: break;
+        }
+        if (line) {
+            char text[200];
+            std::snprintf(text, sizeof text, line, who);
+            ImGui::TextColored(spectate == RS_READY ? kFriendGreen : kMenuGrey, "%s", text);
+        }
+    }
     // online friends first and open; offline ones folded (a long list hid everything below it)
     int online = 0;
     for (int i = 0; i < view.friend_count; ++i) {
@@ -837,6 +862,15 @@ void FriendsTab() {
         }
         Hint(BbSettings::MenuText("Your friends see you offline and get no notice when you come online.",
                                   "Друзья видят вас не в сети и не получают уведомлений."));
+        bool share_races = s.spectate_share;
+        if (ImGui::Checkbox(BbSettings::MenuText("Let my friends watch my races", "Друзья могут смотреть мои гонки"),
+                            &share_races)) {
+            Store(s.spectate_share, share_races, true);
+            runtime_spectate_set_share(share_races);
+        }
+        Hint(BbSettings::MenuText("Each race you finish is sent to the server so your friends can watch it with "
+                                  "Spectate (needs the Replay Mode, included in this build).",
+                                  "Каждая гонка отправляется на сервер, чтобы друзья могли её посмотреть."));
         Checkbox(BbSettings::MenuText("Don't show notifications", "Не показывать уведомления"), s.friends_no_notices);
         Hint(BbSettings::MenuText("No friend notices (requests, invitations, friends online). This tab still shows "
                                   "them.",

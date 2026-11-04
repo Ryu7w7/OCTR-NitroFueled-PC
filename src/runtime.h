@@ -172,6 +172,7 @@ uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_DIR or the user folder */
 void runtime_savedata_configure(const char *title);
+const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
 void runtime_trophy_configure(const char *title);
 void runtime_meta_dump_start(unsigned char *image, size_t size); /* BB_META_DUMP=1: field metadata (lab) */

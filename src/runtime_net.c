@@ -4,6 +4,7 @@
 #include "runtime_net_ping.h"
 #include "runtime_ai_catchup.h"
 #include "runtime_friends.h"
+#include "runtime_spectate.h"
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +63,7 @@ int32_t runtime_net_init(void) {
         runtime_net_trace("sceNetInit completed");
     }
     runtime_friends_start();
+    runtime_spectate_start(); /* spectator build */
     return ORBIS_OK;
 }
 

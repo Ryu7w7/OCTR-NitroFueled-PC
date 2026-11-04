@@ -46,6 +46,11 @@ int32_t runtime_http_wait_request(void *handle, void *events, int32_t max_events
 /* The port's own signed requests to the RyuNET server (runtime_friends.c). */
 int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size);
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size);
+/* A signed request to the RyuNET server with a binary body (size bytes of data, may be 0) and a
+ * binary answer of up to max_reply bytes, malloc'd in *reply (free it; NULL when none). The HTTP
+ * status, 0 when the server could not be reached. */
+int runtime_ryunet_transfer(const char *method, const char *target, const void *data, size_t size,
+                            char **reply, size_t *reply_size, size_t max_reply);
 
 #ifdef __cplusplus
 }
