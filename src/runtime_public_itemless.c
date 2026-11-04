@@ -1,5 +1,8 @@
 /* Public Itemless: authenticated search extension and lobby confirmation. */
 #define _GNU_SOURCE
+#ifndef SACREDFIRE_RELEASE
+#define SACREDFIRE_RELEASE "unversioned"
+#endif
 #include "runtime.h"
 #include "runtime_http.h"
 #include "runtime_np_online.h"
@@ -8,6 +11,7 @@
 #include <inttypes.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <time.h>
 #ifdef _WIN32
 #include "compat_win.h"
 #include <windows.h>
@@ -46,6 +50,7 @@ static void **party_manager;
 static void (ABI *native_placeable_event)(void *, void *);
 static void (ABI *native_stop_matchmaking)(void *);
 static void (ABI *native_return_to_lobby)(void);
+static void prefetch_compatibility(void);
 
 static int itemless_client_available(void) {
     const char *assets = getenv("BB_PRIVATE_ARCHIVE_PATCHES");
@@ -109,6 +114,7 @@ static void reject_search(const char *message) {
 }
 
 void runtime_public_itemless_update(void) {
+    prefetch_compatibility();
     char message[sizeof rejection];
     pthread_mutex_lock(&mode_lock);
     memcpy(message, rejection, sizeof message);
@@ -142,8 +148,8 @@ int runtime_public_itemless_announce(void) {
     uint64_t token = registration_nonce;
     pthread_mutex_unlock(&mode_lock);
     if (!token) return 0;
-    char target[192], body[128];
-    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1", name, token);
+    char target[512], body[128];
+    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&release=%s", name, token, SACREDFIRE_RELEASE);
     int status = runtime_ryunet_request("POST", target, body, sizeof body);
     int accepted = status == 200 && !strcmp(body, "ok");
     pthread_mutex_lock(&mode_lock);
@@ -180,9 +186,51 @@ static const char *field(const char *json, const char *key) {
     return depth ? NULL : found;
 }
 
+/* Only immutable request text crosses to the HTTP worker. Native roster/UI
+ * access stays on the game thread; exact roster+feature keys prevent reuse. */
+static pthread_mutex_t check_lock=PTHREAD_MUTEX_INITIALIZER;
+static char check_key[512], check_body[512];
+static int check_running, check_done, check_status;
+static uint64_t check_until;
+static uint64_t check_clock(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+    return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
+}
+static void *check_worker(void *arg) {
+    char *key=arg, body[512]="";
+    int status=runtime_public_itemless_announce() ? runtime_ryunet_request("GET",key,body,sizeof body) : 0;
+    pthread_mutex_lock(&check_lock);
+    if (!strcmp(key,check_key)) {
+        check_status=status; memcpy(check_body,body,sizeof body);
+        check_done=1; check_until=check_clock()+5000;
+    }
+    check_running=0;
+    pthread_mutex_unlock(&check_lock);
+    free(key); return NULL;
+}
+/* -1 means pending: never wait for a network operation on the game thread. */
+static int compatibility_check(const char *target,char *body,size_t size) {
+    pthread_mutex_lock(&check_lock);
+    if (strcmp(check_key,target)) {
+        snprintf(check_key,sizeof check_key,"%s",target); check_done=0;
+    }
+    int result=-1;
+    if (check_done && check_clock()<check_until) {
+        result=check_status; snprintf(body,size,"%s",check_body);
+    } else if (!check_running) {
+        char *key=strdup(target); pthread_t worker;
+        check_done=0; check_running=1;
+        if (!key || pthread_create(&worker,NULL,check_worker,key)) {
+            free(key); check_running=0; result=0;
+        } else pthread_detach(worker);
+    }
+    pthread_mutex_unlock(&check_lock);
+    return result;
+}
+
 static int party_check(const char *doc) {
     const char *members = field(doc, "members");
-    char ids[192], target[320], body[512];
+    char ids[192], target[512], body[512];
     size_t n = 0;
     if (!members || *members++ != '[') return 0;
     while (*members && *members != ']') {
@@ -196,7 +244,7 @@ static int party_check(const char *doc) {
     const char *name = runtime_np_get_online_name();
     if (*members != ']' || !n || !name) return 0;
     snprintf(target, sizeof target, "/ryunet/itemless-party?name=%s&members=%s", name, ids);
-    int status = runtime_ryunet_request("GET", target, body, sizeof body);
+    int status = compatibility_check(target, body, sizeof body);
     if (status == 200 && !strcmp(body, "ok")) return 1;
     reject_search(status == 409 ? body : "Cannot verify party compatibility. Please retry before starting ITEMLESS.");
     return 0;
@@ -204,8 +252,10 @@ static int party_check(const char *doc) {
 
 /* Check before Go To Lobby or private Ready/Start can run their VSC side effects.
  * Read the same participant IDs used by the native manager. */
-static int early_party_check(const char *feature) {
-    char ids[192] = "", target[320], body[512] = "";
+static _Thread_local const char *dispatch_approved_party;
+static _Thread_local char checked_party[512];
+static int early_party_check(const char *feature, int notify) {
+    char ids[192] = "", target[512], body[512] = "";
     void *manager = participants ? *participants : NULL;
     void *list = manager ? *(void **)((char *)manager + 0x10) : NULL;
     int count = list ? *(int *)((char *)list + 0xc) : 0;
@@ -243,23 +293,25 @@ static int early_party_check(const char *feature) {
     for (int i = 0; i < total; ++i)
         length += (size_t)snprintf(ids + length, sizeof ids - length,
                                   "%s%" PRIu64, i ? "," : "", seen[i]);
-    fprintf(stderr, "ITEMLESS: pre-transition roster members=%s local=1 remote=%d\n", ids, total-1);
-    if (!runtime_public_itemless_announce()) goto unavailable;
+    if (notify) fprintf(stderr, "ITEMLESS: pre-transition roster members=%s local=1 remote=%d\n", ids, total-1);
     if (feature)
-        snprintf(target, sizeof target, "/ryunet/private-party?name=%s&feature=%s&members=%s",
-                 runtime_np_get_online_name(), feature, ids);
+        snprintf(target, sizeof target, "/ryunet/private-party?name=%s&feature=%s&release=%s&members=%s",
+                 runtime_np_get_online_name(), feature, SACREDFIRE_RELEASE, ids);
     else
         snprintf(target, sizeof target, "/ryunet/itemless-party?name=%s&members=%s",
                  runtime_np_get_online_name(), ids);
-    int status = runtime_ryunet_request("GET", target, body, sizeof body);
-    if (status == 200 && !strcmp(body, feature ? "ok-private-v1" : "ok")) {
-        fprintf(stderr, "ITEMLESS: pre-transition gate accepted %d party members\n", total);
+    if (dispatch_approved_party && !strcmp(dispatch_approved_party, target)) return 1;
+    int status = compatibility_check(target, body, sizeof body);
+    if (status == 200 && !strcmp(body, feature ? "ok-private-release:" SACREDFIRE_RELEASE : "ok")) {
+        snprintf(checked_party, sizeof checked_party, "%s", target);
+        if (notify) fprintf(stderr, "ITEMLESS: pre-transition gate accepted %d party members\n", total);
         return 1;
     }
-    notice(status == 409 ? body : "Cannot verify party compatibility. Please retry before starting this race.");
+    if (notify) notice(status == -1 ? "Checking player compatibility. Please press Play again shortly." :
+                       status == 409 ? body : "Cannot verify party compatibility. Please retry before starting this race.");
     return 0;
 unavailable:
-    notice("Cannot verify party compatibility. Please retry before starting this race.");
+    if (notify) notice("Cannot verify party compatibility. Please retry before starting this race.");
     return 0;
 }
 
@@ -267,14 +319,21 @@ static const char *private_feature(void) {
     const int difficulty = runtime_private_difficulty_modified();
     if (runtime_online_mode_private_cup()) return difficulty ? "cup,difficulty" : "cup";
     if (runtime_online_mode_private_teams()) return difficulty ? "teams,difficulty" : "teams";
-    return difficulty ? "difficulty" : NULL;
+    return difficulty ? "difficulty" : runtime_speed_mode_enabled() ? "itemless" : NULL;
+}
+
+static void prefetch_compatibility(void) {
+    const int private_room=runtime_online_mode_in_private();
+    const char *feature=private_room ? private_feature() : NULL;
+    if ((private_room && (runtime_speed_mode_enabled() || feature)) || (!private_room && selected))
+        (void)early_party_check(feature,0);
 }
 
 /* Recheck at native Start as well: the roster can change in team selection. */
 int runtime_private_party_check(void) {
     if (!runtime_online_mode_in_private()) return 1;
     const char *feature = private_feature();
-    return (!feature && !runtime_speed_mode_enabled()) || early_party_check(feature);
+    return (!feature && !runtime_speed_mode_enabled()) || early_party_check(feature,1);
 }
 
 static const char *meta_name(void *object) {
@@ -285,6 +344,7 @@ static const char *meta_name(void *object) {
     return meta ? *(const char **)((char *)meta + 0x10) : NULL;
 }
 static void ABI placeable_event(void *self, void *event) {
+    char approval[sizeof checked_party] = "";
     int private_room = runtime_online_mode_in_private();
     const char *feature = private_room ? private_feature() : NULL;
     int private_gate = private_room && (runtime_speed_mode_enabled() || feature);
@@ -310,23 +370,27 @@ static void ABI placeable_event(void *self, void *event) {
                              (private_gate && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")))) {
                     fprintf(stderr, "ITEMLESS: %s gate reached before native transition\n",
                             private_gate ? "private ready/start" : "public Go To Lobby");
-                    if (!early_party_check(feature)) return;
+                    if (!early_party_check(feature,1)) return;
+                    if (private_gate) memcpy(approval, checked_party, sizeof approval);
                     break;
                 }
             }
         }
     }
+    const char *previous = dispatch_approved_party;
+    if (approval[0]) dispatch_approved_party = approval;
     native_placeable_event(self, event);
+    dispatch_approved_party = previous;
 }
 
 static char *extend(const char *raw, unsigned limit, uint64_t token, int mode) {
     if (!raw || *raw != '{' || !limit || limit > 65536 || !token) return NULL;
     size_t n = strnlen(raw, limit);
     if (n == limit || field(raw, "octr_itemless")) return NULL;
-    char *out = malloc(n + 192);
-    if (out) snprintf(out, n + 192,
-        "{\"octr_itemless\":{\"version\":1,\"mode\":%d,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"nonce\":\"%016" PRIx64 "\"},%s",
-        mode, token, raw + 1);
+    char *out = malloc(n + 320);
+    if (out) snprintf(out, n + 320,
+        "{\"octr_itemless\":{\"version\":1,\"mode\":%d,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},%s",
+        mode, SACREDFIRE_RELEASE, token, raw + 1);
     return out;
 }
 

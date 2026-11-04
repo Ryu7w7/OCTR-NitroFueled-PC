@@ -1,5 +1,7 @@
+#define SACREDFIRE_RELEASE "v9.9.9"
 #include "../src/runtime_public_itemless.c"
 #include <assert.h>
+#include <unistd.h>
 static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room;
 static int private_speed, private_cup, private_teams, modified_difficulty;
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
@@ -10,6 +12,9 @@ int runtime_online_mode_in_private(void) { return private_room; }
 static void *test_network=(void *)1;
 static void ABI stop_matchmaking(void *self) { assert(self==test_network); ++stopped; }
 static void ABI return_to_lobby(void) { assert(stopped==returned+1); ++returned; }
+static pthread_mutex_t http_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t http_condition = PTHREAD_COND_INITIALIZER;
+static int block_get, entered_get;
 static char expected_ids[192];
 static char payload[4096], message[512], reply[512] = "ok";
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
@@ -17,13 +22,19 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     ++requests;
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
+        assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
         snprintf(body,size,"ok"); return 200;
     }
     assert(!strcmp(method,"GET"));
+    pthread_mutex_lock(&http_lock);
+    entered_get=1;
+    pthread_cond_broadcast(&http_condition);
+    while (block_get) pthread_cond_wait(&http_condition,&http_lock);
+    pthread_mutex_unlock(&http_lock);
     assert(strstr(target,"/ryunet/itemless-party?name=LocalHost&members=") ||
            strstr(target,"/ryunet/private-party?name=LocalHost&feature="));
     if (early) assert(!strcmp(strstr(target,"&members=")+9, expected_ids));
-    snprintf(body,size,"%s",strstr(target,"/ryunet/private-party?") && !strcmp(reply,"ok") ? "ok-private-v1" : reply); return status;
+    snprintf(body,size,"%s",strstr(target,"/ryunet/private-party?") && !strcmp(reply,"ok") ? "ok-private-release:" SACREDFIRE_RELEASE : reply); return status;
 }
 static void ABI show(const char *body, void *options) {
     if (!early) assert(stopped==returned && returned==dialogs+1);
@@ -116,11 +127,54 @@ static void test_installed_hooks(const char *region) {
     assert(!runtime_public_itemless_active() && room_owner==NULL);
     munmap(im,size);
 }
+static void await_check(void);
 static void ABI forward_event(void *self, void *event) {
     (void)self; (void)event; ++forwarded;
+    if (dispatch_approved_party) {
+        int before=requests;
+        assert(runtime_private_party_check());
+        assert(requests==before); /* Same dispatch/roster never repeats HTTP. */
+        if (!modified_difficulty) {
+            modified_difficulty = 1;
+            assert(!runtime_private_party_check());
+            await_check();
+            assert(runtime_private_party_check());
+            assert(requests > before); /* Different feature must be checked again. */
+            modified_difficulty = 0;
+        }
+    }
 }
 static void *ABI object_type(void *object) { return *(void **)((char *)object + 8); }
 static void *ABI graph_type(void *object) { return *(void **)((char *)object + 0x20); }
+static void await_check(void) {
+    for (int i=0;i<2000;++i) {
+        pthread_mutex_lock(&check_lock); int running=check_running; pthread_mutex_unlock(&check_lock);
+        if (!running) return;
+        struct timespec delay={0,1000000}; nanosleep(&delay,NULL);
+    }
+    assert(!"compatibility worker stalled");
+}
+static void expire_check(void) {
+    await_check(); pthread_mutex_lock(&check_lock); check_done=0; pthread_mutex_unlock(&check_lock);
+}
+/* Existing acceptance/rejection fixtures explicitly complete background work
+ * before retrying. The first press must never enter native transition. */
+static void settled_event(void *self,void *event) {
+    expire_check();
+    int d=dialogs,f=forwarded;
+    placeable_event(self,event);
+    pthread_mutex_lock(&check_lock); int pending=check_running || check_done; pthread_mutex_unlock(&check_lock);
+    if (pending && dialogs==d+1 && strstr(message,"Checking player")) {
+        assert(forwarded==f); await_check(); --dialogs;
+        placeable_event(self,event);
+    }
+}
+static void prepare_public(void) {
+    if (!selected || rejection[0]) return;
+    expire_check(); char body[512];
+    (void)compatibility_check("/ryunet/itemless-party?name=LocalHost&members=1,2",body,sizeof body);
+    await_check();
+}
 static void test_early_gate(void) {
     early=1;
     native_placeable_event=forward_event;
@@ -166,38 +220,38 @@ static void test_early_gate(void) {
         for(int j=1;j<=n;++j) len+=(size_t)snprintf(expected_ids+len,sizeof expected_ids-len,"%s%d",j==1?"":",",j);
         status=409;snprintf(reply,sizeof reply,"Update required: OldGuest%d",n);
         int f=forwarded,d=dialogs;
-        placeable_event(self,event);
+        settled_event(self,event);
         assert(forwarded==f && dialogs==d+1 && strstr(message,"OldGuest"));
         status=200;strcpy(reply,"ok");
-        placeable_event(self,event);assert(forwarded==f+1);
+        settled_event(self,event);assert(forwarded==f+1);
     }
     /* A removed remote member must disappear from the next request. */
     n=1;memcpy(party_roster+12,&n,4);strcpy(expected_ids,"1");
     int accepted=forwarded;
-    placeable_event(self,event);assert(forwarded==accepted+1);
+    settled_event(self,event);assert(forwarded==accepted+1);
     /* Missing party state must not silently fall back to the one local player. */
     q=NULL;memcpy(party+0x30,&q,8);
     int count_before=requests;
-    placeable_event(self,event);assert(forwarded==accepted+1 && requests==count_before);
+    settled_event(self,event);assert(forwarded==accepted+1 && requests==count_before);
     q=party_roster;memcpy(party+0x30,&q,8);
     /* Base metadata and dynamic graph metadata must both take the early gate. */
     graph[0]=vtable;
     status=409;strcpy(reply,"Update required: OldGuest");
     int f0=forwarded,d0=dialogs;
-    placeable_event(self,event);assert(forwarded==f0 && dialogs==d0+1);
+    settled_event(self,event);assert(forwarded==f0 && dialogs==d0+1);
     graph[0]=graph_vtable;
     status=503;
-    int f=forwarded;placeable_event(self,event);assert(forwarded==f);
+    int f=forwarded;settled_event(self,event);assert(forwarded==f);
     n=9;memcpy(party_roster+12,&n,4);int r=requests;
-    placeable_event(self,event);assert(forwarded==f && requests==r);
+    settled_event(self,event);assert(forwarded==f && requests==r);
     graph_meta[2]="Scripts.Graph.OtherButton";
-    placeable_event(self,event);assert(forwarded==++f && requests==r);
+    settled_event(self,event);assert(forwarded==++f && requests==r);
     graph_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton";
     n=2;memcpy(party_roster+12,&n,4);memcpy(records[1]+0x18,records[0]+0x18,8);
-    placeable_event(self,event);assert(forwarded==f && requests==r);
-    event[3]=(void *)9;placeable_event(self,event);assert(forwarded==++f && requests==r);
-    event[3]=(void *)8;private_room=1;placeable_event(self,event);assert(forwarded==++f && requests==r);
-    private_room=0;runtime_public_itemless_select(0);placeable_event(self,event);assert(forwarded==++f && requests==r);
+    settled_event(self,event);assert(forwarded==f && requests==r);
+    event[3]=(void *)9;settled_event(self,event);assert(forwarded==++f && requests==r);
+    event[3]=(void *)8;private_room=1;settled_event(self,event);assert(forwarded==++f && requests==r);
+    private_room=0;runtime_public_itemless_select(0);settled_event(self,event);assert(forwarded==++f && requests==r);
     /* Private ready/start is gated even with public Itemless disabled. */
     private_room=private_speed=1;
     setenv("BB_PUBLIC_ITEMLESS","0",1);
@@ -211,13 +265,25 @@ static void test_early_gate(void) {
         }
         status=409;strcpy(reply,"Update required: OldGuest");
         int d=dialogs;f=forwarded;
-        placeable_event(self,event);assert(forwarded==f && dialogs==d+1);
+        settled_event(self,event);assert(forwarded==f && dialogs==d+1);
         status=200;strcpy(reply,"ok");
-        placeable_event(self,event);assert(forwarded==f+1);
+        settled_event(self,event);assert(forwarded==f+1);
+        assert(!dispatch_approved_party);
+        int previous_requests = requests;
+        assert(!runtime_private_party_check());
+        await_check();
+        assert(runtime_private_party_check());
+        assert(requests > previous_requests); /* Later Start must revalidate. */
     }
-    status=503;f=forwarded;placeable_event(self,event);assert(forwarded==f);
+    status=503;f=forwarded;settled_event(self,event);assert(forwarded==f);
     private_speed=0;r=requests;
-    placeable_event(self,event);assert(forwarded==f+1 && requests==r);
+    settled_event(self,event);assert(forwarded==f+1 && requests==r);
+    /* An old server's capability-only success cannot authorize a release-gated feature. */
+    private_teams=1; status=200; strcpy(reply,"ok-private-v1");
+    f=forwarded; settled_event(self,event); assert(forwarded==f);
+    strcpy(reply,"ok-private-release:v0.0.1");
+    settled_event(self,event); assert(forwarded==f);
+    strcpy(reply,"ok"); private_teams=0;
     /* Cup and Teams require their own capability, even in Normal mode. */
     for (int feature=0;feature<5;++feature) {
         private_cup=feature==0 || feature==3;private_teams=feature==1 || feature==4;
@@ -228,12 +294,12 @@ static void test_early_gate(void) {
             for(int j=0;j<n;++j) len+=(size_t)snprintf(expected_ids+len,sizeof expected_ids-len,"%s%d",j?",":"",j+1);
             status=409;strcpy(reply,"Update required: OldGuest");
             f=forwarded;int d=dialogs;
-            placeable_event(self,event);assert(forwarded==f && dialogs==d+1);
+            settled_event(self,event);assert(forwarded==f && dialogs==d+1);
             status=200;strcpy(reply,"ok");
-            placeable_event(self,event);assert(forwarded==f+1);
+            settled_event(self,event);assert(forwarded==f+1);
         }
-        status=503;f=forwarded;placeable_event(self,event);assert(forwarded==f);
-        private_room=0;r=requests;placeable_event(self,event);
+        status=503;f=forwarded;settled_event(self,event);assert(forwarded==f);
+        private_room=0;r=requests;settled_event(self,event);
         assert(forwarded==f+1 && requests==r); /* No Team/Cup gate on public menus. */
         private_room=1;
     }
@@ -255,24 +321,24 @@ int main(void) {
     const char doc[]="{\"members\":[1, 2],\"ruleset_payload\":{\"filter\":{\"playlist_id\":0}}}";
     void *result=NULL;
     runtime_public_itemless_select(0);
-    start_search(&result,NULL,doc,sizeof doc,NULL);
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL);
     assert(sent==1 && !strcmp(payload,doc) && !runtime_public_itemless_active());
     runtime_public_itemless_select(1);
     status=409; strcpy(reply,"Cannot start ITEMLESS. These players need the latest Itemless patch: OldPlayer");
-    start_search(&result,NULL,doc,sizeof doc,NULL);
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL);
     assert(!result && sent==1 && dialogs==0);
-    start_search(&result,NULL,doc,sizeof doc,NULL); /* repeated task cannot escape rejection */
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL); /* repeated task cannot escape rejection */
     assert(sent==1 && stopped==0);
     runtime_public_itemless_update();
     runtime_public_itemless_update(); /* cancellation and popup happen once */
     assert(stopped==1 && returned==1);
     assert(!result && sent==1 && dialogs==1 && strstr(message,"OldPlayer"));
     status=503;
-    start_search(&result,NULL,doc,sizeof doc,NULL);
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL);
     runtime_public_itemless_update();
     assert(!result && sent==1 && dialogs==2);
     status=200; strcpy(reply,"ok");
-    start_search(&result,NULL,doc,sizeof doc,NULL);
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL);
     assert(sent==2 && result && request_nonce && strstr(payload,"\"mode\":1"));
     assert(!runtime_public_itemless_active());
     char b[256]; unsigned char owner[0x960]={0}; uint64_t room=42;
@@ -318,7 +384,7 @@ int main(void) {
     assert(!runtime_public_itemless_active());
     assert(!accept(owner,room,b,(unsigned)strlen(b)));
     runtime_public_itemless_update();
-    start_search(&result,NULL,doc,sizeof doc,NULL);
+    prepare_public(); start_search(&result,NULL,doc,sizeof doc,NULL);
     confirmation_doc(b,sizeof b,room,request_nonce);
     native_cancel=send_cancel;
     cancel_search(&result,NULL,1,NULL);
@@ -342,5 +408,25 @@ int main(void) {
     test_full_lobby_confirmation();
     test_installed_hooks("1277e00");
     test_installed_hooks("1277df0");
+    /* The worker can be stuck in HTTP while repeated frame checks return. */
+    early=0; status=200; snprintf(reply,sizeof reply,"ok");
+    await_check();
+    alarm(5);
+    pthread_mutex_lock(&http_lock);
+    block_get=1; entered_get=0;
+    pthread_mutex_unlock(&http_lock);
+    const char *target="/ryunet/itemless-party?name=LocalHost&members=91,92";
+    char response[512];
+    assert(compatibility_check(target,response,sizeof response)==-1);
+    pthread_mutex_lock(&http_lock);
+    while (!entered_get) pthread_cond_wait(&http_condition,&http_lock);
+    pthread_mutex_unlock(&http_lock);
+    for (int i=0;i<100;++i) assert(compatibility_check(target,response,sizeof response)==-1);
+    pthread_mutex_lock(&http_lock);
+    block_get=0; pthread_cond_broadcast(&http_condition);
+    pthread_mutex_unlock(&http_lock);
+    await_check();
+    assert(compatibility_check(target,response,sizeof response)==200);
+    alarm(0);
     puts("Public Itemless request, party rejection, confirmation and lifecycle tests passed");
 }

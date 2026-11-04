@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include "../src/runtime_itemless.c"
+void runtime_race_options_stop_boost(void *b, void (ABI *stop)(void *)) { stop(b); }
 static int active, responses, removals, nested;
 static unsigned char owner[32], other[32], ai[32], ai2[32], obstacle[32], human_racer[32], ai_racer[32];
 static unsigned char boost[32], wall_context[40], collision_data[16];

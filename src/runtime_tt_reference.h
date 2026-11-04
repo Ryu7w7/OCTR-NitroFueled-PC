@@ -12,5 +12,11 @@ int runtime_tt_reference_load(const char *path);
 int runtime_tt_reference_guide(const char *map, uintptr_t owner, unsigned id, int lap, int level,
                               const float position[3], const float velocity[3],
                               float targets[2][3], unsigned *intent);
+int runtime_tt_reference_motion(unsigned id, uintptr_t owner, const float position[3],
+                                const float velocity[3], int airborne, float dt, float out[3]);
+float runtime_tt_reference_turn_allowance(unsigned id, uintptr_t owner);
+float runtime_tt_reference_route_speed(unsigned id, uintptr_t owner);
+float runtime_tt_reference_jump_lead(unsigned id, uintptr_t owner);
+float runtime_tt_reference_jump_speed(unsigned id, uintptr_t owner);
 float runtime_tt_reference_boost_interval(unsigned id, unsigned completed);
 #endif

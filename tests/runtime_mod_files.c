@@ -46,7 +46,7 @@ int main(int argc,char **argv) {
         for (private_room=0; private_room<2; ++private_room)
             for (private_match=0; private_match<2; ++private_match)
                 for (public_room=0; public_room<2; ++public_room)
-                    assert(runtime_speed_race_active()==(public_room || (selected && private_room && private_match)));
+                    assert(runtime_speed_race_active()==(public_room || (selected && private_match)));
     }
     private_room=private_match=public_room=0;
     runtime_speed_mode_set(0);
@@ -62,7 +62,8 @@ int main(int argc,char **argv) {
         public_room=1;
         content("/app0/archives/race.pak", "ITEMLESS");
         public_room=0;private_match=1;private_room=0;
-        content("/app0/archives/race.pak", "NORMAL__");
+        /* A slow CUP load can outlive the five-second peer-traffic window. */
+        content("/app0/archives/race.pak", "ITEMLESS");
         private_room=1;runtime_speed_mode_set(0);
         content("/app0/archives/race.pak", "NORMAL__");
         return 0;

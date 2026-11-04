@@ -154,3 +154,13 @@ int ping_view(uint64_t now_ms, PingPeer *out, int max) {
     give();
     return n;
 }
+
+int ping_peer_name(uint32_t ip, uint16_t port, uint64_t now, char out[PING_NAME]) {
+    int found=0; out[0]=0;
+    take();
+    PingSlot *s=slot_for(ip,port,0);
+    if (s && s->last_game_send && now-s->last_game_send<=PING_ACTIVE_MS && s->name[0]) {
+        memcpy(out,s->name,PING_NAME); found=1;
+    }
+    give(); return found;
+}

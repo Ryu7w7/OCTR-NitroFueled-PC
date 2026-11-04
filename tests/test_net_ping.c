@@ -62,6 +62,11 @@ int main(void) {
     CHECK(n == 2 && b && b->ms == 40);
     CHECK(find(list, n, "") && find(list, n, "")->ms == PING_OLDER_PORT);
 
+    char peer_name[PING_NAME];
+    CHECK(ping_peer_name(bob,3074,1100,peer_name) && !strcmp(peer_name,"Bob"));
+    CHECK(!ping_peer_name(bob,3076,1100,peer_name));
+    CHECK(!ping_peer_name(bob,3074,7000,peer_name));
+
     /* The next answer moves the smoothed time a quarter of the way. */
     ping_on_game_send(bob, 3074, 2000);
     CHECK(ping_next(2000, packet, sizeof(packet), &ip, &port) > 0);

@@ -1,6 +1,7 @@
 /* Native Normal / Speed / Battle selector; Speed uses the game's race event. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_ai_catchup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #ifdef _WIN32
@@ -35,7 +36,7 @@ static int cup_transition_pending;
 static int cup_final_results_ready;
 static void **racer_manager;
 static unsigned char *end_timer_hud_mode;
-static unsigned char *finish_timer_counter;
+static unsigned char *finish_timer_counter, *human_finish_shortcut;
 static unsigned char *ai_reuse_branch, *ai_asset_reuse_branch;
 static const unsigned char native_ai_asset_reuse[] = {0x0f,0x85,0xf2,0x0b,0,0};
 static const unsigned char native_ai_reuse[] = {0x0f,0x85,0xd6,0x06,0,0};
@@ -118,6 +119,13 @@ static _Thread_local int ready_delivery_seen;
 typedef void (ABI *ReadyInsert)(void *, void *, unsigned char *, unsigned);
 static ReadyInsert original_ready_insert;
 static int team_result_count, team_totals[4];
+typedef unsigned char (ABI *RacerAhead)(unsigned char *, unsigned char *);
+static RacerAhead original_racer_ahead;
+static struct { int id, position; } private_grid[8];
+static int private_grid_count;
+static unsigned team_finished_mask;
+static int team_results_pending;
+static unsigned char pending_team_results[0x40];
 static int team_winner = -1, team_tiebreak;
 static EventHandler original_ranking_row_event, original_team_selector_event, original_team_count_event;
 static void **selector_changed_type;
@@ -155,6 +163,10 @@ static _Thread_local int podium_count;
 typedef int (ABI *RaceFinished)(unsigned char *);
 static RaceFinished original_race_finished;
 static SetSeason original_finish_racer;
+typedef void (ABI *RecordLap)(void *, unsigned char *, int);
+typedef void (ABI *CompleteRacer)(void *, unsigned char *);
+static RecordLap original_record_lap;
+static CompleteRacer complete_racer;
 struct CupTotal { uint64_t online_id; int id, human, points, finish_position; };
 static struct CupTotal team_results[8]; /* Indexed by validated host finish order. */
 static struct CupTotal cup_totals[8];
@@ -166,10 +178,15 @@ static MakeHandle make_handle;
 
 typedef void (ABI *LoadMap)(const char *, int);
 static LoadMap original_load_map;
+static char pending_private_map[256];
+static int pending_private_reason;
 typedef void (ABI *NoArgument)(void);
 static NoArgument assign_ai_teams;
 static NoArgument return_to_lobby;
-static NativeEvent next_cup_map;
+static NativeEvent next_cup_map, original_guest_return_timer;
+typedef void (ABI *ReturnDeadline)(void);
+typedef void (ABI *ScheduleReturn)(void *, ReturnDeadline, void *);
+static ScheduleReturn schedule_guest_return;
 typedef void *(ABI *NetworkState)(void);
 typedef int (ABI *NetworkRace)(int);
 static NetworkState network_state;
@@ -519,14 +536,36 @@ static void ABI private_settings_sending(unsigned char *event) {
     int type;
     memcpy(&type, event + 0x20, sizeof type);
     /* Native lobby changes broadcast this payload only for Battle. Racing
-     * needs the same native event to carry teamCount to existing/joining peers. */
-    if (type == 1 && mode == 1 && is_private() && race_settings && *race_settings)
+     * and CUP need the same native event to carry settings to existing/joining peers. */
+    if (type == 1 && (mode == 1 || mode == 6) && is_private() && race_settings && *race_settings)
         broadcast_race_settings(*race_settings);
 }
 
 /* The map loader runs after settings synchronization, on host and peers. Keep
  * the lobby's racing UI mode until this boundary, then use native CUP scoring. */
 static void ABI load_private_map(const char *map, int reason) {
+    private_grid_count = 0;
+    const int lobby = map && (!strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby") ||
+                             !strcasecmp(map, "octane/octane_startscreen/octane_startscreen"));
+    if (lobby) { pending_private_map[0]=0; runtime_room_mode_end_race(); }
+    else if (map && (runtime_online_mode_in_private() || runtime_private_match_active()) && !battle_selected()) {
+        int verified=runtime_room_mode_begin_race();
+        if (verified<0) {
+            if (strlen(map)>=sizeof pending_private_map) return;
+            if (!pending_private_map[0])
+                printf("Native private race: awaiting asynchronous mode verification map=%s reason=%d\n",map,reason);
+            snprintf(pending_private_map,sizeof pending_private_map,"%s",map);
+            pending_private_reason=reason;
+            return;
+        }
+        pending_private_map[0]=0;
+        if (!verified) {
+        puts("Native private race: mode verification failed; cancelling before track loading");
+        return_to_lobby();
+        native_notice("Cannot synchronize the host's race mode. Return to the lobby and retry.", NULL);
+        return;
+    }
+    }
     runtime_race_options_map_loading(map);
     private_team_selector_active = 0;
     assign_handle((unsigned char *)&active_team_selector_project, NULL);
@@ -550,7 +589,7 @@ static void ABI load_private_map(const char *map, int reason) {
     team_score_trace_events = 0;
     assign_handle((unsigned char *)&team_ranking_project, NULL);
     assign_handle((unsigned char *)&team_leaders_project, NULL);
-    team_result_count = 0;
+    team_result_count = team_results_pending = 0;
     if (cup_reset_pending && map &&
         (!strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby") ||
          !strcasecmp(map, "octane/octane_startscreen/octane_startscreen"))) {
@@ -593,6 +632,12 @@ static void ABI load_private_map(const char *map, int reason) {
     if (finish_timer_counter && *finish_timer_counter != counter &&
         !write_code(finish_timer_counter, &counter, 1))
         fputs("Native private race: could not enable AI finish countdown\n", stderr);
+    /* All humans finishing must not cut off nearby AI before the timeout. */
+    const unsigned char finish_gate[2] = {counter == 0xff ? 0x90 : 0x74,
+                                          counter == 0xff ? 0x90 : 0x54};
+    if (human_finish_shortcut && memcmp(human_finish_shortcut, finish_gate, 2) &&
+        !write_code(human_finish_shortcut, finish_gate, 2))
+        fputs("Native private race: could not disable human-only finish shortcut\n", stderr);
     /* Online teardown removes racer objects. Arcade's subsequent-track lookup
      * assumes they survive; use native lookup-or-create for private CUP instead. */
     const unsigned char new_racer[] = {0x90,0x90,0x90,0x90,0x90,0x90};
@@ -691,7 +736,7 @@ static void ABI race_ui(unsigned char *self) {
     team_score_trace_events = 0;
     assign_handle((unsigned char *)&team_ranking_project, NULL);
     assign_handle((unsigned char *)&team_leaders_project, NULL);
-    team_result_count = 0;
+    team_result_count = team_results_pending = 0;
     int mode = 0, teams = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd4c, 4);
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
@@ -716,8 +761,36 @@ static void ABI race_ui(unsigned char *self) {
     }
 }
 
+/* The online guest may not receive the Arcade-only cup-title event. */
+static int refresh_cup_title(unsigned char *row, const char *title, int depth) {
+    if (!row || depth>16) return 0;
+    const char *name=pointer_at(row,0x28);
+    if (name && !strcmp(name,"[CupName]")) { set_text(row,title); return 1; }
+    unsigned char *composition=handle_object((void **)(row+0x38));
+    if (composition && pointer_at(composition,0)==composition_vtable &&
+        refresh_cup_title(pointer_at(composition,0x20),title,depth+1)) return 1;
+    unsigned char *list=pointer_at(row,0x48);
+    int count=0;
+    if (list) memcpy(&count,list+12,4);
+    void **items=list ? pointer_at(list,0x20) : NULL;
+    if (items && count>0 && count<=512) for (int i=0;i<count;++i)
+        if (refresh_cup_title(items[i],title,depth+1)) return 1;
+    return 0;
+}
+
+static void synchronize_cup_finish_time(unsigned char *racer);
 static void gold_project(unsigned char *project);
 static void ABI cup_project_event(void *self, void *event) {
+    if (private_cup_race_active &&
+        (self==handle_object(&cup_finish_project) || self==handle_object(&cup_ranking_project))) {
+        unsigned char *root=racer_manager ? *racer_manager : NULL;
+        unsigned char *list=root ? pointer_at(root,0x10) : NULL;
+        int count=0;
+        if (list) memcpy(&count,list+12,4);
+        void **items=list ? pointer_at(list,0x20) : NULL;
+        for (int i=0;items && count<=8 && i<count;++i)
+            if (items[i]) synchronize_cup_finish_time(items[i]);
+    }
     GetType event_type = (GetType)pointer_at(pointer_at(event, 0), 0);
     const int team_finish = team_race_ui_owner && event_type(event) == *race_finished_type;
     const int trace_score_event = team_race_ui_owner &&
@@ -763,6 +836,11 @@ static void ABI cup_project_event(void *self, void *event) {
         }
     }
     original_project_event(self, event);
+    if (private_cup_race_active && self==handle_object(&cup_ranking_project)) {
+        unsigned char *cup=current_cup();
+        const char *title=cup ? pointer_at(cup,0x30) : NULL;
+        if (title && *title) refresh_cup_title(pointer_at(self,0x10),title,0);
+    }
     gold_project(self);
     refresh_lobby_members_visibility();
     if (trace_score_event) trace_team_score("event-after", self, event_type(event));
@@ -879,6 +957,63 @@ static struct CupTotal racer_identity(unsigned char *racer) {
     return result;
 }
 
+/* Native a299c1 maps an AI spawn slot through the network roster before
+ * comparing result IDs. Spawn slots and network IDs need not be identical. */
+static int result_racer_id(unsigned char *racer) {
+    const struct CupTotal key = racer_identity(racer);
+    if (key.human) return key.id;
+    unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x30) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, list + 12, 4);
+    void **items = list ? pointer_at(list, 0x20) : NULL;
+    if (!items || count < 0 || count > 8) return -1;
+    for (int i = 0; i < count; ++i) {
+        if (!items[i]) continue;
+        int slot, id;
+        memcpy(&slot, (unsigned char *)items[i] + 0x5c, 4);
+        memcpy(&id, (unsigned char *)items[i] + 0x58, 4);
+        if (slot == key.id) return id;
+    }
+    return -1;
+}
+
+static unsigned char ABI racer_ahead(unsigned char *a, unsigned char *b) {
+    const unsigned char ahead = original_racer_ahead(a, b);
+    if (ahead || a == b || !private_grid_count ||
+        (!private_single_race_active && !private_cup_race_active) || original_racer_ahead(b, a)) return ahead;
+    /* Equal native lap/checkpoint/distance must not reshuffle the starting grid. */
+    const int aid = result_racer_id(a), bid = result_racer_id(b);
+    int ap = 0, bp = 0;
+    for (int i = 0; i < private_grid_count; ++i) {
+        if (private_grid[i].id == aid) ap = private_grid[i].position;
+        if (private_grid[i].id == bid) bp = private_grid[i].position;
+    }
+    return ap && bp ? ap < bp : ahead;
+}
+
+static void snapshot_private_grid(void) {
+    private_grid_count = 0;
+    if (!private_single_race_active && !private_cup_race_active) return;
+    unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x10) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, list + 12, 4);
+    void **items = list ? pointer_at(list, 0x20) : NULL;
+    if (!items || count < 1 || count > 8) return;
+    unsigned occupied = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!items[i]) return;
+        const int id = result_racer_id(items[i]);
+        int position;
+        memcpy(&position, (unsigned char *)items[i] + 0x58, 4);
+        if (id < 0 || position < 1 || position > count || (occupied & (1u << position))) return;
+        for (int j = 0; j < i; ++j) if (private_grid[j].id == id) return;
+        private_grid[i].id = id;
+        private_grid[i].position = position;
+        occupied |= 1u << position;
+    }
+    private_grid_count = count;
+}
+
 /* Native finish-time rows require all configured laps and a valid final time.
  * Race teardown sets the finished flag even for racers that timed out. */
 static int team_racer_finished(unsigned char *racer) {
@@ -892,21 +1027,28 @@ static int team_racer_finished(unsigned char *racer) {
     return time > 0;
 }
 
-/* Recompute from the host's complete finish order, so repeat packets cannot
- * add points twice. Keep native individual race positions and timing intact. */
+/* Freeze the final snapshot once, after native result handling. Late lap or
+ * finish callbacks cannot turn a timed-out racer into a scoreboard finisher. */
 static void apply_team_results(unsigned char *event) {
-    if (!team_ranking_project) return;
+    if (!team_ranking_project || team_result_count) return;
     unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x10) : NULL;
     int count = 0, teams = 0;
     if (list) memcpy(&count, list + 12, 4);
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
     void **items = list ? pointer_at(list, 0x20) : NULL;
     if (!items || count < 1 || count > 8 || teams < 2 || teams > 4) return;
+    const int guest=runtime_room_mode_following();
+    const int authoritative=guest ? runtime_ai_catchup_results() : -1;
+    if (guest && authoritative<0) {
+        if (event!=pending_team_results) memcpy(pending_team_results,event,sizeof pending_team_results);
+        team_results_pending=1;
+        return;
+    }
     const int awards[8] = {10, 8, 6, 5, 4, 3, 2, 1};
     int totals[4] = {0};
     struct CupTotal results[8] = {0};
     int rank_team[8] = {0};
-    unsigned occupied = 0;
+    unsigned occupied = 0, finished_mask = 0;
     for (int i = 0; i < count; ++i) {
         unsigned char *racer = items[i];
         if (!racer) return;
@@ -916,11 +1058,12 @@ static void apply_team_results(unsigned char *event) {
         if (player) memcpy(&team, player + 0xe4, 4);
         else team = racer_faction(racer) - 0x16;
         if (team < 0 || team >= teams) return;
+        const int network_id = result_racer_id(racer);
         int position = -1;
         for (int rank = 0; rank < count; ++rank) {
             int id;
             memcpy(&id, event + 0x20 + rank * 4, 4);
-            if (id != key.id) continue;
+            if (id < 0 || id != network_id) continue;
             if (position >= 0 || (occupied & (1u << rank))) return;
             position = rank;
         }
@@ -929,7 +1072,9 @@ static void apply_team_results(unsigned char *event) {
         rank_team[position] = team;
         results[position] = key;
         results[position].finish_position = position + 1;
-        results[position].points = runtime_speed_mode_enabled() && !team_racer_finished(racer) ? 0 : awards[position];
+        const int finished=guest ? !!(authoritative & (1u << position)) : team_racer_finished(racer);
+        if (finished) finished_mask |= 1u << position;
+        results[position].points = runtime_speed_mode_enabled() && !finished ? 0 : awards[position];
         totals[team] += results[position].points;
     }
     int maximum = 0, leaders = 0;
@@ -951,6 +1096,9 @@ static void apply_team_results(unsigned char *event) {
     memcpy(team_totals, totals, sizeof totals);
     memcpy(team_results, results, sizeof results);
     team_result_count = count;
+    team_finished_mask = finished_mask;
+    team_results_pending = 0;
+    if (!guest) runtime_ai_catchup_results_publish(finished_mask);
     for (int i = 0; i < count; ++i)
         printf("Native private TEAM: finish=%d %s=%d team=%s award=%d\n", i + 1,
                results[i].human ? "player" : "AI", results[i].id,
@@ -967,7 +1115,15 @@ static void apply_team_results(unsigned char *event) {
 static void team_ranking_row(unsigned char *self) {
     unsigned char *racer = handle_object((void **)(self + 0x78));
     if (!racer) return;
-    const int finished = team_racer_finished(racer);
+    const struct CupTotal key = racer_identity(racer);
+    int finished = team_result_count || team_results_pending ? 0 : team_racer_finished(racer);
+    for (int i=0;i<team_result_count;++i) {
+        const struct CupTotal *result=team_results+i;
+        if (key.human==result->human && key.id==result->id && key.online_id==result->online_id) {
+            finished=!!(team_finished_mask & (1u << i));
+            break;
+        }
+    }
     unsigned char *name = pointer_at(self, 0xa8);
     unsigned char *highlight = pointer_at(self, 0xc0);
     if (highlight) {
@@ -1035,7 +1191,6 @@ static void team_ranking_row(unsigned char *self) {
             memcpy(name + 12, &flags, 4);
         }
     }
-    const struct CupTotal key = racer_identity(racer);
     /* The separate finish-time panel retains native time/status columns. */
     unsigned char *score = pointer_at(self, 0xd0);
     if (!score) return;
@@ -1180,6 +1335,7 @@ static void team_result_rows(unsigned char *row, int depth) {
 }
 
 static void refresh_team_results(void) {
+    if (team_results_pending) apply_team_results(pending_team_results);
     unsigned char *project = handle_object(&team_ranking_project);
     if (project) team_result_rows(pointer_at(project, 0x10), 0);
     play_team_result_effects();
@@ -1391,6 +1547,7 @@ static void ABI place_cup_racers(unsigned char *self) {
         printf("Native private CUP: restored previous finish grid %d/%d before placement\n", restored, count);
     }
     original_place_racers(self);
+    snapshot_private_grid();
 }
 
 static void snapshot_cup_totals(void) {
@@ -1416,10 +1573,45 @@ static void restore_cup_total(unsigned char *racer) {
     }
 }
 
+/* Network lap timestamps are authoritative. A follower's local clock can
+ * differ, and its final-time callback can be skipped until race teardown. */
+static void synchronize_cup_finish_time(unsigned char *racer) {
+    if (!private_cup_race_active || !racer[0x8c]) return;
+    unsigned char *laps=pointer_at(racer,0x90);
+    int required=0, count=0;
+    if (race_settings && *race_settings) memcpy(&required,*race_settings+12,4);
+    if (laps) memcpy(&count,laps+12,4);
+    const int *times=laps ? pointer_at(laps,0x20) : NULL;
+    if (!times || required<1 || required>99 || count!=required) return;
+    for (int i=0;i<required;++i)
+        if (times[i]<=0 || (i && times[i]<=times[i-1])) return;
+    memcpy(racer+0x68,&count,4);
+    memcpy(racer+0x6c,times+required-1,4);
+}
+
+static void trace_cup_finish(const char *stage, unsigned char *racer) {
+    unsigned char *laps=pointer_at(racer,0x90);
+    int count=0, lap=0, required=0, final_time=0;
+    if (laps) memcpy(&count,laps+12,4);
+    const int *times=laps ? pointer_at(laps,0x20) : NULL;
+    memcpy(&lap,racer+0x4c,4);
+    memcpy(&final_time,racer+0x6c,4);
+    if (race_settings && *race_settings) memcpy(&required,*race_settings+12,4);
+    printf("Native private CUP finish: stage=%s id=%d local=%d finished=%d lap=%d recorded=%d required=%d last_time=%d final_time=%d\n",
+           stage,result_racer_id(racer),racer[0xb0]!=0,racer[0x8c]!=0,lap,count,required,
+           times && count>0 && count<=99 ? times[count-1] : -1,final_time);
+}
+
 static void ABI racer_finished(unsigned char *racer, int finished) {
     restore_cup_total(racer);
+    const int first_finish=finished && !racer[0x8c];
     original_finish_racer(racer, finished);
+    if (private_cup_race_active && first_finish) trace_cup_finish("native-callback",racer);
+    if (team_result_count && team_ranking_project) {
+        refresh_team_results();
+    }
     if (!private_cup_race_active || !cup_result_count) return;
+    synchronize_cup_finish_time(racer);
     const struct CupTotal key = racer_identity(racer);
     for (int i = 0; i < cup_result_count; ++i) {
         const struct CupTotal *result = &cup_results[i].key;
@@ -1431,6 +1623,31 @@ static void ABI racer_finished(unsigned char *racer, int finished) {
         memcpy(racer + 0xb8, &result->points, 4);
         break;
     }
+}
+
+/* Native lap recording is the checkpoint-validated boundary. Cup AI may
+ * keep driving after that final record without the human finish callback. */
+static void ABI record_private_cup_lap(void *self, unsigned char *racer, int lap) {
+    original_record_lap(self, racer, lap);
+    if (!private_cup_race_active || !racer || racer[0x8c] || !racer[0xb0] ||
+        pointer_at(racer, 0x10)) return;
+    unsigned char *entity = handle_object((void **)(racer + 0x20));
+    if (!entity || !(entity[0x3b] & 1)) return;
+    unsigned char *laps = pointer_at(racer, 0x90);
+    int required = 0, completed = 0, current = 0;
+    if (race_settings && *race_settings) memcpy(&required, *race_settings + 12, 4);
+    if (laps) memcpy(&completed, laps + 12, 4);
+    memcpy(&current, racer + 0x4c, 4);
+    const int *times = laps ? pointer_at(laps, 0x20) : NULL;
+    if (required < 1 || required > 99 || lap != required || current != required + 1 ||
+        completed != required || !times) return;
+    for (int i=0; i<required; ++i)
+        if (times[i] <= 0 || (i && times[i] <= times[i-1])) return;
+    printf("Native private CUP: completing recorded AI finish id=%d laps=%d time=%d\n",
+           result_racer_id(racer), completed, times[required-1]);
+    /* Native completion publishes the racer event and performs race-end
+     * bookkeeping. Never set the flag/position or invent a lap time here. */
+    complete_racer(self, racer);
 }
 
 /* Online results carry host player IDs in finishing order. Arcade awards made
@@ -1457,7 +1674,7 @@ static int apply_cup_results(unsigned char *event) {
         for (int rank = 0; rank < count; ++rank) {
             int id;
             memcpy(&id, event + 0x20 + rank * 4, 4);
-            if (id != keys[i].id) continue;
+            if (id < 0 || id != result_racer_id(items[i])) continue;
             if (positions[i] >= 0 || (occupied & (1u << rank))) return 0;
             positions[i] = rank;
             occupied |= 1u << rank;
@@ -1475,6 +1692,8 @@ static int apply_cup_results(unsigned char *event) {
                 break;
             }
         }
+        synchronize_cup_finish_time(racer);
+        if (!cup_result_count) trace_cup_finish("host-results",racer);
         const int position = positions[i] + 1;
         const int award = positions[i] < awards ? points[positions[i]] : 0;
         const int total = previous + award;
@@ -1523,7 +1742,6 @@ static void open_team_score(void) {
 static void ABI race_results_received(unsigned char *event) {
     podium_count = 0;
     open_team_score();
-    apply_team_results(event);
     const int applied = apply_cup_results(event);
     if (applied && current_cup_index() == 3) {
         unsigned char *list = pointer_at(*racer_manager, 0x10);
@@ -1536,8 +1754,9 @@ static void ABI race_results_received(unsigned char *event) {
             printf("Native private CUP: podium %d player=%d points=%d\n", i + 1, key.id, key.points);
         }
     }
-    refresh_team_results();
     original_race_results(event);
+    /* Native result handling can complete remote racers; score that final state. */
+    apply_team_results(event);
     if (team_race_ui_owner) trace_team_score("results-return", NULL, NULL);
     refresh_team_results();
     if (applied && podium_count) cup_final_results_ready = 1;
@@ -1555,11 +1774,15 @@ static int ABI race_finished(unsigned char *self) {
     int count = 0;
     if (list) memcpy(&count, list + 12, 4);
     void **items = list ? pointer_at(list, 0x20) : NULL;
+    int finished = 0;
     for (int i = 0; items && i < count; ++i) {
         unsigned char *racer = items[i];
+        finished += racer[0x8c] != 0;
         if (!racer[0x8c]) cup_transition_pending = 0;
         restore_cup_total(racer);
     }
+    if ((private_cup_race_active || private_single_race_active) &&
+        items && count > 0 && count <= 8 && finished == count) return 1;
     return original_race_finished(self);
 }
 
@@ -1587,6 +1810,18 @@ static void ABI private_race_timer_done(void) {
         }
     }
     return_to_lobby();
+}
+
+/* The native guest first asks the host to return to the lobby, then drops
+ * the host when its grace timer expires. Cup needs the same end-of-results
+ * deadline as the host, without that single-race disconnect handshake. */
+static void ABI private_guest_return_timer(unsigned char *self) {
+    if (private_cup_race_active && current_cup()) {
+        puts("Native private CUP: guest following host countdown; retaining session");
+        schedule_guest_return(self, private_race_timer_done, self);
+        return;
+    }
+    original_guest_return_timer(self);
 }
 
 static void update_private_cup_track(void) {
@@ -1655,10 +1890,20 @@ static void ABI lobby_event(unsigned char *self, void *event, void *owner) {
     refresh_lobby_card(owner);
 }
 
+/* Team selection can hide the lobby while mode verification is in flight. */
+static int resume_private_map(void) {
+    if (!pending_private_map[0]) return 0;
+    char map[sizeof pending_private_map]; memcpy(map,pending_private_map,sizeof map);
+    load_private_map(map,pending_private_reason);
+    if (!pending_private_map[0]) puts("Native private race: pending map transition handled");
+    return !pending_private_map[0];
+}
+
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
     original_lobby_update(self, owner, dt);
     refresh_lobby_card(owner);
     runtime_public_itemless_update();
+    resume_private_map();
 }
 
 static void refresh_lobby_card(unsigned char *owner) {
@@ -1903,6 +2148,10 @@ static void ABI private_start_query(void *context, unsigned char *pins, unsigned
 
 /* Also protect direct/native start callers before the network broadcast. */
 static void ABI private_start_gate(unsigned char *self) {
+    if (!self[0x42] && is_private() && !battle_selected() && !runtime_room_mode_ready()) {
+        native_notice("Room settings are still synchronizing. Please retry Play.", NULL);
+        return;
+    }
     if (!self[0x42] && (reject_private_team_start() || !runtime_private_party_check())) return;
     original_lobby_start(self);
 }
@@ -1968,7 +2217,8 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         runtime_public_itemless_reset();
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
-        const int index = type == 2 ? 2 : (items[1] && (private ? private_speed_selected : runtime_public_itemless_selected()) ? 1 : 0);
+        const int private_speed = runtime_room_mode_following() ? runtime_speed_mode_enabled() : private_speed_selected;
+        const int index = type == 2 ? 2 : (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
         selector_mode_index = index;
         memcpy(self + 0x190, &index, sizeof index);
         runtime_speed_mode_set(private && index == 1);
@@ -2273,10 +2523,15 @@ static void ABI marker_update(unsigned char *self, unsigned char *owner, float d
 
 static void ABI results_item_update(unsigned char *self, unsigned char *owner, float dt) {
     original_results_item_update(self, owner, dt);
+    if (team_ranking_project) {
+        if (team_results_pending) refresh_team_results();
+        team_ranking_row(self);
+    }
     gold_name(pointer_at(self, 0xa8), gold_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
 }
 
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
+    if (resume_private_map()) return; /* Loading may invalidate the old UI objects. */
     original_team_slot_update(self, owner, dt);
     gold_name(pointer_at(self, 0x10), gold_allowed()); /* _namePlaceable */
     refresh_lobby_members_visibility();
@@ -2604,6 +2859,18 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     memcpy(timer_prefix + 26, &timer_call, 4);
     if (memcmp(image + 0x9b1fc0, load_prefix, sizeof load_prefix) ||
         memcmp(image + (0xeac310 - shift), timer_prefix, sizeof timer_prefix)) return 0;
+    if (memcmp(image + (0xf344e6 - shift), "\x44\x39\xf2\x74\x54", 5)) return 0;
+    const unsigned char lap_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x54,0x53,0x48,0x8b,0x5f,0x28,0x41,0x89,0xd6};
+    const unsigned char complete_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x54,0x53,0x48,0x89,0xf3};
+    if (memcmp(image + (0xf350c0 - shift), lap_prefix, sizeof lap_prefix) ||
+        memcmp(image + (0xf351b0 - shift), complete_prefix, sizeof complete_prefix)) return 0;
+    unsigned char guest_timer_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
+        0x8a,0x05,0,0,0,0,0x49,0x89,0xfe};
+    int32_t guest_global = (int32_t)(0x2a92868 - (0xf3963d - shift));
+    memcpy(guest_timer_prefix + 9, &guest_global, 4);
+    if (memcmp(image + (0xf39630 - shift), guest_timer_prefix, sizeof guest_timer_prefix)) return 0;
     unsigned char hud_gate[] = {0x41,0x83,0xfd,0x01,0x0f,0x85,0xe9,0x19,0,0,
         0x48,0x8b,0x35,0x54,0xa6,0xc5,0x01};
     int32_t hud_global = 0x1c5a654;
@@ -2616,6 +2883,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     int32_t racer_displacement = (int32_t)(0x2ad4b70 - (0xf34437 - shift));
     memcpy(finished_prefix + 3, &racer_displacement, 4);
     const unsigned char finish_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x49,0x89,0xfc};
+    const unsigned char order_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+    if (memcmp(image + (0xff11a0 - shift), order_prefix, sizeof order_prefix)) return 0;
     if (memcmp(image + (0xfff160 - shift), participant_prefix, sizeof participant_prefix) ||
         memcmp(image + (0xf34430 - shift), finished_prefix, sizeof finished_prefix) ||
         memcmp(image + (0xff2320 - shift), finish_prefix, sizeof finish_prefix)) return 0;
@@ -2787,7 +3056,22 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     memcpy(trampoline + 2048, legend_prefix, sizeof legend_prefix);
     jump_to(trampoline + 2065, image + (0x110bbd1 - shift));
     original_team_legend_node = (SoundNode)(trampoline + 2048);
-    stub_end = 2079;
+    memcpy(trampoline + 2112, order_prefix, sizeof order_prefix);
+    jump_to(trampoline + 2112 + sizeof order_prefix, image + (0xff11ae - shift));
+    original_racer_ahead = (RacerAhead)(trampoline + 2112);
+    memcpy(trampoline + 2176, guest_timer_prefix, 7);
+    memcpy(trampoline + 2183, "\x48\xb8", 2);
+    void *guest_init_global = image + 0x2a92868;
+    memcpy(trampoline + 2185, &guest_init_global, 8);
+    memcpy(trampoline + 2193, "\x8a\x00\x49\x89\xfe", 5);
+    jump_to(trampoline + 2198, image + (0xf39640 - shift));
+    original_guest_return_timer = (NativeEvent)(trampoline + 2176);
+    schedule_guest_return = (ScheduleReturn)(image + (0xf398a0 - shift));
+    memcpy(trampoline + 2240, lap_prefix, sizeof lap_prefix);
+    jump_to(trampoline + 2240 + sizeof lap_prefix, image + (0xf350c0 - shift) + sizeof lap_prefix);
+    original_record_lap = (RecordLap)(trampoline + 2240);
+    complete_racer = (CompleteRacer)(image + (0xf351b0 - shift));
+    stub_end = 2240 + sizeof lap_prefix + 14;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -2844,6 +3128,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     native_racer_pool = (unsigned char **)(image + 0x2ac57c0);
     end_timer_hud_mode = image + (0xe6675e);
     finish_timer_counter = image + (0xf34575 - shift);
+    human_finish_shortcut = image + (0xf344e9 - shift);
     ai_reuse_branch = image + (0xfff9c2 - shift);
     ai_asset_reuse_branch = image + (0xffd9c7 - shift);
     original_load_map = (LoadMap)(trampoline + 448);
@@ -2985,6 +3270,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xf34430 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, (void *)racer_finished);
     if (!write_code(image + (0xff2320 - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, racer_ahead);
+    if (!write_code(image + (0xff11a0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, trampoline + 512);
     if (!write_code(image + (0xeb9ffb - shift), jump, sizeof jump)) return 0;
     jump_to(jump, (void *)select_mode);
@@ -3019,6 +3306,10 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + 0x9b1fc0, jump, sizeof jump)) return 0;
     jump_to(jump, private_race_timer_done);
     if (!write_code(image + (0xeac310 - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, record_private_cup_lap);
+    if (!write_code(image + (0xf350c0 - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, private_guest_return_timer);
+    if (!write_code(image + (0xf39630 - shift), jump, sizeof jump)) return 0;
     if (custo_ok) {
         original_peer_customization = (PeerCustomization)(trampoline + 1024);
         jump_to(jump, (void *)peer_customization);
