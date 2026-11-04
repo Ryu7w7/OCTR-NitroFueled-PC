@@ -56,7 +56,8 @@ static void ABI contact(void *self, void *context, void *collision) {
 }
 
 static void ABI stop_boost(void *boost) {
-    if (!contact_owner || ptr(boost, 0x18) != contact_owner) native_stop(boost);
+    if (!contact_owner || ptr(boost, 0x18) != contact_owner)
+        runtime_race_options_stop_boost(boost,native_stop);
 }
 
 static void jump(unsigned char *at, const void *target) {

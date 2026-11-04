@@ -2,6 +2,9 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
+void runtime_room_mode_host_name(char out[24]) { strcpy(out,"host"); }
+static int catchup_guest;
+int runtime_room_mode_following(void) { return catchup_guest; }
 static int cup, private_room = 1, itemless, stale_private_ui, battle_menu;
 static unsigned char default_race[0xd50];
 static void *default_race_ptr = default_race;
@@ -52,6 +55,17 @@ static void ABI modifiers_native_mock(void *kart, float dt) {
     float value=.6f; memcpy((unsigned char *)kart+0x190,&value,4);
     put_int(kart,0x194,9999);
 }
+static float expected_motion_scale = 1;
+static float ABI trick_native_mock(void *kart) {
+    return ((unsigned char *)kart)[0xe8] ? 200 : 150;
+}
+static float ABI hop_native_mock(void *kart) { assert(kart); return 100; }
+static void ABI motion_native_mock(void *kart, void *data, void *velocity) {
+    assert(kart && data == (void *)1 && velocity == (void *)2);
+    const size_t offsets[] = {0x38, 0x4c, 0x50};
+    for (int i=0;i<3;++i)
+        assert(fabsf(real(boost_component,offsets[i])-(100+i*100)*expected_motion_scale)<.001f);
+}
 static void test_ai_physics(void) {
     unsigned char game[0x150]={0}, diff[32]={0}, race[0xd50]={0};
     unsigned char ai[0x80]={0}, control[0x80]={0}, kart[0x280]={0}, human[0x280]={0};
@@ -65,6 +79,12 @@ static void test_ai_physics(void) {
     /* AI component +28 is steering coordinates, not a racer handle. */
     float targets[2][3]={{1200,4500,100},{1500,4700,100}};
     memcpy(ai+0x28,targets,sizeof targets);
+    unsigned char racers_owner[32]={0}, racers_list[40]={0}, racer[0x170]={0};
+    unsigned char racer_entity[0x30]={0}, player_handle[0x30]={0}, player[0xd0]={0};
+    void *racers_root=racers_owner, *racers[]={NULL,racer};
+    racer_manager=&racers_root; put_ptr(racers_owner,0x10,racers_list);
+    put_ptr(racers_list,0x20,racers); put_int(racers_list,12,2);
+    put_ptr(racer,0x20,racer_entity); put_ptr(racer_entity,0x28,entity); put_int(racer,0x164,0);
     reset_ai_physics(); register_ai_physics(ai); private_room=1;
     const float expected[]={1,1,1.04f,1.06f,1.08f,1.105f};
     for (int mode=8;mode<=16;mode+=8) for(int level=0;level<6;++level) {
@@ -77,29 +97,31 @@ static void test_ai_physics(void) {
     }
     unsigned char timer[24]={0}; void *vtable[24]={0};
     vtable[0xb0/8]=timing_now; put_ptr(timer,0,vtable); put_ptr(kart,0xf8,timer);
+    for (timing_clock=0;timing_clock<131072;timing_clock+=8192)
+        assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-110.5f)<.001f);
+    put_int(game,0x144,8); /* Offline keeps its time-varying pacing. */
     timing_clock=32768;
     assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-112)<.001f);
     timing_clock=98304;
     assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-109)<.001f);
     timing_clock=0;
-    unsigned char racers_owner[32]={0}, racers_list[40]={0}, racer[0x170]={0};
-    unsigned char racer_entity[0x30]={0}, player_handle[0x30]={0}, player[0xd0]={0};
-    void *racers_root=racers_owner, *racers[]={NULL,racer};
-    racer_manager=&racers_root; put_ptr(racers_owner,0x10,racers_list);
-    put_ptr(racers_list,0x20,racers); put_int(racers_list,12,2);
-    put_ptr(racer,0x20,racer_entity); put_ptr(racer_entity,0x28,entity); put_int(racer,0x164,3);
+    put_int(game,0x144,16);
+    put_int(racer,0x164,3);
     register_ai_physics(ai); assert(ai_physics[0].id==3);
     assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-100*ai_speed_scale(5,0,0,3))<.001f);
     put_ptr(racer,0x10,player_handle); put_ptr(player_handle,0x28,player); put_int(player,0xc8,7);
-    register_ai_physics(ai); assert(ai_physics[0].id==7);
-    peer_decision=1; register_ai_physics(ai); assert(ai_physics[0].id==7); peer_decision=0;
+    register_ai_physics(ai); assert(!ai_physics[0].identity_valid);
+    peer_decision=1; register_ai_physics(ai); assert(!ai_physics[0].identity_valid); peer_decision=0;
     put_ptr(racer_entity,0x28,human); register_ai_physics(ai); assert(ai_physics[0].id==0);
     put_ptr(racer_entity,0x28,entity); put_int(player,0xc8,99);
     register_ai_physics(ai); assert(ai_physics[0].id==0);
     put_int(racers_list,12,9); register_ai_physics(ai); assert(ai_physics[0].id==0);
     racer_manager=NULL; register_ai_physics(ai);
     peer_decision=1;
-    assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-110.5f)<.001f); /* Same physics for replicated AI. */
+    assert(kart_speed(kart,speed_data,0,75,.016f)==100); /* Missing identity stays native on peers. */
+    racer_manager=&racers_root; put_int(racers_list,12,2); put_ptr(racer,0x10,NULL);
+    register_ai_physics(ai);
+    assert(fabsf(kart_speed(kart,speed_data,0,75,.016f)-100*ai_speed_scale(5,0,0,3))<.001f);
     peer_decision=0; private_room=0;
     assert(kart_speed(kart,speed_data,0,75,.016f)==100); private_room=1;
     put_int(race,0xd4c,9); assert(kart_speed(kart,speed_data,0,75,.016f)==100); put_int(race,0xd4c,1);
@@ -113,11 +135,318 @@ static void test_ai_physics(void) {
     assert(integer(kart,0x194)==1234); assert(fabsf(real(kart,0x190)-1.2f)<.001f);
     assert(real(kart,0x198)==damage); /* Damage and native timers remain outside the surface policy. */
     speed_modifiers(human,.016f); assert(fabsf(real(human,0x190)-.6f)<.001f);
+    native_jump_impulse=hop_native_mock; native_trick_impulse=trick_native_mock; native_kart_motion=motion_native_mock;
+    void *boost_meta=(void *)1; boost_type=&boost_meta; component=find_component;
+    const size_t boost_offsets[]={0x38,0x4c,0x50};
+    for(int i=0;i<3;++i) { float v=100+i*100; memcpy(boost_component+boost_offsets[i],&v,4); }
+    for(int level=2;level<=5;++level) {
+        put_int(diff,12,2); ai_profile=level-2;
+        for(itemless=0;itemless<=1;++itemless) {
+            const float hop=1;
+            assert(fabsf(jump_impulse(kart)-100*hop)<.001f);
+            assert(jump_impulse(human)==100);
+            for (int flag=0;flag<2;++flag) {
+                kart[0xe8]=flag; human[0xe8]=flag;
+                float expected=flag ? 200 : 150;
+                assert(fabsf(trick_jump_impulse(kart)-expected)<.001f && kart[0xe8]==flag);
+                assert(trick_jump_impulse(human)==(flag ? 200 : 150) && human[0xe8]==flag);
+            }
+            /* A recycled AI registration must not buff a live human racer. */
+            put_ptr(racer,0x10,player_handle);
+            assert(jump_impulse(kart)==100 && kart_speed(kart,speed_data,0,75,.016f)==100);
+            assert(trick_jump_impulse(kart)==200 && kart[0xe8]==1);
+            expected_motion_scale=1; kart_motion(kart,(void *)1,(void *)2);
+            put_ptr(racer,0x10,NULL);
+            /* Keep the old registration while live ownership becomes uncertain. */
+            for (int invalid=0;invalid<6;++invalid) {
+                if (invalid==0) { put_ptr(racer,0x10,player_handle); put_ptr(player_handle,0x28,NULL); }
+                if (invalid==1) racer_manager=NULL;
+                if (invalid==2) put_ptr(racer_entity,0x28,human);
+                if (invalid==3) put_int(racer,0x164,4); /* Reused entity, different racer. */
+                if (invalid==4) put_int(racer,0x164,99);
+                if (invalid==5) put_int(racers_list,12,0);
+                for (peer_decision=0;peer_decision<2;++peer_decision) {
+                    assert(jump_impulse(kart)==100);
+                    kart[0xe8]=0;
+                    assert(trick_jump_impulse(kart)==150 && kart[0xe8]==0);
+                    assert(kart_speed(kart,speed_data,0,75,.016f)==100);
+                    assert(catchup_for_kart(kart)==0);
+                    expected_motion_scale=1; kart_motion(kart,(void *)1,(void *)2);
+                    speed_modifiers(kart,.016f); assert(fabsf(real(kart,0x190)-.6f)<.001f);
+                }
+                peer_decision=0; racer_manager=&racers_root;
+                put_ptr(racer,0x10,NULL); put_ptr(player_handle,0x28,player);
+                put_ptr(racer_entity,0x28,entity); put_int(racer,0x164,3); put_int(racers_list,12,2);
+            }
+            expected_motion_scale=itemless ? 1.12f+.03f*(level-2) : 1;
+            for(int repeat=0;repeat<3;++repeat) {
+                kart_motion(kart,(void *)1,(void *)2);
+                for(int i=0;i<3;++i) assert(real(boost_component,boost_offsets[i])==100+i*100);
+            }
+            expected_motion_scale=1; kart_motion(human,(void *)1,(void *)2);
+            kart[0x214]=1;
+            float ground=kart_speed(kart,speed_data,0,75,.016f);
+            kart[0x214]=0;
+            float air=kart_speed(kart,speed_data,0,75,.016f);
+            assert(fabsf(air-ground*(itemless ? 1.10f+.03f*(level-2) : 1))<.001f);
+        }
+    }
+    itemless=1; component=NULL; boost_type=NULL;
     put_int(diff,12,1); ai_profile=0;
     assert(kart_speed(kart,speed_data,0,75,.016f)==100);
     speed_modifiers(kart,.016f); assert(fabsf(real(kart,0x190)-.6f)<.001f);
     reset_ai_physics(); assert(kart_speed(kart,speed_data,0,75,.016f)==100);
-    itemless=0; client=difficulty_manager=manager=NULL; ai_profile=0;
+    itemless=0; client=difficulty_manager=manager=racer_manager=NULL; ai_profile=0;
+}
+
+static unsigned char ABI catchup_ahead_mock(void *a,void *b) { return real(a,0x44)>real(b,0x44); }
+static void ABI catchup_position_mock(float *out,void *entity) { memcpy(out,(char *)entity+0x40,12); }
+static int exhaust_mock_state;
+static int ABI exhaust_mock(void *self) { assert(self); return exhaust_mock_state; }
+static void ABI velocity_mock(void *entity,const float *v) { memcpy((char *)entity+0x60,v,12); }
+static void ABI air_motion_mock(void *kart,void *entity,void *input) {
+    (void)kart; (void)input;
+    float speed=real(entity,0x60)*.98f; memcpy((char *)entity+0x60,&speed,4);
+}
+static void test_catchup_physics(void) {
+    unsigned char game[0x150]={0},diff[32]={0},race[0xd50]={0},root[0x40]={0},list[40]={0};
+    unsigned char ai[0x80]={0},control[0x80]={0},kart[0x280]={0},kart_handle[0x30]={0};
+    unsigned char racers[3][0x180]={{0}},entities[3][0x90]={{0}},handles[3][0x30]={{0}};
+    unsigned char players[2][0xd0]={{0}},player_handles[2][0x30]={{0}};
+    void *g=game,*d=diff,*r=race,*m=root,*items[]={racers[0],racers[1],racers[2]};
+    client=&g; difficulty_manager=&d; manager=&r; racer_manager=&m;
+    put_int(game,0x144,16); put_int(race,0xd4c,1); private_room=1;
+    put_ptr(root,0x10,list); put_ptr(list,0x20,items); put_int(list,12,3);
+    put_ptr(ai,0x18,entities[0]); put_ptr(ai,0x48,control); put_ptr(control,0x58,kart_handle);
+    put_ptr(kart_handle,0x28,kart); put_ptr(kart,0x18,entities[0]);
+    put_int(racers[0],0x164,3); entities[0][0x3b]=1; kart[0x214]=1;
+    for (int i=0;i<3;++i) {
+        entities[i][0x3b]=1; /* Local humans here; transport tested separately. */
+        put_ptr(racers[i],0x20,handles[i]); put_ptr(handles[i],0x28,entities[i]);
+        float progress=i*100,velocity=100;
+        memcpy(racers[i]+0x44,&progress,4); memcpy(entities[i]+0x40,&progress,4);
+        memcpy(entities[i]+0x60,&velocity,4);
+        if (i) { put_ptr(racers[i],0x10,player_handles[i-1]); put_ptr(player_handles[i-1],0x28,players[i-1]); }
+    }
+    native_difficulty=difficulty; catchup_racer_ahead=catchup_ahead_mock; world_position=catchup_position_mock;
+    for (itemless=0;itemless<=1;++itemless) for (int level=0;level<=5;++level) {
+        put_int(diff,12,level>2?2:level); ai_profile=level>2?level-2:0;
+        runtime_race_options_map_loading("test-track"); register_ai_physics(ai);
+        for (int n=0;n<30;++n) {
+            ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai);
+        }
+        float bonus=catchup_for_kart(kart); assert(bonus>0);
+        if (!itemless) assert(bonus<=normal_catchup_cap(level,100,100)+.0051f);
+        /* Both human slots are excluded, even after an AI registration is recycled. */
+        put_ptr(racers[0],0x10,player_handles[0]);
+        assert(catchup_for_kart(kart)==0);
+        put_ptr(racers[0],0x10,NULL);
+        /* A follower does not change its decision when local progress differs. */
+        catchup_guest=1;
+        float progress=300; memcpy(racers[0]+0x44,&progress,4);
+        ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai);
+        assert(catchup_for_kart(kart)==bonus);
+        catchup_guest=0;
+        for (int n=0;n<30;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+        assert(catchup_for_kart(kart)==0); /* Ahead of every human: back to baseline. */
+        progress=0; memcpy(racers[0]+0x44,&progress,4);
+    }
+    itemless=0; put_int(diff,12,2); ai_profile=0;
+    runtime_race_options_map_loading("test-track"); register_ai_physics(ai);
+    float slow=50,fast=300; memcpy(entities[1]+0x60,&slow,4); memcpy(entities[2]+0x60,&fast,4);
+    for (int n=0;n<20;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(catchup_for_kart(kart)==0); /* Chase nearer player 2 first, not fast leader. */
+    float progress=150; memcpy(racers[0]+0x44,&progress,4);
+    for (int n=0;n<20;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(catchup_for_kart(kart)>0); /* Overtaken player 2: now chase player 1. */
+    /* The next racer can be a bot: do not fall back to a slower human farther ahead. */
+    put_ptr(racers[2],0x10,NULL); put_int(racers[2],0x164,4);
+    for (int n=0;n<30;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(catchup_for_kart(kart)>0);
+    racers[2][0x8c]=1;
+    for (int n=0;n<30;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(catchup_for_kart(kart)==0); /* Finished bots are not targets. */
+    racers[2][0x8c]=0;
+    put_ptr(racers[2],0x10,player_handles[1]);
+    for (int n=0;n<10;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    float sharp_curve=.8f; memcpy(ai+0x40,&sharp_curve,4);
+    update_ai_catchup(ai); assert(runtime_ai_catchup_bonus(3)==0);
+    sharp_curve=0; memcpy(ai+0x40,&sharp_curve,4);
+    for (int n=0;n<10;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(runtime_ai_catchup_bonus(3)>0); /* Bonus returns after the bend. */
+    /* Host continues computing after native AI ownership moves to a guest. */
+    entities[0][0x3b]=0;
+    float before=catchup_for_kart(kart);
+    memcpy(entities[2]+0x60,&slow,4);
+    ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai);
+    assert(catchup_for_kart(kart)<before); /* Host reacts even for a guest-owned AI. */
+    memcpy(entities[2]+0x60,&fast,4);
+    for (int n=0;n<10;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    /* Recovery follows native splines, so ghost-route physics cannot stack
+     * on top of its braking/hops. Network bonus storage itself stays intact. */
+    itemless=1;
+    const float published=runtime_ai_catchup_bonus(3);
+    const int recovery_level=registered_ai_level(kart);
+    runtime_ai_catchup_recovery_publish(3,1);
+    stuck_recovery[3].owner=entities[0]; stuck_recovery[3].active=1;
+    assert(physics_ai_level(kart)==-1 && catchup_for_kart(kart)==0);
+    assert(runtime_ai_catchup_bonus(3)==published);
+    runtime_ai_catchup_recovery_publish(3,0);
+    stuck_recovery[3].owner=entities[1];
+    assert(physics_ai_level(kart)==recovery_level && catchup_for_kart(kart)>0);
+    stuck_recovery[3].owner=entities[0]; itemless=0;
+    assert(physics_ai_level(kart)==recovery_level && catchup_for_kart(kart)>0);
+    memset(stuck_recovery,0,sizeof stuck_recovery); itemless=1;
+    unsigned char exhaust[0x48]={0},effects[0x30]={0},effect_handle[0x30]={0};
+    put_ptr(exhaust,0x18,effect_handle); put_ptr(effect_handle,0x28,effects); put_ptr(effects,0x18,entities[0]);
+    native_exhaust_state=exhaust_mock; itemless=1;
+    exhaust_mock_state=1; assert(exhaust_state(exhaust)==1); /* No invented sacred fire. */
+    exhaust_mock_state=10; assert(exhaust_state(exhaust)==10);
+    exhaust_mock_state=1; assert(exhaust_state(exhaust)==10);
+    exhaust_mock_state=8; assert(exhaust_state(exhaust)==8); /* Latest red replaces blue. */
+    exhaust_mock_state=1; assert(exhaust_state(exhaust)==8);
+    exhaust_mock_state=12; assert(exhaust_state(exhaust)==12); /* Underwater remains native. */
+    exhaust_mock_state=1; itemless=0; assert(exhaust_state(exhaust)==1); itemless=1;
+    put_ptr(racers[0],0x10,player_handles[0]); assert(exhaust_state(exhaust)==1);
+    put_ptr(racers[0],0x10,NULL);
+    /* Host publishes removal of catch-up in flight, including without a ghost reference. */
+    assert(catchup_for_kart(kart)>0);
+    const float before_jump=ai_physics[0].catchup;
+    kart[0x214]=0; update_ai_catchup(ai);
+    assert(runtime_ai_catchup_bonus(3)==0);
+    assert(ai_physics[0].catchup>=before_jump-.01f);
+    kart[0x214]=1; update_ai_catchup(ai);
+    assert(runtime_ai_catchup_bonus(3)>0); /* Resume demand, not a new ramp from zero. */
+    kart[0x214]=1;
+    /* Without a reference, native airborne deceleration must remain effective. */
+    native_set_velocity=velocity_mock; native_kart_motion=air_motion_mock; entities[0][0x3b]=1;
+    kart[0x214]=1; kart_motion(kart,entities[0],NULL);
+    const float takeoff=real(entities[0],0x60);
+    float z=30; memcpy(entities[0]+0x68,&z,4); kart[0x214]=0;
+    kart_motion(kart,entities[0],NULL); float flight=real(entities[0],0x60);
+    assert(fabsf(flight-takeoff*.98f)<.001f);
+    for (int i=0;i<60;++i) kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)<flight && real(entities[0],0x68)==30);
+    float stop=0; memcpy(entities[0]+0x60,&stop,4); kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)==0 && ai_physics[0].air_until==0);
+    /* Real reference -> approach acceleration -> native velocity setter. */
+    char path[128]; snprintf(path,sizeof path,"/tmp/jump-reference-%ld.bin",(long)getpid());
+    FILE *file=fopen(path,"wb"); assert(file);
+    uint32_t one=1,count=30; char name[64]="jump_test__developer";
+    fwrite("BBGHOST1",1,8,file); fwrite(&one,4,1,file); fwrite(name,1,64,file); fwrite(&count,4,1,file);
+    for (unsigned i=0;i<count;++i) {
+        float x=i<18 ? i*100.f : i<24 ? 1800+(i-18)*250.f : 3300+(i-24)*50.f;
+        float sample[4]={i*.1f,x,0,i==16 ? 150.f : 0}; uint32_t flags=i==15 ? 2 : 0;
+        fwrite(sample,4,4,file); fwrite(&flags,4,1,file);
+    }
+    fclose(file); assert(runtime_tt_reference_load(path)==1); unlink(path);
+    float position[3]={1000,0,0},vel[3]={400,0,30},targets[2][3]; unsigned intent;
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    kart[0x214]=1; memcpy(entities[0]+0x40,position,sizeof position); memcpy(entities[0]+0x60,vel,sizeof vel);
+    update_ai_catchup(ai);
+    assert(runtime_tt_reference_jump_lead(3,(uintptr_t)entities[0])>.35f);
+    assert(runtime_ai_catchup_bonus(3)>0); /* Early approach no longer suppresses the whole bonus. */
+    position[0]=1490;
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    assert(runtime_tt_reference_jump_lead(3,(uintptr_t)entities[0])<=.35f);
+    assert(jump_impulse(kart)==100); /* Guided trajectory does not stack extra hop height. */
+    kart[0xe8]=0; assert(trick_jump_impulse(kart)==150 && kart[0xe8]==0);
+    memcpy(entities[0]+0x40,position,sizeof position);
+    update_ai_catchup(ai);
+    assert(runtime_ai_catchup_bonus(3)==0); /* Jump approach uses the same published restriction. */
+    memcpy(entities[0]+0x60,vel,sizeof vel); kart[0x214]=1;
+    ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+    kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)>600 && real(entities[0],0x60)<=1000 && real(entities[0],0x68)==30);
+    /* Do not pin catch-up overspeed above the recorded landing speed. */
+    float overspeed=2000; memcpy(entities[0]+0x60,&overspeed,4);
+    kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)<=1050.01f && real(entities[0],0x68)==30);
+    memcpy(entities[0]+0x60,&overspeed,4);
+    kart[0x214]=0;
+    kart_motion(kart,entities[0],NULL);
+    assert(fabsf(ai_physics[0].air_floor-1000)<.01f);
+    assert(real(entities[0],0x60)<=1050.01f); /* Overspeed removed on first airborne step. */
+    /* Isolate native braking from timed route corrections; guidance is checked below. */
+    world_position=NULL;
+    for (int n=0;n<60;++n) kart_motion(kart,entities[0],NULL);
+    world_position=catchup_position_mock;
+    assert(real(entities[0],0x60)<=1000.01f && real(entities[0],0x68)==30);
+    /* The same flight accelerates beyond its takeoff speed, then brakes
+     * with the next spatial segment; no vertical force or position rewrite. */
+    position[0]=1900; vel[0]=1000;
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    memcpy(entities[0]+0x40,position,sizeof position);
+    assert(fabsf(runtime_tt_reference_route_speed(3,(uintptr_t)entities[0])-2500)<.01f);
+    assert(trick_jump_impulse(kart)==150 && kart[0xe8]==0);
+    for (int n=0;n<6;++n) {
+        ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+        kart_motion(kart,entities[0],NULL);
+    }
+    assert(real(entities[0],0x60)>2400 && real(entities[0],0x60)<2500.1f);
+    position[1]=214;
+    memcpy(entities[0]+0x40,position,sizeof position);
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    assert(!(intent & TT_REFERENCE_ALIGNED));
+    assert(runtime_tt_reference_route_speed(3,(uintptr_t)entities[0])>0);
+    ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+    kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x64)<0); /* Air steering corrects lateral drift instead of flying straight. */
+    position[1]=0;
+    position[0]=3325; vel[0]=2500;
+    memcpy(entities[0]+0x40,position,sizeof position);
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+    kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)<=525.01f && fabsf(real(entities[0],0x68))<.01f);
+    /* Missing route information cannot resurrect the earlier high floor. */
+    position[1]=2000;
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    assert(runtime_tt_reference_route_speed(3,(uintptr_t)entities[0])==0);
+    ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+    kart_motion(kart,entities[0],NULL); assert(ai_physics[0].air_until==0);
+    vel[0]=400; position[0]=3500; position[1]=position[2]=0;
+    memcpy(entities[0]+0x40,position,sizeof position);
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    assert(runtime_tt_reference_guide("jump_test",(uintptr_t)entities[0],3,0,5,position,vel,targets,&intent));
+    kart[0x214]=0;
+    memcpy(entities[0]+0x60,vel,sizeof vel);
+    ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+    kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)>392 && real(entities[0],0x68)!=30); /* Valid fixture actually applies assistance. */
+    /* Motion assistance follows simulation ticks, not render/wall-clock calls. */
+    unsigned char motion_timer[24]={0}; void *motion_vtable[24]={0};
+    motion_vtable[0xb0/8]=timing_now; put_ptr(motion_timer,0,motion_vtable); put_ptr(kart,0xf8,motion_timer);
+    ai_physics[0].motion_clock_valid=0; timing_clock=1000;
+    memcpy(entities[0]+0x60,vel,sizeof vel); kart_motion(kart,entities[0],NULL);
+    assert(fabsf(real(entities[0],0x60)-392)<.01f && real(entities[0],0x68)==30);
+    timing_clock+=273;
+    memcpy(entities[0]+0x60,vel,sizeof vel); kart_motion(kart,entities[0],NULL);
+    assert(real(entities[0],0x60)>392 && real(entities[0],0x68)!=30);
+    memcpy(entities[0]+0x60,vel,sizeof vel); kart_motion(kart,entities[0],NULL);
+    assert(fabsf(real(entities[0],0x60)-392)<.01f && real(entities[0],0x68)==30);
+    put_ptr(kart,0xf8,NULL);
+    /* Neither a guest simulating received AI nor a recycled human gets the assist. */
+    for (int test=0;test<4;++test) {
+        memcpy(entities[0]+0x60,vel,sizeof vel);
+        if (test==0) entities[0][0x3b]=0;
+        if (test==1) { entities[0][0x3b]=1; put_ptr(racers[0],0x10,player_handles[0]); }
+        if (test==2) put_ptr(player_handles[0],0x28,NULL);
+        if (test==3) { put_ptr(racers[0],0x10,NULL); itemless=0; }
+        ai_physics[0].motion_updated=runtime_ai_catchup_now()-50;
+        kart_motion(kart,entities[0],NULL);
+        assert(fabsf(real(entities[0],0x60)-392)<.01f && real(entities[0],0x68)==30);
+    }
+    put_ptr(player_handles[0],0x28,players[0]);
+    runtime_tt_reference_load(NULL);
+    native_set_velocity=NULL; itemless=0;
+    racers[0][0x8c]=1; assert(catchup_for_kart(kart)==0);
+    itemless=1; assert(exhaust_state(exhaust)==1); itemless=0;
+    racers[0][0x8c]=0; racers[2][0x8c]=1;
+    for (int n=0;n<30;++n) { ai_physics[0].updated=runtime_ai_catchup_now()-100; update_ai_catchup(ai); }
+    assert(catchup_for_kart(kart)==0); /* Finished humans are not targets. */
+    reset_ai_physics(); client=difficulty_manager=racer_manager=NULL; manager=&default_race_ptr;
+    world_position=NULL; catchup_racer_ahead=NULL; ai_profile=0;
 }
 
 static void test_dynamic_speed(void) {
@@ -139,6 +468,103 @@ static void test_dynamic_speed(void) {
     assert(ai_speed_scale(-1,1,0,0)==1 && ai_speed_scale(6,1,0,0)==1);
     assert(fabsf(ai_speed_scale(1,1,32768,0)-1.02f)<.000001f);
     assert(fabsf(ai_speed_scale(1,1,98304,0)-1.01f)<.000001f);
+}
+
+static unsigned char ABI brake_cancel_mock(void *boost, void *data, void *entry) {
+    (void)boost; (void)data; (void)entry; return 0;
+}
+static void ABI wall_cancel_mock(void *boost) {
+    void *list=ptr(boost,0x28); void **items=ptr(list,0x20);
+    for (int i=0;i<integer(list,12);++i) {
+        unsigned char *entry=items[i];
+        if (!entry[0x30]) entry[0x48]=1;
+    }
+}
+static int pad_braking;
+/* Model native entry ageing/selection, including actual expiry (not just refill writes). */
+static void ABI pad_update_mock(void *boost, float dt) {
+    void *list=ptr(boost,0x28); void **entries=ptr(list,0x20);
+    float fastest=0;
+    for (int i=0;i<integer(list,12);++i) {
+        unsigned char *e=entries[i]; void *data=ptr(e,0x10);
+        if (pad_braking && !keep_boost(boost,data,e)) e[0x48]=1;
+        float age=real(e,0x18)+dt; memcpy(e+0x18,&age,4);
+        if (age>=real(data,0x1c)+real(e,0x28)) e[0x48]=1;
+        if (!e[0x48]) fastest=fmaxf(fastest,real(data,0xc));
+    }
+    memcpy((char *)boost+0x38,&fastest,4);
+}
+static void test_maintained_pad_fire(void) {
+    unsigned char game[0x150]={0}, diff[32]={0}, race[0xd50]={0}, kart[0x280]={0};
+    unsigned char entity[0x80]={0}, owner[32]={0}, list[40]={0}, racer[0x170]={0}, handle[0x30]={0};
+    unsigned char boost[0x70]={0}, boost_list[40]={0}, entries[3][0x50]={{0}}, data[3][0x40]={{0}};
+    unsigned char human[0x30]={0};
+    void *g=game,*d=diff,*r=race,*root=owner,*racers[]={racer},*items[]={entries[0],entries[1],entries[2]};
+    client=&g; difficulty_manager=&d; manager=&r; racer_manager=&root;
+    native_difficulty=difficulty; maintained_duration=duration; native_boost_update=pad_update_mock; native_keep_boost=brake_cancel_mock;
+    put_int(game,0x144,16); put_int(race,0xd4c,1); put_int(diff,12,2);
+    put_ptr(owner,0x10,list); put_int(list,12,1); put_ptr(list,0x20,racers);
+    put_ptr(racer,0x20,handle); put_ptr(handle,0x28,entity); put_int(racer,0x164,0);
+    put_ptr(kart,0x18,entity); put_ptr(boost,0x18,entity);
+    put_ptr(boost,0x28,boost_list); put_ptr(boost_list,0x20,items);
+    for (int i=0;i<3;++i) {
+        put_ptr(entries[i],0x10,data[i]);
+        float speed=i==1 ? 200 : 100, duration_value=.1f;
+        memcpy(data[i]+0xc,&speed,4); memcpy(data[i]+0x1c,&duration_value,4); data[i][0x3c]=1;
+    }
+    reset_ai_physics();
+    ai_physics[0].kart=kart; ai_physics[0].entity=entity; ai_physics[0].identity_valid=1;
+    private_room=1; followed_ai_profile=followed_ai_base=-1;
+    for (int network=8;network<=16;network+=8)
+    for (int level=0;level<=5;++level) for (int mode=0;mode<2;++mode) for (int peer=0;peer<2;++peer) {
+        put_int(game,0x144,network);
+        itemless=mode; catchup_guest=peer; entity[0x3b]=!peer;
+        put_int(diff,12,level>2 ? 2 : level); ai_profile=level>2 ? level-2 : 0;
+        followed_ai_profile=peer ? ai_profile : -1;
+        put_int(boost_list,12,1);
+        for (int i=0;i<3;++i) { memset(entries[i],0,sizeof entries[i]); put_ptr(entries[i],0x10,data[i]); }
+        for (int tick=0;tick<600;++tick) {
+            pad_braking=1;
+            runtime_race_options_stop_boost(boost,wall_cancel_mock);
+            boost_update(boost,peer ? 1.f/60 : 1.f/30);
+        }
+        assert(!entries[0][0x30]); /* Temporary contact flag never leaks. */
+        assert(real(boost,0x38)==(level>=4 ? 100 : 0));
+        if (level<4) continue;
+        put_int(boost_list,12,2); /* Blue pad actually acquired. */
+        for (int tick=0;tick<600;++tick) boost_update(boost,1.f/60);
+        assert(real(boost,0x38)==200 && entries[0][0x48] && !entries[1][0x48]);
+        put_int(boost_list,12,3); /* A later red pad cannot downgrade blue. */
+        for (int tick=0;tick<600;++tick) boost_update(boost,1.f/60);
+        assert(real(boost,0x38)==200 && entries[2][0x48]);
+        entries[1][0x48]=1; boost_update(boost,.016f); assert(real(boost,0x38)==0);
+    }
+    ai_profile=3; followed_ai_profile=-1; put_int(diff,12,2); put_int(boost_list,12,1);
+    for (int excluded=0;excluded<7;++excluded) {
+        memset(entries[0],0,sizeof entries[0]); put_ptr(entries[0],0x10,data[0]);
+        if (excluded==0) put_ptr(racer,0x10,human); /* Unresolved human still excluded. */
+        if (excluded==1) data[0][0x3c]=0; /* Item/drift/start turbo. */
+        if (excluded==2) private_room=0;
+        if (excluded==3) put_int(race,0xd4c,9);
+        if (excluded==4) ai_physics[0].identity_valid=0;
+        if (excluded==5) { float age=1; memcpy(entries[0]+0x18,&age,4); }
+        if (excluded==6) entries[0][0x48]=1;
+        boost_update(boost,.2f);
+        assert(real(entries[0],0x28)==0 && real(boost,0x38)==0);
+        put_ptr(racer,0x10,NULL); data[0][0x3c]=1; private_room=1;
+        put_int(race,0xd4c,1); ai_physics[0].identity_valid=1;
+    }
+    /* Paused or invalid timestep must not bank reserves. */
+    memset(entries[0],0,sizeof entries[0]); put_ptr(entries[0],0x10,data[0]);
+    maintain_ai_pad_fire(boost,0); maintain_ai_pad_fire(boost,NAN); maintain_ai_pad_fire(boost,-1);
+    assert(real(entries[0],0x28)==0);
+    /* The host's replicated profile wins over a guest's personal Nightmare setting. */
+    followed_ai_profile=1; maintain_ai_pad_fire(boost,.016f); assert(real(entries[0],0x28)==0);
+    followed_ai_profile=2; maintain_ai_pad_fire(boost,.016f); assert(real(entries[0],0x28)>1);
+    for (int i=0;i<3;++i) assert(real(data[i],0x1c)==.1f && real(data[i],0xc)==(i==1 ? 200 : 100));
+    pad_braking=0;
+    reset_ai_physics(); client=difficulty_manager=racer_manager=NULL; manager=&default_race_ptr;
+    ai_profile=0; followed_ai_profile=followed_ai_base=-1; itemless=catchup_guest=0;
 }
 
 static void test_reserves(void) {
@@ -656,6 +1082,7 @@ static void test_private_difficulty_gate(void) {
 }
 
 static void test_room_difficulty_restore(void) {
+    catchup_guest=1;
     unsigned char game[0x150] = {0}, diff[32] = {0}, ai[0x80] = {0};
     unsigned char entity[0x40] = {0}, wire[0x18] = {0}, actions = 1;
     void *g = game, *d = diff;
@@ -712,7 +1139,7 @@ static void test_room_difficulty_restore(void) {
     assert(effective_profile()==0 && driving_level()==-1);
     private_room=1;stale_private_ui=0;
     runtime_race_options_leave_room(); client = difficulty_manager = NULL; ai_profile = 0;
-    net_context = NULL; owns_object = NULL; native_difficulty = difficulty;
+    net_context = NULL; owns_object = NULL; native_difficulty = difficulty; catchup_guest=0;
 }
 static void test_authority_profile(void) {
     unsigned char game[0x150] = {0}, diff[32] = {0}, ai[0x80] = {0};
@@ -724,13 +1151,13 @@ static void test_authority_profile(void) {
     put_int(game, 0x144, 16); put_int(diff, 12, 2); put_int(diff, 16, 2);
     for (int profile = 0; profile < 4; ++profile) {
         for (unsigned bits = 0; bits < 64; ++bits) {
-            runtime_race_options_leave_room(); ai_profile = profile;
+            runtime_race_options_leave_room(); ai_profile = profile; catchup_guest=0;
             entity[0x3b] = 1; actions = bits;
             ai_input(ai, &actions);
             assert(wire[0x10] == (bits | ((unsigned)profile << 6)));
             assert(input_level == 2 + profile);
             /* Other client has a different local choice; owner packet wins. */
-            ai_profile = (profile + 1) % 4;
+            ai_profile = (profile + 1) % 4; catchup_guest=1;
             entity[0x3b] = 0; actions = 0xff;
             const int decisions = owner_decisions;
             ai_input(ai, &actions);
@@ -742,6 +1169,9 @@ static void test_authority_profile(void) {
             assert(input_level == 2 + profile && wire[0x10] >> 6 == profile);
         }
     }
+    catchup_guest=0; runtime_race_options_leave_room(); ai_profile=3;
+    entity[0x3b]=0; wire[0x10]=1; ai_input(ai,&actions);
+    assert(effective_profile()==3 && followed_ai_profile==-1);
     /* Public input never advertises/adopts custom profile bits, on either peer role. */
     private_room=0; stale_private_ui=1; ai_profile=3; followed_ai_profile=3; followed_ai_base=2;
     entity[0x3b]=1; wire[0x10]=0x80; actions=9;
@@ -767,6 +1197,7 @@ static void test_authority_profile(void) {
     runtime_race_options_leave_room(); ai_profile = 0; client = difficulty_manager = NULL;
 }
 static void test_lines(void) {
+    catchup_guest=0;
     unsigned char list[40] = {0}, entries[3][32] = {{0}}, segments[3][0x68] = {{0}};
     void *items[] = {entries[0], entries[1], entries[2]};
     put_ptr(list, 0x20, items); put_int(list, 12, 3);
@@ -956,19 +1387,28 @@ static void test_ghost_traffic(void) {
     put_ptr(racer,0x20,handle); put_ptr(handle,0x28,other); put_int(racer,0x164,1);
     float pos[]={0,0,0}, peer[]={400,0,0}, line[2][3]={{500,0,0},{1000,0,0}}, target[2][3];
     memcpy(other+0x20,peer,sizeof peer); memcpy(target,line,sizeof line);
-    avoid_reference_traffic(self,0,pos,target,0);
+    avoid_reference_traffic(self,0,pos,target,0,1);
     assert(target[0][1]<0 && target[0][1]>=-90 && target[0][0]==500);
-    memcpy(target,line,sizeof line); avoid_reference_traffic(self,2,pos,target,0);
+    memcpy(target,line,sizeof line); avoid_reference_traffic(self,2,pos,target,0,1);
     assert(target[0][1]>0); /* Deterministic separation from the other side. */
-    memcpy(target,line,sizeof line); avoid_reference_traffic(self,0,pos,target,4);
+    memcpy(target,line,sizeof line); avoid_reference_traffic(self,0,pos,target,4,1);
     assert(!memcmp(target,line,sizeof line)); /* Shortcut geometry is protected. */
     peer[2]=500; memcpy(other+0x20,peer,sizeof peer);
-    avoid_reference_traffic(self,0,pos,target,0); assert(!memcmp(target,line,sizeof line)); /* Other bridge level. */
+    avoid_reference_traffic(self,0,pos,target,0,1); assert(!memcmp(target,line,sizeof line)); /* Other bridge level. */
     peer[2]=0; peer[0]=1500; memcpy(other+0x20,peer,sizeof peer);
-    avoid_reference_traffic(self,0,pos,target,0); assert(!memcmp(target,line,sizeof line));
+    avoid_reference_traffic(self,0,pos,target,0,1); assert(!memcmp(target,line,sizeof line));
     peer[0]=400; memcpy(other+0x20,peer,sizeof peer);
     line[1][0]=500; line[1][1]=500; memcpy(target,line,sizeof line);
-    avoid_reference_traffic(self,0,pos,target,0); assert(!memcmp(target,line,sizeof line)); /* Tight corner. */
+    avoid_reference_traffic(self,0,pos,target,0,1); assert(!memcmp(target,line,sizeof line)); /* Tight corner. */
+    unsigned char second[0x170]={0},second_entity[0x80]={0},second_handle[0x30]={0};
+    void *queue[]={racer,second}; put_ptr(list,32,queue); put_int(list,12,2);
+    put_ptr(second,0x20,second_handle); put_ptr(second_handle,0x28,second_entity); put_int(second,0x164,3);
+    float next[]={500,0,0}; memcpy(second_entity+0x20,next,sizeof next);
+    line[1][0]=1000; line[1][1]=0; memcpy(target,line,sizeof line);
+    avoid_reference_traffic(self,2,pos,target,0,1);
+    assert(fabsf(target[0][1]-50)<.01f); /* Nearest lower-ID racer wins; a farther racer cannot cancel the pass. */
+    memcpy(target,line,sizeof line); avoid_reference_traffic(self,2,pos,target,0,0);
+    assert(!memcmp(target,line,sizeof line)); /* Never offset a flight corridor. */
     racer_manager=NULL;
 }
 static int targets_recovery_seen;
@@ -1365,7 +1805,30 @@ int main(void) {
     test_dynamic_speed();
     manager = &default_race_ptr;
     test_ai_physics();
+    for (unsigned id=0;id<8;++id) {
+        float low=2,high=0;
+        for (uint64_t t=0;t<30000;t+=50) {
+            float pace=catchup_pace(id,t);
+            assert(pace>=.779f && pace<=1.001f);
+            assert(fabsf(pace-catchup_pace(id,t+1))<.001f);
+            low=fminf(low,pace); high=fmaxf(high,pace);
+        }
+        assert(high-low>.09f); /* Every AI changes pace, including online. */
+        for (unsigned j=id+1;j<8;++j) {
+            float difference=0;
+            for (uint64_t t=0;t<30000;t+=1000)
+                difference+=fabsf(catchup_pace(id,t)-catchup_pace(j,t));
+            assert(difference>.5f); /* Different identities do not share a surge cycle. */
+        }
+    }
+    for (int level=0;level<=5;++level) {
+        assert(normal_catchup_cap(level,1,100)==0);
+        assert(normal_catchup_cap(level,1000000,100)<=.20f);
+        assert(normal_catchup_cap(level,100,100)<normal_catchup_cap(level,1000,100));
+    }
+    test_catchup_physics();
     manager = &default_race_ptr;
+    test_maintained_pad_fire();
     test_reserves();
     manager = &default_race_ptr;
     test_lines();
