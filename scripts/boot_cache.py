@@ -20,7 +20,7 @@ from mod_components import long_path
 
 SCHEMA = 1
 MODULES = ('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx')
-GENERATORS = ('boot_cache.py', 'prepare.py', 'game_check.py', 'link_libc.py', 'link_modules.py', 'mod_components.py')
+GENERATORS = ('boot_cache.py', 'prepare.py', 'patches.py', 'game_check.py', 'link_libc.py', 'link_modules.py', 'mod_components.py')
 OUTPUTS = ('boot.bin', 'eboot.elf', 'entry.bin', 'profile.txt', 'analysis.json',
            'boot-libc.bin', 'libc-link.json', 'boot-linked.bin', 'link.json')
 MAGICS = {'boot.bin': b'BBPROBE2', 'boot-libc.bin': b'BBPROBE4',

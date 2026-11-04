@@ -14,6 +14,7 @@ import struct
 import sys
 
 import game_check
+import patches
 
 
 def span(data, offset, size):
@@ -250,11 +251,14 @@ def prepare(game, out):
     with (out / 'boot.bin').open('wb') as f:
         f.write(struct.pack('<8sQQQQQQ', b'BBPROBE2', size, header[4], len(loads), len(relocs), len(names),
                             int(libc_evidence['init_env_is_ret'])))
+        # The executable segment reaches up to the next one: the mod code area (patches.code_extension).
+        extended = patches.code_extension([(p['type'], p['flags'], p['vaddr'], p['memsz']) for p in loads])
         for p in loads:
             seg_flags = p['flags']
             if not (seg_flags & 1):
                 seg_flags |= 2
-            f.write(struct.pack('<QQQ', p['vaddr'], p['memsz'], seg_flags))
+            memsz = extended - p['vaddr'] if extended and p['type'] == 1 and p['flags'] & 1 else p['memsz']
+            f.write(struct.pack('<QQQ', p['vaddr'], memsz, seg_flags))
         for name in names:
             encoded = name.encode()
             if len(encoded) >= 128:
