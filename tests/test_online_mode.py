@@ -422,6 +422,65 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
             online_mode.private_team_settings(b'unknown settings')
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_prepare_preserves_full_widescreen_layout(self):
+        import archive_patch
+        import widescreen
+        from prepare import sfo
+        game = Path(os.environ['BB_TEST_GAME'])
+        info = sfo((game / 'sce_sys/param.sfo').read_bytes())
+        elf = parse_self((game / 'eboot.bin').read_bytes())[0]
+        pak = game / 'archives/update2.pak'
+        entries = iga.pak_entries(pak)
+        settings_index = next(i for i, entry in enumerate(entries)
+                              if entry[0].lower() == online_mode.SETTINGS_ENTRY)
+        lobby_index = next(i for i, entry in enumerate(entries)
+                           if entry[0].lower() == online_mode.LOBBY_ENTRY)
+        public_index = next(i for i, entry in enumerate(entries)
+                            if entry[0].lower() == online_mode.PUBLIC_LOBBY_ENTRY)
+        # The lobby-only regression misses other menus replaced by the layout.
+        for ratio, output in (('21x9', '3440x1440'), ('21x9', '2560x1080'),
+                              ('32x9', '5120x1440')):
+            with self.subTest(ratio=ratio, output=output), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                boot = out / 'eboot.elf'
+                boot.write_bytes(elf)
+                config = out / 'bbport.ini'
+                config.write_text(f'aspect_ratio={ratio}\naspect_output={output}\nrender_res=1440\n')
+                layout = widescreen.prepare(game, out, config, {}, info['TITLE_ID'],
+                                             info['APP_VER'], {})
+                self.assertIsNotNone(layout)
+                base = layout['archive_patches']['/app0/archives/update2.pak']
+                wide = online_mode.current_entry(pak, entries, settings_index, base)
+                patches, _ = online_mode.prepare(game, out / 'online', boot,
+                                                list(layout['archive_patches'].values()))
+                result = next(p for p in patches
+                              if archive_patch.read(p)[1] == '/app0/archives/update2.pak')
+                actual = online_mode.current_entry(pak, entries, settings_index, result)
+                self.assertEqual(actual, online_mode.private_team_settings(wide))
+                old, new = Igz(wide), Igz(actual)
+                allowed = set(range(0x51f8, 0x51fc)) | set(range(0xe070, 0xe07c))
+                self.assertEqual(old.objects(), new.objects())
+                self.assertEqual(old.fixups, new.fixups)
+                self.assertEqual(len(old.data), len(new.data))
+                self.assertTrue(all(a == b or i in allowed
+                                    for i, (a, b) in enumerate(zip(old.data, new.data))))
+                self.assertNotEqual(actual, online_mode.private_team_settings(
+                    online_mode.current_entry(pak, entries, settings_index, None)))
+                lobby = online_mode.current_entry(pak, entries, lobby_index, base)
+                self.assertEqual(online_mode.current_entry(pak, entries, lobby_index, result),
+                                 online_mode.lobby_card(lobby))
+                public = online_mode.current_entry(pak, entries, public_index, base)
+                actual_public = online_mode.current_entry(pak, entries, public_index, result)
+                self.assertEqual(actual_public, online_mode.public_lobby_card(public))
+                self.assertNotEqual(actual_public, online_mode.public_lobby_card(
+                    online_mode.current_entry(pak, entries, public_index, None)))
+                # Unknown edits still fail closed, even on a supported widescreen menu.
+                with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
+                    online_mode.private_team_settings(wide + b'unknown edit')
+                with self.assertRaisesRegex(ValueError, 'unsupported native public lobby card'):
+                    online_mode.public_lobby_card(public + b'unknown edit')
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
     def test_private_teams_visible_for_races_without_changing_native_selector(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
         entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.SETTINGS_ENTRY)
