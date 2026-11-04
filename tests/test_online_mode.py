@@ -218,6 +218,7 @@ class OnlineModeTests(unittest.TestCase):
 
     def test_linux_launch_prepares_both_regions(self):
         script = (ROOT / 'run.sh').read_text()
+        wrapper = script[script.index('startup_python() {'):].split('\n}\n', 1)[0] + '\n}\n'
         block = script[script.index('unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE'):
                        script.index('# The game runs at its own 30 FPS')]
         setup = '''
@@ -236,6 +237,7 @@ prepare_test() {
 PYTHON=prepare_test
 game=game
 out=out
+boot=boot-cache/selected
 title_id=$1
 app_version=$2
 BB_ONLINE=$3
@@ -247,7 +249,7 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                 ('CUSA14876', '01.00', '1', False), ('CUSA14876', '01.21', '0', False)):
             with self.subTest(title=title, version=version, online=online):
                 result = subprocess.run(
-                    ['bash', '-c', setup + block +
+                    ['bash', '-c', setup + wrapper + block +
                      '\nprintf "%s|%s|%s" "${BB_ONLINE_MODE_HOOK:-}" '
                      '"${BB_ARCHIVE_PATCHES:-}" "${BB_PRIVATE_ARCHIVE_PATCHES:-}"',
                      'test', title, version, online], capture_output=True, text=True, check=True)
