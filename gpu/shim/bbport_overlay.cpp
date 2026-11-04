@@ -1703,6 +1703,55 @@ void Menu() {
     }
 }
 
+// Spectator build: the replay panel at the bottom centre while a replay plays (the watched racer, its
+// place, lap and speed, the replay's time and state, and the buttons).
+void ReplayPanel(const RrView& v) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 18.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - pad),
+                            ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##replay", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    const int w = v.watch >= 0 && v.watch < 8 ? v.watch : 0;
+    const auto& r = v.racer[w];
+    const char* kind = r.kind == 1   ? BbSettings::MenuText("Player", "Игрок")
+                       : r.kind == 2 ? BbSettings::MenuText("Online", "Онлайн")
+                                     : BbSettings::MenuText("AI", "ИИ");
+    char state[48];
+    if (v.ended) std::snprintf(state, sizeof state, "%s", BbSettings::MenuText("ENDED", "КОНЕЦ"));
+    else if (v.rewinding) std::snprintf(state, sizeof state, "<<  %s", BbSettings::MenuText("REWIND", "НАЗАД"));
+    else if (v.forwarding) std::snprintf(state, sizeof state, ">>  %s", BbSettings::MenuText("FORWARD", "ВПЕРЁД"));
+    else if (v.paused) std::snprintf(state, sizeof state, "||  %s", BbSettings::MenuText("PAUSED", "ПАУЗА"));
+    else std::snprintf(state, sizeof state, ">  x%g", v.speed);
+    ImGui::TextColored(kMenuYellow, "REPLAY  %s", v.track);
+    ImGui::SameLine();
+    ImGui::TextDisabled("   %s", state);
+    char lap[32] = "";
+    if (r.lap > 0) {
+        std::snprintf(lap, sizeof lap, BbSettings::MenuText("Lap %d/%d", "Круг %d/%d"),
+                      v.laps > 0 && r.lap > v.laps ? v.laps : r.lap, v.laps > 0 ? v.laps : 3);
+    }
+    if (r.finished) {
+        ImGui::Text(BbSettings::MenuText("#%d  %s (%s)  finished  %d km/h", "#%d  %s (%s)  финиш  %d км/ч"), r.finished,
+                    r.name, kind, v.kmh);
+    } else {
+        ImGui::Text(BbSettings::MenuText("#%d  %s (%s)  %s  %d km/h", "#%d  %s (%s)  %s  %d км/ч"), r.rank, r.name, kind, lap,
+                    v.kmh);
+    }
+    const float t = v.time > 0.0f ? v.time : 0.0f, end = v.end > 0.0f ? v.end : 1.0f;
+    char clock[48];
+    std::snprintf(clock, sizeof clock, "%d:%05.2f / %d:%05.2f", (int)t / 60, t - 60 * (int)(t / 60), (int)end / 60,
+                  end - 60 * (int)(end / 60));
+    ImGui::ProgressBar(t / end, ImVec2(ImGui::GetFontSize() * 26.0f, 0.0f), clock);
+    ImGui::TextDisabled("%s", BbSettings::MenuText(
+                                  "L1/R1 lap   L2/R2 racer   Square pause   Up/Down speed   Left/Right rewind/forward",
+                                  "L1/R1 круг   L2/R2 гонщик   Квадрат пауза   Вверх/Вниз скорость   Влево/Вправо перемотка"));
+    ImGui::End();
+}
+
 void FpsCounter() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float pad = 12.0f * base_scale;
@@ -2231,6 +2280,7 @@ bool Visible() {
         notice = !notices.empty();
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+                           runtime_replay_playing() ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice);
 }
 
@@ -2313,6 +2363,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (RrView replay; !menu_open && runtime_replay_view(&replay)) {
+        ReplayPanel(replay);
     }
     corner_ping_height = 0.0f;
     if (BbSettings::Get().show_ping && !menu_open && InOnlineRoom()) {

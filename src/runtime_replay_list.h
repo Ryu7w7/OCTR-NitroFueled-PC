@@ -29,6 +29,25 @@ int runtime_replay_can_start(void);
 /* 1 while a replay is loading or playing. */
 int runtime_replay_playing(void);
 
+/* What the replay panel shows (taken every frame from the game's thread). */
+typedef struct {
+    int active;         /* the replay's race is on */
+    char track[40];
+    int laps;
+    float time, end;    /* play time and the recording's end, s since GO */
+    float speed;        /* x0.1 .. x4 */
+    int paused, rewinding, forwarding, ended;
+    int watch;          /* the racer the camera follows */
+    int kmh;
+    struct {
+        char name[48];  /* the online name, else the driver's */
+        int kind;       /* 1 local, 2 another PC, 3 AI, 0 none */
+        int rank, lap, finished, present;
+    } racer[8];
+} RrView;
+/* 1 and the view while a replay's race is on. */
+int runtime_replay_view(RrView *out);
+
 #ifdef __cplusplus
 }
 #endif
