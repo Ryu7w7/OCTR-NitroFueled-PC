@@ -1,8 +1,8 @@
-> Current requirement (2026-11-01): the user rejected the separate SELECT TEAM
+> Current requirement (2026-11-01): I rejected the separate SELECT TEAM
 > button. Sections 8 and 14 describe an abandoned implementation. Start must
 > drive the native synchronized Team Select/countdown flow. Normal/Itemless
 > team scores sum finishing awards 9/6/3/1 per team. Runtime/asset changes and
-> automated checks are implemented (sections 17–18). User verified selector
+> automated checks are implemented (sections 17–18). I verified selector
 > entry, but reported locked team changes, item boxes in Itemless, and missing
 > indicators/results. Section 18 addresses that feedback; its live outcome
 > remains unverified.
@@ -250,7 +250,7 @@ lobby UI/navigation where the project lacks an entry point:
 1. **Keep host settings authoritative.** The existing private settings sync
    (`broadcastSettings_VSC` / `COctaneLobbySyncPrivateMatchDataEvent`) and the
    native TeamCount selector should carry the selected count to every peer.
-   Do not force `teamCount >= 2`: `1` is the user's intentional FFA choice. The
+   Do not force `teamCount >= 2`: `1` is my intentional FFA choice. The
    current C helper reads the value for logging and button visibility; there
    is no `force_private_team_count()` implementation.
 2. **Add a separate Team Select action below Friends.** Keep the Friends row
@@ -328,7 +328,7 @@ by opening projects (`open_project 0x986820` at `FUN_00e9ba20/30`):
   `DAT_02ad4e30+0x28` (the same teamCount the results picker reads —
   verified §2) — **the banner event then fires by itself**.
 
-**Conclusion for our hook (objective c from the user):** `FUN_00eab2f0/0eab300`
+**Conclusion for our hook (objective c):** `FUN_00eab2f0/0eab300`
 already posts the winner event when, and only when, the racers share one
 placement; the **Octane_BattleTeam_Ranking** project picks up `_isWinnerName` and
 `_resultString` itself (from its VSC on-field `_isWinnerName`/`_resultString`,
@@ -522,7 +522,7 @@ teamCount: it carries type/map/useAI/difficulty/laps/mode. The prior blanket
 claim that unhiding the row automatically guarantees synchronization for racing
 was therefore not justified. This additional gate needs an explicit correction.
 
-User reiterated: both clients must enter Team Select together and see each
+I reiterated: both clients must enter Team Select together and see each
 other's team changes. Preserve the native request/confirm network route; local
 UI state is not acceptance evidence. The saved Ghidra projects at
 `/home/n0bu/ghidra_ctr/proj/CTR_USA` and `CTR_EU` are available read-only.
@@ -605,7 +605,7 @@ of the added GUI graph must not be described as a verified crash cure.
 
 ## 18. Feedback from 04:29 session: controls, Itemless, results
 
-User confirmed Team Selector opens, but cannot change teams. Also reported item
+I confirmed Team Selector opens, but cannot change teams. Also reported item
 boxes despite choosing Itemless, absent team indicators/scores, and requested
 the native Battle team victory presentation rather than a newly invented
 three-character podium format.
@@ -800,7 +800,7 @@ Executable-only build succeeded: `out/sacredfire`, 2064168 bytes, 2026-11-01T05:
 
 ## 20. Live regression report: blocked selector, missing interim results (2026-11-01)
 
-User's 05:21 screenshot and 051702 run invalidate the earlier implication
+My 05:21 screenshot and 051702 run invalidate the earlier implication
 that selector input was fixed. All input methods still failed. Interim host
 finish view had no right-hand timing/status list. Final results names lacked
 team colors. Overhead names/colors and avatar borders are visible in the
@@ -816,7 +816,7 @@ placeholder times. RaceRankingSelectItem now colors +a8 (player name) from
 bound racer +78 before the host final results exist. Its +d0 score override
 only runs on score rows; plain timing rows retain native fields.
 
-Removed the extra team-based three-slot podium ordering. User explicitly
+Removed the extra team-based three-slot podium ordering. I explicitly
 requested no podium if Battle has no proven matching ceremony. The verified
 Battle presenter eab300 supplies a team result banner, not a cinematic scene;
 no dedicated Battle team podium was found in the inspected graphs/assets.
@@ -840,27 +840,27 @@ If no input line appears after an initialized selector, delivery is blocked
 before the behavior. If a line appears, readiness/capacity/mapping can be
 checked directly. Input success remains UNVERIFIED, not declared fixed.
 
-Attempted to inspect the user's live processes, but both had closed before
+Attempted to inspect my live processes, but both had closed before
 the selector state could be read. A separate agent-started client was then
-launched for reproduction; user instructed NO autonomous game testing.
+launched for reproduction; I instructed NO autonomous game testing.
 Immediately terminated only that agent-started PID 438942 and unloaded its
 temporary KWin focus script. No more game launch/input testing will be done;
-user owns live verification. Unit/compile/signature checks continue offline.
+I handle live verification myself. Unit/compile/signature checks continue offline.
 
-Offline validation for section 20: C adapter tests passed for both regional layouts; Python game-asset/signature tests passed 12/12 USA and 12/12 EU. Added checks for deferred selector input enabling, eligibility surviving lobby teardown, unchanged public opens, interim timing event forwarding, and team name color before and after final host results. No live input/result verification was performed after the user prohibited autonomous game testing.
+Offline validation for section 20: C adapter tests passed for both regional layouts; Python game-asset/signature tests passed 12/12 USA and 12/12 EU. Added checks for deferred selector input enabling, eligibility surviving lobby teardown, unchanged public opens, interim timing event forwarding, and team name color before and after final host results. No live input/result verification was performed after I prohibited autonomous game testing.
 
-Section 20 executable-only build succeeded: 2073408 bytes, 2026-11-01T05:32:49.902445+07:00. GPU checksum remains f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. User will perform next live test.
+Section 20 executable-only build succeeded: 2073408 bytes, 2026-11-01T05:32:49.902445+07:00. GPU checksum remains f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. I will perform next live test.
 
 
 ## 21. Selector disabled state is a counter, not a boolean (2026-11-01)
 
-User clarifies that the selector itself is in disabled state. Static executable
+I clarify that the selector itself is in disabled state. Static executable
 inspection establishes `igGuiProject +0x48` as a nested disable depth:
 `253990` increments it; `253970` decrements it, clamping at zero. Native
 `a09190` enableControls calls 253970 exactly once, then enables GUI manager
 input and refreshes the project. Therefore a single enable call is insufficient
 when depth exceeds one. Earlier research describing this as a boolean was
-incomplete. The actual depth in the user's failed run was not captured, so
+incomplete. The actual depth in my failed run was not captured, so
 nested depth is a supported failure case, not a claimed live diagnosis.
 
 After original TeamSelect Initialize, private mode-1 selector now normalizes
@@ -868,14 +868,14 @@ its project depth to one and calls the native enable helper, resulting in zero
 while preserving the helper's manager-input and refresh behavior. Normalization
 runs at initialization only: future modal, close, and transition disables stay
 native. Public/Battle selectors are unchanged. Diagnostic initialization log
-records the previous disabled_depth for the user's next test.
+records the previous disabled_depth for my next test.
 
 Both native counter functions are checked byte-for-byte before hook installation
 and against both game dumps. Unit test reproduces depth 3, verifies depth 0 after
 private selector init, and verifies depth 3 remains intact on public initialization.
-No game was started or controlled during this change; user owns live testing.
+No game was started or controlled during this change; I handle live testing myself.
 
-Section 21 checks: runtime adapter tests pass both layouts; asset/signature tests 12/12 USA and 12/12 EU; diff whitespace check clean. Executable-only build succeeded 2026-11-01T05:41:00.116043+07:00 (2073832 bytes). GPU checksum unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. User live verification remains pending.
+Section 21 checks: runtime adapter tests pass both layouts; asset/signature tests 12/12 USA and 12/12 EU; diff whitespace check clean. Executable-only build succeeded 2026-11-01T05:41:00.116043+07:00 (2073832 bytes). GPU checksum unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e. My live verification remains pending.
 
 
 ## 22. Manual results, immediate selector, personal header, Single-only scope (2026-11-01)
@@ -886,7 +886,7 @@ confirmation animation. Mark only these three nodes with one unused null pin;
 115a740 (EU -10) selects their native offline/manual outputs only while a
 private Single team ranking project is active. Other graph calls still use
 native a90b10 network query. Global online state and lobby-return timer remain
-unchanged. Back/confirm and DNF presentation still require user live verification.
+unchanged. Back/confirm and DNF presentation still require my live verification.
 
 Native lobby countdown eb7950 (EU -10) waits for remaining <= +2c before
 opening TeamSelect. Private Single teams 2–4 now set that pending threshold to
@@ -901,7 +901,7 @@ only by private Single results. Local team uses native controller 0 -> player
 mapping. Unknown local team shows RESULT instead of falsely declaring a loss.
 Tie header names tied leading teams; no winner-colored tint on a draw.
 
-User limits all new team-race behavior to Single Normal/Itemless. CUP selection,
+I limit all new team-race behavior to Single Normal/Itemless. CUP selection,
 settings send/receive, and map load normalize Teams to native individual value 1.
 CUP TeamCount selector locks its available options to individual and rejects
 selection-change events. Race/selector/AI gates explicitly exclude CUP even
@@ -915,7 +915,7 @@ succeeded; no game launch/input testing and no GPU build.
 
 ## 23. Battle friendly-fire/targeting audit — IN PROGRESS (2026-11-01)
 
-User requests all behavior, including rocket AIM/lock-on, not only damage.
+I request all behavior, including rocket AIM/lock-on, not only damage.
 Track acquisition, impact filtering, area damage, dropped traps, and kart
 contact independently. Do not generalize from a team-colored HUD.
 
@@ -944,14 +944,14 @@ Scoring comparison requested while friendly-fire audit continues:
 - Recommended for this eight-racer Single team mode: 10/8/6/5/4/3/2/1.
   Example A places 1/4/7/8 vs B 2/3/5/6: old A 10 vs B 9; recommendation
   A 18 vs B 21. This is a design recommendation, not an applied change;
-  user has not selected a replacement yet. Existing CUP scoring remains intact.
+  I have not selected a replacement yet. Existing CUP scoring remains intact.
 
 Latest executable build: 2026-11-01 05:54:47 +0700, 2080640 bytes.
 GPU SHA256 unchanged f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
 
 ## 24. Approved Single team scoring and finish-order head-to-head (2026-11-01)
 
-User approved the recommended eight-racer awards and explicitly selected the
+I approved the recommended eight-racer awards and explicitly selected the
 best finisher among tied teams as the tiebreak. This supersedes section 22's
 DRAW header and section 23's statement that scoring was not yet approved.
 
@@ -977,7 +977,7 @@ and unchanged CUP awards are covered. git diff --check passed.
 Executable-only build completed 2026-11-01T06:04:02.978802+07:00,
 out/sacredfire 2080488 bytes. GPU SHA256 remains
 f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-No game was launched or controlled; user will perform live verification.
+No game was launched or controlled; I will perform live verification.
 
 Friendly-fire audit evidence added since section 23:
 - Spawned rocket acquisition f2b210 (called by f2a9f0) explicitly skips racers
@@ -1000,7 +1000,7 @@ Friendly-fire audit evidence added since section 23:
 
 ## 25. Single team friendly damage and even team options (2026-11-01)
 
-User requests an actual Normal team friendly-fire fix and only 2/4 team choices.
+I request an actual Normal team friendly-fire fix and only 2/4 team choices.
 Native engine accepts 3 teams, but eight participants cannot divide evenly;
 Single's choices are now No Teams / 2 / 4. CUP remains No Teams and Battle
 keeps its native restrictions. Normalize old/synchronized Single settings of
@@ -1048,12 +1048,12 @@ passthrough and retention of Battle three-team settings. Python asset/signature
 tests pass 14/14 in each region. git diff --check clean. Executable-only build
 completed 2026-11-01T06:11:15.215154+07:00, 2091664 bytes.
 GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-No game process was launched or controlled. User live testing remains pending.
+No game process was launched or controlled. My live testing remains pending.
 
 
 ## 26. Remove the 3-team option in Private Single only (2026-11-01)
 
-User supersedes the disabled-option approach: remove it from the visible list.
+I supersede the disabled-option approach: remove it from the visible list.
 Added a shared race-options wrapper installed after online hooks and also when
 online is off, but only modifies Private Single Normal/Itemless. Offline and
 Battle return directly to native code. It transfers the native "4" string into
@@ -1069,7 +1069,7 @@ New wrapper has not yet been live tested or built into the executable.
 
 ## 27. Feedback at 06:24: input routing, readable header, portraits
 
-The user corrected the option scope: offline three-team settings must stay
+I corrected the option scope: offline three-team settings must stay
 native. Tests now cover this passthrough. Battle remains native too.
 Latest saved log 20261101_061247.log reports disabled_depth=0 on both selector
 initializations, but no input event callbacks. A ready-table-only explanation
@@ -1090,7 +1090,7 @@ clone of the RaceRanking portrait placeable, with explicit RaceRanking asset
 dependency, proper RHND/ROFS fixups, and insertion in the row child list. Native
 9b87e0 binds each racer's character texture. The portrait starts hidden and is
 revealed only by the private team row callback. Visual spacing and input still
-require the user's game test; no live game is run by the agent.
+require my game test; no live game is run by the agent.
 
 
 ## 28. AI-first finish countdown, solo and teams
@@ -1113,12 +1113,12 @@ The scoreboard portrait clone now has a second child using the native
 Octane_Race_Leaders contour sprite, colored by team at binding time. Header
 winner text is white, with points moved above racer rows. Asset tests verify
 both portrait and contour names, handles, sibling links and dependencies.
-User live testing is still required for visual spacing and selector input.
+My live testing is still required for visual spacing and selector input.
 
 
-## Latest user regression / load failure evidence (2026-11-01 07:10)
+## Latest regression / load failure evidence (2026-11-01 07:10)
 
-User reports selector still disabled and both finish-time and final scoreboard
+I report selector still disabled and both finish-time and final scoreboard
 missing. Existing init log shows flags 0x61, controller mask 0xff, disable depth
 0, but no selector input callbacks. These init values do NOT prove input works;
 GUI dispatch also checks project owner +e2 and later disable depth. Do not mark
@@ -1145,7 +1145,7 @@ map, because those domain archives may be released during transitions. Patched
 update/update2 assets continue to come from their overlay rather than an original
 loose copy. This targets the observed fallback request for a nonexistent standalone
 BattleTeam ranking archive. The runtime now logs a handle as "requested", not
-"loaded". Actual display is still pending user verification.
+"loaded". Actual display is still pending my verification.
 
 Checks: preparation succeeds, dependency closure has no duplicate rows and
 contains all three panels and their materials/portrait contour. 15 Python tests
@@ -1156,7 +1156,7 @@ PlayerReady events. 9c6cc0 uses matching player handle and event+20 to update
 slot+70, then plays +50 (unready) or +58 (ready). Slot update 9c60b0 binds players
 by player+e4 versus slot+60 and reads the shared ready map through slot+80;
 empty slots and first-bind/changed-player states have separate animations.
-This does not establish that the user's gray slot is a hardware input failure.
+This does not establish that my gray slot is a hardware input failure.
 Native cancel 9c3bf0 emits unconfirm if ready; 9c2db0 clears the map and emits
 PlayerReady(false). The root VSC provides two native legend entries. Continue
 tracing their creation/visibility; selector regression remains unresolved.
@@ -1185,21 +1185,21 @@ remain native. No per-frame force-unready or arbitrary input injection is added.
 Asset checks verify only the intended action changes and original pins/next action
 are retained in both archives. Runtime tests cover marked private callback,
 unmarked disables, inactive selector and Battle fallback in USA/EU layouts.
-These pass. User gameplay verification remains necessary; this finding supersedes
+These pass. My gameplay verification remains necessary; this finding supersedes
 the earlier input-only suspicion, but does not claim a live test was performed.
 
 Final executable-only build: 2026-11-01T07:30:36.170374, 2132160 bytes. Includes selector callback relock fix, difficulty cursor fix and connected alternate-route tuning. CPU unit checks pass; asset checks cover USA/EU including both lobby-root versions. GPU SHA256 unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e). No live gameplay tests.
 
 ## Team Selector confirmed; ranking dependency correction (2026-11-01)
 
-User explicitly confirmed: "team selector sudah work". Latest captured selector
+I explicitly confirmed: "team selector sudah work". Latest captured selector
 log also has ready=0 and left/right signals changing team. Treat this fix as
-user-verified; do not reopen the hardware/input theory.
+verified in my testing; do not reopen the hardware/input theory.
 
 The same session still fails to open the team ranking project: the loader requests
 `octane_battleteam_ranking.pak`, which does not exist. Team scores are calculated
 (BLUE 21, RED 18), so score calculation is not evidence that the GUI loaded.
-The previous Online-package preload alone did not fix this, per user report.
+The previous Online-package preload alone did not fix this, in my test.
 
 Removed newly introduced whole-GUI dependencies on Race_Ranking and Race_Leaders
 from the patched BattleTeam_Ranking. Portrait and contour sprites are now local
@@ -1213,23 +1213,23 @@ This is a candidate correction for failed project loading, NOT proof that the
 missing-archive fallback was solely caused by these dependencies. No game was
 launched or controlled. Results now log whether ranking/finish handles actually
 resolve, rather than implying a requested handle means successful load. Both
-finish forwarding and final scoreboard still require user verification.
+finish forwarding and final scoreboard still require my verification.
 
 Validation: 16 Python asset tests each on USA and EU; USA patch preparation;
 C online-mode tests including interim finish-event forwarding and team results.
 All pass. Generated validation assets are in /tmp, leaving running games alone.
 
-Executable-only build completed 2026-11-01T07:58:18.712476, 2142776 bytes at out/sacredfire. GPU hash unchanged. User launch with BB_PREBUILT=1 and BB_PROBE="$PWD/out/sacredfire" regenerates updated Online assets through run.sh. No gameplay test performed.
+Executable-only build completed 2026-11-01T07:58:18.712476, 2142776 bytes at out/sacredfire. GPU hash unchanged. Launching with BB_PREBUILT=1 and BB_PROBE="$PWD/out/sacredfire" regenerates updated Online assets through run.sh. No gameplay test performed.
 
 ## Follow-up: missing ranking archive and intro order (2026-11-01)
 
-User confirms selector works. Leave that flow intact. Latest report: intro cannot
+I confirm selector works. Leave that flow intact. Latest report: intro cannot
 be skipped; finish panel and final scoreboard still absent. The 07:59 log still
 requests missing `archives/octane_battleteam_ranking.pak`. Logging a non-null
 resolved handle does NOT prove a loaded visible GUI: native 987380 can return a
 future object while StreamingUI is pending.
 
-Changes awaiting user gameplay verification:
+Changes awaiting my gameplay verification:
 - Open the additional finish panel at the original ranking-open point, BEFORE
   native intro setup, instead of after the whole race_ui call. Preserve native
   primary ranking/minimap/intro order. This addresses a possible input-stack
@@ -1241,7 +1241,7 @@ Changes awaiting user gameplay verification:
   Generate actual standalone BattleTeam_Ranking and Race_Ranking archives via
   the existing graphics_tab archive writer and loose-file overlay. Include native
   chunk_info package at packages/generated/ui/<project>_pkg.igz, patched project/
-  VSC and its race-package dependency closure. Never modify the user's game dump.
+  VSC and its race-package dependency closure. Never modify my game dump.
   Preserve source package order, native loader kinds and permanent dependencies.
   Existing package preload remains; fallback now has a real archive if released.
 
@@ -1249,14 +1249,14 @@ Tests read generated archives back, verify patched VSC bytes, root/package paths
 material dependency presence and every package row's payload. Archive ordinal's
 low byte is the high offset byte; generated ordinals use index<<8. Runtime tests
 cover finish-before-intro ordering and selective event forwarding. These are
-static/unit checks only; finish/score visibility and intro skip need user testing.
+static/unit checks only; finish/score visibility and intro skip need my testing.
 
 CPU executable rebuilt: 2026-11-01T08:25:40.611114+07:00, 2148608 bytes at `out/sacredfire`. No GPU build and no gameplay launch. Runtime C checks pass; 17 online asset tests pass for both USA/EU dumps; full USA online preparation succeeds. Developer ghost decoder validates all 40 developer references.
 
 
 ## Native finish panel restored; scoreboard opened at final results (2026-11-01)
 
-User confirms intro skip now works, but both panels still fail. Saved 17:20 log
+I confirm intro skip now works, but both panels still fail. Saved 17:20 log
 contains `result panels ranking=unresolved finish=resolved`. Scores were computed
 correctly; the previous extra finish project only received its local-finish event
 through the substituted scoreboard's dispatch, so an unresolved scoreboard also
@@ -1276,7 +1276,7 @@ C fixtures now use separate finish/scoreboard objects and assert native finish
 slot preservation before results, exactly-once finish event delivery, deferred
 scoreboard opening and slot replacement on results, plus existing score/header,
 CUP, Battle and selector checks for USA/EU. These checks pass. This is a candidate
-runtime fix requiring user gameplay confirmation, not a verified visible panel.
+runtime fix requiring my gameplay confirmation, not a verified visible panel.
 No game was launched and no GPU build was performed.
 
 CPU build completed: 2026-11-01T17:45:30.445692, 2188064 bytes at `out/sacredfire`. GPU unchanged; no gameplay launch.
@@ -1301,13 +1301,13 @@ report rerouted network ready/unready and whether delivery reached the handler.
 C fixtures for both regional layouts cover missed delivery, no duplicate when
 native delivery works, unready, unrelated events and stale-project cleanup.
 These pass but do not simulate two live clients or prove network requests arrive.
-The guest Ready fix remains a candidate until the user's host/guest gameplay test.
+The guest Ready fix remains a candidate until my host/guest gameplay test.
 
 CPU build completed: 2026-11-01T17:59:57.971867, 2197984 bytes at `out/sacredfire`. GPU SHA256 unchanged: `f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e`. No gameplay launch.
 
 ## Private selector Back is Unready only (2026-11-01)
 
-User reports host Ready reaches the guest, while guest Ready does not appear on
+I report host Ready reaches the guest, while guest Ready does not appear on
 either client. This is asymmetric; it does not establish whether the guest's
 request was sent, received, rejected by native validation or missed GUI delivery.
 The preceding scoped native broadcast fallback remains the candidate repair;
@@ -1325,13 +1325,13 @@ on the selector until the existing match-start transition.
 Both regional C fixtures pass checks for not-ready Back suppression, ready Back
 forwarding, unresolved ready entries, unchanged Ready/team movement and native
 Battle Back, alongside Ready/Unready fallback/no-duplicate/lifecycle checks.
-No gameplay was run. Guest Ready synchronization still requires user validation.
+No gameplay was run. Guest Ready synchronization still requires my validation.
 
 CPU rebuild: 2026-11-01T18:03:34.825661, 2198128 bytes. GPU checksum unchanged; no gameplay launch.
 
-## User confirms selector + finish; scoreboard still absent (2026-11-01)
+## I confirm selector + finish; scoreboard still absent (2026-11-01)
 
-Team Selector and the interim finish panel are confirmed working by the user.
+Team Selector and the interim finish panel are working, as I confirmed in testing.
 Latest 18:00 log reports final scoreboard opened=1 resolved=1 and valid team
 scores, despite no visible scoreboard. Loading alone is therefore insufficient.
 BattleTeam_Ranking's RaceFinished graph sets its input-ready flag and starts
@@ -1356,7 +1356,7 @@ Latest CPU build (includes power-slide cycle follow-up): 2026-11-01T18:14:31.116
 
 ## 2026-11-01 — exclusive ownership of the final team result flow
 
-User screenshot still shows Wumpa Report for host and no scoreboard for guest.
+My screenshot still shows Wumpa Report for host and no scoreboard for guest.
 Latest available log is 20261101_184807.log: final scoreboard opened=1,
 resolved=1, forwarded RaceFinished, valid eight-row totals. Thus the earlier
 missing-event candidate is insufficient; do not claim visible UI from these logs.
@@ -1381,14 +1381,14 @@ C regression now checks old finish handler receives zero final events while the
 team handler receives exactly one, including repeated broadcasts to both. It
 previously only checked delivery to the new project and missed old-project
 execution. Both regional fixtures pass. No gameplay launched. Visibility,
-CONTINUE navigation and Wumpa transition still need user validation.
+CONTINUE navigation and Wumpa transition still need my validation.
 
 CPU-only build completed 2026-11-01 18:58:31 +0700: out/sacredfire, 2211112 bytes. GPU SHA256 unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e). git diff --check passes.
 
 
 ## 2026-11-01 — prepare final scoreboard during native race UI creation
 
-User again confirms private-team final scoreboard absent. New 200410 log shows
+I again confirm private-team final scoreboard absent. New 200410 log shows
 activated previous patch: opened/resolved team project, exclusive RaceFinished
 ownership (interim flow suppressed), valid BLUE/YELLOW 14-point tie resolved by
 head-to-head, and eventual lobby return. Therefore stopping duplicate flow did
@@ -1419,14 +1419,14 @@ Regression asserts scoreboard creation during race UI, finish-slot retention
 through racing, no additional creation during results, both broadcast orders,
 and one final event with no interim end-flow event. Both regional fixtures tested.
 No gameplay launched. Actual visibility and intro/input ordering still require
-user gameplay validation; this log does not justify claiming the panel fixed.
+my gameplay validation; this log does not justify claiming the panel fixed.
 
 CPU rebuild completed 2026-11-01 20:14:13 +0700: out/sacredfire 2219760 bytes. Online-mode regressions pass for USA/EU. GPU SHA256 unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e); git diff --check clean. No game launched.
 
 
 ## 2026-11-01 — follow the native Battle scoreboard owner and result pipeline
 
-User again reports no private-team scoreboard. The latest relevant private-team
+I again report no private-team scoreboard. The latest relevant private-team
 log is 201522 (newer202203 has no TEAM records). It reports prepared scoreboard
 UNRESOLVED with the finish panel resolved; pre-opening alone did not fix it.
 Prior event-timing and exclusivity changes were insufficient. Do not treat their
@@ -1456,14 +1456,14 @@ Tests now model +68 independently from +60 (fixture expanded to0x70), assert
 both slots before finish and retirement of +60 afterward, and verify delivery
 of arena-result/finish/context companions while suppressing only duplicate finish
 events. Both regional runtime fixtures are checked. Actual rendering and native
-resource lifetime still require user gameplay validation; no game was launched.
+resource lifetime still require my gameplay validation; no game was launched.
 
 USA/EU runtime regressions pass. CPU build completed 2026-11-01 20:27:25 +0700: out/sacredfire 2220984 bytes. GPU SHA256 unchanged (f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e); git diff --check passes. No gameplay launch.
 
 
 ## 2026-11-01 — remove scoreboard avatars and trace project resolution
 
-User reports scoreboard still absent and recalls it working before added avatars.
+I report scoreboard still absent and recall it working before added avatars.
 Latest private-team log 20261101_202951 confirms ranking=requested at race UI
 construction, then prepared scoreboard unresolved at results; finish panel resolves.
 Totals are valid BLUE21 / RED18. This proves failure precedes row rendering, but
@@ -1488,8 +1488,8 @@ native graph/visibility progression without forcing visibility or synthetic even
 row bytes, exports, EXID/EXNM/TDEP data and absent avatar markers. USA/EU runtime
 fixtures pass with new tracing. A full asset-generation check caught a removed
 race UI index still needed for the finish-panel archive; restored that lookup.
-No game launched or controlled; no GPU build. User visual validation remains pending.
-run.sh regenerates online assets even with BB_PREBUILT=1, so the user's configured
+No game launched or controlled; no GPU build. My visual validation remains pending.
+run.sh regenerates online assets even with BB_PREBUILT=1, so my configured
 BB_DATA_DIR receives the avatar-free patch at next launch.
 
 Full asset preparation succeeded; generated BattleTeam streaming archive was
@@ -1501,7 +1501,7 @@ git diff --check passed.
 
 ## 2026-11-01 — plain Highscores-style avatar using the scoreboard's own sprite
 
-User confirms avatar removal restored scoreboard visibility. Requests avatar only,
+I confirm avatar removal restored scoreboard visibility. I request avatars only,
 without contour/frame, like the Time Trial Highscores list. No gameplay launched.
 
 Inspected native HighscoreListItem: its character portrait is a64px minimap sprite
@@ -1540,12 +1540,12 @@ success claim. run.sh regenerates assets for the configured BB_DATA_DIR at launc
 Generated streaming archive reopened and avatar/chain/no-frame assertions passed.
 CPU-only build completed 2026-11-01 20:57:51 +0700, out/sacredfire2224448 bytes.
 GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-git diff --check passed; visual validation remains with the user.
+git diff --check passed; visual validation remains pending my manual testing.
 
 
 ## 2026-11-01 — finish-style row pitch and engine icon
 
-User requests list spacing like finish panel, with avatar, engine-type icon and
+I request list spacing like finish panel, with avatar, engine-type icon and
 team-colored name; sprites must retain their original color. Header/scoring flow
 are outside this change.
 
@@ -1568,17 +1568,17 @@ preserving bidirectional flattened object order and all original children.
 no extra external dependencies/sprites, complete retained object chain, unchanged
 serialized Battle list dimensions, private row-pitch/count and name placement,
 engine reveal and unchanged white color. Full asset generation succeeds. Actual
-screen fit/rendering needs user validation; no gameplay launched or GPU build.
+screen fit/rendering needs my validation; no gameplay launched or GPU build.
 
 CPU-only build completed 2026-11-01 21:04:47 +0700, out/sacredfire2231080 bytes.
 Race-options Clang ASan/UBSan passed; runtime and asset regressions passed.
 GPU SHA256 unchanged: f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-git diff --check passed. No gameplay launched; user validation pending.
+git diff --check passed. No gameplay launched; my validation pending.
 
 
 ## 2026-11-01 — fix touching rows, sprite alignment and explicit POINT labels
 
-User screenshot211339 shows no vertical separation, list still too low, avatar/
+My screenshot 211339 shows no vertical separation, list still too low, avatar/
 engine icons appearing below their intended racer, and requests explicit10 POINT,
 8 POINT etc. Scope is scoreboard layout/text only; AI/scoring rules unchanged.
 
@@ -1595,7 +1595,7 @@ Restore the original86-unit item height (-9 spacing gives77-unit pitch), retain8
 visible rows, move the marked private-team list upward with local Y=-7. This aims
 to use the empty area below the total-points heading and retain space above the
 Continue footer. Header/navigation and serialized native Battle layout unchanged.
-Actual final margins still need user screenshot validation.
+Actual final margins still need my screenshot validation.
 
 Per-racer score strings now use the requested literal format `%d POINT` for all
 awards (including zero). Keep native right alignment; scale this score placeable
@@ -1608,7 +1608,7 @@ Validation: USA/EU runtime fixtures and17 Python asset tests passed. Full asset
 preparation succeeded. CPU-only build2026-11-01 21:22:29 +0700, out/sacredfire
 2233072 bytes. GPU checksum unchanged:
 f84b449c9fe9d9fc86c90095918df660a1094d421caf32401a60fe23f8d31f2e.
-git diff --check passed. User visual validation pending; no gameplay launched.
+git diff --check passed. My visual validation pending; no gameplay launched.
 
 
 ## 2026-11-01 — lift team results and move return countdown beside panel
@@ -1631,7 +1631,7 @@ CPU-only build completed 2026-11-01T21:37:27.047547+07:00; out/sacredfire 223633
 
 ## 2026-11-01 — keep row one inside clipping parent; native DNF opacity
 
-User reports row1 clipping after raising the list, and requests native-style
+I report row1 clipping after raising the list, and request native-style
 transparent rows for retired/non-finishers. BattleTeam list e30 is inside ce0
 (flags401002, scissor wrapper, local scaleY10.874557). Moving only listY from-7
 to-22 displaced content relative to that wrapper. Restore listY-7 and move its
@@ -1809,7 +1809,7 @@ verification in the game; these tests do not establish rendered appearance.
 
 ## 2026-11-01 — countdown initialization and deferred team finish effects
 
-User reported host 10 seconds / guest 60 seconds, followed by host race-start
+I reported host 10 seconds / guest 60 seconds, followed by host race-start
 failure and guest host-left notice. The previous eb7950 tick hook changed the
 component's remaining time after eb71d0 had already created Octane_Lobby_Timer
 with the original value. That UI receives its initial duration via 110d3b0
@@ -1860,7 +1860,7 @@ Inspected the running client processes 899014/899142 and their latest logs
 (233559 / 233603). Both mapped the same built executable inode. Native timer
 initialization was 60.0 on the host and 59.9 on the guest. Both opened the
 four-team selector with two humans. Host logged map load after Ready; guest
-did not. User confirmed loading begins immediately when everyone is ready.
+did not. I confirmed loading begins immediately when everyone is ready.
 This disproves the old 10/60 display mismatch as the remaining cause.
 
 The overlooked native config field +0x114 is 10.0, copied to timer +0x30.
@@ -1897,7 +1897,7 @@ ready/start flow and modal appearance still require a live retest.
 
 ## 2026-11-01 — team selector duration reduced to 30 seconds
 
-User requested 30 seconds instead of 60. Set private team initialization
+I requested 30 seconds instead of 60. Set private team initialization
 config +0x110/+0x114/+0x118 together to 30, preserving first-tick peer
 preparation, replicated guest time and native all-ready start. Updated the
 existing USA/EU runtime assertions; runtime tests and executable build pass.
@@ -1913,7 +1913,7 @@ the original wrapper. Ready/unready input behavior is unchanged.
 
 USA/EU asset tests verify exactly one marked node, preserved original inputs
 and executable prologue. Runtime tests check private Back suppression, Ready
-forwarding, and Battle Back forwarding. User confirmed earlier confetti/audio
+forwarding, and Battle Back forwarding. I confirmed earlier confetti/audio
 and 30-second countdown changes work. New legend requires relaunch; no live
 visual verification performed for this change.
 
