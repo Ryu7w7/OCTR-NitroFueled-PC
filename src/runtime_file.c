@@ -483,7 +483,9 @@ int runtime_speed_race_active(void) {
      * predicate gates both archive assets and seasonal pickup spawning; a remembered private
      * selection alone never enables it outside an active eligible room. */
     return runtime_public_itemless_active() ||
-           (runtime_speed_mode_enabled() && runtime_private_room_active() && private_race_session());
+           (runtime_speed_mode_enabled() &&
+            (runtime_private_match_active() ||
+             (runtime_private_room_active() && private_race_session())));
 }
 
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {

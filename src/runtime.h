@@ -110,6 +110,12 @@ int runtime_online_mode_private_cup_race(void); /* a race of a private room's CU
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
+int runtime_room_mode_following(void);
+void runtime_room_mode_host_name(char out[24]);
+int runtime_room_mode_ready(void);
+/* 1 verified/frozen, 0 rejected, -1 background verification pending. */
+int runtime_room_mode_begin_race(void);
+void runtime_room_mode_end_race(void);
 int runtime_public_itemless_start(unsigned char *image, size_t size);
 int runtime_public_itemless_available(void);
 int runtime_public_itemless_announce(void);
@@ -127,6 +133,7 @@ int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
 void runtime_race_options_map_loading(const char *map);
 int runtime_race_options_start(unsigned char *image, size_t size);
+void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
