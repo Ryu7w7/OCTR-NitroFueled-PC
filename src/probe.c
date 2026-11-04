@@ -1234,6 +1234,7 @@ int main(int argc, char **argv) {
     if (!runtime_public_itemless_start(image, size)) fail("native public Itemless callbacks could not be installed");
     if (!runtime_time_trial_start(image, size)) fail("Time Trial challenge callback could not be installed");
     if (!runtime_itemless_start(image, size)) fail("native Itemless collision callback could not be installed");
+    runtime_replay_start(image, size); /* spectator build: native race recording (BB_REPLAY=0 off) */
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
