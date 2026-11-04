@@ -13,8 +13,10 @@
  * (runtime_replay_play_file), run on the game's thread by the pad read hook (runtime_replay_play_tick). */
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
+#include "runtime_replay_list.h"
 #include "runtime.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +58,10 @@ typedef void *ABI zone_by_name_fn(void *zones, const char *level);
 typedef unsigned char ABI decal_find_fn(void *table, const char **kart, uint32_t hash, void ***out);
 typedef void ABI player_input_fn(void *actor, void *command);
 typedef void *ABI meta_of_fn(void *object);
+typedef void ABI set_text_fn(void *placeable, const char *text);
+typedef void ABI set_hidden_fn(void *placeable, int hidden);
+typedef void ABI hud_set_lap_fn(void *hud, int lap);
+typedef void *ABI find_driver_fn(void *drivers, const char *name);
 
 static struct {
     ghost_new_fn *ghost_new, *move_key_new, *input_key_new;
@@ -84,7 +90,14 @@ static struct {
     customization_fn *enter_customization;
     zone_by_name_fn *zone_by_name;
     decal_find_fn *decal_find;
+    set_text_fn *set_text;
+    set_hidden_fn *set_hidden;
+    hud_set_lap_fn *hud_set_lap;
+    find_driver_fn *find_driver;
 } game;
+
+#define D_HUD_META 0x2ad4940
+#define COMPOSITION_VTABLE 0x2431b18
 
 enum {
     D_PLAYERS = 0x2ad1160, D_INPUT_MANAGER = 0x2ac2e90, D_KART_CAMERA_META = 0x2ac42e8, D_PLAYER_ENTITIES = 0x2ad0730,
@@ -128,6 +141,13 @@ static struct {
     int last_frame;
     char request[64];           /* a file asked for by the menu (any thread), taken by the game's thread */
     pthread_mutex_t lock;
+    /* the HUD and the panel */
+    char names[RR_RACERS][48];
+    void *hud_root, *total_lap, *place, *place_suffix, *wumpa;
+    int shown_lap, setting_lap, lap_refresh;
+    float speed_clock;
+    int shown_speed, speed_watch, scrub_dir;
+    RrView view;                /* the panel's copy, under lock */
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
@@ -664,6 +684,7 @@ static void read_buttons(float dt) {
     if (PRESSED(S_DOWN) && P.speed > 0) P.speed--;
     const float end = ghost_time(&P.frames[P.count - 1]) - RACE_START;
     P.scrubbing = HELD(S_LEFT) || HELD(S_RIGHT);
+    P.scrub_dir = HELD(S_LEFT) ? -1 : HELD(S_RIGHT) ? 1 : 0;
     if (HELD(S_LEFT)) {
         P.time -= dt * SCRUB;
         if (P.time < 0.0f) P.time = 0.0f;
@@ -719,6 +740,159 @@ static void feed(void *kart) {
 }
 
 static int running(void) { return P.pending == 2 && P.started; }
+
+/* In a replay the items come from the recording: what old items do after a rewind cleared them would run on
+ * freed memory (runtime_replay.c's item stubs), crates give nothing, the HUD's lap is ours. */
+int ABI runtime_replay_on(void) { return P.pending == 2; }
+int ABI runtime_replay_crate(void) { return P.pending != 2; }
+int ABI runtime_replay_hud_lap(void) { return P.pending != 2 || !P.started || P.setting_lap; }
+
+/* ---- the race HUD shows the watched racer ---- */
+static void *asset_of(void *placeable) { return rr_handle_object(&RR_AT(placeable, 0x38, void *)); }
+
+static void *content(void *placeable) {
+    void *a = asset_of(placeable);
+    return a && RR_AT(a, 0, const void *) == (const void *)rr_game(COMPOSITION_VTABLE) ? RR_AT(a, 0x20, void *) : 0;
+}
+
+static void *find(void *placeable, const char *name, int depth) {
+    if (!placeable || depth > 24) return 0;
+    if (same_text(RR_AT(placeable, 0x28, const char *), name)) return placeable;
+    void *children = RR_AT(placeable, 0x48, void *);
+    for (int i = 0; i < rr_count(children); i++) {
+        void *found = find(rr_item(children, i), name, depth + 1);
+        if (found) return found;
+    }
+    return find(content(placeable), name, depth + 1);
+}
+
+static void show_text(void *piece, const char *text) {
+    if (!piece) return;
+    game.set_hidden(RR_AT(piece, 0x40, void *), 0);
+    if (!same_text(RR_AT(piece, 0x30, const char *), text)) game.set_text(piece, text);
+}
+
+static void hud(void) {
+    void *meta = rr_ptr(D_HUD_META);
+    void *component = P.kart && meta ? rr_find_component(P.kart, meta) : 0;
+    if (!component || !RR_AT(component, 0x80, uint8_t)) return;        /* _isInitialized */
+    void *project = rr_handle_object(&RR_AT(component, 0x38, void *));
+    void *root = project && RR_AT(project, 0x10, void *) ? content(RR_AT(project, 0x10, void *)) : 0;
+    if (!root) return;
+    char *racers = rr_ptr(RR_D_RACER_MANAGER);
+    void *watched = kart_of_racer(P.watch);
+    void *own = watched && racers ? game.racer_of(racers, watched) : 0;
+    if (own && rr_handle_object(&RR_AT(component, 0x28, void *)) != own) game.make_handle(&RR_AT(component, 0x28, void *), own);
+    const int laps = P.header.laps > 0 ? P.header.laps : 3;
+    RR_AT(component, 0x84, int32_t) = laps;             /* _totalLap: the race has 99 */
+    if (root != P.hud_root) {
+        P.hud_root = root;
+        P.total_lap = find(root, "[TotalLap]", 0);
+        P.place = find(root, "[PositionNumber]", 0);
+        P.place_suffix = find(root, "[PositionText]", 0);
+        P.wumpa = find(root, "[WumpaFruitText]", 0);
+        P.shown_lap = 0;
+    }
+    const struct rr_sample *s = &frame_now()->racer[P.watch];
+    char number[16];
+    snprintf(number, sizeof number, "%d", s->rank);
+    show_text(P.place, s->rank ? number : "");
+    /* the English suffixes follow the number; other languages keep the game's own */
+    const char *suffix = P.place_suffix ? RR_AT(P.place_suffix, 0x30, const char *) : 0;
+    if (suffix && (same_text(suffix, "ST") || same_text(suffix, "ND") || same_text(suffix, "RD") || same_text(suffix, "TH")))
+        show_text(P.place_suffix, s->rank == 1 ? "ST" : s->rank == 2 ? "ND" : s->rank == 3 ? "RD" : "TH");
+    snprintf(number, sizeof number, "%d", s->wumpa);
+    show_text(P.wumpa, number);
+    snprintf(number, sizeof number, "%d", laps);
+    if (P.total_lap && !same_text(RR_AT(P.total_lap, 0x30, const char *), number)) game.set_text(P.total_lap, number);
+    const int lap = s->lap > laps ? laps : s->lap;
+    if (lap && (lap != P.shown_lap || ++P.lap_refresh >= 60)) {
+        P.shown_lap = lap;
+        P.lap_refresh = 0;
+        P.setting_lap = 1;
+        game.hud_set_lap(component, lap);
+        P.setting_lap = 0;
+    }
+}
+
+/* The display name of each racer: the online name, else the driver's shown name */
+static void racer_names(void) {
+    char *racers = rr_ptr(RR_D_RACER_MANAGER);
+    for (int i = 0; i < RR_RACERS; i++) {
+        const struct rr_racer *r = &P.header.racer[i];
+        P.names[i][0] = 0;
+        if (!r->kind) continue;
+        if (r->name[0] && strcmp(r->name, "GHOST")) {
+            snprintf(P.names[i], sizeof P.names[i], "%s", r->name);
+            continue;
+        }
+        void *data = racers && r->driver[0] ? game.find_driver(RR_AT(racers, 0x18, void *), r->driver) : 0;
+        const char *shown = data ? RR_AT(data, 0x60, const char *) : 0;
+        const char *name = shown && *shown ? shown : r->driver;
+        if (!strncmp(name, "Driver", 6)) name += 6;
+        size_t o = 0;
+        for (size_t k = 0; name[k] && o + 2 < sizeof P.names[i]; k++) {
+            if (!shown && k && name[k] >= 'A' && name[k] <= 'Z' && name[k - 1] >= 'a' && name[k - 1] <= 'z') P.names[i][o++] = ' ';
+            P.names[i][o++] = name[k];
+        }
+        P.names[i][o] = 0;
+    }
+}
+
+/* Speed over the ground in km/h (world units are centimetres): the average of the last half second, worked
+ * out 3 times a second, changed only by 2 km/h or more */
+static void speed_now(float dt) {
+    P.speed_clock += dt;
+    if (P.speed_clock < 0.33f && P.speed_watch == P.watch) return;
+    const struct rr_frame *f = frame_now();
+    int n = 0;
+    float sum = 0.0f;
+    for (const struct rr_frame *g = f; g >= P.frames && n < RR_RATE / 2; g--, n++) {
+        const float x = g->racer[P.watch].velocity[0], y = g->racer[P.watch].velocity[1];
+        sum += sqrtf(x * x + y * y);
+    }
+    const int kmh = n && !ended() && !P.paused ? (int)(sum / n / RR_VELOCITY * 0.036f + 0.5f) : 0;
+    if (kmh == 0 || abs(kmh - P.shown_speed) >= 2 || P.speed_watch != P.watch) P.shown_speed = kmh;
+    P.speed_clock = 0.0f;
+    P.speed_watch = P.watch;
+}
+
+static void publish_view(void) {
+    RrView v;
+    memset(&v, 0, sizeof v);
+    v.active = 1;
+    snprintf(v.track, sizeof v.track, "%s", P.header.track);
+    v.laps = P.header.laps;
+    v.time = P.time;
+    v.end = ghost_time(&P.frames[P.count - 1]) - RACE_START;
+    v.speed = SPEEDS[P.speed];
+    v.paused = P.paused;
+    v.ended = ended();
+    v.rewinding = P.scrubbing && P.scrub_dir < 0;
+    v.forwarding = P.scrubbing && P.scrub_dir > 0;
+    v.watch = P.watch;
+    v.kmh = P.shown_speed;
+    const struct rr_frame *f = frame_now();
+    for (int i = 0; i < RR_RACERS; i++) {
+        snprintf(v.racer[i].name, sizeof v.racer[i].name, "%s", P.names[i]);
+        v.racer[i].kind = P.header.racer[i].kind;
+        v.racer[i].present = kart_of_racer(i) != 0 && (f->racer[i].flags & RS_PRESENT);
+        v.racer[i].rank = f->racer[i].rank;
+        v.racer[i].lap = f->racer[i].lap;
+        v.racer[i].finished = (f->racer[i].flags & RS_FINISHED) ? P.header.racer[i].finished : 0;
+    }
+    pthread_mutex_lock(&P.lock);
+    P.view = v;
+    pthread_mutex_unlock(&P.lock);
+}
+
+int runtime_replay_view(RrView *out) {
+    pthread_mutex_lock(&P.lock);
+    const int active = P.pending == 2 && P.view.active;
+    if (active && out) *out = P.view;
+    pthread_mutex_unlock(&P.lock);
+    return active;
+}
 
 /* ---- hooks (the game's threads) ---- */
 static player_input_fn *native_player_input;
@@ -797,6 +971,9 @@ void ABI runtime_replay_level_start(void *manager) {
         if (P.kart_slot[i] >= 0) ghosts += !!(P.ghost[i] = build_ghost(i));
     P.watch = P.player_slot >= 0 ? P.player_slot : 0;
     P.speed = NORMAL_SPEED;
+    P.hud_root = 0;
+    P.shown_speed = 0;
+    racer_names();
     printf("Replay: playing %s (%d racers)\n", P.header.track, ghosts);
     fflush(stdout);
 }
@@ -827,6 +1004,9 @@ void runtime_replay_play_frame(void) {
     drive(P.started ? P.time + RACE_START : RACE_START - 0.2f);
     unghost();
     follow();
+    hud();
+    speed_now(dt);
+    publish_view();
     const float finish = P.header.racer[P.watch].finish_time;
     set_race_clock((frame_now()->racer[P.watch].flags & RS_FINISHED) && finish > 0.0f && finish < P.time ? finish : P.time);
 }
@@ -936,6 +1116,10 @@ int runtime_replay_play_install(int eu) {
     game.enter_customization = fn(0xe1e7a0, 0, eu);
     game.zone_by_name = fn(0x102e320, 1, eu);
     game.decal_find = fn(0xa0b5a0, 0, eu);
+    game.set_text = fn(0x268ef0, 0, eu);
+    game.set_hidden = fn(0x2694d0, 0, eu);
+    game.hud_set_lap = fn(0xe63f20, 0, eu);
+    game.find_driver = fn(0xf9c610, 1, eu);
     /* every function but player_at starts "push rbp; mov rbp, rsp" */
     void *const check[] = {game.ghost_new, game.move_key_new, game.input_key_new, game.list_reserve, game.list_set_count,
                            game.ghost_reset, game.ghost_attach, game.ghost_update, game.ai_load, game.ai_count, game.racer_of,
@@ -943,7 +1127,7 @@ int runtime_replay_play_install(int eu) {
                            game.ghost_look_end_new, game.send_message, game.player_kart, game.despawn_items, game.string,
                            game.string_release, game.release, game.set_next_race_mode, game.set_next_map, game.load_next_map,
                            game.apply_choice, game.apply_player_count, game.enter_customization, game.zone_by_name,
-                           game.decal_find};
+                           game.decal_find, game.set_text, game.hud_set_lap, game.find_driver};
     for (size_t i = 0; i < sizeof check / sizeof *check; i++)
         if (memcmp(check[i], "\x55\x48\x89\xe5", 4)) {
             printf("Replay: player function %zu is not the expected code: no replays\n", i);

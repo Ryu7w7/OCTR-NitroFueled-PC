@@ -736,7 +736,11 @@ void ABI runtime_replay_item_made(void *object, int type) {
  * arguments (one on the stack), then tells the handler the new item. */
 void *runtime_replay_cont_race_frame, *runtime_replay_cont_level_exit, *runtime_replay_cont_item_used,
      *runtime_replay_item_factory, *runtime_replay_cont_level_start, *runtime_replay_native_pad_read,
-     *runtime_replay_ai_body, *runtime_replay_ai_no_entity;
+     *runtime_replay_ai_body, *runtime_replay_ai_no_entity, *runtime_replay_cont_item_cancel,
+     *runtime_replay_cont_item_respawn, *runtime_replay_cont_item_finish, *runtime_replay_cont_item_update,
+     *runtime_replay_cont_item_crate, *runtime_replay_cont_item_wumpa, *runtime_replay_cont_hud_lap,
+     *runtime_replay_cont_crate;
+int ABI runtime_replay_on(void), runtime_replay_crate(void), runtime_replay_hud_lap(void);   /* the player */
 void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
 
 #define RR_SAVE                                                                                       \
@@ -753,6 +757,9 @@ void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
     "movdqu 192(%rsp), %xmm12\n movdqu 208(%rsp), %xmm13\n movdqu 224(%rsp), %xmm14\n movdqu 240(%rsp), %xmm15\n" \
     "mov %rbx, %rsp\n pop %rbx\n pop %r11\n pop %r10\n pop %r9\n pop %r8\n pop %rdi\n pop %rsi\n pop %rdx\n" \
     "pop %rcx\n pop %rax\n"
+#define RR_GATE_STUB(stub, handler, cont)                                                             \
+    ".globl " #stub "\n" #stub ":\n" RR_SAVE "call " #handler "\n test %eax, %eax\n" RR_RESTORE      \
+    "jz 1f\n push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *" #cont "(%rip)\n 1: ret\n"
 #define RR_ENTRY_STUB(stub, handler, cont)                                                            \
     ".globl " #stub "\n" #stub ":\n" RR_SAVE "call " #handler "\n" RR_RESTORE                        \
     "push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *" #cont "(%rip)\n"
@@ -775,6 +782,26 @@ __asm__(".text\n"
         "jz 1f\n test %rax, %rax\n jz 2f\n jmp *runtime_replay_ai_body(%rip)\n"
         "2: jmp *runtime_replay_ai_no_entity(%rip)\n"
         "1: pop %rbx\n pop %r14\n pop %rbp\n ret\n"
+        /* Gates in a replay (handler 0: the game's function returns at once): a kart through an item crate
+         * (items come from the recording), the HUD's lap (ours) */
+        RR_GATE_STUB(runtime_replay_stub_crate, runtime_replay_crate, runtime_replay_cont_crate)
+        RR_GATE_STUB(runtime_replay_stub_hud_lap, runtime_replay_hud_lap, runtime_replay_cont_hud_lap)
+        /* A rewind clears the items: their components stay on the karts' message lists. An old item with no
+         * entity left (+0x18) ends or updates as nothing; what items do on a respawn, finish, crate or wumpa
+         * is skipped in a replay (it would run on freed memory). */
+        ".globl runtime_replay_stub_item_cancel\n runtime_replay_stub_item_cancel:\n"
+        "cmpq $0, 0x18(%rdi)\n je 1f\n push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *runtime_replay_cont_item_cancel(%rip)\n 1: ret\n"
+        ".globl runtime_replay_stub_item_update\n runtime_replay_stub_item_update:\n"
+        "cmpq $0, 0x18(%rdi)\n je 1f\n push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *runtime_replay_cont_item_update(%rip)\n 1: ret\n"
+        "runtime_replay_replay_on:\n" RR_SAVE "call runtime_replay_on\n test %eax, %eax\n" RR_RESTORE "ret\n"
+        ".globl runtime_replay_stub_item_respawn\n runtime_replay_stub_item_respawn:\n"
+        "call runtime_replay_replay_on\n jnz 1f\n mov 0xd0(%rdi), %eax\n jmp *runtime_replay_cont_item_respawn(%rip)\n 1: ret\n"
+        ".globl runtime_replay_stub_item_finish\n runtime_replay_stub_item_finish:\n"
+        "call runtime_replay_replay_on\n jnz 1f\n mov 0xd0(%rdi), %eax\n jmp *runtime_replay_cont_item_finish(%rip)\n 1: ret\n"
+        ".globl runtime_replay_stub_item_crate\n runtime_replay_stub_item_crate:\n"
+        "call runtime_replay_replay_on\n jnz 1f\n push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *runtime_replay_cont_item_crate(%rip)\n 1: ret\n"
+        ".globl runtime_replay_stub_item_wumpa\n runtime_replay_stub_item_wumpa:\n"
+        "call runtime_replay_replay_on\n jnz 1f\n push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *runtime_replay_cont_item_wumpa(%rip)\n 1: ret\n"
         ".globl runtime_replay_stub_item_made\n"
         "runtime_replay_stub_item_made:\n"
         "push %rbx\n push %r12\n push %r13\n mov %rdi, %rbx\n mov %ecx, %r12d\n sub $8, %rsp\n"
@@ -783,7 +810,10 @@ __asm__(".text\n"
         "pop %r13\n pop %r12\n pop %rbx\n ret\n");
 extern void runtime_replay_stub_race_frame(void), runtime_replay_stub_level_exit(void),
     runtime_replay_stub_item_used(void), runtime_replay_stub_item_made(void), runtime_replay_stub_level_start(void),
-    runtime_replay_stub_pad_read(void), runtime_replay_stub_ai_input(void);
+    runtime_replay_stub_pad_read(void), runtime_replay_stub_ai_input(void), runtime_replay_stub_crate(void),
+    runtime_replay_stub_hud_lap(void), runtime_replay_stub_item_cancel(void), runtime_replay_stub_item_update(void),
+    runtime_replay_stub_item_respawn(void), runtime_replay_stub_item_finish(void), runtime_replay_stub_item_crate(void),
+    runtime_replay_stub_item_wumpa(void);
 
 static int writable(void *address, size_t length) {
 #ifdef _WIN32
@@ -842,6 +872,14 @@ static int hook_entry(size_t usa, void (*stub)(void), void **cont) {
     return rel32(at, 0xe9, t);
 }
 
+/* Replaces 6 known bytes at `at` (the same in both editions) by a jump to `stub`; it goes on at at + 6. */
+static int hook_bytes(size_t at, const unsigned char *expected, void (*stub)(void), void **cont) {
+    unsigned char *p = G(at), *t;
+    if (memcmp(p, expected, 6) || !(t = trampoline(stub))) return 0;
+    *cont = p + 6;
+    return rel32(p, 0xe9, t);
+}
+
 int runtime_replay_start(unsigned char *base, size_t size) {
     const char *off = getenv("BB_REPLAY");
     if (off && *off == '0') return 0;
@@ -896,6 +934,17 @@ int runtime_replay_start(unsigned char *base, size_t size) {
         runtime_replay_native_pad_read = pad_fn;
         player = rel32(ai_site, 0xe9, ai_t) && rr_redirect_call(pad_site, pad_fn, runtime_replay_stub_pad_read);
     }
+    /* the player's gates and the item guards for rewinds */
+    static const unsigned char ITEM_STATE[6] = {0x8b, 0x87, 0xd0, 0x00, 0x00, 0x00};   /* mov eax, [rdi + 0xd0] */
+    if (player && ai_t)
+        player = hook_bytes(0xe36230, PROLOGUE, runtime_replay_stub_crate, &runtime_replay_cont_crate) &&
+                 hook_bytes(0xe63f20, PROLOGUE, runtime_replay_stub_hud_lap, &runtime_replay_cont_hud_lap) &&
+                 hook_bytes(0xe35190, PROLOGUE, runtime_replay_stub_item_cancel, &runtime_replay_cont_item_cancel) &&
+                 hook_bytes(0xe38b00, PROLOGUE, runtime_replay_stub_item_update, &runtime_replay_cont_item_update) &&
+                 hook_bytes(0xe35990, ITEM_STATE, runtime_replay_stub_item_respawn, &runtime_replay_cont_item_respawn) &&
+                 hook_bytes(0xe359b0, ITEM_STATE, runtime_replay_stub_item_finish, &runtime_replay_cont_item_finish) &&
+                 hook_bytes(0xe359e0, PROLOGUE, runtime_replay_stub_item_crate, &runtime_replay_cont_item_crate) &&
+                 hook_bytes(0xe35b80, PROLOGUE, runtime_replay_stub_item_wumpa, &runtime_replay_cont_item_wumpa);
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
