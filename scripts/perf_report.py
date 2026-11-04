@@ -281,16 +281,20 @@ def keep(report, folder):
     return path
 
 
-def mods_in_use(data):
-    """The folder names of the mods this launch used (scripts/mods.py's choice), at most 20."""
-    if os.environ.get('BB_MODS_ENABLED', '1') == '0':
-        return []
-    try:
-        import mods
-        names = mods.selected(os.environ.get('BB_MODS_DIR') or Path(data) / 'mods',
-                              os.environ.get('BB_MODS_CONFIG') or Path(data) / 'mods.json')
-    except Exception:
-        return []
+def mods_in_use(data, env=None):
+    """The names of the mods this launch used, at most 20: the Mods page's packages
+    (scripts/mod_packages.py names them in BB_MOD_PACKAGES_USED) and loose mods folders
+    (scripts/mods.py's choice). Up to v0.7.5 only the loose ones were read, and packages turn
+    loose mods off (BB_MODS_ENABLED=0), so reports never named a mod."""
+    env = os.environ if env is None else env
+    names = [n for n in (env.get('BB_MOD_PACKAGES_USED') or '').split(',') if n]
+    if env.get('BB_MODS_ENABLED', '1') != '0':
+        try:
+            import mods
+            names += mods.selected(env.get('BB_MODS_DIR') or Path(data) / 'mods',
+                                   env.get('BB_MODS_CONFIG') or Path(data) / 'mods.json')
+        except Exception:
+            pass
     return [scrub(n, 40) for n in names[:20]]
 
 

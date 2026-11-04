@@ -81,6 +81,8 @@ else
 fi
 # The game's login says this port's version (src/runtime_http.c, the server's client_gate.go).
 v=${version#v}; export BB_OCTR_VERSION=${v%%-*}
+# This PC's anonymous fingerprint (a ban covers the PC, not only the nickname), as run.py.
+BB_MACHINE_ID=$("$PYTHON" scripts/machine_id.py 2>/dev/null || true); export BB_MACHINE_ID
 # Mod packages (the launcher's Mods page: .pak, .zip and folders in the data folder's mods/,
 # switched in patches.json), as run.py: scripts/mod_packages.py prepares a separate mod session
 # (its own bbport.ini, saves and patches, the mods' files redirected by the engine, never a game
@@ -309,6 +311,10 @@ if [[ -f $BB_CONFIG ]] && grep -qx 'patch_no_motion_blur=1' "$BB_CONFIG"; then
 else
     export BB_NO_MOTION_BLUR=0
 fi
+# Started from Steam (a non-Steam shortcut, the Steam Deck), Steam turns on its Fossilize layer,
+# which records every pipeline the game builds: thousands at start, a black window for minutes.
+# Steam never ships a shader cache for a shortcut, so it only costs; the overlay stays (run.py).
+export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
 # Background upload of the game's GPU memory into VRAM ahead of use (BufferCache::Preupload):
 # 1 = only memory already in VRAM that the game rewrote (no new VRAM), 2 = all of it (~3 GB more
 # VRAM), 0 = off. BB_GUEST_GPU_MEMORY=1 puts guest direct memory in GPU-visible dma-buf chunks

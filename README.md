@@ -105,6 +105,12 @@ Shared default names (RyuPC, Player, Jugador...) are refused. The first installa
 with a nickname keeps it, through the key in `ryunet_online.key` (copied to
 `%APPDATA%\CTR-NitroFueled-PC`): **never share that file.**
 
+**Fair play.** Players banned for cheating are banned with their PC, not only their nickname: a
+new nickname or a fresh install does not bring them back. For this the game sends the server an
+anonymous fingerprint of the PC: two SHA-256 digests of Windows' installation ID and the
+motherboard's ID (`scripts/machine_id.py`). The server can only tell whether it saw the same PC
+again; it never learns the hardware, and the IDs themselves never leave the PC.
+
 **Discord** (Windows launcher, Online tab):
 
 - **Link with Discord** ties your nickname to your Discord account. *Recover with Discord* gets

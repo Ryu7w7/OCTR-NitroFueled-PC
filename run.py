@@ -347,6 +347,21 @@ HTTPS_PORT = 443      # the server's nginx: /ryunet/ by HTTPS (tests point it el
 HTTPS_FAILED = set()  # servers whose HTTPS failed this run: their next requests go to the port
 
 
+def machine_header():
+    """This PC's anonymous fingerprint for the server's bans (scripts/machine_id.py), once."""
+    global MACHINE
+    if MACHINE is None:
+        try:
+            import machine_id
+            MACHINE = machine_id.header()
+        except Exception:  # never stops a launch
+            MACHINE = ''
+    return MACHINE
+
+
+MACHINE = None
+
+
 def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=None):
     """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
     By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
@@ -384,6 +399,7 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=No
         request = urllib.request.Request(url, method=method,
                                          data=body if body is not None else (b'' if method == 'POST' else None),
                                          headers={**(headers(method, target) if headers else {}),
+                                                  **({'X-RyuNET-Machine': machine_header()} if machine_header() else {}),
                                                   **({'Content-Type': 'application/json'} if body is not None else {})})
         try:
             with opener.open(request, timeout=timeout) as reply:
@@ -632,7 +648,7 @@ def finish_perf_report(env, config, data, version, title_id, code):
             'online': env.get('BB_ONLINE') == '1',
             'settings': perf_report.settings_of(config),
             'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
-            'mods': perf_report.mods_in_use(data),
+            'mods': perf_report.mods_in_use(data, env),
         })
         if not report.get('overall') and not report.get('fault'):
             return  # nothing drawn and no crash (a start stopped early): nothing to say
@@ -969,6 +985,7 @@ def main():
         say(f'SacredFire {version or "unknown version"}')
         update_notice(env, version)
         env['BB_OCTR_VERSION'] = version.removeprefix('v').split('-')[0] if version else ''  # the game's login says it
+        env['BB_MACHINE_ID'] = machine_header()  # this PC's anonymous fingerprint, for bans
         # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
@@ -1038,6 +1055,11 @@ def main():
             # Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too
             # (objects moving on their own: the crowd, plants; bb_motion_blur.h)
             env['BB_NO_MOTION_BLUR'] = '1' if ini_has(config, 'patch_no_motion_blur=1') else '0'
+            # Started from Steam (a non-Steam shortcut), Steam turns on its Fossilize layer, which
+            # records every pipeline the game builds: thousands at start, so the window stayed
+            # black for minutes. Steam never ships a shader cache for a shortcut, so it only costs.
+            # The overlay layer (Shift+Tab) stays.
+            env['DISABLE_VK_LAYER_VALVE_steam_fossilize_1'] = '1'
             applied = patches.applied_game_patches(out)  # None: an older compile, trusted
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank

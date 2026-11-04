@@ -1,5 +1,7 @@
 """Build disposable normal and private Speed archive views from the player's CTR files."""
 import argparse
+import hashlib
+import json
 import lzma
 import re
 import struct
@@ -186,14 +188,52 @@ def nested_track_ranges(outer, workdir):
     return ranges, tracks
 
 
+# The scripts whose code shapes the overlays: a change to any of them builds them again.
+SOURCES = ('speed_mode.py', 'archive_patch.py', 'archive_reader.py', 'igz_file.py', 'widescreen_startup.py')
+
+
+def stamp_of(game, base_patches):
+    """What the overlays are made from: these scripts, the game's archives (name, size, time) and
+    the overlays they build on (their bytes: the earlier steps write them again each launch)."""
+    h = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for name in SOURCES:
+        h.update(name.encode() + b'\0' + (here / name).read_bytes())
+    for pak in sorted((Path(game) / 'archives').glob('*.pak')):
+        st = pak.stat()
+        h.update(f'{pak.name.lower()}:{st.st_size}:{st.st_mtime_ns}\n'.encode())
+    for path in base_patches:
+        h.update(str(Path(path).resolve()).encode() + b'\0' + Path(path).read_bytes())
+    return h.hexdigest()
+
+
 def prepare(game, output, base_patches):
     """Return matching normal/private archive views and the race track count.
 
     Their directories and appended asset offsets match, so the runtime can serve
     normal bytes in Arcade/Adventure and Speed bytes in a private room.
+    Building them takes 7-14 s, so the views are kept (speed-mode/cache.json) and used again
+    while nothing they are made from changed.
     """
     game, output = Path(game), Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    cache = output / 'cache.json'
+    stamp = stamp_of(game, base_patches)
+    try:
+        kept = json.loads(cache.read_text(encoding='utf-8'))
+        if kept.get('stamp') == stamp and all(Path(p).is_file() for p in kept['normal'] + kept['speed']):
+            return [Path(p) for p in kept['normal']], [Path(p) for p in kept['speed']], kept['tracks']
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    cache.unlink(missing_ok=True)  # a build stopped halfway must not be trusted next time
+    normal, speed, tracks = build(game, output, base_patches)
+    cache.write_text(json.dumps({'stamp': stamp, 'normal': [str(p) for p in normal],
+                                 'speed': [str(p) for p in speed], 'tracks': tracks}), encoding='utf-8')
+    return normal, speed, tracks
+
+
+def build(game, output, base_patches):
+    """The views prepare() returns, made from the game's archives."""
     current = {read(path)[1]: Path(path) for path in base_patches}
     entries = {}
     tracks = set()

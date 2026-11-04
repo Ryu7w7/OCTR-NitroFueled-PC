@@ -604,6 +604,12 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
         if (items && *items && strlen(items) < 48 && !strpbrk(items, "\r\n") &&
             hlen < (int)sizeof(header_buf) - 80)
             hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Items: %s\r\n", items);
+        /* This PC's anonymous fingerprint (scripts/machine_id.py, set by run.py/run.sh): a ban
+         * covers the PC, not only the nickname. */
+        const char *machine = getenv("BB_MACHINE_ID");
+        if (machine && *machine && strlen(machine) < 80 && !strpbrk(machine, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 112)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Machine: %s\r\n", machine);
     }
     hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
 

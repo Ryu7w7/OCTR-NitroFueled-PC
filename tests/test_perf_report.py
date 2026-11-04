@@ -120,6 +120,12 @@ class PerfReportTests(unittest.TestCase):
             (Path(folder) / 'mods.json').write_text(json.dumps({'disabled': ['Off']}))
             self.assertEqual(perf_report.mods_in_use(folder), ['A skin', 'B kart'])
             self.assertEqual(perf_report.mods_in_use(Path(folder) / 'nothing'), [])
+            # Mods page packages: named by mod_packages.py, while loose mods are off.
+            env = {'BB_MOD_PACKAGES_USED': 'Gwen,Miku racer', 'BB_MODS_ENABLED': '0'}
+            self.assertEqual(perf_report.mods_in_use(folder, env), ['Gwen', 'Miku racer'])
+            env['BB_MODS_ENABLED'] = '1'
+            self.assertEqual(perf_report.mods_in_use(folder, env), ['Gwen', 'Miku racer', 'A skin', 'B kart'])
+            self.assertEqual(perf_report.mods_in_use(folder, {'BB_MODS_ENABLED': '0'}), [])
 
 
 if __name__ == '__main__':
