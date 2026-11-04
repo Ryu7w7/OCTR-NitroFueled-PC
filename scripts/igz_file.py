@@ -14,6 +14,7 @@ Fixups this needs:
 Other fixups are kept as they are.
 """
 import struct
+from bisect import bisect_left
 
 MAGIC = 0x49475A01
 STRING_LISTS = ('TSTR', 'TMET', 'EXNM', 'TDEP')
@@ -156,9 +157,10 @@ class Igz:
         return off
 
     def add_site(self, tag, off):
-        if off not in self.sites[tag]:
-            self.sites[tag].append(off)
-            self.sites[tag].sort()
+        sites = self.sites[tag]
+        index = bisect_left(sites, off)
+        if index == len(sites) or sites[index] != off:
+            sites.insert(index, off)
 
     # --- writing ---------------------------------------------------------------------------
     def build(self):

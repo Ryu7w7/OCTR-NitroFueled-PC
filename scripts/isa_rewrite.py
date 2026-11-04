@@ -15,9 +15,13 @@ The record layout and the rewrite plan follow gow3_pc's G3PROBE5 scanner
 import argparse
 from dataclasses import dataclass
 import hashlib
+import importlib.metadata
+import json
+import os
 from pathlib import Path
 import struct
 import sys
+import tempfile
 from prepare import span, unpack
 
 try:
@@ -186,18 +190,38 @@ def main(argv):
             raise RuntimeError('iced_x86 is not installed')
         segments, image = read_boot_linked(a.boot.read_bytes())
         # The table names the image it was made for: the scan (about 10 s) runs once per image.
+        a.out.mkdir(parents=True, exist_ok=True)
         target = a.out / 'isa-rewrite.bin'
+        stamp = a.out / 'isa-rewrite.json'
+        generator = [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                     hashlib.sha256(Path(__file__).with_name('prepare.py').read_bytes()).hexdigest(),
+                     importlib.metadata.version('iced-x86')]
         try:
-            magic, size, digest, count, _unsupported = HEADER.unpack_from(target.read_bytes())
-            if magic == b'BBISA1\0\0' and size == len(image) and digest == hashlib.sha256(image).digest():
+            table = target.read_bytes()
+            magic, size, digest, count, _unsupported = HEADER.unpack_from(table)
+            expected = dict(generator=generator, sha256=hashlib.sha256(table).hexdigest())
+            if (magic == b'BBISA1\0\0' and size == len(image) and digest == hashlib.sha256(image).digest()
+                    and len(table) == HEADER.size + count * RECORD.size
+                    and json.loads(stamp.read_text(encoding='utf-8')) == expected):
                 print(f'ISA: rewrite table of this image already made ({count} sites)')
                 return 0
-        except (OSError, struct.error):
+        except (OSError, ValueError, struct.error):
             pass
         sites = [site for address, size, flags in segments if flags & 1
                  for site in scan_segment(span(image, address, size), address)]
-        (a.out / 'isa-rewrite.bin').write_bytes(encode_table(image, sites))
-    except (OSError, ValueError, RuntimeError) as e:
+        table = encode_table(image, sites)
+        for path, data in ((target, table), (stamp, json.dumps(dict(
+                generator=generator, sha256=hashlib.sha256(table).hexdigest())).encode())):
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=a.out, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError, RuntimeError, importlib.metadata.PackageNotFoundError) as e:
         print(f'ISA: rewrite table unavailable ({e})')
         return 1
     print(summary(sites))

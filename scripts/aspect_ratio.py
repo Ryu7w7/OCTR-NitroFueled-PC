@@ -49,7 +49,7 @@ def selection(settings):
     return ratio, output, internal
 
 
-def prepare(game, out, config, env, title_id, app_version, base_patches):
+def prepare(game, out, config, env, title_id, app_version, base_patches, *, boot_dir=None):
     """The selected aspect ratio's private config, executable/asset patches and environment.
 
     Return None for 16:9 or an unsupported executable; keep the saved settings unchanged.
@@ -60,7 +60,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
         return None
     ratio, output, internal = chosen
     if ratio != '16x10':
-        return widescreen.prepare(game, out, config, env, title_id, app_version, base_patches)
+        return widescreen.prepare(game, out, config, env, title_id, app_version, base_patches, boot_dir=boot_dir)
     if app_version != APP_VERSION or title_id not in (TITLE_ID, EU_TITLE):
         say(f'16:10 is made for the 1.21 update ({TITLE_ID} or {EU_TITLE}); this game is {title_id} {app_version}: 16:9')
         return None
@@ -78,7 +78,7 @@ def prepare(game, out, config, env, title_id, app_version, base_patches):
         for _, _, meta in patches.render_patches({'ultrawide': '1', 'ultrawide_size': output}):
             for line in meta.iter('Line'):
                 lines.append(copy.deepcopy(line))
-        elf = (Path(out) / 'eboot.elf').read_bytes()
+        elf = (Path(boot_dir if boot_dir is not None else out) / 'eboot.elf').read_bytes()
         for line in xml.iter('Line'):
             if not line.get('Signature'):
                 raise ValueError(f'{line.get("Address")} has no signature')
@@ -111,6 +111,7 @@ def main():
     p = argparse.ArgumentParser(description='Select the aspect ratio of a launch (run.sh).')
     p.add_argument('game')
     p.add_argument('--out', required=True)
+    p.add_argument('--boot-dir', help='verified boot inputs (default: --out)')
     p.add_argument('--settings', required=True, help='bbport.ini')
     p.add_argument('--title-id', default=TITLE_ID)
     p.add_argument('--app-version', default=APP_VERSION)
@@ -120,7 +121,7 @@ def main():
     MESSAGES = sys.stderr
     widescreen.MESSAGES = sys.stderr
     base = {archive_patch.read(path)[1]: Path(path) for path in a.base}
-    plan = prepare(a.game, a.out, a.settings, dict(os.environ), a.title_id, a.app_version, base)
+    plan = prepare(a.game, a.out, a.settings, dict(os.environ), a.title_id, a.app_version, base, boot_dir=a.boot_dir)
     print(f'settings={plan["config"] if plan else a.settings}')
     print(f'patches_dir={plan["patches_dir"] if plan else ""}')
     print(f'archive_patches={archive_list(base, plan)}')

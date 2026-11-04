@@ -41,6 +41,7 @@ class GraphicsTabTests(unittest.TestCase):
         start = script.index('unset BB_GRAPHICS_TAB_ARCHIVE')
         end = script.index('\nfi', start) + 3
         block = script[start:end]
+        wrapper = script[script.index('startup_python() {'):].split('\n}\n', 1)[0] + '\n}\n'
         setup = '''set -eu
 title_id=$1; app_version=$2; game=game; out=out; BB_CONFIG=config
 prepare_test() { echo 'archives/update3.pak=graphics.pak'; }
@@ -49,7 +50,7 @@ PYTHON=prepare_test
         for title, version, expected in (('CUSA13795', '01.21', 'graphics.pak'),
                                           ('CUSA14876', '01.21', 'graphics.pak'),
                                           ('CUSA14876', '01.00', '')):
-            result = subprocess.run(['bash', '-c', setup + block +
+            result = subprocess.run(['bash', '-c', setup + wrapper + block +
                                      '\nprintf "%s" "${BB_GRAPHICS_TAB_ARCHIVE:-}"',
                                      'test', title, version], text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout, expected)

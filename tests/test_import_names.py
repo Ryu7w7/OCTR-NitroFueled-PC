@@ -3,6 +3,9 @@ from paths import ROOT
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -10,6 +13,20 @@ import gen_import_names
 
 
 class ImportNameTests(unittest.TestCase):
+    def test_selected_boot_directory_without_legacy_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, boot = Path(tmp) / 'out', Path(tmp) / 'boot'
+            out.mkdir()
+            boot.mkdir()
+            (boot / 'link.json').write_text('{"unresolved_imports": ["abc#libc"]}')
+            names = out / 'aerolib.inl'
+            names.write_text('STUB("abc", selected_symbol)\n')
+            with patch.object(sys, 'argv', ['gen_import_names.py', '--out', str(out),
+                                          '--boot-dir', str(boot), '--aerolib', str(names)]), \
+                    redirect_stdout(io.StringIO()):
+                gen_import_names.main()
+            self.assertIn('abc libc selected_symbol', (out / 'import_names.txt').read_text())
+
     def test_lines_name_known_nids_and_mark_unknown(self):
         names = {'bzQExy189ZI': '_init_env', 'g8cM39EUZ6o': 'sceSysmoduleLoadModule'}
         lines = gen_import_names.generate(['bzQExy189ZI#libc', 'g8cM39EUZ6o#libSceSysmodule', 'cmvr0mOCX2Q#libSceNpToolkit2', 'plain'], names)

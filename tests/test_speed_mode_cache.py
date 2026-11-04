@@ -9,6 +9,24 @@ import speed_mode
 
 
 class SpeedModeCacheTests(unittest.TestCase):
+    def test_stamp_tracks_game_location_and_resolved_mod_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / 'game'
+            (game / 'archives').mkdir(parents=True)
+            original = game / 'archives/update2.pak'
+            original.write_bytes(b'ORIGINAL')
+            replacement = root / 'mod.pak'
+            replacement.write_bytes(b'MOD DATA')
+            normal = speed_mode.stamp_of(game, [])
+            with mock.patch.object(speed_mode, 'resolve', return_value=replacement):
+                self.assertNotEqual(speed_mode.stamp_of(game, []), normal)
+            other = root / 'other-region'
+            (other / 'archives').mkdir(parents=True)
+            import shutil
+            shutil.copy2(original, other / 'archives/update2.pak')
+            self.assertNotEqual(speed_mode.stamp_of(other, []), normal)
+
     def test_kept_until_an_input_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

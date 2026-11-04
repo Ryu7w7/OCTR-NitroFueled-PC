@@ -23,19 +23,6 @@ if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-co
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
     exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash run.sh $args"
 fi
-# BB_SAVE_LOG=1 (launcher: "Save the log and statistics to a file"): this run's output and its
-# per-frame statistics also go to $data/logs/<time>.log, .frames.csv and .readbacks.csv.
-if [[ ${BB_SAVE_LOG:-} == 1 ]]; then
-    logs=$data/logs
-    mkdir -p "$logs"
-    printf -v stamp '%(%Y%m%d_%H%M%S)T' -1
-    export BB_FRAME_STATS=1 BB_FRAME_LOG=${BB_FRAME_LOG:-$logs/$stamp.frames.csv}
-    export BB_READBACK_LOG=${BB_READBACK_LOG:-$logs/$stamp.readbacks.csv}
-    echo "Log: $logs/$stamp.log"
-    exec 3>"$logs/$stamp.log"
-    # Bash builtins only (the AppImage's PATH has no tee).
-    exec > >(while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; printf '%s\n' "$line" >&3; done) 2>&1
-fi
 if [[ -z ${PYTHON:-} ]]; then
     PYTHON=$(command -v python3 || true)
     if [[ -z $PYTHON ]]; then
@@ -45,9 +32,34 @@ if [[ -z ${PYTHON:-} ]]; then
     fi
 fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
+# The supervisor retains the lock across launches and in-game restarts; no flock executable needed.
+if ! "$PYTHON" scripts/launch_lock.py --check "$data"; then
+    exec "$PYTHON" scripts/launch_lock.py --run "$data" "$BASH" "$PWD/run.sh" "$@"
+fi
+# BB_SAVE_LOG=1: this run's output and per-frame statistics go to the data directory.
+if [[ ${BB_SAVE_LOG:-} == 1 ]]; then
+    logs=$data/logs
+    mkdir -p "$logs"
+    printf -v stamp '%(%Y%m%d_%H%M%S)T' -1
+    export BB_FRAME_STATS=1 BB_FRAME_LOG=${BB_FRAME_LOG:-$logs/$stamp.frames.csv}
+    export BB_READBACK_LOG=${BB_READBACK_LOG:-$logs/$stamp.readbacks.csv}
+    echo "Log: $logs/$stamp.log"
+    exec {log_fd}>"$logs/$stamp.log"
+    # Allocate a descriptor instead of overwriting the inherited launch lock.
+    exec > >(while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; printf '%s\n' "$line" >&"$log_fd"; done) 2>&1
+fi
+# Timings go to stderr so command-substitution protocols remain unchanged.
+startup_python() {
+    if [[ ${BB_STARTUP_TIMING:-0} == 1 ]]; then
+        local TIMEFORMAT="Startup: ${1##*/} %3R s"
+        time "$PYTHON" "$@"
+    else
+        "$PYTHON" "$@"
+    fi
+}
 # Configure the private online server before patches.py selects the game's key patch.
 online_env=$(mktemp "$out/online-env.XXXXXX")
-if ! "$PYTHON" scripts/online_config.py --config "$BB_CONFIG" --data "$data" --env-file "$online_env"; then
+if ! startup_python scripts/online_config.py --config "$BB_CONFIG" --data "$data" --env-file "$online_env"; then
     rm -f "$online_env"
     exit 1
 fi
@@ -63,17 +75,17 @@ game=${BB_GAME_DIR:-orig/CUSA13795}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 # The game check (scripts/game_check.py) compares the executable image with the supported one
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
-profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
+profile=$(startup_python scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
 # The edition's title ID and version (the EU edition has its own patches); the USA 1.21 update when
 # param.sfo cannot be read, as run.py.
-read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
+read -r title_id app_version < <(startup_python scripts/game_check.py --info "$game") || true
 title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 # The game executable (built here in a checkout): mod packages ask it what it supports.
 if [[ -n ${BB_PREBUILT:-} ]]; then
     probe=${BB_PROBE:-bin/sacredfire}
-    version=$(cat VERSION 2>/dev/null || true)
+    version=$(cat VERSION 2>/dev/null || cat "$(dirname -- "$probe")/VERSION" 2>/dev/null || true)
 else
     bash build.sh
     probe=${BB_PROBE:-out/sacredfire}  # BB_PROBE: a wrapper (gdb) around it
@@ -94,7 +106,7 @@ export BB_MOD_LIBRARY_DIR=${BB_MOD_LIBRARY_DIR:-$data/patches}
 mod_session_owner=0
 if [[ -z ${BB_MOD_SESSION:-} ]]; then
     mod_env=$(mktemp "$out/mod-env.XXXXXX")
-    if ! "$PYTHON" scripts/mod_launch.py prepare --data "$data" --game "$game" --config "$BB_CONFIG" --env-file "$mod_env"; then
+    if ! startup_python scripts/mod_launch.py prepare --data "$data" --game "$game" --config "$BB_CONFIG" --env-file "$mod_env"; then
         rm -f "$mod_env"
         exit 1
     fi
@@ -118,31 +130,29 @@ if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01
             archives/update3.pak=*) export BB_GRAPHICS_TAB_ARCHIVE=${line#archives/update3.pak=} ;;
             ?*) echo "$line" ;;
         esac
-    done < <("$PYTHON" scripts/graphics_tab.py "$game" --out "$out" --settings "$BB_CONFIG" ||
+    done < <(startup_python scripts/graphics_tab.py "$game" --out "$out" --settings "$BB_CONFIG" ||
              echo "Graphics tab: off (scripts/graphics_tab.py stopped)")
 fi
-game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
+game=$(startup_python scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
     --enabled "${BB_MODS_ENABLED:-1}")
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game
-    trap '"$PYTHON" -c '\''import shutil,sys; shutil.rmtree(sys.argv[1])'\'' "$mod_game"' EXIT
+    trap 'startup_python -c '\''import shutil,sys; shutil.rmtree(sys.argv[1])'\'' "$mod_game"' EXIT
 fi
-"$PYTHON" scripts/prepare.py "$game" --out "$out"
-"$PYTHON" scripts/link_libc.py "$game" --out "$out"
-"$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules libc.prx libSceFios2.prx libSceNpToolkit2.prx
+boot=$(startup_python scripts/boot_cache.py "$game" --out "$out") || exit 1
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
-"$PYTHON" tools/gen_import_names.py --out "$out"
+startup_python tools/gen_import_names.py --out "$out" --boot-dir "$boot"
 # Optional DLC from the writable data directory (also used by the launcher).
-"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
+startup_python scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
     --dlc-dir "${BB_DLC_DIR:-$data/dlc}"
 # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
 # own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
 # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
 recipe=${BB_SHADER_RECIPE:-shaders/recipe.zip}
 if [[ ${BB_SHADER_RECIPE:-} != 0 && -f $recipe ]]; then
-    "$PYTHON" scripts/gcn_shaders.py "$game" --out "$out"
+    startup_python scripts/gcn_shaders.py "$game" --out "$out"
     BB_SHADER_RECIPE=$(realpath "$recipe")
     BB_GCN_SHADERS=$(realpath "$out")/gcn_shaders.bin
     export BB_SHADER_RECIPE BB_GCN_SHADERS
@@ -152,14 +162,14 @@ fi
 # Every race track in the online playlist, at the same weight, always (as run.py): the game reads
 # it through an archive patch. When it cannot be built, the game keeps its own.
 unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
-"$PYTHON" scripts/online_playlist.py "$game" --out "$out"
+startup_python scripts/online_playlist.py "$game" --out "$out"
 base_patches=()
 if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online_playlist.bbpatch"); fi
 # Xbox button prompts (bbport.ini button_prompts, scripts/button_prompts.py), as run.py: the fonts'
 # button image through archive patches, each keeping the patch before it for the same archive.
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
-done < <("$PYTHON" scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
+done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
 # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
@@ -171,17 +181,17 @@ while IFS='=' read -r key value; do
         archive_patches) if [[ -n $value ]]; then export BB_ARCHIVE_PATCHES=$value; fi ;;
         env.*) export "${key#env.}=$value" ;;
     esac
-done < <("$PYTHON" scripts/aspect_ratio.py "$game" --out "$out" --settings "$BB_CONFIG" \
+done < <(startup_python scripts/aspect_ratio.py "$game" --out "$out" --boot-dir "$boot" --settings "$BB_CONFIG" \
              --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
 # A mod session (above): the packages' archive entries over those archive patches, and their
 # executable patches checked against each other and the layout, as run.py.
 strict_overlap=()
 if [[ -n ${BB_MOD_SESSION:-} ]]; then
     if [[ -n ${BB_MOD_ARCHIVE_PLAN:-} ]]; then
-        archives=$("$PYTHON" scripts/mod_launch.py overlays --game "$game" --out "$out") || exit 1
+        archives=$(startup_python scripts/mod_launch.py overlays --game "$game" --out "$out") || exit 1
         if [[ -n $archives ]]; then export BB_ARCHIVE_PATCHES=$archives; else unset BB_ARCHIVE_PATCHES; fi
     fi
-    "$PYTHON" scripts/mod_launch.py preflight --game "$game" --config "$BB_CONFIG" --settings "$settings" \
+    startup_python scripts/mod_launch.py preflight --game "$game" --config "$BB_CONFIG" --settings "$settings" \
         --layout-patches "${layout_patches[1]:-}" --title-id "$title_id" --app-version "$app_version" || exit 1
     strict_overlap=(--strict-overlap)
 fi
@@ -190,7 +200,7 @@ fi
 # the server at login that they are applied (its client_gate.go).
 unset BB_ITEM_RULES_ID
 if [[ -n ${BB_ITEM_RULES:-} && -f $BB_ITEM_RULES ]]; then
-    if with_rules=$("$PYTHON" scripts/item_rules.py "$game" --apply "$BB_ITEM_RULES" --out "$out" \
+    if with_rules=$(startup_python scripts/item_rules.py "$game" --apply "$BB_ITEM_RULES" --out "$out" \
             --archive-patches "${BB_ARCHIVE_PATCHES:-}") && [[ $with_rules != "${BB_ARCHIVE_PATCHES:-}" ]]; then
         export BB_ARCHIVE_PATCHES=$with_rules
         [[ -n ${BB_ITEM_RULES_SERVER_ID:-} ]] && export BB_ITEM_RULES_ID=$BB_ITEM_RULES_SERVER_ID
@@ -203,7 +213,7 @@ fi
 # Prepare local TT references for Private Itemless AI guidance.
 unset BB_TT_REFERENCE
 if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
-    if "$PYTHON" scripts/tt_reference.py "$game" --out "$out/tt-reference"; then
+    if startup_python scripts/tt_reference.py "$game" --out "$out/tt-reference"; then
         export BB_TT_REFERENCE="$out/tt-reference/reference.bin"
     else
         echo "TT reference preparation failed; AI retains native route guidance." >&2
@@ -218,8 +228,8 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             if [[ -n $speed_patch ]]; then speed_bases+=(--base "$speed_patch"); fi
         done
         if [[ ${BB_ONLINE:-0} == 1 ]]; then
-            mode_result=$("$PYTHON" scripts/online_mode.py "$game" --out "$out/online-mode" \
-                --elf "$out/eboot.elf" "${speed_bases[@]}") || exit 1
+            mode_result=$(startup_python scripts/online_mode.py "$game" --out "$out/online-mode" \
+                --elf "$boot/eboot.elf" "${speed_bases[@]}") || exit 1
             while IFS='=' read -r key value; do
                 case $key in
                     archive_patches) IFS='|' read -r -a speed_existing <<< "$value" ;;
@@ -232,7 +242,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             for speed_patch in "${speed_existing[@]}"; do speed_bases+=(--base "$speed_patch"); done
         fi
         # a damaged game file stops Speed Mode only (speed_mode.py says why): online plays as before
-        if ! speed_result=$("$PYTHON" scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}"); then
+        if ! speed_result=$(startup_python scripts/speed_mode.py "$game" --out "$out/speed-mode" "${speed_bases[@]}"); then
             speed_joined=$(IFS='|'; echo "${speed_existing[*]}")
             speed_result="archive_patches=$speed_joined"
         fi
@@ -251,13 +261,13 @@ fi
 # keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
 # in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
+startup_python scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
     "${layout_patches[@]}" "${strict_overlap[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
-    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$settings"
+    --app-version "$app_version" --title-id "$title_id" --out "$out" --boot-dir "$boot" --settings "$settings"
 patch_args=(--patches "$out/patches.bin")
 # bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
 # above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
-read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$settings") || true
+read -r plan_pro plan_heap plan_label < <(startup_python scripts/patches.py --print-plan --settings "$settings") || true
 if [[ -n ${plan_pro:-} ]]; then
     export BB_NEO=$plan_pro
     if [[ $plan_heap == 1 && ${BB_DMEM_MB:-0} -lt 7168 ]]; then export BB_DMEM_MB=7168; fi
@@ -268,14 +278,14 @@ fi
 unset BB_CINEMATIC_16X9 BB_CUTSCENE
 if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$settings" 2>/dev/null; then
     export BB_CINEMATIC_16X9=1
-    BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
+    BB_CUTSCENE=$(startup_python scripts/patches.py --print-cutscene --out "$out" --boot-dir "$boot" || true)
     export BB_CUTSCENE
 fi
 # Ultrawide: the title and customization screens with a 16:9 field of view, so their backdrop
 # fills the width (src/runtime_frontend.c), unless bbport.ini has ultrawide_frontend=0.
 unset BB_FRONTEND_FOV
 if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$settings" 2>/dev/null; then
-    BB_FRONTEND_FOV=$("$PYTHON" scripts/patches.py --print-frontend --out "$out" || true)
+    BB_FRONTEND_FOV=$(startup_python scripts/patches.py --print-frontend --out "$out" --boot-dir "$boot" || true)
     export BB_FRONTEND_FOV
 fi
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
@@ -297,7 +307,7 @@ fi
 # Only when patches.py really applied it (out/patches-applied.json): skipped (its code is not in
 # this build of the update), the game still waits for vblanks at 30 FPS and 480 Hz runs it fast.
 if [[ -f $BB_CONFIG ]] && grep -qx 'patch_60fps=1' "$BB_CONFIG"; then
-    if "$PYTHON" -c 'import sys; sys.path.insert(0, "scripts"); import patches; a = patches.applied_game_patches(sys.argv[1]); sys.exit(0 if a is None or "patch_60fps" in a else 1)' "$out"; then
+    if startup_python -c 'import sys; sys.path.insert(0, "scripts"); import patches; a = patches.applied_game_patches(sys.argv[1]); sys.exit(0 if a is None or "patch_60fps" in a else 1)' "$out"; then
         export BB_VBLANK_HZ=${BB_VBLANK_HZ:-480}
         echo "60 FPS patch on: virtual vblank ${BB_VBLANK_HZ} Hz"
     else
@@ -401,7 +411,7 @@ echo "SacredFire ${version:-unknown version}"
 if [[ -z ${BB_NATIVE_VK:-} && -f $BB_CONFIG ]] && grep -qx 'renderer=native' "$BB_CONFIG"; then
     native_env=$(mktemp "$out/native-env.XXXXXX")
     temporal=$(sed -n 's/^temporal=//p' "$BB_CONFIG" | tail -n 1)
-    "$PYTHON" scripts/native_shaders.py --data "$data" --game "$game" --title-id "$title_id" \
+    startup_python scripts/native_shaders.py --data "$data" --game "$game" --title-id "$title_id" \
         --app-version "$app_version" --temporal "$temporal" --env-file "$native_env" || true
     while IFS= read -r -d '' setting; do export "$setting"; done < "$native_env"
     rm -f "$native_env"
@@ -412,7 +422,7 @@ fi
 # cache clearing above would miss (seen on the first launch from a fresh data directory).
 export BB_GPU_USER_DIR=${BB_USER_DIR:-$data/user}
 mkdir -p "$BB_GPU_USER_DIR"
-probe_args=("$out/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
+probe_args=("$boot/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
 if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     "$probe" "${probe_args[@]}" &
     mod_pid=$!
@@ -422,7 +432,7 @@ if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     # An interrupted wait must finish the child before removing its mounted view.
     if kill -0 "$mod_pid" 2>/dev/null; then wait "$mod_pid" || mod_status=$?; fi
     if [[ $mod_session_owner == 1 ]]; then
-        "$PYTHON" scripts/mod_launch.py finish --session "$BB_MOD_SESSION" --state "$BB_MOD_STATE" --code "$mod_status" ||
+        startup_python scripts/mod_launch.py finish --session "$BB_MOD_SESSION" --state "$BB_MOD_STATE" --code "$mod_status" ||
             echo "Mods: the session's saves could not be copied back; they are kept in $BB_MOD_SESSION" >&2
     fi
     exit "$mod_status"

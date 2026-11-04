@@ -6,13 +6,13 @@ import lzma
 import re
 import struct
 import sys
-import tempfile
 import zlib
 from pathlib import Path
 
 from archive_reader import Archive
 from archive_patch import read, write, write_entries_patch
 from igz_file import Igz
+from mod_file_paths import resolve
 from widescreen_startup import IGZ
 
 POWER_UP = re.compile(r'^maps/Octane/(T\d{3}_[^/]+)/[^/]+_Power_Up\.igz$', re.I)
@@ -44,13 +44,15 @@ def move_crates(blob, kind, tiger_gate=False, spawner=False):
         igz = Igz(blob)
     except KeyError:
         return None  # Empty stage resource without crates.
-    if not igz.objects() or igz.objects()[0] != (0, 'igObjectList'):
+    objects = igz.objects()
+    if not objects or objects[0] != (0, 'igObjectList'):
         raise ValueError('Power Up asset has an unexpected root')
     count = igz.u32(0x0c)
     if not count:
         return None
     refs = igz.u64(0x20)
-    types = dict(igz.objects())
+    types = dict(objects)
+    string_sites = set(igz.sites.get('RSTT', ()))
     if refs + count * 8 > len(igz.data):
         raise ValueError('Power Up asset has an invalid root list')
     if kind == 'wumpa' and not any('WumpaFruitCrate' in name for name in igz.strings):
@@ -65,7 +67,7 @@ def move_crates(blob, kind, tiger_gate=False, spawner=False):
         if spawner and types.get(off) == 'CEntity':
             entity_data = igz.u64(off + 0x40)
             marker = entity_data + 0xc0
-            if types.get(entity_data) == 'CEntityData' and marker in igz.sites['RSTT'] and \
+            if types.get(entity_data) == 'CEntityData' and marker in string_sites and \
                     igz.string_at(marker) == 'instance_Scripts.Graph.common_Crate_SpawnerData':
                 spawners += 1
                 struct.pack_into('<f', result, data_offset + off + 0x20, 1_000_000.0)
@@ -73,7 +75,7 @@ def move_crates(blob, kind, tiger_gate=False, spawner=False):
             entity_data = igz.u64(off + 0x40)
             if types.get(entity_data) == 'CGameEntityData':
                 model = entity_data + 0x48
-                name = igz.string_at(model) if model in igz.sites['RSTT'] else ''
+                name = igz.string_at(model) if model in string_sites else ''
                 if name == 'LevelAssets\\Basic\\box':
                     crates += 1
                     # Keep the object graph intact: the game dereferences these
@@ -125,83 +127,80 @@ def nested_track_ranges(outer, workdir):
             continue
         if entry['compression'] != 0xffffffff:
             raise ValueError(f'Nested track PAK is unexpectedly compressed: {entry["path"]}')
-        with tempfile.TemporaryDirectory(prefix='speed-track-', dir=workdir) as temporary:
-            path = Path(temporary) / 'track.pak'
-            path.write_bytes(outer.extract(entry))
-            nested = Archive(path)
-            try:
-                if nested.version < 13:
-                    raise ValueError(f'Unsupported nested track PAK: {entry["path"]}')
-                for item in nested.files:
-                    power, design = POWER_UP.fullmatch(item['path']), DESIGN.fullmatch(item['path'])
-                    if not (power or design):
+        with outer.nested(entry) as nested:
+            if nested.version < 13:
+                raise ValueError(f'Unsupported nested track PAK: {entry["path"]}')
+            for item in nested.files:
+                power, design = POWER_UP.fullmatch(item['path']), DESIGN.fullmatch(item['path'])
+                if not (power or design):
+                    continue
+                before = nested.extract(item)
+                after = move_crates(before, 'item' if power else 'wumpa')
+                if after is None:
+                    continue
+                if len(after) != len(before):
+                    raise ValueError(f'Nested asset changed size: {item["path"]}')
+                if power:
+                    tracks.add(power.group(1).lower())
+                size, comp = item['size'], item['compression']
+                table, shift = ((nested.tables[2], 7) if size <= 127 * nested.sector else
+                                (nested.tables[1], 15) if size <= 32767 * nested.sector else
+                                (nested.tables[0], 31))
+                for block in range((size + 32767) // 32768):
+                    part = after[block * 32768:(block + 1) * 32768]
+                    if part == before[block * 32768:(block + 1) * 32768]:
                         continue
-                    before = nested.extract(item)
-                    after = move_crates(before, 'item' if power else 'wumpa')
-                    if after is None:
+                    marker = table[(comp & 0x0fffffff) + block]
+                    at = item['offset'] + (marker & ((1 << shift) - 1)) * nested.sector
+                    if not marker >> shift:
+                        ranges.append((entry['offset'] + at, part))
                         continue
-                    if len(after) != len(before):
-                        raise ValueError(f'Nested asset changed size: {item["path"]}')
-                    if power:
-                        tracks.add(power.group(1).lower())
-                    size, comp = item['size'], item['compression']
-                    table, shift = ((nested.tables[2], 7) if size <= 127 * nested.sector else
-                                    (nested.tables[1], 15) if size <= 32767 * nested.sector else
-                                    (nested.tables[0], 31))
-                    for block in range((size + 32767) // 32768):
-                        part = after[block * 32768:(block + 1) * 32768]
-                        if part == before[block * 32768:(block + 1) * 32768]:
-                            continue
-                        marker = table[(comp & 0x0fffffff) + block]
-                        at = item['offset'] + (marker & ((1 << shift) - 1)) * nested.sector
-                        if not marker >> shift:
-                            ranges.append((entry['offset'] + at, part))
-                            continue
-                        length = struct.unpack_from('<I', nested.data, at)[0]
-                        kind = comp >> 28
-                        if kind == 2:
-                            props = bytes(nested.data[at + 4:at + 9])
-                            value = props[0]
-                            lc, value = value % 9, value // 9
-                            lp, pb = value % 5, value // 5
-                            codec = dict(id=lzma.FILTER_LZMA1,
-                                         dict_size=struct.unpack_from('<I', props, 1)[0],
-                                         lc=lc, lp=lp, pb=pb)
-                            encoded = lzma.compress(part, format=lzma.FORMAT_RAW, filters=[codec])
-                            decoded = lzma.decompress(encoded, format=lzma.FORMAT_RAW, filters=[codec])
-                        elif kind == 1:
-                            props = b''
-                            compressor = zlib.compressobj(level=9, wbits=-15)
-                            encoded = compressor.compress(part) + compressor.flush()
-                            decoded = zlib.decompress(encoded, -15)
-                        else:
-                            raise ValueError(f'Unsupported nested compression: {kind}')
-                        capacity = ((4 + len(props) + length + nested.sector - 1) //
-                                    nested.sector) * nested.sector
-                        if decoded != part or 4 + len(props) + len(encoded) > capacity:
-                            raise ValueError(f'Nested track block does not fit: {item["path"]}')
-                        ranges.append((entry['offset'] + at,
-                                       struct.pack('<I', len(encoded)) + props + encoded))
-            finally:
-                nested.data.close()
-                nested._file.close()
+                    length = struct.unpack_from('<I', nested.data, at)[0]
+                    kind = comp >> 28
+                    if kind == 2:
+                        props = bytes(nested.data[at + 4:at + 9])
+                        value = props[0]
+                        lc, value = value % 9, value // 9
+                        lp, pb = value % 5, value // 5
+                        codec = dict(id=lzma.FILTER_LZMA1,
+                                     dict_size=struct.unpack_from('<I', props, 1)[0],
+                                     lc=lc, lp=lp, pb=pb)
+                        encoded = lzma.compress(part, format=lzma.FORMAT_RAW, filters=[codec])
+                        decoded = lzma.decompress(encoded, format=lzma.FORMAT_RAW, filters=[codec])
+                    elif kind == 1:
+                        props = b''
+                        compressor = zlib.compressobj(level=9, wbits=-15)
+                        encoded = compressor.compress(part) + compressor.flush()
+                        decoded = zlib.decompress(encoded, -15)
+                    else:
+                        raise ValueError(f'Unsupported nested compression: {kind}')
+                    capacity = ((4 + len(props) + length + nested.sector - 1) //
+                                nested.sector) * nested.sector
+                    if decoded != part or 4 + len(props) + len(encoded) > capacity:
+                        raise ValueError(f'Nested track block does not fit: {item["path"]}')
+                    ranges.append((entry['offset'] + at,
+                                   struct.pack('<I', len(encoded)) + props + encoded))
     return ranges, tracks
 
 
 # The scripts whose code shapes the overlays: a change to any of them builds them again.
-SOURCES = ('speed_mode.py', 'archive_patch.py', 'archive_reader.py', 'igz_file.py', 'widescreen_startup.py')
+SOURCES = ('speed_mode.py', 'archive_patch.py', 'archive_reader.py', 'igz_file.py',
+           'widescreen_startup.py', 'mod_file_paths.py')
 
 
 def stamp_of(game, base_patches):
     """What the overlays are made from: these scripts, the game's archives (name, size, time) and
     the overlays they build on (their bytes: the earlier steps write them again each launch)."""
     h = hashlib.sha256()
+    game = Path(game).resolve()
+    h.update(str(game).encode() + b'\0')
     here = Path(__file__).resolve().parent
     for name in SOURCES:
         h.update(name.encode() + b'\0' + (here / name).read_bytes())
-    for pak in sorted((Path(game) / 'archives').glob('*.pak')):
-        st = pak.stat()
-        h.update(f'{pak.name.lower()}:{st.st_size}:{st.st_mtime_ns}\n'.encode())
+    for pak in sorted((game / 'archives').glob('*.pak')):
+        source = resolve(pak)
+        st = source.stat()
+        h.update(f'{pak.name.lower()}:{source}:{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}\n'.encode())
     for path in base_patches:
         h.update(str(Path(path).resolve()).encode() + b'\0' + Path(path).read_bytes())
     return h.hexdigest()
@@ -250,6 +249,7 @@ def build(game, output, base_patches):
     finally:
         earlier.data.close()
         earlier._file.close()
+    overridden_assets = updated_assets | earlier_assets
     for pak in sorted((game / 'archives').glob('*.pak')):
         if pak.name not in ('update.pak', *HUD_ARCHIVES) \
                 and not re.match(r'^t\d{3}_.+\.pak$', pak.name, re.I):
@@ -267,7 +267,7 @@ def build(game, output, base_patches):
                     if pak.name == 'update.pak' and path.lower() in updated_assets:
                         continue
                     if pak.name not in ('update.pak', 'update2.pak') and \
-                            path.lower() in updated_assets | earlier_assets:
+                            path.lower() in overridden_assets:
                         continue
                     original = archive.extract(item)
                     changed = move_crates(original, 'item' if power or extra else 'wumpa',
