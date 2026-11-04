@@ -4758,10 +4758,10 @@ constexpr KeyInput kKeyInputs[] = {
     {"options", "Options (pausa)", "Options (pause)", "Return"},
     {"touchpad", "Panel táctil", "Touchpad", "Tab"},
     {"touchpad_right", "Panel táctil (derecha)", "Touchpad (right)", "Backspace"},
-    {"up", "Cruceta arriba", "D-pad up", "I"},
-    {"down", "Cruceta abajo", "D-pad down", "K"},
-    {"left", "Cruceta izquierda", "D-pad left", "J"},
-    {"right", "Cruceta derecha", "D-pad right", "L"},
+    {"up", "Cruceta arriba", "D-pad Up", "I"},
+    {"down", "Cruceta abajo", "D-pad Down", "K"},
+    {"left", "Cruceta izquierda", "D-pad Left", "J"},
+    {"right", "Cruceta derecha", "D-pad Right", "L"},
     {"look_up", "Stick derecho arriba", "Right stick up", "Up"},
     {"look_down", "Stick derecho abajo", "Right stick down", "Down"},
     {"look_left", "Stick derecho izquierda", "Right stick left", "Left"},
@@ -4964,14 +4964,14 @@ constexpr PadInput kPadInputs[] = {
     {"r1", "R1 / RB (Salto / Derrape)", "R1 / RB (Hop / Drift)", "rightshoulder"},
     {"l2", "L2 / LT (Usar objeto / Ítem)", "L2 / LT (Use item)", "lefttrigger"},
     {"r2", "R2 / RT (Mirar atrás)", "R2 / RT (Look back)", "righttrigger"},
-    {"l3", "L3 (Click stick izq.)", "L3 (Left stick click)", "leftstick"},
-    {"r3", "R3 (Click stick der.)", "R3 (Right stick click)", "rightstick"},
+    {"l3", "L3 (Click stick izq.)", "L3 Click (Left Stick)", "leftstick"},
+    {"r3", "R3 (Click stick der.)", "R3 Click (Right Stick)", "rightstick"},
     {"options", "Options / Start (Pausa)", "Options / Start (Pause)", "start"},
     {"touchpad", "Touchpad / Back / Select", "Touchpad / Back / Select", "back,touchpad"},
-    {"up", "Cruceta arriba", "D-pad up", "dpup"},
-    {"down", "Cruceta abajo", "D-pad down", "dpdown"},
-    {"left", "Cruceta izquierda", "D-pad left", "dpleft"},
-    {"right", "Cruceta derecha", "D-pad right", "dpright"},
+    {"up", "Cruceta arriba", "D-pad Up", "dpup"},
+    {"down", "Cruceta abajo", "D-pad Down", "dpdown"},
+    {"left", "Cruceta izquierda", "D-pad Left", "dpleft"},
+    {"right", "Cruceta derecha", "D-pad Right", "dpright"},
 };
 
 std::string PadButtonLabel(const std::string& name) {
@@ -5103,22 +5103,22 @@ void GamepadTab() {
             ImGui::SameLine();
         };
 
-        AddBtn("a", "Cruz / A");
-        AddBtn("b", "Círculo / B");
-        AddBtn("x", "Cuadrado / X");
-        AddBtn("y", "Triángulo / Y");
+        AddBtn("a", T("Cruz / A", "Cross / A"));
+        AddBtn("b", T("Círculo / B", "Circle / B"));
+        AddBtn("x", T("Cuadrado / X", "Square / X"));
+        AddBtn("y", T("Triángulo / Y", "Triangle / Y"));
         AddBtn("leftshoulder", "L1 / LB");
         AddBtn("rightshoulder", "R1 / RB");
         ImGui::NewLine();
-        AddBtn("lefttrigger", "Gatillo L2 / LT");
-        AddBtn("righttrigger", "Gatillo R2 / RT");
-        AddBtn("dpup", "Cruceta Arriba");
-        AddBtn("dpdown", "Cruceta Abajo");
-        AddBtn("dpleft", "Cruceta Izq.");
-        AddBtn("dpright", "Cruceta Der.");
+        AddBtn("lefttrigger", T("Gatillo L2 / LT", "Trigger L2 / LT"));
+        AddBtn("righttrigger", T("Gatillo R2 / RT", "Trigger R2 / RT"));
+        AddBtn("dpup", T("Cruceta Arriba", "D-pad Up"));
+        AddBtn("dpdown", T("Cruceta Abajo", "D-pad Down"));
+        AddBtn("dpleft", T("Cruceta Izq.", "D-pad Left"));
+        AddBtn("dpright", T("Cruceta Der.", "D-pad Right"));
         ImGui::NewLine();
-        AddBtn("leftstick", "L3 (Stick Izq.)");
-        AddBtn("rightstick", "R3 (Stick Der.)");
+        AddBtn("leftstick", T("L3 (Stick Izq.)", "L3 (Left Stick)"));
+        AddBtn("rightstick", T("R3 (Stick Der.)", "R3 (Right Stick)"));
         AddBtn("start", "Start / Options");
         AddBtn("back", "Select / Back");
         AddBtn("touchpad", "Touchpad");
