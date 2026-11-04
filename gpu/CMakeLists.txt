@@ -242,6 +242,11 @@ if (WIN32)
     add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/sacredfire.rc)
+    if (NOT SACREDFIRE_RELEASE)
+        execute_process(COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/build_version.py
+            OUTPUT_VARIABLE SACREDFIRE_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    target_compile_definitions(sacredfire PRIVATE SACREDFIRE_RELEASE="${SACREDFIRE_RELEASE}")
     set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     # isa_emulate runs inside guest code: no XMM/YMM.
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
