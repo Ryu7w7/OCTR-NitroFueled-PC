@@ -2,6 +2,7 @@
 #include "runtime_net_overrides.h"
 #include "runtime_net_tunnel.h"
 #include "runtime_net_ping.h"
+#include "runtime_ai_catchup.h"
 #include "runtime_friends.h"
 #include "runtime.h"
 #include <stdio.h>
@@ -408,12 +409,13 @@ static int ping_enabled(void) {
     if (state < 0) {
         const char *v = getenv("BB_ONLINE_PING");
         state = !(v && strcmp(v, "0") == 0) && tunnel_server(NULL);
-        if (state) ping_set_name(getenv("BB_ONLINE_NAME"));
+        ping_set_name(getenv("BB_ONLINE_NAME"));
     }
     return state;
 }
 
 int runtime_net_ping_view(PingPeer *out, int max) {
+    if (!ping_enabled()) return 0; /* Control traffic must not re-enable the optional ping display. */
     return ping_view(now_ms(), out, max);
 }
 
@@ -426,15 +428,32 @@ static void ping_send(VSocket *vs, const uint8_t *packet, size_t n, const struct
     tunnel_copy(vs, packet, n, to);
 }
 
+static int catchup_direct_peer(uint32_t ip) {
+    const uint8_t *b=(const uint8_t *)&ip;
+    return b[0]==10 || b[0]==127 || (b[0]==172 && (b[1]&0xf0)==16) ||
+           (b[0]==192 && b[1]==168) || (b[0]==100 && (b[1]&0xc0)==64) ||
+           (b[0]==169 && b[1]==254);
+}
+
 /* After the game's send to a peer: the pings that are due. */
 static void ping_after_send(VSocket *vs, const struct sockaddr_in *to) {
     struct sockaddr_in server;
-    if (!ping_enabled() || !tunnel_server(&server)) return;
-    if (!tun_candidate(to->sin_addr.s_addr, server.sin_addr.s_addr) ||
-        tun_relay_index(to->sin_addr.s_addr, ntohs(to->sin_port)) >= 0)
-        return;
+    if ((!ping_enabled() && !runtime_ai_catchup_discovery()) || !tunnel_server(&server)) return;
+    /* LAN peers need the same control handshake, but never a relay copy.
+     * Discover only actual game destinations during a private catch-up session. */
+    if (from_server(to,&server) || tun_relay_index(to->sin_addr.s_addr,ntohs(to->sin_port))>=0) return;
+    const int direct=catchup_direct_peer(to->sin_addr.s_addr);
+    if (!tun_candidate(to->sin_addr.s_addr,server.sin_addr.s_addr) &&
+        !(direct && runtime_ai_catchup_discovery())) return;
     const uint64_t now = now_ms();
+    if (direct && runtime_ai_catchup_discovery()) ping_on_capable(to->sin_addr.s_addr,ntohs(to->sin_port),now);
     ping_on_game_send(to->sin_addr.s_addr, ntohs(to->sin_port), now);
+    char peer_name[PING_NAME];
+    uint8_t catchup[AI_CATCHUP_PACKET];
+    if (ping_peer_name(to->sin_addr.s_addr,ntohs(to->sin_port),now,peer_name)) {
+        size_t n=runtime_ai_catchup_send(peer_name,catchup,now);
+        if (n) ping_send(vs,catchup,n,to);
+    }
     uint8_t packet[PING_PACKET_MAX];
     uint32_t ip;
     uint16_t port;
@@ -446,7 +465,11 @@ static void ping_after_send(VSocket *vs, const struct sockaddr_in *to) {
 
 /* A datagram from a peer (unwrapped): 1 when it was a ping packet, answered here. */
 static int ping_take(VSocket *vs, const uint8_t *data, int len, const struct sockaddr_in *from) {
-    if (len < PING_MAGIC_LEN || memcmp(data, PING_MAGIC, PING_MAGIC_LEN) != 0 || !ping_enabled()) return 0;
+    if (len < PING_MAGIC_LEN || memcmp(data, PING_MAGIC, PING_MAGIC_LEN) != 0 ) return 0;
+    char peer_name[PING_NAME];
+    ping_peer_name(from->sin_addr.s_addr,ntohs(from->sin_port),now_ms(),peer_name);
+    if (runtime_ai_catchup_receive(peer_name,data,(size_t)len,now_ms())) return 1;
+    if (!ping_enabled() && !runtime_ai_catchup_discovery()) return 0;
     uint8_t reply[PING_PACKET_MAX];
     size_t reply_len = 0;
     if (!ping_on_packet(data, (size_t)len, from->sin_addr.s_addr, ntohs(from->sin_port), now_ms(), reply,
