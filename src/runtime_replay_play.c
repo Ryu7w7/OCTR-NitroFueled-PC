@@ -1329,7 +1329,10 @@ static void publish_view(void) {
         v.racer[i].rank = f->racer[i].rank;
         v.racer[i].lap = f->racer[i].lap;
         v.racer[i].finished = (f->racer[i].flags & RS_FINISHED) ? P.header.racer[i].finished : 0;
+        v.racer[i].time = v.racer[i].finished ? P.header.racer[i].finish_time : 0.0f;
     }
+    /* as in a race: the results come when the recording player finishes, and fill in as the others do */
+    v.results = P.started && ((P.player_slot >= 0 && (f->racer[P.player_slot].flags & RS_FINISHED)) || v.ended);
     pthread_mutex_lock(&P.lock);
     P.view = v;
     pthread_mutex_unlock(&P.lock);

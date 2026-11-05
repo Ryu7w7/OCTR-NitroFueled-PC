@@ -43,7 +43,9 @@ typedef struct {
         char name[48];  /* the online name, else the driver's */
         int kind;       /* 1 local, 2 another PC, 3 AI, 0 none */
         int rank, lap, finished, present;
+        float time;     /* its finish time (s), 0 while it races */
     } racer[8];
+    int results;        /* the recorded player finished (or the replay ended): the results show */
 } RrView;
 /* 1 and the view while a replay's race is on. */
 int runtime_replay_view(RrView *out);

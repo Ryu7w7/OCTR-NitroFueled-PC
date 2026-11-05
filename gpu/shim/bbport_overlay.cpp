@@ -1785,6 +1785,76 @@ void SpectatorBadge(int viewers) {
     ImGui::End();
 }
 
+/// Replay results (spectator build): when the recording player finished, as a race's own results screen does,
+/// each racer's place, name and finish time on the right; the others fill in as they finish. The watched racer's
+/// row is highlighted. Nothing is taken from the pad: the replay's controls go on underneath.
+bool ReplayResultsShowing() {
+    RrView v;
+    return runtime_replay_view(&v) && v.results;
+}
+
+void ReplayResults(const RrView& v) {
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // the finished first, by their finish place; then the ones still racing, by their place now
+    int order[8], n = 0;
+    for (int i = 0; i < 8; ++i)
+        if (v.racer[i].kind) order[n++] = i;
+    std::sort(order, order + n, [&](int a, int b) {
+        const auto& ra = v.racer[a];
+        const auto& rb = v.racer[b];
+        if ((ra.finished > 0) != (rb.finished > 0)) return ra.finished > 0;
+        return (ra.finished > 0 ? ra.finished : ra.rank) < (rb.finished > 0 ? rb.finished : rb.rank);
+    });
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 48.0f * s,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.0f * s, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f * s, 18.0f * s));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.25f, 0.55f, 0.90f));
+    ImGui::Begin("##replay_results", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::TextUnformatted(BbSettings::MenuText("RESULTS", "РЕЗУЛЬТАТЫ"));
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::Spacing();
+    const float time_x = 520.0f * s - 22.0f * s - ImGui::CalcTextSize("00:00:00").x;
+    for (int k = 0; k < n; ++k) {
+        const auto& r = v.racer[order[k]];
+        const bool watched = order[k] == v.watch;
+        const ImVec4 colour = watched ? ImVec4(1.0f, 0.82f, 0.25f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        const int place = r.finished > 0 ? r.finished : (r.rank > 0 ? r.rank : k + 1);
+        ImGui::TextColored(colour, "%d", place);
+        ImGui::SameLine(46.0f * s);
+        ImGui::TextColored(colour, "%s", r.name[0] ? r.name : "-");
+        ImGui::SameLine(time_x);
+        if (r.finished > 0 && r.time > 0.0f) {
+            const int cs = static_cast<int>(r.time * 100.0f + 0.5f);
+            ImGui::TextColored(colour, "%d:%02d:%02d", cs / 6000, cs / 100 % 60, cs % 100);
+        } else {
+            ImGui::TextColored(ImVec4(0.75f, 0.82f, 0.95f, 1.0f), "--:--:--");
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Spacing();
+    char followed[32] = "", footer[160];
+    if (runtime_spectate_following(followed, sizeof followed)) {
+        std::snprintf(footer, sizeof footer,
+                      BbSettings::MenuText("Spectating %s: their next race loads by itself.",
+                                           "Смотрите %s: следующая гонка загрузится сама."),
+                      followed);
+    } else {
+        std::snprintf(footer, sizeof footer, "%s",
+                      BbSettings::MenuText("Pause > Quit: back to the menu.", "Пауза > Выход: назад в меню."));
+    }
+    ImGui::TextColored(ImVec4(0.80f, 0.88f, 1.0f, 1.0f), "%s", footer);
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
 // RyuNET server announcements ("maintenance in 5 minutes"): the launcher writes
 // ryunet_announce.txt next to bbport.ini (id, level, expires, text) and each new one is drawn
 // over the picture for a few seconds. No input is taken: the game goes on underneath.
@@ -2272,7 +2342,7 @@ bool Visible() {
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
-                           runtime_spectate_viewers() > 0);
+                           runtime_spectate_viewers() > 0 || ReplayResultsShowing());
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -2361,6 +2431,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (const int viewers = runtime_spectate_viewers(); viewers > 0 && !menu_open) {
         SpectatorBadge(viewers);
+    }
+    if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
+        ReplayResults(replay);
     }
     if (prompt_active && !menu_open) {
         TextPrompt();
