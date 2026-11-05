@@ -175,7 +175,7 @@ static uint64_t get_online_account_id(void) {
  * that line, so a game that is already running lists them at its next friend-list refresh.
  * Readers get a pointer to a complete list: a new list is built in the other buffer and then
  * published, never written over the one being read. */
-static char s_friends_buf[2][4096];
+static char s_friends_buf[2][NP_FRIENDS_CSV_CAPACITY];
 static volatile int s_friends_cur = 0;
 static uint64_t s_friends_stamp = ~0ULL;  /* last write time and size of the file */
 static pthread_mutex_t s_friends_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -205,7 +205,7 @@ static void read_ini_friends(const char *cfg, char *out, size_t out_size) {
 
 /* Appends the comma-separated names of src to dst, skipping blanks and case-insensitive repeats. */
 static void merge_friends(char *dst, size_t dst_size, const char *src) {
-    char copy[4096];
+    char copy[NP_FRIENDS_CSV_CAPACITY];
     snprintf(copy, sizeof(copy), "%s", src ? src : "");
     char *ctx = NULL;
     for (char *tok = strtok_s(copy, ",", &ctx); tok; tok = strtok_s(NULL, ",", &ctx)) {

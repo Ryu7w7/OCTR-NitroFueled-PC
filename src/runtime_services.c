@@ -21,6 +21,7 @@
 #else
 #include <arpa/inet.h>
 #include <sys/stat.h>
+#define strtok_s(str, delim, ptr) strtok_r(str, delim, ptr)
 #endif
 
 #define USER_ID 1
@@ -612,19 +613,31 @@ void runtime_np_set_title(const char *title_id) {
     if (title_id && *title_id) snprintf(np_title, sizeof(np_title), "%s", title_id);
 }
 
+/* Room for every merged friend, including legacy config names, plus the local profile.
+ * Each record has under 1 KB of fixed JSON and at most six copies of its name. */
+static size_t friends_response_capacity(const char *csv) {
+    size_t capacity = 2048;
+    for (const char *p = csv; p && *p; ++p)
+        capacity += *p == ',' ? 1024 : 6;
+    return capacity;
+}
+
 static char *generate_friends_json(void) {
     const char *csv = runtime_np_get_friends_csv();
-    char buf[16384];
+    const size_t capacity = friends_response_capacity(csv);
+    char *buf = malloc(capacity);
+    if (!buf) return NULL;
     size_t pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"friendList\":[");
+    pos += snprintf(buf + pos, capacity - pos, "{\"friendList\":[");
 
     int count = 0;
     if (csv && *csv) {
-        char copy[1024];
+        char copy[NP_FRIENDS_CSV_CAPACITY];
         strncpy(copy, csv, sizeof(copy) - 1);
         copy[sizeof(copy) - 1] = '\0';
-        char *token = strtok(copy, ",");
-        while (token && pos + 1024 < sizeof(buf)) {
+        char *context = NULL;
+        char *token = strtok_s(copy, ",", &context);
+        while (token && pos + 1024 < capacity) {
             while (*token == ' ' || *token == '\t') token++;
             char *end = token + strlen(token);
             while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
@@ -632,9 +645,9 @@ static char *generate_friends_json(void) {
             if (*token) {
                 uint64_t acc_id = runtime_np_calculate_account_id(token);
                 if (count > 0) {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                    pos += snprintf(buf + pos, capacity - pos, ",");
                 }
-                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                pos += snprintf(buf + pos, capacity - pos,
                     "{"
                     "\"avatarUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
                     "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
@@ -668,13 +681,13 @@ static char *generate_friends_json(void) {
                     token, (unsigned long long)acc_id, (unsigned long long)acc_id, token, token, token, np_title);
                 count++;
             }
-            token = strtok(NULL, ",");
+            token = strtok_s(NULL, ",", &context);
         }
     }
 
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"totalResults\":%d,\"size\":%d,\"offset\":0,\"limit\":500,\"start\":0}", count, count);
+    pos += snprintf(buf + pos, capacity - pos, "],\"totalResults\":%d,\"size\":%d,\"offset\":0,\"limit\":500,\"start\":0}", count, count);
     runtime_net_trace("generate_friends_json: returning %d friend(s)", count);
-    return strdup(buf);
+    return buf;
 }
 
 static char *generate_profiles_json(const char *path) {
@@ -682,16 +695,18 @@ static char *generate_profiles_json(const char *path) {
     const char *csv = runtime_np_get_friends_csv();
     const char *my_name = runtime_np_get_online_name();
 
-    char buf[16384];
+    const size_t capacity = friends_response_capacity(csv);
+    char *buf = malloc(capacity);
+    if (!buf) return NULL;
     size_t pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"profiles\":[");
+    pos += snprintf(buf + pos, capacity - pos, "{\"profiles\":[");
 
     int count = 0;
 
     /* Include local player */
     if (my_name && *my_name) {
         uint64_t my_acc = runtime_np_calculate_account_id(my_name);
-        pos += snprintf(buf + pos, sizeof(buf) - pos,
+        pos += snprintf(buf + pos, capacity - pos,
             "{"
             "\"accountId\":\"%llu\","
             "\"onlineId\":\"%s\","
@@ -717,11 +732,12 @@ static char *generate_profiles_json(const char *path) {
 
     /* Include friends */
     if (csv && *csv) {
-        char copy[1024];
+        char copy[NP_FRIENDS_CSV_CAPACITY];
         strncpy(copy, csv, sizeof(copy) - 1);
         copy[sizeof(copy) - 1] = '\0';
-        char *token = strtok(copy, ",");
-        while (token && pos + 1024 < sizeof(buf)) {
+        char *context = NULL;
+        char *token = strtok_s(copy, ",", &context);
+        while (token && pos + 1024 < capacity) {
             while (*token == ' ' || *token == '\t') token++;
             char *end = token + strlen(token);
             while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
@@ -729,9 +745,9 @@ static char *generate_profiles_json(const char *path) {
             if (*token && (!my_name || strcmp(token, my_name) != 0)) {
                 uint64_t acc_id = runtime_np_calculate_account_id(token);
                 if (count > 0) {
-                    pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                    pos += snprintf(buf + pos, capacity - pos, ",");
                 }
-                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                pos += snprintf(buf + pos, capacity - pos,
                     "{"
                     "\"accountId\":\"%llu\","
                     "\"onlineId\":\"%s\","
@@ -754,13 +770,13 @@ static char *generate_profiles_json(const char *path) {
                     (unsigned long long)acc_id, token, (unsigned long long)acc_id, token, token, token);
                 count++;
             }
-            token = strtok(NULL, ",");
+            token = strtok_s(NULL, ",", &context);
         }
     }
 
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"size\":%d,\"totalResults\":%d}", count, count);
+    pos += snprintf(buf + pos, capacity - pos, "],\"size\":%d,\"totalResults\":%d}", count, count);
     runtime_net_trace("generate_profiles_json: returning %d profile(s)", count);
-    return strdup(buf);
+    return buf;
 }
 
 static char *generate_friend_online_id_lists_json(void) {
@@ -768,34 +784,37 @@ static char *generate_friend_online_id_lists_json(void) {
     const char *my_name = runtime_np_get_online_name();
     uint64_t my_acc = runtime_np_calculate_account_id(my_name);
 
-    char buf[8192];
+    const size_t capacity = friends_response_capacity(csv);
+    char *buf = malloc(capacity);
+    if (!buf) return NULL;
     size_t pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, capacity - pos,
         "{\"friendOnlineIdLists\":[{\"user\":{\"accountId\":\"%llu\",\"onlineId\":\"%s\"},\"friendOnlineIdList\":[",
         (unsigned long long)my_acc, (my_name && *my_name) ? my_name : "Player");
 
     int count = 0;
     if (csv && *csv) {
-        char copy[1024];
+        char copy[NP_FRIENDS_CSV_CAPACITY];
         strncpy(copy, csv, sizeof(copy) - 1);
         copy[sizeof(copy) - 1] = '\0';
-        char *token = strtok(copy, ",");
-        while (token && pos + 128 < sizeof(buf)) {
+        char *context = NULL;
+        char *token = strtok_s(copy, ",", &context);
+        while (token && pos + 128 < capacity) {
             while (*token == ' ' || *token == '\t') token++;
             char *end = token + strlen(token);
             while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
             *end = '\0';
             if (*token) {
-                if (count > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "\"%s\"", token);
+                if (count > 0) pos += snprintf(buf + pos, capacity - pos, ",");
+                pos += snprintf(buf + pos, capacity - pos, "\"%s\"", token);
                 count++;
             }
-            token = strtok(NULL, ",");
+            token = strtok_s(NULL, ",", &context);
         }
     }
 
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}]}");
-    return strdup(buf);
+    pos += snprintf(buf + pos, capacity - pos, "]}]}");
+    return buf;
 }
 
 static char *invitation_json(const char *host);
@@ -1304,6 +1323,10 @@ static ABI int32_t np_webapi_send_req(int64_t req_id, const void *data, uint64_t
         if (s_webapi_reqs[i].in_use && s_webapi_reqs[i].id == req_id) {
             if (!s_webapi_reqs[i].response) {
                 s_webapi_reqs[i].response = get_webapi_response_for_req(&s_webapi_reqs[i]);
+                if (!s_webapi_reqs[i].response) {
+                    pthread_mutex_unlock(&s_webapi_lock);
+                    return HTTP_NETWORK;
+                }
                 s_webapi_reqs[i].response_len = strlen(s_webapi_reqs[i].response);
                 s_webapi_reqs[i].read_pos = 0;
             }
@@ -1323,6 +1346,10 @@ static ABI int32_t np_webapi_send_req2(int64_t req_id, const void *data, uint64_
         if (s_webapi_reqs[i].in_use && s_webapi_reqs[i].id == req_id) {
             if (!s_webapi_reqs[i].response) {
                 s_webapi_reqs[i].response = get_webapi_response_for_req(&s_webapi_reqs[i]);
+                if (!s_webapi_reqs[i].response) {
+                    pthread_mutex_unlock(&s_webapi_lock);
+                    return HTTP_NETWORK;
+                }
                 s_webapi_reqs[i].response_len = strlen(s_webapi_reqs[i].response);
                 s_webapi_reqs[i].read_pos = 0;
             }
