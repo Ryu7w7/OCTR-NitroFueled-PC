@@ -396,7 +396,11 @@ static void cast_player(int ask) {
     void *player = local_player();
     const struct rr_racer *rec = P.player_slot >= 0 ? &P.header.racer[P.player_slot] : 0;
     void *driver = rec && player ? rr_game_data(RR_DRIVERS, rec->driver) : 0, *kart = driver ? rr_game_data(RR_KARTS, rec->kart) : 0;
-    if (!kart || (P.player && P.player != player)) return;
+    if (!kart || (P.player && P.player != player)) {
+        if (ask) printf("Replay: the player's kart cannot show %s / %s (player %p, driver %p, kart %p, own %p)\n",
+                        rec ? rec->driver : "-", rec ? rec->kart : "-", player, driver, kart, P.player);
+        return;
+    }
     if (!P.player) {
         const int index = RR_AT(player, 0xb4, int32_t);
         char *entities = rr_ptr(D_PLAYER_ENTITIES), *karts = rr_ptr(RR_D_KART_MANAGER);
@@ -419,6 +423,7 @@ static void cast_player(int ask) {
     if (outfit) game.make_handle(&RR_AT(player, 0x90, void *), outfit);
     for (int k = 0; k < 4 && rec->look_filled; k++) RR_AT(player, 0x74 + 4 * k, int32_t) = look_value(rec->look[k]);
     if (ask) {
+        printf("Replay: the player's kart shows %s / %s (outfit %p)\n", rec->driver, rec->kart, outfit);
         request_character(player, rec->driver, outfit, rec->kart);
         char *settings = rr_ptr(RR_D_RACE_SETTINGS);
         if (settings && P.mirror_was < 0) {
@@ -1283,6 +1288,7 @@ void ABI runtime_replay_level_start(void *manager) {
     char *g = rr_ptr(RR_D_GAME), *settings = rr_ptr(RR_D_RACE_SETTINGS);
     if (P.pending != 1 || !manager || !g || RR_AT(g, 0xd4c, int32_t) != 1) {
         P.pending = 0;                                  /* another level: the replay is over */
+        P.live = 0;
         drop_ghosts();
         play_end(1);
         return;
@@ -1319,6 +1325,7 @@ void runtime_replay_play_level_end(void) {
     accolades(0);
     if (P.pending != 2) return;
     P.pending = 0;
+    P.live = 0;
     drop_ghosts();
     play_end(0);
 }
@@ -1475,7 +1482,11 @@ void ABI runtime_replay_tick(void) {
         else if (direct_ready() || ++P.frames_waited > 600) P.step = STEP_LOAD, P.wait = 90;
         return;
     }
-    if (P.cast_in && !--P.cast_in) cast_player(1);
+    if (P.cast_in && !--P.cast_in) {
+        if (P.pending != 1) printf("Replay: the level started before the player's character was asked\n");
+        cast_player(1);
+        fflush(stdout);
+    }
 }
 
 /* The menu (any thread): play a file of RaceReplay. 0 when a replay is already starting or playing. */
@@ -1605,7 +1616,7 @@ int runtime_replay_play_live(const struct rr_header *header, const uint8_t *pack
 }
 
 int runtime_replay_live_append(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames, int ended) {
-    if (!P.live || !P.pending) return 0;
+    if (!P.live) return 0;
     if (packed && size) __atomic_store_n(&P.count, unpack_more(packed, size, frames), __ATOMIC_RELEASE);
     if (header) {
         pthread_mutex_lock(&P.lock);
@@ -1617,4 +1628,4 @@ int runtime_replay_live_append(const struct rr_header *header, const uint8_t *pa
     return 1;
 }
 
-uint32_t runtime_replay_live_count(void) { return P.live && P.pending ? frames_now() : 0; }
+uint32_t runtime_replay_live_count(void) { return P.live ? frames_now() : 0; }
