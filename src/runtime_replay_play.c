@@ -176,7 +176,6 @@ static struct {
     int input_last[RR_RACERS];
     uint32_t laps_scanned;
     int hero_told;                      /* runtime_replay_hero() logged for this replay */
-    int choice_kinds;                  /* choose_recorded(): the choice's fields that hold what we think (-1 not known) */
     int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
@@ -310,7 +309,6 @@ static void keep_choice(int index) {
     char *save = g ? RR_AT(g, 0xdb0, char *) : 0;
     void *list = save ? RR_AT(save, 0x10, void *) : 0;
     P.choice = index >= 0 && index < rr_count(list) ? rr_item(list, index) : 0;
-    P.choice_kinds = -1;
     if (!P.choice) return;
     P.choice_driver = rr_handle_object(&RR_AT(P.choice, 0x10, void *));
     P.choice_kart = rr_handle_object(&RR_AT(P.choice, 0x20, void *));
@@ -411,34 +409,6 @@ static void set_look(void *preset, const char **kart, const struct rr_racer *r) 
     game.make_handle(&RR_AT(preset, 0x28, void *), nth(RR_AT(global, 0x20, void *), r->look[3]));
 }
 
-/* The save's character choice (keep_choice): the map load applies it (changeHeroAndOutfit), which put the
- * viewer's own driver back on the player's kart. It gets the recorded racer's driver and kart, and its outfit
- * number, each only when the choice holds the viewer's own one of the same kind (the fields are not known for
- * sure); put_choice_back gives the viewer's own back. */
-static int skin_index(void *driver_data, void *outfit) {
-    void *skins = driver_data ? RR_AT(driver_data, 0x98, void *) : 0;
-    for (int k = 0; outfit && k < rr_count(skins); k++)
-        if (rr_item(skins, k) && RR_AT(rr_item(skins, k), 0x68, void *) == outfit) return k;
-    return -1;
-}
-
-static void choose_recorded(void *driver, void *kart, const struct rr_racer *rec) {
-    if (!P.choice) return;
-    if (P.choice_kinds < 0) {           /* found once, while the choice still holds the viewer's own */
-        void *own = P.driver ? rr_game_data(RR_DRIVERS, P.driver) : 0;
-        void *own_kart = P.kart_name ? rr_game_data(RR_KARTS, P.kart_name) : 0;
-        const int own_skin = skin_index(own, P.outfit);
-        P.choice_kinds = (own && P.choice_driver == own ? 1 : 0) | (own_kart && P.choice_kart == own_kart ? 2 : 0);
-        if ((P.choice_kinds & 1) && own_skin >= 0 && P.choice_numbers[0] == own_skin) P.choice_kinds |= 4;
-        printf("Replay: the save's character choice: driver %s, kart %s, outfit %s (number %d, own outfit %d)\n",
-               P.choice_kinds & 1 ? "set" : "left", P.choice_kinds & 2 ? "set" : "left", P.choice_kinds & 4 ? "set" : "left",
-               P.choice_numbers[0], own_skin);
-    }
-    if (P.choice_kinds & 1) game.make_handle(&RR_AT(P.choice, 0x10, void *), driver);
-    if (P.choice_kinds & 2) game.make_handle(&RR_AT(P.choice, 0x20, void *), kart);
-    if (P.choice_kinds & 4) RR_AT(P.choice, 0x18, int32_t) = rec->look[5] ? rec->look[5] - 1 : 0;
-}
-
 /* changeHeroAndOutfit (runtime_replay.c's stub, guest 0xbd5b90): whatever its caller read (the save's choice, the
  * profile), during a replay the player's kart gets the recorded racer's driver and outfit. 1: the stub hands the
  * game these two instead of its own. */
@@ -446,6 +416,9 @@ char *runtime_replay_hero_name;
 void *runtime_replay_hero_outfit;
 int ABI runtime_replay_hero(void *entities, int index, char **hero, void **outfit) {
     (void)outfit;
+    /* an empty driver is the game clearing the slot before a map load: kept, or the next driver looks loaded
+     * already and the map's own hero load never comes (a kart without its driver, the race never starting) */
+    if (!hero || !*hero || !**hero) return 0;
     if (!P.pending || P.player_slot < 0 || !entities || entities != rr_ptr(D_PLAYER_ENTITIES)) return 0;
     void *player = local_player();
     if (!player || RR_AT(player, 0xb4, int32_t) != index) return 0;
@@ -508,7 +481,6 @@ static void cast_player(int ask) {
             P.laps_was = RR_AT(settings, 0xc, int32_t);
         }
         if (settings) RR_AT(settings, 0x3c, uint8_t) = P.header.mirror;
-        choose_recorded(driver, kart, rec);
     }
 }
 
