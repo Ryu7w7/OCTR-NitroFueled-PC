@@ -214,7 +214,7 @@ const char* Spanish(const char* english) {
     {"In a room (%d/%d)", "En sala (%d/%d)"},
     {"Online", "En línea"},
     {"Invite", "Invitar"},
-    {"Spectate", "Espectar"},
+    {"Spectate (beta)", "Espectar (beta)"},
     {"Stop spectating", "Dejar de espectar"},
     {"RESULTS", "RESULTADOS"},
     {"Pause > Quit: back to the menu.", "Pausa > Salir: volver al menú."},

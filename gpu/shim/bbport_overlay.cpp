@@ -901,7 +901,7 @@ void FriendsTab() {
             char followed[32] = "";
             if (runtime_spectate_following(followed, sizeof followed) && !std::strcmp(followed, f.name)) {
                 if (ImGui::Button(BbSettings::MenuText("Stop spectating", "Не смотреть"))) runtime_spectate_stop();
-            } else if (ImGui::Button(BbSettings::MenuText("Spectate", "Смотреть"))) {
+            } else if (ImGui::Button(BbSettings::MenuText("Spectate (beta)", "Смотреть (бета)"))) {
                 runtime_spectate_watch(f.name);
             }
         }
