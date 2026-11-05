@@ -105,6 +105,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     // notifications get their own thread: detecting devices after a controller connects or turns
     // off can block for a long time on Windows (DirectInput asking a slow HID device its name), and
     // the window stopped responding meanwhile.
+    // Keep playing with a gamepad while another monitor has keyboard focus.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
     SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
