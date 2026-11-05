@@ -1478,13 +1478,19 @@ void ABI runtime_replay_tick(void) {
     if (P.step != STEP_NONE) {
         /* the map loads 1.5 s after the player's kart is made (at most 10 s) */
         if (P.wait) P.wait--;
-        else if (P.step == STEP_LOAD) direct_go(), P.step = STEP_NONE, P.cast_in = 5;
+        else if (P.step == STEP_LOAD) {
+            /* the recording player's character is asked as the map starts loading (the frames do not count
+             * while it loads: 5 frames later came after the level start), and again 5 frames later */
+            direct_go();
+            cast_player(1);
+            fflush(stdout);
+            P.step = STEP_NONE, P.cast_in = 5;
+        }
         else if (direct_ready() || ++P.frames_waited > 600) P.step = STEP_LOAD, P.wait = 90;
         return;
     }
     if (P.cast_in && !--P.cast_in) {
-        if (P.pending != 1) printf("Replay: the level started before the player's character was asked\n");
-        cast_player(1);
+        if (P.pending == 1) cast_player(1);
         fflush(stdout);
     }
 }
