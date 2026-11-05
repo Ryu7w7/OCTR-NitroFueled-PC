@@ -95,6 +95,8 @@ size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, ui
 int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
 int runtime_replay_live_append(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames, int ended);
 uint32_t runtime_replay_live_count(void);   /* frames the viewer has, 0 when no live replay is on */
+/* 1 when a replay is over on screen: runtime_replay_play_live then plays the next race in its place */
+int runtime_replay_can_chain(void);
 
 /* Packing of the replay file (shared with the player and the live stream). */
 uint8_t *rr_pack_frame(uint8_t *out, const struct rr_frame *f, const struct rr_frame *p1, const struct rr_frame *p2);

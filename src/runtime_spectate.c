@@ -37,6 +37,8 @@ static char watch_name[32], status_name[32];
 static time_t since;                 /* races saved before this are not shared */
 static char sent_name[64];           /* the newest race sent: its name and time */
 static time_t sent_time;
+static int viewers;                  /* friends watching this player's live race (the server's answer) */
+static time_t viewers_at;
 
 static void race_dir(char *out, size_t size) {
     snprintf(out, size, "%s/savedata/1/%s/RaceReplay", runtime_file_progress_dir(), runtime_savedata_title());
@@ -208,6 +210,8 @@ static uint32_t live_sent_race, live_sent;
 static int live_sent_end, live_backoff;
 static char live_host[32];          /* the friend watched live, "" none */
 static uint32_t live_race;
+static char follow_name[32];        /* Spectate on: this friend's next races load by themselves ("" off; lock) */
+static uint32_t seen_race, seen_frames; /* the followed friend's last live race seen (worker thread) */
 
 static void put32(uint8_t *at, uint32_t v) {
     at[0] = (uint8_t)v, at[1] = (uint8_t)(v >> 8), at[2] = (uint8_t)(v >> 16), at[3] = (uint8_t)(v >> 24);
@@ -255,6 +259,13 @@ static void share_live(void) {
     free(body);
     if (status == 200) {
         if (!live_sent) printf("Spectate: live race %u on the server\n", race);
+        int watching = 0;
+        if (reply && !strncmp(reply, "ok ", 3)) watching = atoi(reply + 3);
+        pthread_mutex_lock(&lock);
+        if (watching != viewers) printf("Spectate: %d friend(s) watching live\n", watching);
+        viewers = watching > 0 ? watching : 0;
+        viewers_at = time(NULL);
+        pthread_mutex_unlock(&lock);
         live_sent += n;
         live_sent_end = last;
     } else if (status == 409 && reply && !strncmp(reply, "need ", 5)) {
@@ -278,11 +289,12 @@ static int live_get(const char *who, uint32_t race, uint32_t from, char **data, 
     return status;
 }
 
-/* Watching: the friend's live race if there is one (it starts once the race reached GO), else their last race. */
-static int watch_live(const char *who) {
+/* Watching: the friend's live race if there is one (it starts once the race reached GO), else their last race.
+ * only_new (following): a race other than the last one seen; the server sends only what is new of that one. */
+static int watch_live(const char *who, int only_new) {
     char *data = NULL;
     size_t size = 0;
-    const int status = live_get(who, 0, 0, &data, &size);
+    const int status = only_new && seen_race ? live_get(who, seen_race, seen_frames, &data, &size) : live_get(who, 0, 0, &data, &size);
     if (status != 200) {
         free(data);
         return status;
@@ -291,11 +303,17 @@ static int watch_live(const char *who) {
     struct rr_header header;
     memcpy(&header, d + 24, LIVE_HEADER);
     const uint32_t race = get32(d + 8), frames = get32(d + 12), ended = get32(d + 20);
+    if (only_new && race == seen_race) {
+        seen_frames = frames;
+        free(data);
+        return 404;                         /* the race already seen (or left): wait for the next one */
+    }
     if (ended || header.go_time < 0.0f || frames < 2) {
+        if (ended) seen_race = race, seen_frames = frames;  /* an ended race is not polled whole again */
         free(data);
         return ended ? 404 : 202;           /* over (its file comes as the last race), or not at GO yet */
     }
-    if (!runtime_replay_can_start()) {
+    if (!runtime_replay_can_start() && !runtime_replay_can_chain()) {
         free(data);
         return 409;
     }
@@ -306,6 +324,7 @@ static int watch_live(const char *who) {
     snprintf(live_host, sizeof live_host, "%s", who);
     live_race = race;
     pthread_mutex_unlock(&lock);
+    seen_race = race, seen_frames = frames;
     printf("Spectate: watching %s live (race %u, %u frames)\n", who, race, frames);
     fflush(stdout);
     return 200;
@@ -333,6 +352,7 @@ static void follow_live(void) {
         struct rr_header header;
         memcpy(&header, d + 24, LIVE_HEADER);
         const uint32_t race = get32(d + 8), frames = get32(d + 12), from = get32(d + 16), ended = get32(d + 20);
+        if (race == live_race) seen_frames = frames;
         if (race == live_race && from == have && frames >= have)
             runtime_replay_live_append(&header, d + 24 + LIVE_HEADER, size - 24 - LIVE_HEADER, frames, (int)ended);
         else if (race != live_race)         /* the friend's next race: this one is over */
@@ -351,10 +371,34 @@ static void follow_live(void) {
     free(data);
 }
 
+/* Following (Spectate on): about every second, the friend's next live race; it starts by itself from the
+ * menus or in place of a replay that ended on screen. Quiet while the viewer races or watches. */
+static void follow_next(void) {
+    char who[32];
+    pthread_mutex_lock(&lock);
+    snprintf(who, sizeof who, "%s", follow_name);
+    const int now = state;
+    pthread_mutex_unlock(&lock);
+    if (!who[0] || live_host[0] || (!runtime_replay_can_start() && !runtime_replay_can_chain())) return;
+    const char *me = runtime_np_get_online_name();
+    if (!me || !valid_nick(me)) return;
+    const int live = watch_live(who, 1);
+    if (live == 200) {
+        set_state(RS_LIVE, who);
+    } else if (live == 202) {
+        if (now != RS_WAITING) set_state(RS_WAITING, who);
+    } else if (live == 403) {
+        pthread_mutex_lock(&lock);
+        follow_name[0] = 0;
+        pthread_mutex_unlock(&lock);
+        set_state(RS_REFUSED, who);
+    } else if (live == 404 && (now == RS_LIVE || now == RS_WAITING)) {
+        set_state(RS_FOLLOW, who);
+    }
+}
+
 static void *worker(void *unused) {
     (void)unused;
-    char waiting[32] = "";          /* a friend whose live race has not reached GO yet */
-    time_t waiting_until = 0;
     for (unsigned turn = 0;; turn++) {
         char who[32] = "";
         pthread_mutex_lock(&lock);
@@ -369,27 +413,26 @@ static void *worker(void *unused) {
         watch_name[0] = '\0';
         const int sharing = share;
         pthread_mutex_unlock(&lock);
-        if (who[0]) waiting[0] = 0;
-        if (!who[0] && waiting[0] && time(NULL) < waiting_until && turn % 2 == 0) snprintf(who, sizeof who, "%s", waiting);
-        if (who[0]) {
+        if (who[0]) {                        /* Spectate pressed: the live race now, else the last race */
+            seen_race = seen_frames = 0;
             const char *me = runtime_np_get_online_name();
-            const int live = me && valid_nick(me) && valid_nick(who) ? watch_live(who) : 0;
+            const int live = me && valid_nick(me) && valid_nick(who) ? watch_live(who, 0) : 0;
             if (live == 200) {
-                waiting[0] = 0;
                 set_state(RS_LIVE, who);
             } else if (live == 202) {
-                if (!waiting[0]) snprintf(waiting, sizeof waiting, "%s", who), waiting_until = time(NULL) + 120;
                 set_state(RS_WAITING, who);
             } else if (live == 409) {
-                waiting[0] = 0;
                 set_state(RS_BUSY, who);
             } else if (live == 403) {
-                waiting[0] = 0;
+                pthread_mutex_lock(&lock);
+                follow_name[0] = 0;
+                pthread_mutex_unlock(&lock);
                 set_state(RS_REFUSED, who);
             } else {
-                waiting[0] = 0;
                 fetch(who);
             }
+        } else if (turn % 2 == 0) {
+            follow_next();
         }
         follow_live();
         if (sharing) {
@@ -424,11 +467,39 @@ void runtime_spectate_watch(const char *friend_name) {
     if (!friend_name || !valid_nick(friend_name)) return;
     pthread_mutex_lock(&lock);
     snprintf(watch_name, sizeof watch_name, "%s", friend_name);
+    snprintf(follow_name, sizeof follow_name, "%s", friend_name);
     state = RS_FETCHING;
     snprintf(status_name, sizeof status_name, "%s", friend_name);
     ++serial;
     pthread_cond_signal(&wake);
     pthread_mutex_unlock(&lock);
+    printf("Spectate: following %s (their next races load by themselves)\n", friend_name);
+    fflush(stdout);
+}
+
+void runtime_spectate_stop(void) {
+    pthread_mutex_lock(&lock);
+    if (follow_name[0]) printf("Spectate: no longer following %s\n", follow_name);
+    follow_name[0] = watch_name[0] = 0;
+    state = RS_IDLE;
+    ++serial;
+    pthread_mutex_unlock(&lock);
+    fflush(stdout);
+}
+
+int runtime_spectate_following(char *friend_name, int size) {
+    pthread_mutex_lock(&lock);
+    const int on = follow_name[0] != 0;
+    if (friend_name && size > 0) snprintf(friend_name, (size_t)size, "%s", follow_name);
+    pthread_mutex_unlock(&lock);
+    return on;
+}
+
+int runtime_spectate_viewers(void) {
+    pthread_mutex_lock(&lock);
+    const int n = time(NULL) - viewers_at <= 3 ? viewers : 0;   /* no race sent lately: nobody */
+    pthread_mutex_unlock(&lock);
+    return n;
 }
 
 unsigned runtime_spectate_status(int *out_state, char *friend_name, int size) {
