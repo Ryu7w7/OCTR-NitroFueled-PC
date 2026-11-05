@@ -84,6 +84,17 @@ struct rr_frame {
 /* Installs the recorder's hooks (probe.c, before the game runs). 1 = recording, 0 = not this game. */
 int runtime_replay_start(unsigned char *image, size_t size);
 
+/* The race being recorded, for the live stream: its id (counts up), header, frames that will not change any
+ * more, and whether it ended. 0 before the first race. */
+int runtime_replay_live_state(uint32_t *race_id, struct rr_header *header, uint32_t *frames, int *ended);
+/* Packs frames [from, to) of race race_id (each against the two before it); the bytes, 0 when that race is
+ * gone or the frames are not there yet. */
+size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, uint8_t *out, size_t cap);
+/* The live viewer (runtime_replay_play.c): plays a friend's race while it is sent (runtime_spectate.c). */
+int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
+int runtime_replay_live_append(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames, int ended);
+uint32_t runtime_replay_live_count(void);   /* frames the viewer has, 0 when no live replay is on */
+
 /* Packing of the replay file (shared with the player and the live stream). */
 uint8_t *rr_pack_frame(uint8_t *out, const struct rr_frame *f, const struct rr_frame *p1, const struct rr_frame *p2);
 int rr_unpack_frame(struct rr_frame *f, const struct rr_frame *p1, const struct rr_frame *p2,

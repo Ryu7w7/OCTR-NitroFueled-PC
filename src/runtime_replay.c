@@ -387,6 +387,15 @@ static void date_of(int64_t t, uint8_t *date) {
     date[0] = (uint8_t)(year - 2000), date[1] = (uint8_t)month, date[2] = (uint8_t)day;
 }
 
+/* The race being recorded, for the live stream (runtime_spectate.c reads it on its own thread) */
+static struct {
+    pthread_mutex_t lock;
+    uint32_t race_id;           /* counts up with every race recorded, 0 none yet */
+    struct rr_header header;
+    uint32_t frames;            /* frames that will not change any more (the newest one still can) */
+    int ended;
+} live = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
 static void start(void *race) {
     memset(&rr.header, 0, sizeof rr.header);
     memcpy(rr.header.magic, RR_MAGIC, 8);
@@ -408,6 +417,12 @@ static void start(void *race) {
     rr.done = 0;
     rr.recording = 1;
     memset(rr.uses, 0, sizeof rr.uses);
+    pthread_mutex_lock(&live.lock);
+    live.race_id++;
+    live.header = rr.header;
+    live.frames = 0;
+    live.ended = 0;
+    pthread_mutex_unlock(&live.lock);
 }
 
 /* ---- the file ---- */
@@ -657,6 +672,11 @@ void ABI runtime_replay_level_end(void) {
     if (!rr.recording) return;
     rr.recording = 0;
     rr.race = 0;
+    pthread_mutex_lock(&live.lock);
+    live.header = rr.header;
+    live.frames = rr.header.frames;
+    live.ended = 1;
+    pthread_mutex_unlock(&live.lock);
     if (rr.header.frames <= 60 || rr.header.go_time < 0.0f) return;
     save();
 }
@@ -708,6 +728,34 @@ void ABI runtime_replay_race_frame(void *race) {
     if (!rr.end_at && racers && finished == racers) rr.end_at = rr.time + 3.0f;
     if (!rr.end_local && local_finished) rr.end_local = rr.time + 60.0f;
     if ((rr.end_at && rr.time >= rr.end_at) || (rr.end_local && rr.time >= rr.end_local)) rr.done = 1;
+    pthread_mutex_lock(&live.lock);
+    live.header = rr.header;
+    live.frames = rr.done ? rr.header.frames : rr.header.frames - 1;
+    live.ended = rr.done;
+    pthread_mutex_unlock(&live.lock);
+}
+
+/* ---- the live stream (runtime_replay.h) ---- */
+int runtime_replay_live_state(uint32_t *race_id, struct rr_header *header, uint32_t *frames, int *ended) {
+    pthread_mutex_lock(&live.lock);
+    *race_id = live.race_id;
+    if (header) *header = live.header;
+    *frames = live.frames;
+    *ended = live.ended;
+    pthread_mutex_unlock(&live.lock);
+    return *race_id != 0;
+}
+
+size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, uint8_t *out, size_t cap) {
+    static const struct rr_frame ZERO;
+    size_t used = 0;
+    pthread_mutex_lock(&live.lock);
+    if (race_id == live.race_id && rr.frames && to <= live.frames)
+        for (uint32_t i = from; i < to && used + 2 * sizeof(struct rr_frame) < cap; i++)
+            used = (size_t)(rr_pack_frame(out + used, &rr.frames[i], i > 0 ? &rr.frames[i - 1] : &ZERO,
+                                          i > 1 ? &rr.frames[i - 2] : &ZERO) - out);
+    pthread_mutex_unlock(&live.lock);
+    return used;
 }
 
 /* A kart uses its item (counted with an item stored) */

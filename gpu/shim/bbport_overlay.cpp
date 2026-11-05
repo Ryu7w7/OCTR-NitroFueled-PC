@@ -867,12 +867,17 @@ void FriendsTab() {
         case RS_NONE: line = BbSettings::MenuText("%s has no recent race to watch.", "У %s нет недавних гонок."); break;
         case RS_REFUSED: line = BbSettings::MenuText("%s does not share races with you.", "%s не делится гонками с вами."); break;
         case RS_FAILED: line = BbSettings::MenuText("Could not download %s's race.", "Не удалось загрузить гонку %s."); break;
+        case RS_LIVE: line = BbSettings::MenuText("Watching %s live.", "Смотрите %s в прямом эфире."); break;
+        case RS_WAITING: line = BbSettings::MenuText("%s is live: waiting for the race to start...", "%s в эфире: ждём старта..."); break;
+        case RS_BUSY: line = BbSettings::MenuText("Spectate works from the menus, not during a race or a replay.",
+                                                  "Смотреть можно из меню, не во время гонки или повтора."); break;
+        case RS_PLAYING: line = BbSettings::MenuText("Playing %s's last race.", "Идёт последняя гонка %s."); break;
         default: break;
         }
         if (line) {
             char text[200];
             std::snprintf(text, sizeof text, line, who);
-            ImGui::TextColored(spectate == RS_READY ? kFriendGreen : kMenuGrey, "%s", text);
+            ImGui::TextColored(spectate == RS_READY || spectate == RS_LIVE || spectate == RS_PLAYING ? kFriendGreen : kMenuGrey, "%s", text);
         }
     }
     // online friends first and open; offline ones folded (a long list hid everything below it)
