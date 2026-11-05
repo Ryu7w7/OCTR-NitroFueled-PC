@@ -190,6 +190,7 @@ static struct {
 } NEXT;
 static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
 static void items_reset(void);
+static int items_restore;            /* drive cleared the track: the recent items come back (track_items) */
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
@@ -710,7 +711,7 @@ static void drive(float time) {
         game.ghost_attach(manager, kart, id);
         P.attached[i] = 1;
     }
-    if (P.rewound) game.despawn_items();
+    if (P.rewound) game.despawn_items(), items_restore = 1;
     for (int i = 0; i < RR_RACERS && P.rewound; i++) {
         if (!P.ghost[i]) continue;
         RR_AT(P.ghost[i], 0x40, int64_t) = 0;
@@ -1609,9 +1610,13 @@ static void hold(void *controller, int type) {
     IT.give(controller, type, 0, 0, 0, 0.0f);
 }
 
+static int shield_up(void *kart);
+static void hurt(void *kart, int type);
 static void use_item(void *kart, int type) {
     void *controller = items_of(kart);
     if (!controller) return;
+    /* a shield still up (the replay had no hit to end it): the next use would throw it, not this item */
+    if (type != 8 && shield_up(kart)) hurt(kart, 4);
     hold(controller, type);
     IT.using = 1;
     IT.use(controller);
@@ -1681,11 +1686,182 @@ static void item_slot(void) {
     }
 }
 
+#define D_ENTITY_TABLE 0x2a92880
+#define DROPPED 16
+typedef void *ABI meta_fn(void *object);
+typedef void ABI crate_attach_fn(void *crate);
+
+static struct {
+    crate_attach_fn *crate_attach;
+    struct { void *kart; int type; float at[3]; } dropped[DROPPED];
+    int dropped_count, dropped_wait;
+} TRACK;
+
 static void items_reset(void) {
+    items_restore = 0;
+    TRACK.dropped_count = TRACK.dropped_wait = 0;
     IT.last = 0;
     IT.slot_kart = 0;
     memset(IT.hit_used, 0, sizeof IT.hit_used);
     memset(IT.hit_frame, 0, sizeof IT.hit_frame);
+}
+
+/* ---- Items on the track (ported from Replay Mode's play.c): a rewind clears them (drive: despawn_items), so the
+ * ones thrown, dropped or worn not long before come back; a recorded TNT goes on its racer's head; a recorded shield's
+ * end is a hit. Each item on the track is an entity with a spawned power-up component (CSpawnedPowerUpComponent's
+ * classes: their metas have its meta at +0x40; +0x28 its owner's handle, +0x34 its EPowerUpType). ---- */
+/* Each item on the track: its entity slot and component, -1 at the end */
+static int next_spawned(int from, void **component_out) {
+    char *table = rr_ptr(D_ENTITY_TABLE);
+    void *spawned = rr_ptr(RR_D_SPAWNED_META);
+    void *gens = table ? RR_AT(table, 0x28, void *) : 0;
+    void **entities = table ? RR_AT(table, 0x20, void **) : 0;
+    uint16_t *generation = gens ? RR_AT(gens, 0x20, uint16_t *) : 0;
+    for (int i = from; entities && generation && spawned && i < rr_count(gens) && i < 4096; i++) {
+        void *list = (generation[i] & 0x8000) && entities[i] ? RR_AT(entities[i], 0x18, void *) : 0;
+        for (int k = 0; k < rr_count(list); k++) {
+            void *component = rr_item(list, k);
+            void *meta = component ? (**(meta_fn ***)component)(component) : 0;
+            if (meta && RR_AT(meta, 0x40, void *) == spawned) {
+                *component_out = component;
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+static void *entity_at(int slot) {
+    char *table = rr_ptr(D_ENTITY_TABLE);
+    return table ? RR_AT(table, 0x20, void **)[slot] : 0;
+}
+
+static float distance2(void *entity, const float *at) {
+    float d = 0.0f;
+    for (int c = 0; c < 3; c++) {
+        const float x = RR_AT(entity, 0x20 + 4 * c, float) - at[c];
+        d += x * x;
+    }
+    return d;
+}
+
+/* The kart's active power-up (controller +0x38, it stays on the last thrown item) is a shield, and its spawned shield is there */
+static int shield_up(void *kart) {
+    void *controller = items_of(kart), *active = controller ? rr_handle_object(&RR_AT(controller, 0x38, void *)) : 0, *component;
+    void *meta = active ? (**(meta_fn ***)active)(active) : 0;
+    const char *name = meta ? RR_AT(meta, 0x10, const char *) : 0;
+    if (!name || strcmp(name, "CPowerShieldComponent")) return 0;
+    for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component))
+        if (RR_AT(component, 0x34, int32_t) == 8 && rr_handle_object(&RR_AT(component, 0x28, void *)) == kart) return 1;
+    return 0;
+}
+
+/* What racer r has at frame i, on its kart: a shuffle that ends with its next item, the item it holds, or none */
+static void sync_item(void *controller, int r, uint32_t i) {
+    const struct rr_sample *s = &P.frames[i].racer[r];
+    const int shuffling = RR_AT(controller, 0x40, uint8_t), next = next_item(r, i);
+    if (s->flags & RS_SHUFFLING) {
+        if (shuffling) {
+            if (next >= 0) RR_AT(controller, 0x78, int32_t) = next;
+        } else if (next >= 0) {
+            if (rr_handle_object(&RR_AT(controller, 0x30, void *))) game.make_handle(&RR_AT(controller, 0x30, void *), 0);
+            RR_AT(controller, 0x78, int32_t) = next;
+            IT.shuffle_start(controller, 0.0f);
+        }
+        return;
+    }
+    if (s->item >= 0) {
+        hold(controller, s->item);          /* a running shuffle ends now with it */
+        return;
+    }
+    /* none: a shuffle still running (a jump back from after it) would give an item of its own */
+    if (shuffling) IT.shuffle_end(controller);
+    if (rr_handle_object(&RR_AT(controller, 0x30, void *))) game.make_handle(&RR_AT(controller, 0x30, void *), 0);
+}
+
+static int thrown_seconds(int type) {
+    return type == 0 || type == 9 ? 3 : type == 1 || type == 10 ? 4 : type == 2 || type == 3 ? 20 : type == 4 || type == 8 || type == 12 ? 12 : 0;
+}
+
+/* After a jump (the track cleared): the items thrown, dropped or worn not long before come back. Thrown ones start
+ * from the kart; dropped ones are put where they were dropped a few frames later (an item comes out after its use). */
+static void restore_items(uint32_t now) {
+    TRACK.dropped_count = 0;
+    for (int r = 0; r < RR_RACERS; r++) {
+        void *kart = kart_of_racer(r), *controller = items_of(kart);
+        if (!controller) continue;
+        for (uint32_t k = now > 20 * RR_RATE ? now - 20 * RR_RATE : 1; k <= now; k++) {
+            const struct rr_sample *a = &P.frames[k - 1].racer[r], *b = &P.frames[k].racer[r];
+            if (b->item_uses == a->item_uses || a->item < 0 || a->item >= 13 ||
+                (now - k) / RR_RATE >= (uint32_t)thrown_seconds(a->item))
+                continue;
+            use_item(kart, a->item);
+            if ((a->item == 2 || a->item == 3) && TRACK.dropped_count < DROPPED) {
+                TRACK.dropped[TRACK.dropped_count].kart = kart;
+                TRACK.dropped[TRACK.dropped_count].type = a->item;
+                for (int c = 0; c < 3; c++) TRACK.dropped[TRACK.dropped_count].at[c] = (float)b->position[c] / RR_POSITION;
+                TRACK.dropped_count++;
+            }
+        }
+        sync_item(controller, r, now);
+    }
+    TRACK.dropped_wait = 4;
+    IT.slot_kart = 0;       /* the item slot shows what the watched racer holds now */
+}
+
+static void place_dropped(void) {
+    void *component;
+    for (int d = 0; d < TRACK.dropped_count; d++) {
+        void *best = 0;
+        float near = 2000.0f * 2000.0f;
+        for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
+            void *entity = entity_at(i);
+            if (!entity || RR_AT(component, 0x34, int32_t) != TRACK.dropped[d].type ||
+                rr_handle_object(&RR_AT(component, 0x28, void *)) != TRACK.dropped[d].kart)
+                continue;
+            const float gone = distance2(entity, &RR_AT(TRACK.dropped[d].kart, 0x20, float));
+            if (gone < near) near = gone, best = entity;
+        }
+        for (int c = 0; best && c < 3; c++) RR_AT(best, 0x20 + 4 * c, float) = TRACK.dropped[d].at[c];
+    }
+    TRACK.dropped_count = 0;
+}
+
+/* A recorded TNT on a racer's head: the nearest crate on the track goes on its head, as a crate's own hit does (+0xa8 the
+ * kart, +0xb0 state 2, 0xe40d60). A recorded shield that ended: the hit that took it. */
+static void tnt(uint32_t now) {
+    void *component;
+    for (int r = 0; r < RR_RACERS && now && TRACK.crate_attach; r++) {
+        void *kart = kart_of_racer(r);
+        const int on = !!(P.frames[now].racer[r].flags & RS_TNT), was = !!(P.frames[now - 1].racer[r].flags & RS_TNT);
+        if (kart && (P.frames[now - 1].racer[r].flags & RS_SHIELD) && !(P.frames[now].racer[r].flags & RS_SHIELD) && shield_up(kart))
+            hurt(kart, 4);
+        if (!kart || on == was || !on) continue;
+        void *best = 0;
+        float near = 4000.0f * 4000.0f;
+        for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
+            void *entity = entity_at(i);
+            if (!entity || RR_AT(component, 0x34, int32_t) != 2 || RR_AT(component, 0xb0, int32_t) == 2) continue;
+            const float d = distance2(entity, &RR_AT(kart, 0x20, float));
+            if (d < near) near = d, best = component;
+        }
+        if (!best) continue;
+        game.make_handle(&RR_AT(best, 0xa8, void *), kart);
+        RR_AT(best, 0xb0, int32_t) = 2;
+        TRACK.crate_attach(best);
+    }
+}
+
+/* After the frame's item events (items_frame): the items back after a jump, the dropped ones in place, TNT and shields */
+static void track_items(void) {
+    if (!IT.ready || !P.started) return;
+    const uint32_t now = frame_index();
+    if (items_restore && !P.scrubbing && !P.rewound) {
+        items_restore = 0;
+        restore_items(now);
+    }
+    if (TRACK.dropped_wait && !--TRACK.dropped_wait) place_dropped();
+    if (!P.paused && !P.scrubbing && now) tnt(now);
 }
 
 /* Every frame, each racer: its wumpa count (CRacer +0x9c: the HUD's, and an item is juiced from 10) and, while the
@@ -1707,9 +1883,7 @@ static void items_frame(void) {
         if (!forward) {
             if (now == last) continue;
             IT.hit_used[r] = now, IT.hit_frame[r] = 0;
-            const int type = f->racer[r].item;
-            if (type >= 0 && !(f->racer[r].flags & RS_SHUFFLING)) hold(controller, type);
-            else if (type < 0 && rr_handle_object(&RR_AT(controller, 0x30, void *))) game.make_handle(&RR_AT(controller, 0x30, void *), 0);
+            sync_item(controller, r, now);
             IT.slot_kart = 0;
             continue;
         }
@@ -1734,6 +1908,7 @@ static void items_frame(void) {
             }
         }
     }
+    track_items();
     item_slot();
 }
 
@@ -1749,6 +1924,8 @@ static int items_install(int eu) {
     IT.charges = (event_new_fn *)fn(0x117f530, 1, eu);
     IT.reset = (event_new_fn *)fn(0x117f410, 1, eu);
     IT.faction = (faction_fn *)fn(0xfe5790, 1, eu);
+    TRACK.crate_attach = (crate_attach_fn *)fn(0xe40d60, 0, eu);
+    if (memcmp(TRACK.crate_attach, "\x55\x48\x89\xe5", 4)) TRACK.crate_attach = 0;      /* no TNT on heads */
     /* (0xf0b070 and 0xe330e0 start with jumps: the recorder's gate, the online mode's damage wrap) */
     void *const check[] = {IT.give, IT.shuffle_start, IT.shuffle_end, IT.show, IT.hide, IT.item, IT.charges, IT.reset, IT.faction};
     for (size_t i = 0; i < sizeof check / sizeof *check; i++)

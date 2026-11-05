@@ -1831,7 +1831,7 @@ void ReplayResults(const RrView& v) {
         ImGui::TextColored(colour, "%s", r.name[0] ? r.name : "-");
         ImGui::SameLine(time_x);
         if (r.finished > 0 && r.time > 0.0f) {
-            const int cs = static_cast<int>(r.time * 100.0f + 0.5f);
+            const int cs = static_cast<int>(r.time * 100.0f + 0.001f);   // cut, as the game shows it
             ImGui::TextColored(colour, "%d:%02d:%02d", cs / 6000, cs / 100 % 60, cs % 100);
         } else {
             ImGui::TextColored(ImVec4(0.75f, 0.82f, 0.95f, 1.0f), "--:--:--");
