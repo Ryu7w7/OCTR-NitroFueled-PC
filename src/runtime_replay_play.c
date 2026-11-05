@@ -168,12 +168,29 @@ static struct {
     void *pad_piece[12], *pad_seen, *pad_root;
     int pad_frames;
     uint32_t pad_shown;
+    /* live: a friend's race while it is sent (runtime_spectate.c appends its frames on its own thread) */
+    int live, live_ended, live_request, buffering, live_header_new;
+    struct rr_header live_header;
+    int key_cs[RR_RACERS];          /* the next move key's time (1/100 s) of each ghost */
+    uint32_t input_frame[RR_RACERS];    /* the next frame to make input keys from */
+    int input_last[RR_RACERS];
+    uint32_t laps_scanned;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
 static float ghost_time(const struct rr_frame *f) { return f->time - P.header.go_time + RACE_START; }
-static int ended(void) { return P.time >= ghost_time(&P.frames[P.count - 1]) - RACE_START - 0.01f; }
+#define LIVE_DELAY 2.0f        /* live: the play time stays this far behind the newest frame */
+static uint32_t frames_now(void) { return __atomic_load_n(&P.count, __ATOMIC_ACQUIRE); }
+/* the last play time there is: live, a little behind the newest frame until the race is over */
+static float last_time(void) {
+    const float end = ghost_time(&P.frames[frames_now() - 1]) - RACE_START;
+    return P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE) ? end - LIVE_DELAY : end;
+}
+static int ended(void) {
+    if (P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE)) return 0;
+    return P.time >= ghost_time(&P.frames[frames_now() - 1]) - RACE_START - 0.01f;
+}
 
 int runtime_replay_playing(void) { return P.pending != 0; }
 
@@ -218,6 +235,7 @@ static void clean_text(char *t, size_t size) {
 }
 
 static int load(const char *path) {
+    P.live = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     int ok = fread(&P.header, 1, sizeof P.header, f) == sizeof P.header && !memcmp(P.header.magic, RR_MAGIC, 8) &&
@@ -522,6 +540,9 @@ static void *build_ghost(int slot) {
         game.release(key);
         last = bits;
     }
+    P.key_cs[slot] = ((int)(end * 100.0f) / KEY_STEP + 1) * KEY_STEP;
+    P.input_frame[slot] = P.count;
+    P.input_last[slot] = last;
     if (rr_count(moves) < 2 || !rr_count(inputs)) {
         game.release(ghost);
         return 0;
@@ -589,7 +610,7 @@ static void drive(float time) {
     game.ghost_update(manager);
     with_ghosts(0);
     const struct rr_frame *now = frame_now();
-    const float scale = P.paused || P.scrubbing || ended() ? 0.0f : SPEEDS[P.speed];
+    const float scale = P.paused || P.scrubbing || P.buffering || ended() ? 0.0f : SPEEDS[P.speed];
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = P.attached[i] ? kart_of_racer(i) : 0;
         void *move = kart ? rr_component(kart, RR_D_KART_CONTROLLER_META) : 0;
@@ -709,7 +730,7 @@ static void read_buttons(float dt) {
     }
     if (PRESSED(S_UP) && P.speed < (int)(sizeof SPEEDS / sizeof SPEEDS[0]) - 1) P.speed++;
     if (PRESSED(S_DOWN) && P.speed > 0) P.speed--;
-    const float end = ghost_time(&P.frames[P.count - 1]) - RACE_START;
+    const float end = last_time();
     P.scrubbing = HELD(S_LEFT) || HELD(S_RIGHT);
     P.scrub_dir = HELD(S_LEFT) ? -1 : HELD(S_RIGHT) ? 1 : 0;
     if (HELD(S_LEFT)) {
@@ -722,6 +743,7 @@ static void read_buttons(float dt) {
     } else if (!P.paused) {
         P.time += dt * SPEEDS[P.speed];
     }
+    P.buffering = P.live && !P.paused && !P.scrubbing && P.time >= end;
     if (P.time > end) P.time = end;
     if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : HELD(S_RIGHT) ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
 #undef PRESSED
@@ -889,7 +911,8 @@ static void status_text(char *out, size_t size) {
     if ((s->flags & RS_FINISHED) && r->finished)
         snprintf(first + strlen(first), sizeof first - strlen(first), "   FINISHED %d%s", r->finished,
                  r->finished == 1 ? "ST" : r->finished == 2 ? "ND" : r->finished == 3 ? "RD" : "TH");
-    const char *state = ended() ? "REPLAY ENDED" : P.paused ? "REPLAY PAUSED" : "";
+    const char *state = ended() ? "REPLAY ENDED" : P.paused ? "REPLAY PAUSED" : P.live && P.buffering ? "LIVE (WAITING)"
+                      : P.live && !P.live_ended ? "LIVE" : "";
     char speed[16] = "";
     if (!state[0] && SPEED_TEXT[P.speed][0]) snprintf(speed, sizeof speed, "REPLAY %s", SPEED_TEXT[P.speed]);
     snprintf(out, size, "%s\n%d KM/H\n%s", first, P.shown_speed, state[0] ? state : speed);
@@ -1300,6 +1323,65 @@ void runtime_replay_play_level_end(void) {
     play_end(0);
 }
 
+/* Live: the frames that came since the last game frame become ghost keys, lap starts and names (the game's
+ * thread: the ghost lists are the game's) */
+static void live_extend(void) {
+    if (!P.live || P.pending != 2) return;
+    const uint32_t n = frames_now();
+    struct rr_header header;
+    int new_header = 0;
+    pthread_mutex_lock(&P.lock);
+    if (P.live_header_new) header = P.live_header, P.live_header_new = 0, new_header = 1;
+    pthread_mutex_unlock(&P.lock);
+    for (int i = 0; new_header && i < RR_RACERS; i++) {
+        struct rr_racer *r = &P.header.racer[i];
+        r->finished = header.racer[i].finished;
+        r->finish_time = header.racer[i].finish_time;
+        if (!r->name[0]) memcpy(r->name, header.racer[i].name, sizeof r->name);
+        r->name[sizeof r->name - 1] = 0;
+    }
+    if (new_header) P.header.duration = header.duration;
+    float end = ghost_time(&P.frames[n - 1]);
+    if (end > 650.0f) end = 650.0f;
+    for (int slot = 0; slot < RR_RACERS; slot++) {
+        void *ghost = P.ghost[slot];
+        if (!ghost) continue;
+        void *moves = RR_AT(ghost, 0x30, void *), *inputs = RR_AT(ghost, 0x38, void *);
+        for (; P.key_cs[slot] <= (int)(end * 100.0f); P.key_cs[slot] += KEY_STEP) {
+            float position[3], angles[3];
+            if (!pose(slot, P.key_cs[slot] / 100.0f, position, angles)) continue;
+            void *key = game.move_key_new(0);
+            if (!key) break;
+            for (int k = 0; k < 3; k++) {
+                RR_AT(key, 0xc + 4 * k, float) = position[k];
+                RR_AT(key, 0x1a + 2 * k, int16_t) = (int16_t)(angles[k] * ANGLE_UNIT);
+            }
+            RR_AT(key, 0x18, uint16_t) = (uint16_t)P.key_cs[slot];
+            list_append(moves, key);
+            game.release(key);
+        }
+        for (; P.input_frame[slot] < n; P.input_frame[slot]++) {
+            const float t = ghost_time(&P.frames[P.input_frame[slot]]);
+            const int bits = P.frames[P.input_frame[slot]].racer[slot].ghost_bits;
+            if (t < 0.0f || t > end || bits == P.input_last[slot]) continue;
+            void *key = game.input_key_new(0);
+            if (!key) break;
+            RR_AT(key, 0xc, uint16_t) = (uint16_t)bits;
+            RR_AT(key, 0xe, uint16_t) = (uint16_t)(t * 100.0f + 0.5f);
+            list_append(inputs, key);
+            game.release(key);
+            P.input_last[slot] = bits;
+        }
+        RR_AT(ghost, 0x28, float) = end + 60.0f;        /* _duration */
+    }
+    for (uint32_t i = P.laps_scanned > 0 ? P.laps_scanned : 1; i < n; i++)
+        for (int r = 0; r < RR_RACERS; r++) {
+            const int was = P.frames[i - 1].racer[r].lap, now = P.frames[i].racer[r].lap;
+            if (now > was && was >= 1 && now - 1 < MAX_LAPS) P.lap_start[r][now - 1] = P.frames[i].race_time;
+        }
+    P.laps_scanned = n;
+}
+
 void runtime_replay_play_frame(void) {
     char *frame = rr_ptr(RR_D_FRAME);
     if (P.pending != 2) return;
@@ -1311,7 +1393,10 @@ void runtime_replay_play_frame(void) {
     if (go > 0.0f && P.kart) {
         P.started = 1;
         P.time = go;
+        const float newest = last_time() - 1.0f;   /* live: close to the race, not from its start */
+        if (P.live && newest > go + 1.0f) P.time = newest, P.rewound = 1;
     }
+    live_extend();
     const float dt = frame ? RR_AT(frame, 0x18, float) : 0.0f;
     if (P.started && !(frame && RR_AT(frame, 0x28, uint8_t))) read_buttons(dt);
     drive(P.started ? P.time + RACE_START : RACE_START - 0.2f);
@@ -1335,7 +1420,11 @@ void ABI runtime_replay_tick(void) {
     snprintf(path, sizeof path, "%s", P.request);
     P.request[0] = 0;
     pthread_mutex_unlock(&P.lock);
-    if (path[0] && !P.pending && P.step == STEP_NONE) {
+    pthread_mutex_lock(&P.lock);
+    const int live = P.live_request;
+    P.live_request = 0;
+    pthread_mutex_unlock(&P.lock);
+    if ((path[0] || live) && !P.pending && P.step == STEP_NONE) {
         char full[800];
         rr_race_dir(full, sizeof full - 80);
         strncat(full, "/", sizeof full - strlen(full) - 1);
@@ -1349,7 +1438,12 @@ void ABI runtime_replay_tick(void) {
         P.time = 0.0f;
         memset(P.attached, 0, sizeof P.attached);
         memset(P.fed, 0, sizeof P.fed);
-        if (!load(full)) {
+        if (live) {
+            P.live_ended = 0;
+            P.laps_scanned = 0;
+            snprintf(path, sizeof path, "%s", "(live)");
+        }
+        if (!live && !load(full)) {
             printf("Replay: %s cannot be played\n", path);
         } else {
             P.player_slot = -1;
@@ -1473,3 +1567,54 @@ int runtime_replay_play_install(int eu) {
 int runtime_replay_can_start(void) {
     return !P.pending && P.step == STEP_NONE && rr_game(0) && !rr_kart_of(0, 0);
 }
+
+/* ---- live (runtime_replay.h): runtime_spectate.c's thread gives the frames ---- */
+static uint32_t unpack_more(const uint8_t *packed, size_t size, uint32_t frames) {
+    static const struct rr_frame ZERO;
+    const uint8_t *in = packed, *end = packed + size;
+    uint32_t n = frames_now();
+    for (; n < frames && n < RR_MAX_FRAMES; n++)
+        if (!rr_unpack_frame(&P.frames[n], n > 0 ? &P.frames[n - 1] : &ZERO, n > 1 ? &P.frames[n - 2] : &ZERO, &in, end,
+                             (int)P.header.version))
+            break;
+    return n;
+}
+
+int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames) {
+    if (P.pending || P.step != STEP_NONE || !header || memcmp(header->magic, RR_MAGIC, 8) || header->go_time < 0.0f) return 0;
+    if (!P.frames && !(P.frames = malloc(sizeof(struct rr_frame) * RR_MAX_FRAMES))) return 0;
+    P.header = *header;
+    P.header.level[sizeof P.header.level - 1] = 0;
+    clean_text(P.header.player, sizeof P.header.player);
+    clean_text(P.header.track, sizeof P.header.track);
+    for (int i = 0; i < RR_RACERS; i++) {
+        clean_text(P.header.racer[i].name, sizeof P.header.racer[i].name);
+        clean_text(P.header.racer[i].driver, sizeof P.header.racer[i].driver);
+        clean_text(P.header.racer[i].kart, sizeof P.header.racer[i].kart);
+    }
+    __atomic_store_n(&P.count, 0, __ATOMIC_RELEASE);
+    const uint32_t n = unpack_more(packed, size, frames);
+    if (n < 2) return 0;
+    __atomic_store_n(&P.count, n, __ATOMIC_RELEASE);
+    P.live = 1;
+    __atomic_store_n(&P.live_ended, 0, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&P.lock);
+    P.live_request = 1;
+    pthread_mutex_unlock(&P.lock);
+    return 1;
+}
+
+int runtime_replay_live_append(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames, int ended) {
+    if (!P.live || !P.pending) return 0;
+    if (packed && size) __atomic_store_n(&P.count, unpack_more(packed, size, frames), __ATOMIC_RELEASE);
+    if (header) {
+        pthread_mutex_lock(&P.lock);
+        P.live_header = *header;
+        P.live_header_new = 1;
+        pthread_mutex_unlock(&P.lock);
+    }
+    if (ended) __atomic_store_n(&P.live_ended, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+uint32_t runtime_replay_live_count(void) { return P.live && P.pending ? frames_now() : 0; }

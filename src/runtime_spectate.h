@@ -15,6 +15,10 @@ enum {
     RS_NONE = 3,        /* the friend has no recent race shared */
     RS_REFUSED = 4,     /* not friends, or the friend does not share */
     RS_FAILED = 5,      /* the server did not answer, or the file could not be written */
+    RS_LIVE = 6,        /* watching the friend's race live */
+    RS_WAITING = 7,     /* the friend is live but their race has not reached GO yet */
+    RS_BUSY = 8,        /* a replay or a race is on: Spectate works from the menus */
+    RS_PLAYING = 9,     /* the friend's last race is playing */
 };
 
 void runtime_spectate_start(void);
