@@ -1,17 +1,10 @@
-/* Spectator build (experimental): friends watch each other's races.
+/* Spectator build (experimental): friends watch each other's races, live only.
  *
- * The Replay Mode mod (patches/ReplayMode.xml) saves every race it records in the save folder
- * savedata/1/<title>/RaceReplay: A<number>.crr (the last 50), K<number>.crr (kept). Any other *.crr there
- * is listed too, newest first, the next time the main menu's REPLAYS list opens.
- *
- * Sharing (bbport.ini spectate_share=1, in-game menu > Friends > Options): a race saved after the
- * game started is sent to the RyuNET server (POST /ryunet/spectate/upload), which keeps a player's
- * last few races for their friends.
- * Watching (Friends > Spectate): GET /ryunet/spectate/latest?host=<friend> downloads the friend's newest
- * race into RaceReplay as <friend>_<hhmmss>.crr and plays it.
- * Live: while a sharing player races, the race goes to the server as it is recorded
- * (POST /ryunet/spectate/live, about twice a second); Spectate plays a friend's live race when there is
- * one (GET /ryunet/spectate/live), a few seconds behind, its new frames fetched as it goes. */
+ * While a sharing player (bbport.ini spectate_share=1, in-game menu > Friends > Options) races, the race goes
+ * to the RyuNET server as it is recorded (POST /ryunet/spectate/live, about twice a second; the answer says
+ * how many friends watch: SPECTATOR (n)). Spectate (Friends) follows a friend: their live race plays a few
+ * seconds behind (GET /ryunet/spectate/live, new frames as they come), and each next race of theirs loads by
+ * itself until Stop spectating. Finished races are not sent or downloaded. */
 #include "runtime_spectate.h"
 #include "runtime.h"
 #include "runtime_http.h"
@@ -19,12 +12,10 @@
 #include "runtime_replay.h"
 #include "runtime_replay_list.h"
 
-#include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 
 #define MAX_RACE_BYTES (48u * 1024 * 1024)
@@ -34,15 +25,8 @@ static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
 static int started, share, state;
 static unsigned serial;
 static char watch_name[32], status_name[32];
-static time_t since;                 /* races saved before this are not shared */
-static char sent_name[64];           /* the newest race sent: its name and time */
-static time_t sent_time;
 static int viewers;                  /* friends watching this player's live race (the server's answer) */
 static time_t viewers_at;
-
-static void race_dir(char *out, size_t size) {
-    snprintf(out, size, "%s/savedata/1/%s/RaceReplay", runtime_file_progress_dir(), runtime_savedata_title());
-}
 
 static int valid_nick(const char *s) {
     size_t n = strlen(s);
@@ -54,153 +38,12 @@ static int valid_nick(const char *s) {
     return 1;
 }
 
-/* A<digits>.crr or K<digits>.crr: a race this player recorded. */
-static int own_race(const char *name) {
-    size_t n = strlen(name);
-    if (n < 6 || n > 40 || (name[0] != 'A' && name[0] != 'K') || strcmp(name + n - 4, ".crr")) return 0;
-    for (size_t i = 1; i < n - 4; ++i)
-        if (name[i] < '0' || name[i] > '9') return 0;
-    return 1;
-}
-
-static char *read_file(const char *path, size_t *size) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    char *data = NULL;
-    if (!fseek(f, 0, SEEK_END)) {
-        const long n = ftell(f);
-        if (n > 8 && (unsigned long)n <= MAX_RACE_BYTES && !fseek(f, 0, SEEK_SET) && (data = malloc((size_t)n))) {
-            if (fread(data, 1, (size_t)n, f) != (size_t)n) {
-                free(data);
-                data = NULL;
-            } else {
-                *size = (size_t)n;
-            }
-        }
-    }
-    fclose(f);
-    return data;
-}
-
 static void set_state(int value, const char *who) {
     pthread_mutex_lock(&lock);
     state = value;
     if (who) snprintf(status_name, sizeof status_name, "%s", who);
     ++serial;
     pthread_mutex_unlock(&lock);
-}
-
-/* The newest own race saved since the game started and at least 2 s ago (written whole), if it is
- * newer than the last one sent. */
-static int newest_unsent(char *name, size_t size, time_t *when) {
-    char dir[700];
-    race_dir(dir, sizeof dir);
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-    const time_t now = time(NULL);
-    int found = 0;
-    for (struct dirent *e; (e = readdir(d));) {
-        if (!own_race(e->d_name)) continue;
-        char path[800];
-        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        struct stat st;
-        if (stat(path, &st) || st.st_mtime < since || now - st.st_mtime < 2) continue;
-        if (st.st_mtime < sent_time || (st.st_mtime == sent_time && !strcmp(e->d_name, sent_name))) continue;
-        if (!found || st.st_mtime > *when) {
-            snprintf(name, size, "%s", e->d_name);
-            *when = st.st_mtime;
-            found = 1;
-        }
-    }
-    closedir(d);
-    return found;
-}
-
-static void share_new_race(void) {
-    const char *me = runtime_np_get_online_name();
-    char name[64];
-    time_t when = 0;
-    if (!me || !valid_nick(me) || !newest_unsent(name, sizeof name, &when)) return;
-    char dir[700], path[800], target[128];
-    race_dir(dir, sizeof dir);
-    snprintf(path, sizeof path, "%s/%s", dir, name);
-    size_t size = 0;
-    char *data = read_file(path, &size);
-    if (!data || memcmp(data, "CTRRPLAY", 8)) {
-        free(data);
-        sent_time = when; /* not a race file: skip it */
-        snprintf(sent_name, sizeof sent_name, "%s", name);
-        return;
-    }
-    snprintf(target, sizeof target, "/ryunet/spectate/upload?name=%s", me);
-    char *reply = NULL;
-    size_t reply_size = 0;
-    const int status = runtime_ryunet_transfer("POST", target, data, size, &reply, &reply_size, 4096);
-    free(data);
-    free(reply);
-    if (status == 200) {
-        sent_time = when;
-        snprintf(sent_name, sizeof sent_name, "%s", name);
-        printf("Spectate: shared %s (%zu KB)\n", name, size / 1024);
-    } else {
-        printf("Spectate: sharing %s failed (HTTP %d)\n", name, status);
-        sent_time = when; /* one try per race: a refused one is not sent again and again */
-        snprintf(sent_name, sizeof sent_name, "%s", name);
-    }
-    fflush(stdout);
-}
-
-static void fetch(const char *who) {
-    const char *me = runtime_np_get_online_name();
-    if (!me || !valid_nick(me) || !valid_nick(who)) {
-        set_state(RS_FAILED, who);
-        return;
-    }
-    set_state(RS_FETCHING, who);
-    char target[128];
-    snprintf(target, sizeof target, "/ryunet/spectate/latest?name=%s&host=%s", me, who);
-    char *data = NULL;
-    size_t size = 0;
-    const int status = runtime_ryunet_transfer("GET", target, NULL, 0, &data, &size, MAX_RACE_BYTES);
-    if (status == 404) {
-        free(data);
-        set_state(RS_NONE, who);
-        return;
-    }
-    if (status == 403) {
-        free(data);
-        set_state(RS_REFUSED, who);
-        return;
-    }
-    if (status != 200 || !data || size < 8 || memcmp(data, "CTRRPLAY", 8)) {
-        free(data);
-        printf("Spectate: %s's race could not be downloaded (HTTP %d)\n", who, status);
-        set_state(RS_FAILED, who);
-        return;
-    }
-    char dir[700], path[800];
-    race_dir(dir, sizeof dir);
-    const time_t now = time(NULL);
-    struct tm t;
-#ifdef _WIN32
-    localtime_s(&t, &now);
-#else
-    localtime_r(&now, &t);
-#endif
-    snprintf(path, sizeof path, "%s/%s_%02d%02d%02d.crr", dir, who, t.tm_hour, t.tm_min, t.tm_sec);
-    FILE *f = fopen(path, "wb");
-    const int ok = f && fwrite(data, 1, size, f) == size;
-    if (f) fclose(f);
-    free(data);
-    if (!ok) {
-        printf("Spectate: could not write %s\n", path);
-        set_state(RS_FAILED, who);
-        return;
-    }
-    printf("Spectate: %s's race saved as %s (%zu KB)\n", who, path, size / 1024);
-    fflush(stdout);
-    const char *file = strrchr(path, '/');
-    set_state(file && runtime_replay_can_start() && runtime_replay_play_file(file + 1) ? RS_PLAYING : RS_READY, who);
 }
 
 /* ---- live: the race being recorded goes to the server while it is driven; a friend's comes back ---- */
@@ -428,8 +271,8 @@ static void *worker(void *unused) {
                 follow_name[0] = 0;
                 pthread_mutex_unlock(&lock);
                 set_state(RS_REFUSED, who);
-            } else {
-                fetch(who);
+            } else {                        /* live only: no race now, the next one loads by itself */
+                set_state(RS_FOLLOW, who);
             }
         } else if (turn % 2 == 0) {
             follow_next();
@@ -437,7 +280,6 @@ static void *worker(void *unused) {
         follow_live();
         if (sharing) {
             share_live();
-            if (turn % 6 == 0) share_new_race();
         }
     }
     return NULL;
@@ -447,7 +289,6 @@ void runtime_spectate_start(void) {
     pthread_mutex_lock(&lock);
     const int first = !started;
     started = 1;
-    if (first) since = time(NULL); /* sharing is set by the in-game menu (bbport.ini spectate_share) */
     pthread_mutex_unlock(&lock);
     if (!first) return;
     pthread_t thread;
