@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #ifdef _WIN32
@@ -517,6 +518,31 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     return status;
 }
 
+/* A "Transfer-Encoding: chunked" body decoded in place: its length, or the length given when it is not one. */
+static size_t dechunk(char *body, size_t length) {
+    size_t in = 0, out = 0;
+    while (in < length) {
+        char *end = NULL;
+        const unsigned long chunk = strtoul(body + in, &end, 16);
+        const char *line = end ? strstr(end, "\r\n") : NULL;
+        if (!end || end == body + in || !line) return length;
+        in = (size_t)(line + 2 - body);
+        if (!chunk) return out;
+        if (chunk > length - in) return length;
+        memmove(body + out, body + in, chunk);
+        out += chunk;
+        in += chunk + 2;
+    }
+    return out;
+}
+
+static int chunked_reply(const char *headers, const char *body) {
+    for (const char *h = headers; h && h < body; h = strstr(h, "\r\n"), h = h ? h + 2 : NULL)
+        if (!strncasecmp(h, "Transfer-Encoding:", 18) && strstr(h, "chunked") && strstr(h, "chunked") < strstr(h, "\r\n"))
+            return 1;
+    return 0;
+}
+
 int runtime_ryunet_transfer(const char *method, const char *target, const void *data, size_t size,
                             char **reply, size_t *reply_size, size_t max_reply) {
     *reply = NULL;
@@ -597,7 +623,8 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     const char *start = strstr(buffer, "\r\n\r\n");
     if (start) {
         start += 4;
-        const size_t body = got - (size_t)(start - buffer);
+        size_t body = got - (size_t)(start - buffer);
+        if (chunked_reply(buffer, start)) body = dechunk((char *)start, body);
         if (body > 0) {
             char *out = malloc(body + 1);
             if (out) {
