@@ -1534,13 +1534,18 @@ static void live_extend(void) {
     pthread_mutex_lock(&P.lock);
     if (P.live_header_new) header = P.live_header, P.live_header_new = 0, new_header = 1;
     pthread_mutex_unlock(&P.lock);
+    int named = 0;
     for (int i = 0; new_header && i < RR_RACERS; i++) {
         struct rr_racer *r = &P.header.racer[i];
         r->finished = header.racer[i].finished;
         r->finish_time = header.racer[i].finish_time;
-        if (!r->name[0]) memcpy(r->name, header.racer[i].name, sizeof r->name);
+        if (!r->name[0] && header.racer[i].name[0]) {
+            memcpy(r->name, header.racer[i].name, sizeof r->name);
+            named = 1;
+        }
         r->name[sizeof r->name - 1] = 0;
     }
+    if (named) racer_names();                   /* a nick that came late: the tags and the results take it */
     if (new_header) P.header.duration = header.duration;
     float end = ghost_time(&P.frames[n - 1]);
     if (end > 650.0f) end = 650.0f;

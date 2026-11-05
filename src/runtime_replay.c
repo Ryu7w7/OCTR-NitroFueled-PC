@@ -732,7 +732,10 @@ void ABI runtime_replay_race_frame(void *race) {
     int racers = 0, finished = 0, local_finished = 0;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = kart_of(i, 0);
-        if (kart && (!rr.header.racer[i].kind || !rr.header.racer[i].driver[0]) && PTR(D_RACER_MANAGER)) identify(i, kart);
+        /* (again twice a second while a player has no name yet: online it can come after the racer) */
+        const struct rr_racer *known = &rr.header.racer[i];
+        const int unnamed = known->kind && known->kind != RR_AI && !known->name[0] && rr.header.frames % 30 == 0;
+        if (kart && (!known->kind || !known->driver[0] || unnamed) && PTR(D_RACER_MANAGER)) identify(i, kart);
         sample(&f->racer[i], kart, i);
         racers += !!kart;
         finished += !!(f->racer[i].flags & RS_FINISHED);
