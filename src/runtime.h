@@ -136,6 +136,8 @@ int runtime_race_options_start(unsigned char *image, size_t size);
 void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
 int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
+/* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
+int runtime_replay_no_crates(void);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
 void runtime_file_report(void);

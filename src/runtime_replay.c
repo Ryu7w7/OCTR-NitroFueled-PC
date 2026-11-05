@@ -407,6 +407,7 @@ static void start(void *race) {
     rr.header.go_time = -1.0f;
     rr.header.laps = settings ? AT(settings, 0xc, int32_t) : 0;
     rr.header.mirror = settings && AT(settings, 0x3c, uint8_t);
+    rr.header.no_crates = rr.header.mode == 2 || runtime_speed_race_active();
     void *zones = PTR(D_ZONE_SYSTEM);
     void *zone = zones ? game_current_zone(zones) : 0;
     if (zone) copy_text(rr.header.level, AT(zone, 0x10, const char *), sizeof rr.header.level);

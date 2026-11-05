@@ -494,13 +494,15 @@ static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
     const int room = runtime_private_room_active();
     const int private = private_race_session();
     const int public = runtime_public_itemless_active();
-    const int active = runtime_speed_race_active();
+    /* a replay of a race without crates (Time Trial, Itemless) loads the track without them too */
+    const int replay = runtime_replay_no_crates();
+    const int active = runtime_speed_race_active() || replay;
     /* Log the actual asset decision, not just the menu's selected label. */
     static int previous = -1;
-    const int state = selected | (room << 1) | (private << 2) | (public << 3);
+    const int state = selected | (room << 1) | (private << 2) | (public << 3) | (replay << 4);
     if (__atomic_exchange_n(&previous, state, __ATOMIC_RELAXED) != state)
-        fprintf(stderr, "ITEMLESS assets: selected=%d session_peer=%d private_session=%d public_confirmed=%d view=%s archive=%s\n",
-                selected, room, private, public, active ? "ITEMLESS" : "NORMAL", normal->guest);
+        fprintf(stderr, "ITEMLESS assets: selected=%d session_peer=%d private_session=%d public_confirmed=%d replay=%d view=%s archive=%s\n",
+                selected, room, private, public, replay, active ? "ITEMLESS" : "NORMAL", normal->guest);
     return active ? normal->private_view : normal;
 }
 
