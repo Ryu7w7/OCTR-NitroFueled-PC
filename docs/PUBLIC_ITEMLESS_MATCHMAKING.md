@@ -17,6 +17,11 @@ Itemless assets and gameplay follow the confirmed lobby identity. Leaving,
 cancelling, disconnecting, or changing rooms clears the confirmation. Loading a
 track and rematching retain the current mode.
 
+Public Itemless uses valid final times when the host builds finish order, rather
+than stale stored positions. Clients retain the validated host order for final
+results even if their local times or positions differ. Malformed orders cannot
+replace the last validated result, and loading the next map clears it.
+
 Cup, Team Race, and modified AI difficulty remain unavailable in public
 matchmaking. See [private race modes](PRIVATE_RACE_MODES.md) for those features.
 

@@ -110,10 +110,13 @@ int runtime_online_mode_private_cup_race(void); /* a race of a private room's CU
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
+int runtime_room_mode_prepare_race(void);
+void runtime_room_mode_race_ended(void);
 int runtime_public_itemless_start(unsigned char *image, size_t size);
 int runtime_public_itemless_available(void);
 int runtime_public_itemless_announce(void);
 int runtime_public_itemless_active(void);
+int runtime_public_match_active(void);
 int runtime_private_match_active(void);
 int runtime_private_party_check(void);
 int runtime_private_difficulty_modified(void);
