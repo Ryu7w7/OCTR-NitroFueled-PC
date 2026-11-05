@@ -6,10 +6,11 @@ confirmed lobby mode. Both the party leader and members see
 
 ## Parties and compatibility
 
-The party compatibility check runs before Go To Lobby starts matchmaking.
-If a member is incompatible, the leader sees a native notice naming that player,
-and the party stays in place. Confirming the notice only closes it.
-Itemless rejection does not fall back to Normal matchmaking.
+The server validates every party member as part of the native asynchronous
+matchmaking request. Go To Lobby does not wait for a separate HTTP preflight or
+its cache. Incompatible parties are rejected through the native matchmaking task;
+rejection does not fall back to Normal. The client still verifies the server's
+Itemless lobby confirmation before enabling Itemless gameplay.
 
 ## Mode lifetime
 

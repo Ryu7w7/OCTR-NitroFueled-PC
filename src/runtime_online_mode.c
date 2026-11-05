@@ -581,6 +581,7 @@ static void ABI private_settings_sending(unsigned char *event) {
 /* The map loader runs after settings synchronization, on host and peers. Keep
  * the lobby's racing UI mode until this boundary, then use native CUP scoring. */
 static void ABI load_private_map(const char *map, int reason) {
+    runtime_private_party_cancel();
     private_grid_count = 0;
     const int lobby = map && (!strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby") ||
                              !strcasecmp(map, "octane/octane_startscreen/octane_startscreen"));
@@ -2037,6 +2038,7 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     original_lobby_update(self, owner, dt);
     refresh_lobby_card(owner);
     runtime_public_itemless_update();
+    if (runtime_private_party_update()) return;
     resume_private_map();
 }
 
@@ -2282,13 +2284,25 @@ static void ABI private_start_query(void *context, unsigned char *pins, unsigned
     if (yes) run_graph_node(context, nodes[0]);
 }
 
+static void ABI private_start_gate(void *object);
+static void ABI resume_private_start(void *object) {
+    /* A peer/native transition may have started the race while HTTP was pending. */
+    if (!((unsigned char *)object)[0x42]) private_start_gate(object);
+}
+
 /* Also protect direct/native start callers before the network broadcast. */
-static void ABI private_start_gate(unsigned char *self) {
+static void ABI private_start_gate(void *object) {
+    unsigned char *self=object;
     if (!self[0x42] && is_private() && !battle_selected() && !runtime_room_mode_ready()) {
         native_notice("Room settings are still synchronizing. Please retry Play.", NULL);
         return;
     }
-    if (!self[0x42] && (reject_private_team_start() || !runtime_private_party_check())) return;
+    if (!self[0x42]) {
+        if (reject_private_team_start()) return;
+        int status=runtime_private_party_check();
+        if (status == -1) runtime_private_party_defer_start(self,resume_private_start);
+        if (status != 1) return;
+    }
     original_lobby_start(self);
 }
 
@@ -2678,6 +2692,7 @@ static void ABI results_item_update(unsigned char *self, unsigned char *owner, f
 }
 
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
+    if (runtime_private_party_update()) return;
     if (resume_private_map()) return; /* Loading may invalidate the old UI objects. */
     original_team_slot_update(self, owner, dt);
     gold_name(pointer_at(self, 0x10), gold_allowed()); /* _namePlaceable */

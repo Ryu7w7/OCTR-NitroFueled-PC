@@ -8,6 +8,13 @@
 
 static int compatibility_ready = 1;
 int runtime_private_party_check(void) { return compatibility_ready; }
+static void *deferred_start;
+static void (ABI *resume_start)(void *);
+void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *)) {
+    deferred_start=self; resume_start=resume;
+}
+int runtime_private_party_update(void) { return 0; }
+void runtime_private_party_cancel(void) {}
 static int mode_checks;
 void runtime_race_options_map_loading(const char *map) { (void)map; }
 static int public_available, public_selected, public_active;
@@ -1654,7 +1661,11 @@ static void test_region(size_t shift) {
     gate_lobby[0x42]=0;gate_native_calls=0;compatibility_ready=0;
     start_gate(gate_lobby);
     assert(gate_native_calls==0 && gate_lobby[0x42]==0);
-    compatibility_ready=1;start_gate(gate_lobby);
+    compatibility_ready=-1;start_gate(gate_lobby);
+    assert(gate_native_calls==0 && deferred_start==gate_lobby && resume_start);
+    compatibility_ready=1;gate_lobby[0x42]=1;
+    resume_start(deferred_start);assert(gate_native_calls==0);
+    gate_lobby[0x42]=0;resume_start(deferred_start);
     assert(gate_native_calls==1 && gate_lobby[0x42]==1);
     gate_lobby[0x42]=0;mode_ready=0;
     start_gate(gate_lobby);
