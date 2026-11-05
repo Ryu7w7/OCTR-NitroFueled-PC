@@ -179,6 +179,8 @@ static struct {
     int hero_told;                      /* runtime_replay_hero() logged for this replay */
     int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
+    uint32_t world_id;                  /* the replay's level's world (give_back waits for another) */
+    int back_frames;
     int ghosts_later;                   /* live, loaded before the friend's GO: the ghosts are made at GO */
     int option_set;                     /* skip_intro(): the game's auto-skip fly-by option is ours */
     uint8_t option_was;
@@ -434,6 +436,7 @@ static void give_back(void) {
     P.driver = P.kart_name = 0;
     P.player = 0;
     P.give_back = 0;
+    P.back_frames = 0;
     P.choice = 0;
     puts("Replay: the player's own character is back");
 }
@@ -2109,6 +2112,7 @@ void runtime_replay_play_frame(void) {
     if (frame && !RR_AT(frame, 0x28, uint8_t)) P.level_time += RR_AT(frame, 0x24, float);
     put_choice_back();
     if (!P.set_up) set_up();
+    P.world_id = rr_world_id();
     camera_triggers();
     if (P.ghosts_later) {                       /* live, before the friend's GO: wait for it on the grid */
         live_go();
@@ -2273,7 +2277,10 @@ void ABI runtime_replay_tick(void) {
     for (int i = 1; i < RR_RACERS; i++) ai |= rr_kart_of(i, 0) != 0;
     /* not on the title screen (no world there): the driver given back loads its hero, whose load reads the
      * world's components (a null world: guest 0x3dbfad called from 0xda8eb1, code 3 on leaving a replay) */
-    if (P.give_back && !P.pending && !ai && rr_world()) give_back();
+    if (P.give_back && !P.pending && !ai && rr_world() && rr_world_id() != P.world_id) {
+        /* (the race's world stays until the next level is loaded: not while it goes, the same crash) */
+        if (++P.back_frames >= 30) give_back();
+    }
     if (P.step != STEP_NONE) {
         /* the map loads 1.5 s after the player's kart is made (at most 10 s) */
         if (P.wait) P.wait--;
@@ -2384,10 +2391,15 @@ int runtime_replay_play_install(int eu) {
 
 /* The menu may start a replay: none is starting or playing, and no race is on (no player kart). */
 int runtime_replay_can_start(void) {
-    /* not in a race (a race clock on the world; the menus' karts, the online menu's too, do not count) and not in an
-     * online room (a local race there would break it: the followed race loads once the room is left) */
+    /* no race on (no player kart), and not in the online mode: its lobby is the game's online session even alone in a
+     * room, and a local race started there came back with "not all players are ready" (the followed race loads once
+     * the online menus are left) */
     PingPeer peers[PING_MAX_PEERS];
-    return !P.pending && P.step == STEP_NONE && rr_game(0) && !race_timer() && runtime_net_ping_view(peers, PING_MAX_PEERS) <= 0;
+    const char *level = rr_current_level();
+    int online = 0;
+    for (const char *c = level; c && *c && !online; c++) online = !strncasecmp(c, "onlinelobby", 11);
+    return !P.pending && P.step == STEP_NONE && rr_game(0) && !rr_kart_of(0, 0) && !race_timer() && !online &&
+           runtime_net_ping_view(peers, PING_MAX_PEERS) <= 0;
 }
 
 /* ---- live (runtime_replay.h): runtime_spectate.c's thread gives the frames ---- */

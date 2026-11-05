@@ -670,6 +670,9 @@ float rr_race_clock(void) { return race_clock(); }
 void *rr_game_data(int list, const char *name) { return game_data(list, name); }
 void rr_race_dir(char *out, size_t size) { race_dir(out, size); }
 
+/* The world entity's id: another level's world has another one */
+uint32_t rr_world_id(void) { return AT(image, D_WORLD_ID, uint32_t); }
+
 /* The level loaded now (its zone's name), 0 none */
 const char *rr_current_level(void) {
     void *zones = PTR(D_ZONE_SYSTEM);

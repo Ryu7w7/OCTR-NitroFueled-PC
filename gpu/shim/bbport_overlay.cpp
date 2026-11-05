@@ -930,8 +930,8 @@ void FriendsTab() {
         case RS_FAILED: line = BbSettings::MenuText("Could not download %s's race.", "Не удалось загрузить гонку %s."); break;
         case RS_LIVE: line = BbSettings::MenuText("Watching %s live.", "Смотрите %s в прямом эфире."); break;
         case RS_WAITING: line = BbSettings::MenuText("%s is live: waiting for the race to start...", "%s в эфире: ждём старта..."); break;
-        case RS_BUSY: line = BbSettings::MenuText("%s's race loads once you are not racing or in an online room.",
-                                                  "Гонка %s загрузится, когда вы не в гонке и не в онлайн-комнате."); break;
+        case RS_BUSY: line = BbSettings::MenuText("%s's race loads once you leave the race or the online mode.",
+                                                  "Гонка %s загрузится, когда вы выйдете из гонки или онлайн-режима."); break;
         case RS_PLAYING: line = BbSettings::MenuText("Playing %s's last race.", "Идёт последняя гонка %s."); break;
         case RS_FOLLOW: line = BbSettings::MenuText("Spectating %s: their next race loads by itself.",
                                                     "Смотрите %s: следующая гонка загрузится сама."); break;
