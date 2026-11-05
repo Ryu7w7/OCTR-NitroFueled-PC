@@ -62,6 +62,9 @@ int main(void) {
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
+    /* Keep an unfocused window alive so every virtual-pad check exercises background input. */
+    SDL_Window *background_window=SDL_CreateWindow("Background controller test",320,240,SDL_WINDOW_HIDDEN);
+    assert(background_window && !SDL_GetKeyboardFocus());
     pad_thread_state=-1; /* no bb:pad thread: each read samples first, so the asserts below see it */
     assert(pad_init()==0 && pad_open(1,0,0,NULL)==1);
     PadData data;
@@ -389,6 +392,7 @@ int main(void) {
         }
         pad_thread_state=-1;
     }
+    SDL_DestroyWindow(background_window);
     SDL_Quit();
     unlink(path);
     unlink(config);
