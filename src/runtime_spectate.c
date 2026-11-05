@@ -151,10 +151,11 @@ static int watch_live(const char *who, int only_new) {
         free(data);
         return 404;                         /* the race already seen (or left): wait for the next one */
     }
-    if (ended || header.go_time < 0.0f || frames < 2) {
+    /* from the friend's level start (before GO too): the map loads while their race starts, the replay waits for GO */
+    if (ended || frames < 2) {
         if (ended) seen_race = race, seen_frames = frames;  /* an ended race is not polled whole again */
         free(data);
-        return ended ? 404 : 202;           /* over (its file comes as the last race), or not at GO yet */
+        return ended ? 404 : 202;           /* over, or just started */
     }
     if (!runtime_replay_can_start() && !runtime_replay_can_chain()) {
         free(data);
