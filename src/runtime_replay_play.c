@@ -189,6 +189,7 @@ static struct {
     uint32_t frames;
 } NEXT;
 static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
+static void items_reset(void);
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
@@ -1416,6 +1417,7 @@ void ABI runtime_replay_level_start(void *manager) {
     cast_player(0);
     P.pending = 2;
     drop_ghosts_at_end = 0;
+    items_reset();
     P.level_time = 0.0f;
     if (settings) RR_AT(settings, 0xc, int32_t) = 99;   /* laps: the player's kart never finishes */
     drop_ghosts();
@@ -1515,6 +1517,246 @@ static void live_extend(void) {
     P.laps_scanned = n;
 }
 
+static void *fn(size_t usa, int eu_moved, int eu);
+/* ---- Items and hits (ported from Replay Mode's play.c). They come from the recording only: crates give nothing
+ * (runtime_replay_crate), the karts' own item uses (the AI's, the pad's) and the game's hits are refused
+ * (runtime_replay.c's gates at 0xf0b070 and 0xe330f1); at the recorded moments a shuffle starts that ends with the
+ * recorded item (controller +0x78 _crateCollectedPowerUpType, as a crate of a given type does), the item is used
+ * (the game throws the real one) and the hit is taken. The watched racer's item events go to the HUD (0xe368a0). ---- */
+typedef void ABI item_give_fn(void *controller, int type, int backward, int juiced, int boss, float lifetime);
+typedef void ABI controller_fn(void *controller);
+typedef void ABI shuffle_start_fn(void *controller, float zero);
+typedef int ABI take_damage_fn(void *damage, int type, void **attacker, int flag);
+typedef void *ABI event_new_fn(int pool);
+typedef int ABI faction_fn(void *entity);
+typedef void ABI hud_event_fn(void *project, void *event);
+
+static struct {
+    item_give_fn *give;
+    controller_fn *use, *shuffle_end;
+    shuffle_start_fn *shuffle_start;
+    take_damage_fn *take_damage;
+    event_new_fn *show, *hide, *item, *charges, *reset;
+    faction_fn *faction;
+    int ready, using, hurting;
+    void *slot_kart;                    /* the kart the HUD's item slot shows */
+    uint32_t last;                      /* the frame the item events were made up to */
+    uint32_t hit_used[RR_RACERS], hit_frame[RR_RACERS];
+    int told;
+} IT;
+
+#define HIT_NEAR (RR_RATE * 2 / 5)      /* frames around a recorded hit a real one counts for: 0.4 s */
+#define HIT_WAIT (RR_RATE * 7 / 20)     /* a recorded hit waits 0.35 s for its real one */
+
+static int items_running(void) { return IT.ready && P.pending == 2; }
+
+int ABI runtime_replay_item_gate(void) { return !items_running() || IT.using; }
+
+static void *items_of(void *kart) { return kart ? rr_component(kart, RR_D_POWER_UP_META) : 0; }
+
+static int hit_starts(int r, uint32_t i) {
+    if (i == 0 || i >= frames_now()) return 0;
+    const struct rr_sample *a = &P.frames[i - 1].racer[r], *b = &P.frames[i].racer[r];
+    return b->damage && b->damage != a->damage && b->damage - 1 < 11;
+}
+
+static uint32_t frame_index(void) { return (uint32_t)(frame_now() - P.frames); }
+
+/* A real hit (a replayed item reached a kart) is taken when its racer has a recorded hit near then: the game's own
+ * hit then plays with all its effects. Recorded hits no real one took are made a little later (hurt). */
+int ABI runtime_replay_take_damage(void *damage, int type) {
+    (void)type;
+    int ok = !items_running() || IT.hurting;
+    void *meta = rr_ptr(RR_D_DAMAGE_META);
+    for (int r = 0; !ok && r < RR_RACERS; r++) {
+        void *kart = kart_of_racer(r);
+        if (!kart || !meta || rr_find_component(kart, meta) != damage) continue;
+        const uint32_t now = frame_index(), n = frames_now();
+        for (uint32_t i = now > HIT_NEAR ? now - HIT_NEAR : 1; i <= now + HIT_NEAR && i < n && !ok; i++)
+            if (i > IT.hit_used[r] && hit_starts(r, i)) {
+                ok = 1;
+                IT.hit_used[r] = i;
+                if (IT.hit_frame[r] == i) IT.hit_frame[r] = 0;
+            }
+    }
+    return ok;
+}
+
+/* The item racer r holds next (within 6 s of frame i), or -1 */
+static int next_item(int r, uint32_t i) {
+    const uint32_t n = frames_now();
+    for (uint32_t k = i; k < n && k < i + RR_RATE * 6; k++)
+        if (P.frames[k].racer[r].item >= 0) return P.frames[k].racer[r].item;
+    return -1;
+}
+
+/* The kart holds this item: a running shuffle ends now with it (as a use during a shuffle does, 0xf0b403), else it is
+ * given when the kart holds another or none */
+static void hold(void *controller, int type) {
+    if (type < 0 || type >= 13) return;
+    if (RR_AT(controller, 0x40, uint8_t)) {
+        RR_AT(controller, 0x78, int32_t) = type;
+        IT.shuffle_end(controller);
+        return;
+    }
+    void *stored = rr_handle_object(&RR_AT(controller, 0x30, void *));
+    if (stored && rr_item_type(RR_AT(controller, 0x30, void *)) == type) return;
+    /* an item it still holds goes first: the game keeps it, and the next use threw the wrong one */
+    if (stored) game.make_handle(&RR_AT(controller, 0x30, void *), 0);
+    IT.give(controller, type, 0, 0, 0, 0.0f);
+}
+
+static void use_item(void *kart, int type) {
+    void *controller = items_of(kart);
+    if (!controller) return;
+    hold(controller, type);
+    IT.using = 1;
+    IT.use(controller);
+    IT.using = 0;
+}
+
+/* A ghost takes no damage (CKartControllerComponent +0x260 _isGhost): not a ghost for the call */
+static void hurt(void *kart, int type) {
+    void *damage = rr_component(kart, RR_D_DAMAGE_META), *move = rr_component(kart, RR_D_KART_CONTROLLER_META);
+    void *attacker = 0;
+    if (!damage || !move) return;
+    const uint8_t ghost = RR_AT(move, 0x260, uint8_t);
+    RR_AT(move, 0x260, uint8_t) = 0;
+    IT.hurting = 1;
+    IT.take_damage(damage, type, &attacker, 0);
+    IT.hurting = 0;
+    RR_AT(move, 0x260, uint8_t) = ghost;
+}
+
+/* The item slot: the game sends a kart's item events to that kart's own HUD (the HUD component's project +0x38,
+ * vtable +0xb0). In a replay the watched kart's go to the HUD (the player's kart's), the others' nowhere. */
+static void to_hud(void *kart, void *event) {
+    void *meta = rr_ptr(D_HUD_META);
+    void *hud = kart && meta ? rr_find_component(kart, meta) : 0;
+    void *project = hud ? rr_handle_object(&RR_AT(hud, 0x38, void *)) : 0;
+    if (project) RR_AT(*(void **)project, 0xb0, hud_event_fn *)(project, event);
+}
+
+int ABI runtime_replay_power_event(void *controller, void *event) {
+    if (!items_running()) return 1;
+    void *kart = controller ? RR_AT(controller, 0x18, void *) : 0;
+    if (kart && P.kart && kart == kart_of_racer(P.watch)) to_hud(P.kart, event);
+    return 0;
+}
+
+static void send_event(void *event) {
+    if (!event) return;
+    to_hud(P.kart, event);
+    game.release(event);
+}
+
+/* A new watched racer: its item at once */
+static void item_slot(void) {
+    void *kart = kart_of_racer(P.watch), *controller = items_of(kart);
+    if (kart == IT.slot_kart || !controller || !P.kart) return;
+    IT.slot_kart = kart;
+    send_event(IT.reset(0));
+    void *stored = rr_handle_object(&RR_AT(controller, 0x30, void *));
+    if (!stored) {
+        send_event(IT.hide(0));
+        return;
+    }
+    send_event(IT.show(0));
+    char *racers = rr_ptr(RR_D_RACER_MANAGER);
+    void *racer = racers ? game.racer_of(racers, kart) : 0;
+    void *event = IT.item(0);
+    if (event) {
+        RR_AT(event, 0x18, int32_t) = RR_AT(stored, 0x54, int32_t);         /* as the store (0xe371a0) does */
+        RR_AT(event, 0x1c, uint8_t) = racer && RR_AT(racer, 0x9c, int32_t) > 9;
+        RR_AT(event, 0x20, int32_t) = IT.faction(kart);
+        send_event(event);
+    }
+    const int charges = frame_now()->racer[P.watch].item_count;
+    if (charges > 1 && (event = IT.charges(0))) {
+        RR_AT(event, 0x18, int32_t) = charges;
+        send_event(event);
+    }
+}
+
+static void items_reset(void) {
+    IT.last = 0;
+    IT.slot_kart = 0;
+    memset(IT.hit_used, 0, sizeof IT.hit_used);
+    memset(IT.hit_frame, 0, sizeof IT.hit_frame);
+}
+
+/* Every frame, each racer: its wumpa count (CRacer +0x9c: the HUD's, and an item is juiced from 10) and, while the
+ * replay goes forward, the item events of the frames passed since the last one; after a jump (rewind, forward, a live
+ * catch-up) each kart holds what the racer holds there */
+static void items_frame(void) {
+    if (!IT.ready || !P.started) return;
+    const struct rr_frame *f = frame_now();
+    const uint32_t now = (uint32_t)(f - P.frames), last = IT.last;
+    IT.last = now;
+    const int forward = !P.paused && !P.scrubbing && now > last && now - last <= RR_RATE / 2;
+    char *racers = rr_ptr(RR_D_RACER_MANAGER);
+    for (int r = 0; r < RR_RACERS; r++) {
+        void *kart = kart_of_racer(r);
+        void *racer = kart && racers ? game.racer_of(racers, kart) : 0;
+        void *controller = items_of(kart);
+        if (!racer || !controller) continue;
+        RR_AT(racer, 0x9c, int32_t) = f->racer[r].wumpa;
+        if (!forward) {
+            if (now == last) continue;
+            IT.hit_used[r] = now, IT.hit_frame[r] = 0;
+            const int type = f->racer[r].item;
+            if (type >= 0 && !(f->racer[r].flags & RS_SHUFFLING)) hold(controller, type);
+            else if (type < 0 && rr_handle_object(&RR_AT(controller, 0x30, void *))) game.make_handle(&RR_AT(controller, 0x30, void *), 0);
+            IT.slot_kart = 0;
+            continue;
+        }
+        for (uint32_t i = last + 1; i <= now; i++) {
+            const struct rr_sample *a = &P.frames[i - 1].racer[r], *b = &P.frames[i].racer[r];
+            if (b->item_uses != a->item_uses && a->item >= 0 && a->item < 13) use_item(kart, a->item);
+            const int type = next_item(r, i);
+            if ((b->flags & RS_SHUFFLING) && !(a->flags & RS_SHUFFLING) && type >= 0 && !RR_AT(controller, 0x40, uint8_t) &&
+                !rr_handle_object(&RR_AT(controller, 0x30, void *))) {
+                RR_AT(controller, 0x78, int32_t) = type;
+                IT.shuffle_start(controller, 0.0f);
+            }
+            if (b->item >= 0 && a->item < 0 && !(b->flags & RS_SHUFFLING)) hold(controller, b->item);
+            if (hit_starts(r, i) && i > IT.hit_used[r]) IT.hit_frame[r] = i;
+        }
+        const uint32_t wait = IT.hit_frame[r];
+        if (wait && now >= wait + HIT_WAIT) {
+            IT.hit_frame[r] = 0;
+            if (wait > IT.hit_used[r]) {
+                IT.hit_used[r] = wait;
+                hurt(kart, P.frames[wait].racer[r].damage - 1);
+            }
+        }
+    }
+    item_slot();
+}
+
+static int items_install(int eu) {
+    IT.give = (item_give_fn *)fn(0xe366b0, 0, eu);
+    IT.use = (controller_fn *)fn(0xf0b070, 1, eu);
+    IT.shuffle_start = (shuffle_start_fn *)fn(0xe363e0, 0, eu);
+    IT.shuffle_end = (controller_fn *)fn(0xe37b50, 0, eu);
+    IT.take_damage = (take_damage_fn *)fn(0xe330e0, 0, eu);
+    IT.show = (event_new_fn *)fn(0x117ee70, 1, eu);
+    IT.hide = (event_new_fn *)fn(0x117ef90, 1, eu);
+    IT.item = (event_new_fn *)fn(0x117f1d0, 1, eu);
+    IT.charges = (event_new_fn *)fn(0x117f530, 1, eu);
+    IT.reset = (event_new_fn *)fn(0x117f410, 1, eu);
+    IT.faction = (faction_fn *)fn(0xfe5790, 1, eu);
+    /* (0xf0b070 and 0xe330e0 start with jumps: the recorder's gate, the online mode's damage wrap) */
+    void *const check[] = {IT.give, IT.shuffle_start, IT.shuffle_end, IT.show, IT.hide, IT.item, IT.charges, IT.reset, IT.faction};
+    for (size_t i = 0; i < sizeof check / sizeof *check; i++)
+        if (memcmp(check[i], "\x55\x48\x89\xe5", 4)) {
+            printf("Replay: item function %zu is not the expected code: replays keep the game's own items\n", i);
+            return 0;
+        }
+    IT.ready = 1;
+    return 1;
+}
+
 void runtime_replay_play_frame(void) {
     char *frame = rr_ptr(RR_D_FRAME);
     if (P.pending != 2) return;
@@ -1535,6 +1777,7 @@ void runtime_replay_play_frame(void) {
     drive(P.started ? P.time + RACE_START : RACE_START - 0.2f);
     unghost();
     follow();
+    items_frame();
     hud();
     speed_now(dt);
     publish_view();
@@ -1756,6 +1999,7 @@ int runtime_replay_play_install(int eu) {
             printf("Replay: player function %zu is not the expected code: no replays\n", i);
             return 0;
         }
+    items_install(eu);
     unsigned char *input_fn_at = fn(0xbc3830, 0, eu);
     native_player_input = (player_input_fn *)input_fn_at;
     native_ai_count = game.ai_count;

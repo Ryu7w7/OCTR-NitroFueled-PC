@@ -173,7 +173,7 @@ static float reserves(void *boosts) {
 
 /* The type of a stored item (a handle): the one the factory made it with; else (a kart another PC
  * simulates) from its data, the type's entry of the power-up table */
-static int item_type(void *handle) {
+int rr_item_type(void *handle) {
     static const uint8_t FIELD[12] = {0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x80, 0x70, 0x78};
     for (int i = 1; i <= RR_MADE; i++) {
         const int k = (rr.made_next - i + RR_MADE) % RR_MADE;
@@ -237,7 +237,7 @@ static void sample(struct rr_sample *s, void *kart, int slot) {
         void *stored = handle_object(&AT(items, 0x30, void *));
         if (AT(items, 0x40, uint8_t)) s->flags |= RS_SHUFFLING;
         if (stored) {
-            s->item = (int8_t)item_type(AT(items, 0x30, void *));
+            s->item = (int8_t)rr_item_type(AT(items, 0x30, void *));
             const int32_t charges = s->item == 9 || s->item == 10 ? AT(stored, 0x50, int32_t) : 1;
             s->item_count = (uint8_t)(charges > 0 && charges < 10 ? charges : 1);
         }
@@ -759,16 +759,20 @@ size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, ui
     return used;
 }
 
-/* A kart uses its item (counted with an item stored) */
-void ABI runtime_replay_item_used(void *controller) {
-    if (!rr.recording || !controller || !handle_object(&AT(controller, 0x30, void *))) return;
+/* A kart uses its item (counted with an item stored). 0: a replay refuses it (only the recorded uses are made,
+ * runtime_replay_play.c), the game's function returns at once. */
+int ABI runtime_replay_item_gate(void);
+int ABI runtime_replay_item_used(void *controller) {
+    if (!runtime_replay_item_gate()) return 0;
+    if (!rr.recording || !controller || !handle_object(&AT(controller, 0x30, void *))) return 1;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = kart_of(i, 0);
         if (kart && component(kart, D_POWER_UP_META) == controller) {
             rr.uses[i]++;
-            return;
+            return 1;
         }
     }
+    return 1;
 }
 
 /* The item factory made `object` of `type` */
@@ -788,9 +792,12 @@ void *runtime_replay_cont_race_frame, *runtime_replay_cont_level_exit, *runtime_
      *runtime_replay_ai_body, *runtime_replay_ai_no_entity, *runtime_replay_cont_item_cancel,
      *runtime_replay_cont_item_respawn, *runtime_replay_cont_item_finish, *runtime_replay_cont_item_update,
      *runtime_replay_cont_item_crate, *runtime_replay_cont_item_wumpa, *runtime_replay_cont_hud_lap,
-     *runtime_replay_cont_crate, *runtime_replay_cont_hero;
+     *runtime_replay_cont_crate, *runtime_replay_cont_hero, *runtime_replay_cont_damage, *runtime_replay_cont_power_event,
+     *runtime_replay_stack_guard;
 int ABI runtime_replay_on(void), runtime_replay_crate(void), runtime_replay_hud_lap(void);   /* the player */
 int ABI runtime_replay_hero(void *entities, int index, char **hero, void **outfit);
+int ABI runtime_replay_take_damage(void *damage, int type);        /* runtime_replay_play.c */
+int ABI runtime_replay_power_event(void *controller, void *event);
 extern char *runtime_replay_hero_name;     /* runtime_replay_play.c: what changeHeroAndOutfit gets instead */
 extern void *runtime_replay_hero_outfit;
 void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
@@ -819,7 +826,7 @@ void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
 __asm__(".text\n"
         RR_ENTRY_STUB(runtime_replay_stub_race_frame, runtime_replay_race_frame, runtime_replay_cont_race_frame)
         RR_ENTRY_STUB(runtime_replay_stub_level_exit, runtime_replay_level_end, runtime_replay_cont_level_exit)
-        RR_ENTRY_STUB(runtime_replay_stub_item_used, runtime_replay_item_used, runtime_replay_cont_item_used)
+        RR_GATE_STUB(runtime_replay_stub_item_used, runtime_replay_item_used, runtime_replay_cont_item_used)
         RR_ENTRY_STUB(runtime_replay_stub_level_start, runtime_replay_level_start, runtime_replay_cont_level_start)
         /* replaces "call pad_read" (every frame): the game's call, then the player's tick */
         ".globl runtime_replay_stub_pad_read\n"
@@ -841,6 +848,18 @@ __asm__(".text\n"
         /* changeHeroAndOutfit(entities, index, const string &hero, const handle &outfit, ...): in a replay the
          * player's kart gets the recorded racer's (handler 1: the saved rdx and rcx, at rbx + 56 and + 64,
          * become our string and handle; the game copies both with their reference counts) */
+        /* Replaces "mov rax, [stack guard]" at 0xe330f1 (after the 17 bytes the online mode wraps): a kart takes damage
+         * (rdi its damage component, esi the type). Handler 0 (a replay, not a recorded hit): the function returns
+         * 0, "no damage", undoing its prologue (push rbp, r15, r14, r13, r12, rbx; sub rsp, 0x48). */
+        ".globl runtime_replay_stub_damage\n runtime_replay_stub_damage:\n"
+        RR_SAVE "call runtime_replay_take_damage\n test %eax, %eax\n" RR_RESTORE
+        "jz 1f\n mov runtime_replay_stack_guard(%rip), %rax\n mov (%rax), %rax\n jmp *runtime_replay_cont_damage(%rip)\n"
+        "1: add $0x48, %rsp\n pop %rbx\n pop %r12\n pop %r13\n pop %r14\n pop %r15\n pop %rbp\n xor %eax, %eax\n ret\n"
+        /* 0xe368a0(controller, event): a kart's item events (shuffle, item, charges, show, hide) to its own HUD.
+         * Handler 0: a replay sent it where it goes (the watched racer's to the HUD), the game's function returns. */
+        ".globl runtime_replay_stub_power_event\n runtime_replay_stub_power_event:\n"
+        RR_SAVE "call runtime_replay_power_event\n test %eax, %eax\n" RR_RESTORE
+        "jz 1f\n push %rbp\n mov %rsp, %rbp\n push %r14\n jmp *runtime_replay_cont_power_event(%rip)\n 1: ret\n"
         ".globl runtime_replay_stub_hero\n runtime_replay_stub_hero:\n"
         RR_SAVE "call runtime_replay_hero\n test %eax, %eax\n jz 1f\n"
         "lea runtime_replay_hero_name(%rip), %rax\n mov %rax, 56(%rbx)\n"
@@ -873,7 +892,8 @@ extern void runtime_replay_stub_race_frame(void), runtime_replay_stub_level_exit
     runtime_replay_stub_pad_read(void), runtime_replay_stub_ai_input(void), runtime_replay_stub_crate(void),
     runtime_replay_stub_hud_lap(void), runtime_replay_stub_item_cancel(void), runtime_replay_stub_item_update(void),
     runtime_replay_stub_item_respawn(void), runtime_replay_stub_item_finish(void), runtime_replay_stub_item_crate(void),
-    runtime_replay_stub_item_wumpa(void), runtime_replay_stub_hero(void);
+    runtime_replay_stub_item_wumpa(void), runtime_replay_stub_hero(void), runtime_replay_stub_damage(void),
+    runtime_replay_stub_power_event(void);
 
 static int writable(void *address, size_t length) {
 #ifdef _WIN32
@@ -1008,6 +1028,19 @@ int runtime_replay_start(unsigned char *base, size_t size) {
     /* the player's kart: changeHeroAndOutfit (its callers, the map load among them, read the save's choice) */
     if (player && ai_t && !hook_entry(0xbd5b90, runtime_replay_stub_hero, &runtime_replay_cont_hero))
         printf("Native Replay: changeHeroAndOutfit not found: the player's kart keeps the viewer's driver\n");
+    /* the items: the recorded hits only, and the watched racer's item events to the HUD */
+    static const unsigned char GUARD_LOAD[7] = {0x48, 0x8b, 0x05, 0xa0, 0x3f, 0x9d, 0x01};   /* mov rax, [0x2807098] */
+    static const unsigned char EVENT_PROLOGUE[6] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x56};
+    unsigned char *damage_at = G(0xe330f1), *event_at = G(0xe368a0), *t;
+    int items = 0;
+    if (player && ai_t && !memcmp(damage_at, GUARD_LOAD, 7) && !memcmp(event_at, EVENT_PROLOGUE, 6)) {
+        runtime_replay_stack_guard = G(0x2807098);
+        runtime_replay_cont_damage = damage_at + 7;
+        runtime_replay_cont_power_event = event_at + 6;
+        items = (t = trampoline(runtime_replay_stub_damage)) && rel32(damage_at, 0xe9, t) &&
+                (t = trampoline(runtime_replay_stub_power_event)) && rel32(event_at, 0xe9, t);
+    }
+    if (player && ai_t && !items) printf("Native Replay: the item hooks are not there: items in replays are the game's own\n");
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
