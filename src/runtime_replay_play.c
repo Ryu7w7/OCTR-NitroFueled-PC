@@ -175,7 +175,8 @@ static struct {
     uint32_t input_frame[RR_RACERS];    /* the next frame to make input keys from */
     int input_last[RR_RACERS];
     uint32_t laps_scanned;
-    int skip_set, flyby_seen;           /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
+    int choice_kinds;                   /* choose_recorded(): the choice's fields that hold what we think (-1 not known) */
+    int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
 static int drop_ghosts_at_end;          /* a chained live race: the level that ends still has the last race's ghosts */
@@ -308,6 +309,7 @@ static void keep_choice(int index) {
     char *save = g ? RR_AT(g, 0xdb0, char *) : 0;
     void *list = save ? RR_AT(save, 0x10, void *) : 0;
     P.choice = index >= 0 && index < rr_count(list) ? rr_item(list, index) : 0;
+    P.choice_kinds = -1;
     if (!P.choice) return;
     P.choice_driver = rr_handle_object(&RR_AT(P.choice, 0x10, void *));
     P.choice_kart = rr_handle_object(&RR_AT(P.choice, 0x20, void *));
@@ -408,6 +410,34 @@ static void set_look(void *preset, const char **kart, const struct rr_racer *r) 
     game.make_handle(&RR_AT(preset, 0x28, void *), nth(RR_AT(global, 0x20, void *), r->look[3]));
 }
 
+/* The save's character choice (keep_choice): the map load applies it (changeHeroAndOutfit), which put the
+ * viewer's own driver back on the player's kart. It gets the recorded racer's driver and kart, and its outfit
+ * number, each only when the choice holds the viewer's own one of the same kind (the fields are not known for
+ * sure); put_choice_back gives the viewer's own back. */
+static int skin_index(void *driver_data, void *outfit) {
+    void *skins = driver_data ? RR_AT(driver_data, 0x98, void *) : 0;
+    for (int k = 0; outfit && k < rr_count(skins); k++)
+        if (rr_item(skins, k) && RR_AT(rr_item(skins, k), 0x68, void *) == outfit) return k;
+    return -1;
+}
+
+static void choose_recorded(void *driver, void *kart, const struct rr_racer *rec) {
+    if (!P.choice) return;
+    if (P.choice_kinds < 0) {           /* found once, while the choice still holds the viewer's own */
+        void *own = P.driver ? rr_game_data(RR_DRIVERS, P.driver) : 0;
+        void *own_kart = P.kart_name ? rr_game_data(RR_KARTS, P.kart_name) : 0;
+        const int own_skin = skin_index(own, P.outfit);
+        P.choice_kinds = (own && P.choice_driver == own ? 1 : 0) | (own_kart && P.choice_kart == own_kart ? 2 : 0);
+        if ((P.choice_kinds & 1) && own_skin >= 0 && P.choice_numbers[0] == own_skin) P.choice_kinds |= 4;
+        printf("Replay: the save's character choice: driver %s, kart %s, outfit %s (number %d, own outfit %d)\n",
+               P.choice_kinds & 1 ? "set" : "left", P.choice_kinds & 2 ? "set" : "left", P.choice_kinds & 4 ? "set" : "left",
+               P.choice_numbers[0], own_skin);
+    }
+    if (P.choice_kinds & 1) game.make_handle(&RR_AT(P.choice, 0x10, void *), driver);
+    if (P.choice_kinds & 2) game.make_handle(&RR_AT(P.choice, 0x20, void *), kart);
+    if (P.choice_kinds & 4) RR_AT(P.choice, 0x18, int32_t) = rec->look[5] ? rec->look[5] - 1 : 0;
+}
+
 /* The player's kart shows the recording player (its CPlayer gets that racer's driver, outfit, kart, look) */
 static void cast_player(int ask) {
     if (P.pending != 1) return;
@@ -449,6 +479,7 @@ static void cast_player(int ask) {
             P.laps_was = RR_AT(settings, 0xc, int32_t);
         }
         if (settings) RR_AT(settings, 0x3c, uint8_t) = P.header.mirror;
+        choose_recorded(driver, kart, rec);
     }
 }
 
@@ -1307,7 +1338,10 @@ static void ABI ai_load(void *manager) {
 
 /* The ghost manager's level start: in a replay, a ghost is made for every recorded racer */
 void ABI runtime_replay_level_start(void *manager) {
-    if (!P.pending) return;
+    if (!P.pending) {
+        if (P.give_back) give_back();           /* not given back in the menus (no world there): now */
+        return;
+    }
     char *g = rr_ptr(RR_D_GAME), *settings = rr_ptr(RR_D_RACE_SETTINGS);
     if (P.pending != 1 || !manager || !g || RR_AT(g, 0xd4c, int32_t) != 1) {
         P.pending = 0;                                  /* another level: the replay is over */
@@ -1456,9 +1490,19 @@ static void skip_intro(void) {
         if (!P.skip_set) P.skip_set = 1, P.skip_was = RR_AT(manager, 0x7a, uint8_t), P.flyby_seen = 0;
         RR_AT(manager, 0x7a, uint8_t) = 1;
         char *active = RR_AT(manager, 0xa0, char *);   /* _activeCutsceneData, _isFlybyIntro +0x30 */
-        if (active && RR_AT(active, 0x30, uint8_t) && !P.flyby_seen) {
-            P.flyby_seen = 1;
-            printf("Replay: the track's fly-over plays anyway\n");
+        if (active && RR_AT(active, 0x30, uint8_t)) {
+            /* _skipCutscenes does not stop the fly-over: _scheduledToStop (+0x20), written only while it reads as
+             * a bool (0 or 1: its type is not known for sure) */
+            const uint64_t stop = RR_AT(manager, 0x20, uint64_t);
+            if (stop <= 1) RR_AT(manager, 0x20, uint8_t) = 1;
+            if (!P.flyby_seen) {
+                P.flyby_seen = 1;
+                printf("Replay: the track's fly-over: stopping it (_scheduledToStop was %#llx)\n", (unsigned long long)stop);
+                fflush(stdout);
+            }
+        } else if (P.flyby_seen == 1 && P.pending == 2) {
+            P.flyby_seen = 2;
+            printf("Replay: the track's fly-over is over\n");
             fflush(stdout);
         }
     } else if (P.skip_set) {
@@ -1552,13 +1596,16 @@ void ABI runtime_replay_tick(void) {
     }
     int ai = 0;
     for (int i = 1; i < RR_RACERS; i++) ai |= rr_kart_of(i, 0) != 0;
-    if (P.give_back && !P.pending && !ai) give_back();
+    /* not on the title screen (no world there): the driver given back loads its hero, whose load reads the
+     * world's components (a null world: guest 0x3dbfad called from 0xda8eb1, code 3 on leaving a replay) */
+    if (P.give_back && !P.pending && !ai && rr_world()) give_back();
     if (P.step != STEP_NONE) {
         /* the map loads 1.5 s after the player's kart is made (at most 10 s) */
         if (P.wait) P.wait--;
         else if (P.step == STEP_LOAD) {
             /* the recording player's character is asked as the map starts loading (the frames do not count
              * while it loads: 5 frames later came after the level start), and again 5 frames later */
+            cast_player(1);                     /* the save's choice too, which direct_go applies */
             direct_go();
             cast_player(1);
             fflush(stdout);
