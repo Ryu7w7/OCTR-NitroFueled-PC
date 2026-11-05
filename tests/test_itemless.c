@@ -45,7 +45,9 @@ static void test_track_rules(void) {
     memcpy(code + 32, "\x49\x3b\x44\x24\x10\x75\x06\x89\xc8\x41\x5c\xc3\x90\x0f\x0b", 15);
     assert(crate_mode_stub(code + 64, &manager_ptr, code + 32) < 256);
     int (ABI *bridge)(void *) = (void *)code;
-    for (active = 0; active <= 1; ++active) {
+    const int transitions[] = {0, 1, 0, 1, 0};
+    for (size_t step = 0; step < sizeof transitions / sizeof *transitions; ++step) {
+        active = transitions[step];
         for (int mode = 0; mode <= 15; ++mode) {
             int expected = active && (mode == 1 || mode == 6) ? 2 : mode;
             assert(layer_filter(owner, (const char *)other, mode) == expected);
