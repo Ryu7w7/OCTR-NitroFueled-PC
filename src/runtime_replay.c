@@ -68,6 +68,7 @@ static struct {
     struct rr_frame *frames;
     void *race;
     uint8_t uses[RR_RACERS];
+    uint8_t pressed[RR_RACERS];         /* the item button with nothing stored since the last sample */
     uint8_t launch[RR_RACERS];          /* the direction of each racer's last use + 1 (RS_LAUNCH_SHIFT), 0 not known */
     struct { void *object; int32_t type; } made[RR_MADE];
     int made_next;
@@ -245,6 +246,7 @@ static void sample(struct rr_sample *s, void *kart, int slot) {
     }
     s->item_uses = rr.uses[slot];
     s->flags |= (uint16_t)((rr.launch[slot] & 3u) << RS_LAUNCH_SHIFT);
+    if (rr.pressed[slot]) s->flags |= RS_PRESSED, rr.pressed[slot] = 0;
     void *horn = component(kart, D_HORN_META);
     if (horn && AT(horn, 0x30, uint8_t)) s->flags |= RS_HONK;
     void *damage = component(kart, D_DAMAGE_META);
@@ -421,6 +423,7 @@ static void start(void *race) {
     rr.recording = 1;
     memset(rr.uses, 0, sizeof rr.uses);
     memset(rr.launch, 0, sizeof rr.launch);
+    memset(rr.pressed, 0, sizeof rr.pressed);
     pthread_mutex_lock(&live.lock);
     live.race_id++;
     live.header = rr.header;
@@ -777,11 +780,13 @@ size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, ui
 int ABI runtime_replay_item_gate(void);
 int ABI runtime_replay_item_used(void *controller) {
     if (!runtime_replay_item_gate()) return 0;
-    if (!rr.recording || !controller || !handle_object(&AT(controller, 0x30, void *))) return 1;
+    if (!rr.recording || !controller) return 1;
+    const int stored = handle_object(&AT(controller, 0x30, void *)) != 0;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = kart_of(i, 0);
         if (kart && component(kart, D_POWER_UP_META) == controller) {
-            rr.uses[i]++;
+            if (stored) rr.uses[i]++;
+            else rr.pressed[i] = 1;
             const int32_t direction = AT(controller, 0x28, int32_t);   /* _launchDirection, set by the use input */
             rr.launch[i] = direction >= 0 && direction <= 2 ? (uint8_t)(direction + 1) : 0;
             return 1;

@@ -2062,6 +2062,13 @@ static void items_frame(void) {
         for (uint32_t i = last + 1; i <= now; i++) {
             const struct rr_sample *a = &P.frames[i - 1].racer[r], *b = &P.frames[i].racer[r];
             if (b->item_uses != a->item_uses && a->item >= 0 && a->item < 13) use_item(kart, a->item, b->flags);
+            if ((b->flags & RS_PRESSED) && shield_up(kart)) {       /* a bubble up: the same use throws it */
+                const unsigned launch = (b->flags & RS_LAUNCH_MASK) >> RS_LAUNCH_SHIFT;
+                if (launch) RR_AT(controller, 0x28, int32_t) = (int32_t)launch - 1;
+                IT.using = 1;
+                IT.use(controller);
+                IT.using = 0;
+            }
             const int type = next_item(r, i);
             if ((b->flags & RS_SHUFFLING) && !(a->flags & RS_SHUFFLING) && type >= 0 && !RR_AT(controller, 0x40, uint8_t) &&
                 !rr_handle_object(&RR_AT(controller, 0x30, void *))) {
@@ -2121,16 +2128,20 @@ static int items_install(int eu) {
 static struct {
     event_new_fn *spawn;
     int sent, tries, told;
-    void *manager;
+    void *manager, *owner;
     uint32_t frames;
 } TAGS;
 
+static void *behavior_owner;            /* find_behavior: the placeable that holds what it found */
 static void *find_behavior(void *placeable, size_t vtable, int depth) {
     if (!placeable || depth > 24) return 0;
     void *list = RR_AT(placeable, 0xe8, void *);
     for (int i = 0; i < rr_count(list); i++) {
         void *b = rr_item(list, i);
-        if (b && RR_AT(b, 0, const void *) == (const void *)rr_game(vtable)) return b;
+        if (b && RR_AT(b, 0, const void *) == (const void *)rr_game(vtable)) {
+            behavior_owner = placeable;
+            return b;
+        }
     }
     void *children = RR_AT(placeable, 0x48, void *);
     for (int i = 0; i < rr_count(children); i++) {
@@ -2152,6 +2163,7 @@ static void nicknames(void) {
         if (TAGS.tries > 12) return;
         if (!TAGS.tries++ ) printf("Replay: looking for the HUD's kart markers\n");
         TAGS.manager = find_behavior(RR_AT(project, 0x10, void *), KART_MARKER_MANAGER_VTABLE, 0);
+        TAGS.owner = TAGS.manager ? behavior_owner : 0;
         if (!TAGS.manager) {
             if (TAGS.tries > 12) printf("Replay: this HUD has no kart markers: no nicknames over the karts\n");
             fflush(stdout);
@@ -2165,6 +2177,8 @@ static void nicknames(void) {
         fflush(stdout);
         return;
     }
+    /* the manager hides itself outside online races and battles (0x9d85c5: its placeable's hidden bit, +0xc 0x400) */
+    if (TAGS.owner) game.set_hidden(TAGS.owner, 0);
     char *racers = rr_ptr(RR_D_RACER_MANAGER);
     void *list = RR_AT(TAGS.manager, 0x18, void *);
     const int n = rr_count(list);
@@ -2175,6 +2189,7 @@ static void nicknames(void) {
         void *racer = marker ? rr_handle_object(&RR_AT(marker, 0x70, void *)) : 0;
         void *tag = marker ? RR_AT(marker, 0x50, void *) : 0;
         if (!racer || !tag) continue;
+        game.set_hidden(placeable, 0);
         for (int r = 0; r < RR_RACERS; r++) {
             void *kart = kart_of_racer(r);
             if (!kart || game.racer_of(racers, kart) != racer) continue;
@@ -2195,7 +2210,7 @@ static void nicknames(void) {
 
 static void tags_reset(void) {
     TAGS.sent = TAGS.tries = TAGS.told = 0;
-    TAGS.manager = 0;
+    TAGS.manager = TAGS.owner = 0;
     TAGS.frames = 0;
 }
 

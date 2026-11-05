@@ -79,6 +79,8 @@ enum { RS_PRESENT = 1, RS_FINISHED = 2, RS_ON_GROUND = 4, RS_BOOSTING = 8, RS_DR
  * forward, 1 neutral, 2 backward), 0 not known (older files, other PCs' karts) */
 #define RS_LAUNCH_SHIFT 12
 #define RS_LAUNCH_MASK (3u << RS_LAUNCH_SHIFT)
+/* flags bit 14: the item button with nothing stored (a bubble up: it throws it) */
+#define RS_PRESSED (1u << 14)
 
 struct rr_frame {
     float time;
