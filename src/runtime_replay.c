@@ -788,8 +788,11 @@ void *runtime_replay_cont_race_frame, *runtime_replay_cont_level_exit, *runtime_
      *runtime_replay_ai_body, *runtime_replay_ai_no_entity, *runtime_replay_cont_item_cancel,
      *runtime_replay_cont_item_respawn, *runtime_replay_cont_item_finish, *runtime_replay_cont_item_update,
      *runtime_replay_cont_item_crate, *runtime_replay_cont_item_wumpa, *runtime_replay_cont_hud_lap,
-     *runtime_replay_cont_crate;
+     *runtime_replay_cont_crate, *runtime_replay_cont_hero;
 int ABI runtime_replay_on(void), runtime_replay_crate(void), runtime_replay_hud_lap(void);   /* the player */
+int ABI runtime_replay_hero(void *entities, int index, char **hero, void **outfit);
+extern char *runtime_replay_hero_name;     /* runtime_replay_play.c: what changeHeroAndOutfit gets instead */
+extern void *runtime_replay_hero_outfit;
 void ABI runtime_replay_tick(void);         /* runtime_replay_play.c */
 
 #define RR_SAVE                                                                                       \
@@ -835,6 +838,14 @@ __asm__(".text\n"
          * (items come from the recording), the HUD's lap (ours) */
         RR_GATE_STUB(runtime_replay_stub_crate, runtime_replay_crate, runtime_replay_cont_crate)
         RR_GATE_STUB(runtime_replay_stub_hud_lap, runtime_replay_hud_lap, runtime_replay_cont_hud_lap)
+        /* changeHeroAndOutfit(entities, index, const string &hero, const handle &outfit, ...): in a replay the
+         * player's kart gets the recorded racer's (handler 1: the saved rdx and rcx, at rbx + 56 and + 64,
+         * become our string and handle; the game copies both with their reference counts) */
+        ".globl runtime_replay_stub_hero\n runtime_replay_stub_hero:\n"
+        RR_SAVE "call runtime_replay_hero\n test %eax, %eax\n jz 1f\n"
+        "lea runtime_replay_hero_name(%rip), %rax\n mov %rax, 56(%rbx)\n"
+        "lea runtime_replay_hero_outfit(%rip), %rax\n mov %rax, 64(%rbx)\n"
+        "1:\n" RR_RESTORE "push %rbp\n mov %rsp, %rbp\n push %r15\n jmp *runtime_replay_cont_hero(%rip)\n"
         /* A rewind clears the items: their components stay on the karts' message lists. An old item with no
          * entity left (+0x18) ends or updates as nothing; what items do on a respawn, finish, crate or wumpa
          * is skipped in a replay (it would run on freed memory). */
@@ -862,7 +873,7 @@ extern void runtime_replay_stub_race_frame(void), runtime_replay_stub_level_exit
     runtime_replay_stub_pad_read(void), runtime_replay_stub_ai_input(void), runtime_replay_stub_crate(void),
     runtime_replay_stub_hud_lap(void), runtime_replay_stub_item_cancel(void), runtime_replay_stub_item_update(void),
     runtime_replay_stub_item_respawn(void), runtime_replay_stub_item_finish(void), runtime_replay_stub_item_crate(void),
-    runtime_replay_stub_item_wumpa(void);
+    runtime_replay_stub_item_wumpa(void), runtime_replay_stub_hero(void);
 
 static int writable(void *address, size_t length) {
 #ifdef _WIN32
@@ -994,6 +1005,9 @@ int runtime_replay_start(unsigned char *base, size_t size) {
                  hook_bytes(0xe359b0, ITEM_STATE, runtime_replay_stub_item_finish, &runtime_replay_cont_item_finish) &&
                  hook_bytes(0xe359e0, PROLOGUE, runtime_replay_stub_item_crate, &runtime_replay_cont_item_crate) &&
                  hook_bytes(0xe35b80, PROLOGUE, runtime_replay_stub_item_wumpa, &runtime_replay_cont_item_wumpa);
+    /* the player's kart: changeHeroAndOutfit (its callers, the map load among them, read the save's choice) */
+    if (player && ai_t && !hook_entry(0xbd5b90, runtime_replay_stub_hero, &runtime_replay_cont_hero))
+        printf("Native Replay: changeHeroAndOutfit not found: the player's kart keeps the viewer's driver\n");
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif

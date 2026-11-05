@@ -175,7 +175,8 @@ static struct {
     uint32_t input_frame[RR_RACERS];    /* the next frame to make input keys from */
     int input_last[RR_RACERS];
     uint32_t laps_scanned;
-    int choice_kinds;                   /* choose_recorded(): the choice's fields that hold what we think (-1 not known) */
+    int hero_told;                      /* runtime_replay_hero() logged for this replay */
+    int choice_kinds;                  /* choose_recorded(): the choice's fields that hold what we think (-1 not known) */
     int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
@@ -436,6 +437,34 @@ static void choose_recorded(void *driver, void *kart, const struct rr_racer *rec
     if (P.choice_kinds & 1) game.make_handle(&RR_AT(P.choice, 0x10, void *), driver);
     if (P.choice_kinds & 2) game.make_handle(&RR_AT(P.choice, 0x20, void *), kart);
     if (P.choice_kinds & 4) RR_AT(P.choice, 0x18, int32_t) = rec->look[5] ? rec->look[5] - 1 : 0;
+}
+
+/* changeHeroAndOutfit (runtime_replay.c's stub, guest 0xbd5b90): whatever its caller read (the save's choice, the
+ * profile), during a replay the player's kart gets the recorded racer's driver and outfit. 1: the stub hands the
+ * game these two instead of its own. */
+char *runtime_replay_hero_name;
+void *runtime_replay_hero_outfit;
+int ABI runtime_replay_hero(void *entities, int index, char **hero, void **outfit) {
+    (void)outfit;
+    if (!P.pending || P.player_slot < 0 || !entities || entities != rr_ptr(D_PLAYER_ENTITIES)) return 0;
+    void *player = local_player();
+    if (!player || RR_AT(player, 0xb4, int32_t) != index) return 0;
+    const struct rr_racer *rec = &P.header.racer[P.player_slot];
+    void *driver = rec->driver[0] ? rr_game_data(RR_DRIVERS, rec->driver) : 0;
+    if (!driver) return 0;
+    if (!runtime_replay_hero_name || strcmp(runtime_replay_hero_name, rec->driver)) {
+        char *old = runtime_replay_hero_name;
+        runtime_replay_hero_name = game.string(string_pool(), rec->driver);
+        if (old) game.string_release(string_pool(), old - 0x10);
+    }
+    game.make_handle(&runtime_replay_hero_outfit, outfit_of(driver, rec));
+    if (!P.hero_told) {
+        P.hero_told = 1;
+        printf("Replay: changeHeroAndOutfit asked for %s on the player's kart: %s instead\n", hero && *hero ? *hero : "-",
+               rec->driver);
+        fflush(stdout);
+    }
+    return runtime_replay_hero_name != 0;
 }
 
 /* The player's kart shows the recording player (its CPlayer gets that racer's driver, outfit, kart, look) */
@@ -1563,6 +1592,7 @@ void ABI runtime_replay_tick(void) {
             P.mirror_was = -1;
         }
         P.accolade_player = -2;
+        P.hero_told = 0;
         P.set_up = P.started = P.paused = P.scrubbing = P.rewound = 0;
         P.camera = P.target = P.kart = 0;
         P.time = 0.0f;
