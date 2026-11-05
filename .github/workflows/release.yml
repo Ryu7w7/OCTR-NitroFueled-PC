@@ -11,6 +11,24 @@ permissions:
   contents: read
 
 jobs:
+  boot-cache-checks:
+    name: Boot cache (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: ISA decoder
+        run: python -m pip install iced-x86
+      - name: Cache and filesystem contracts
+        run: python -m unittest discover -s tests -p 'test_boot_cache*.py' -v
+
   checks:
     name: Source checks
     runs-on: ubuntu-24.04
@@ -35,7 +53,7 @@ jobs:
   linux:
     name: Linux AppImage
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    needs: checks
+    needs: [checks, boot-cache-checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -74,7 +92,7 @@ jobs:
   windows:
     name: Windows portable ZIP
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    needs: checks
+    needs: [checks, boot-cache-checks]
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:

@@ -99,7 +99,7 @@ Neither those standings nor the end-race menu receive additional background chan
 No external background dependencies are added. Archive cache format 13 rebuilds older
 cached corrections. The USA path prepares 227 entries and 16 executable writes.
 
-Both 21:9 and 32:9 were user-confirmed working with online enabled on the official
+I confirmed both 21:9 and 32:9 work with online enabled on the official
 v0.5.4 Windows engine and USA 1.21. Startup text, notifications, racer names and Wumpa
 backgrounds were reviewed during that work. This does not certify every output size,
 transition, engine build or edition. The online interface asset/projection additions

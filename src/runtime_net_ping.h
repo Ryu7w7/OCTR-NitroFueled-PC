@@ -51,6 +51,7 @@ int ping_on_packet(const uint8_t *in, size_t len, uint32_t ip, uint16_t port, ui
                    uint8_t *reply, size_t cap, size_t *reply_len);
 /* The players in the room (the peers the game sends to), by nickname: their count. */
 int ping_view(uint64_t now_ms, PingPeer *out, int max);
+int ping_peer_name(uint32_t ip, uint16_t port, uint64_t now_ms, char out[PING_NAME]);
 
 /* runtime_net.c: ping_view now, for the menu. */
 int runtime_net_ping_view(PingPeer *out, int max);

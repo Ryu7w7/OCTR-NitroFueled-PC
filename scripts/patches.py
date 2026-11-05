@@ -574,6 +574,7 @@ def main():
     p.add_argument('--app-version',default=APP_VERSION)
     p.add_argument('--title-id',default=TITLE_ID,help='the game (patch files naming other ids are skipped)')
     p.add_argument('--out',type=Path,default=root/'out')
+    p.add_argument('--boot-dir',type=Path,help='verified boot inputs (default: --out for standalone tools)')
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
     p.add_argument('--print-cutscene',action='store_true',
@@ -583,19 +584,20 @@ def main():
     p.add_argument('--print-plan',action='store_true',
                    help='print "PRO HEAP LABEL" of the render plan (run.sh), or nothing, and exit')
     a=p.parse_args()
+    boot = a.boot_dir if a.boot_dir is not None else a.out
     if a.print_cutscene:
-        found=cutscene_state(a.out)
+        found=cutscene_state(boot)
         if found: print(f'{found[0]:#x} {found[1]:#x} {found[2]:#x}'+(f' {found[3]:#x}' if found[3] is not None else ''))
         return
     if a.print_frontend:
-        found=frontend_state(a.out)
+        found=frontend_state(boot)
         if found: print(' '.join(f'{v:#x}' for v in found))
         return
     if a.print_plan:
         plan=render_plan(read_settings(a.settings))
         if plan: print(int(plan['pro']),int(plan['heap']),plan['label'])
         return
-    elf=(a.out/'eboot.elf').read_bytes()
+    elf=(boot/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
     found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
