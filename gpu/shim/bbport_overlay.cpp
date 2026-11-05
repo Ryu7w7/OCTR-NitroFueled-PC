@@ -661,11 +661,44 @@ void ReplaysTab() {
         ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("Replays start from the menus, not during a race.",
                                                                    "Повторы запускаются из меню, не во время гонки."));
     }
+    // managing them: the shared "replays" folder next to bbport.ini (export copies a race there, import takes the
+    // races put there), and deleting one (asked twice)
+    static std::string status;
+    static double status_at = -100.0;
+    static char confirm_delete[64] = "";
+    const auto say = [&](const std::string& text) {
+        status = text;
+        status_at = now;
+    };
+    if (ImGui::Button(BbSettings::MenuText("Import", "Импорт"))) {
+        const int copied = runtime_replay_import();
+        char text[160];
+        if (copied < 0) {
+            std::snprintf(text, sizeof text, "%s",
+                          BbSettings::MenuText("No races in the replays folder: put .crr files there first.",
+                                               "В папке replays нет гонок."));
+        } else {
+            std::snprintf(text, sizeof text, BbSettings::MenuText("%d new race(s) imported.", "Импортировано: %d."), copied);
+        }
+        say(text);
+        listed = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(BbSettings::MenuText("Open folder", "Открыть папку"))) {
+        char folder[700];
+        runtime_replay_folder(folder, sizeof folder);
+        std::string url = "file:///";
+        for (const char* c = folder; *c; ++c) url += *c == '\\' ? '/' : *c;
+        SDL_OpenURL(url.c_str());
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", BbSettings::MenuText("(the replays folder next to the game)", "(папка replays рядом с игрой)"));
+    if (!status.empty() && now - status_at < 6.0) ImGui::TextColored(kFriendGreen, "%s", status.c_str());
     if (!listed) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("No races recorded yet.", "Записанных гонок пока нет."));
         return;
     }
-    if (ImGui::BeginTable("##replays", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+    if (ImGui::BeginTable("##replays", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
         for (int i = 0; i < listed; ++i) {
             const RrListEntry& e = list[i];
             ImGui::PushID(i);
@@ -685,6 +718,28 @@ void ReplaysTab() {
             else ImGui::TextDisabled("-");
             ImGui::TableNextColumn();
             ImGui::TextDisabled("%s  %d:%02d", e.when, (int)e.duration / 60, (int)e.duration % 60);
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton(BbSettings::MenuText("Export", "Экспорт"))) {
+                char saved[200] = "", text[300];
+                if (runtime_replay_export(e.file, saved, sizeof saved)) {
+                    std::snprintf(text, sizeof text, BbSettings::MenuText("Exported to the replays folder: %s",
+                                                                          "Сохранено в папку replays: %s"), saved);
+                } else {
+                    std::snprintf(text, sizeof text, "%s", BbSettings::MenuText("Could not export it.", "Не удалось экспортировать."));
+                }
+                say(text);
+            }
+            ImGui::TableNextColumn();
+            if (!std::strcmp(confirm_delete, e.file)) {
+                if (ImGui::SmallButton(BbSettings::MenuText("Sure? Delete", "Точно удалить?"))) {
+                    say(runtime_replay_delete(e.file) ? BbSettings::MenuText("Deleted.", "Удалено.")
+                                                      : BbSettings::MenuText("Could not delete it.", "Не удалось удалить."));
+                    confirm_delete[0] = 0;
+                    listed = -1;
+                }
+            } else if (ImGui::SmallButton(BbSettings::MenuText("Delete", "Удалить"))) {
+                std::snprintf(confirm_delete, sizeof confirm_delete, "%s", e.file);
+            }
             ImGui::PopID();
         }
         ImGui::EndTable();

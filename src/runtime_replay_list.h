@@ -1,6 +1,8 @@
 #ifndef RUNTIME_REPLAY_LIST_H
 #define RUNTIME_REPLAY_LIST_H
 
+#include <stddef.h>
+
 /* The in-game menu's Replays tab (spectator build): the races in RaceReplay, newest first. */
 
 #ifdef __cplusplus
@@ -28,6 +30,14 @@ int runtime_replay_play_file(const char *name);
 int runtime_replay_can_start(void);
 /* 1 while a replay is loading or playing. */
 int runtime_replay_playing(void);
+/* Managing the list. The shared folder: "replays" next to bbport.ini (made when missing), as a full path. */
+void runtime_replay_folder(char *out, size_t size);
+/* Copies a race of the list to the shared folder with a readable name (saved_as: that name). 1 = done. */
+int runtime_replay_export(const char *file, char *saved_as, size_t size);
+/* Copies the shared folder's races RaceReplay does not have yet: the number copied, -1 when there is none there. */
+int runtime_replay_import(void);
+/* Deletes a race of the list. 1 = done. */
+int runtime_replay_delete(const char *file);
 
 /* What the replay panel shows (taken every frame from the game's thread). */
 typedef struct {
