@@ -337,9 +337,71 @@ static void request_character(void *player, const char *driver, void *outfit, co
     if (slot) set_string(slot, 0x30, kart);
 }
 
+/* The kart and its look on the player's kart. The map start (guest 0xe73820) gives each vehicle (kart manager
+ * +0x10 + 8 * slot) the kart named at +0x38 (+0x30 is the current one, +0x40 its wheels) and the look comes
+ * from the customization table (+0x10 + 0x88 * slot: wheels, paint, decal, sticker, ... every 0x20, as the
+ * recorder reads them). Both get the recorded racer's while a replay loads or plays, and the viewer's own
+ * back afterwards (give_back). */
+static int32_t look_value(uint16_t v);
+static struct {
+    int saved;
+    int64_t look[5];
+    char *start_kart;
+    int32_t wheels;
+    int told;
+} OWN;
+
+static char *vehicle_of(int index) {
+    char *karts = rr_ptr(RR_D_KART_MANAGER);
+    return karts && (uint32_t)index < 8 ? RR_AT(karts, 0x10 + 8 * index, char *) : 0;
+}
+
+static void apply_look(void) {
+    void *player = P.pending && P.player_slot >= 0 ? local_player() : 0;
+    const struct rr_racer *rec = player ? &P.header.racer[P.player_slot] : 0;
+    if (!rec || !rec->kart[0] || !rr_game_data(RR_KARTS, rec->kart)) return;
+    const int index = RR_AT(player, 0xb4, int32_t);
+    char *custom = rr_ptr(RR_D_CUSTOMIZATION), *vehicle = vehicle_of(index);
+    int64_t *look = custom && (uint32_t)index < 8 ? (int64_t *)(custom + 0x10 + 0x88 * index) : 0;
+    if (!OWN.saved && look && vehicle) {
+        OWN.saved = 1;
+        for (int k = 0; k < 5; k++) OWN.look[k] = look[k * 4];
+        const char *own = RR_AT(vehicle, 0x38, const char *);
+        OWN.start_kart = own ? game.string(string_pool(), own) : 0;
+        OWN.wheels = RR_AT(vehicle, 0x40, int32_t);
+    }
+    if (!OWN.saved) return;
+    const char *start = vehicle ? RR_AT(vehicle, 0x38, const char *) : 0;
+    if (vehicle && (!start || strcmp(start, rec->kart))) set_string(vehicle, 0x38, rec->kart);
+    if (vehicle && rec->look_filled) RR_AT(vehicle, 0x40, int32_t) = look_value(rec->look[0]);
+    for (int k = 0; look && rec->look_filled && k < 5; k++) look[k * 4] = look_value(rec->look[k]);
+    if (!OWN.told) {
+        OWN.told = 1;
+        printf("Replay: the player's kart is %s, look %d %d %d %d %d (own: %s)\n", rec->kart, look_value(rec->look[0]),
+               look_value(rec->look[1]), look_value(rec->look[2]), look_value(rec->look[3]), look_value(rec->look[4]),
+               OWN.start_kart ? OWN.start_kart : "-");
+        fflush(stdout);
+    }
+}
+
+static void restore_look(void *player) {
+    if (!OWN.saved || !player) return;
+    const int index = RR_AT(player, 0xb4, int32_t);
+    char *custom = rr_ptr(RR_D_CUSTOMIZATION), *vehicle = vehicle_of(index);
+    if (custom && (uint32_t)index < 8)
+        for (int k = 0; k < 5; k++) ((int64_t *)(custom + 0x10 + 0x88 * index))[k * 4] = OWN.look[k];
+    if (vehicle && OWN.start_kart) set_string(vehicle, 0x38, OWN.start_kart);
+    if (vehicle && P.kart_name) set_string(vehicle, 0x30, P.kart_name);
+    if (vehicle) RR_AT(vehicle, 0x40, int32_t) = OWN.wheels;
+    if (OWN.start_kart) game.string_release(string_pool(), OWN.start_kart - 0x10);
+    OWN.start_kart = 0;
+    OWN.saved = OWN.told = 0;
+}
+
 static void give_back(void) {
     void *player = local_player();
     put_choice_back();
+    restore_look(player);
     char *settings = rr_ptr(RR_D_RACE_SETTINGS);
     if (settings && P.mirror_was >= 0) {
         RR_AT(settings, 0x3c, uint8_t) = (uint8_t)P.mirror_was;
@@ -1515,6 +1577,7 @@ static void skip_intro(void) {
 /* Every frame (the pad read, runtime_replay.c): the menu's request, the start sequence, the character given back */
 void ABI runtime_replay_tick(void) {
     skip_intro();
+    apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
     if (number == P.last_frame) return;
@@ -1607,9 +1670,10 @@ void ABI runtime_replay_tick(void) {
         else if (P.step == STEP_LOAD) {
             /* the recording player's character is asked as the map starts loading (the frames do not count
              * while it loads: 5 frames later came after the level start), and again 5 frames later */
-            cast_player(1);                     /* the save's choice too, which direct_go applies */
+            cast_player(1);
             direct_go();
             cast_player(1);
+            apply_look();                       /* after direct_go, which applies the save's choice */
             fflush(stdout);
             P.step = STEP_NONE, P.cast_in = 5;
         }

@@ -867,7 +867,7 @@ void FriendsTab() {
         runtime_spectate_status(&spectate, who, sizeof who);
         const char* line = nullptr;
         switch (spectate) {
-        case RS_FETCHING: line = BbSettings::MenuText("Downloading %s's last race...", "Загрузка последней гонки %s..."); break;
+        case RS_FETCHING: line = BbSettings::MenuText("Looking for %s's live race...", "Ищем гонку %s в эфире..."); break;
         case RS_READY: line = BbSettings::MenuText("%s's last race is ready: main menu > REPLAYS (top of the list).",
                                                    "Последняя гонка %s готова: главное меню > REPLAYS (вверху)."); break;
         case RS_NONE: line = BbSettings::MenuText("%s has no recent race to watch.", "У %s нет недавних гонок."); break;
@@ -935,9 +935,9 @@ void FriendsTab() {
             Store(s.spectate_share, share_races, true);
             runtime_spectate_set_share(share_races);
         }
-        Hint(BbSettings::MenuText("Each race you finish is sent to the server so your friends can watch it with "
-                                  "Spectate (needs the Replay Mode, included in this build).",
-                                  "Каждая гонка отправляется на сервер, чтобы друзья могли её посмотреть."));
+        Hint(BbSettings::MenuText("While you race, your race is sent live to the server so your friends can watch it "
+                                  "with Spectate.",
+                                  "Пока вы едете, гонка идёт на сервер в прямом эфире, и друзья могут её смотреть."));
         Checkbox(BbSettings::MenuText("Don't show notifications", "Не показывать уведомления"), s.friends_no_notices);
         Hint(BbSettings::MenuText("No friend notices (requests, invitations, friends online). This tab still shows "
                                   "them.",
