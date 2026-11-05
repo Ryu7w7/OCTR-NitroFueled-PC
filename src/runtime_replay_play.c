@@ -178,6 +178,9 @@ static struct {
     int hero_told;                      /* runtime_replay_hero() logged for this replay */
     int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
+    int ghosts_later;                   /* live, loaded before the friend's GO: the ghosts are made at GO */
+    int option_set;                     /* skip_intro(): the game's auto-skip fly-by option is ours */
+    uint8_t option_was;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
 static int drop_ghosts_at_end;          /* a chained live race: the level that ends still has the last race's ghosts */
 /* The friend's next live race while the last one is still on screen (ended): kept for the game's thread,
@@ -190,6 +193,8 @@ static struct {
 } NEXT;
 static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
 static void items_reset(void);
+/* live: the friend's GO time from the newest header the stream brought, once it is there */
+static void live_go(void);
 static void left_level(void);
 static int items_restore;            /* drive cleared the track: the recent items come back (track_items) */
 
@@ -1456,9 +1461,12 @@ void ABI runtime_replay_level_start(void *manager) {
     P.level_time = 0.0f;
     if (settings) RR_AT(settings, 0xc, int32_t) = 99;   /* laps: the player's kart never finishes */
     drop_ghosts();
+    live_go();
     int ghosts = 0;
-    for (int i = 0; i < RR_RACERS; i++)
+    P.ghosts_later = P.header.go_time < 0.0f;          /* live, before the friend's GO: made when it comes */
+    for (int i = 0; i < RR_RACERS && !P.ghosts_later; i++)
         if (P.kart_slot[i] >= 0) ghosts += !!(P.ghost[i] = build_ghost(i));
+    if (P.ghosts_later) puts("Replay: the friend's race has not reached GO yet: its racers come at GO");
     P.watch = P.player_slot >= 0 ? P.player_slot : 0;
     P.speed = NORMAL_SPEED;
     P.hud_root = 0;
@@ -1504,10 +1512,18 @@ void runtime_replay_play_level_end(void) {
     drop_ghosts();
 }
 
+static void live_go(void) {
+    if (!P.live || P.header.go_time >= 0.0f) return;
+    pthread_mutex_lock(&P.lock);
+    const float go = P.live_header_new || P.live_header.go_time >= 0.0f ? P.live_header.go_time : -1.0f;
+    pthread_mutex_unlock(&P.lock);
+    if (go >= 0.0f) P.header.go_time = go;
+}
+
 /* Live: the frames that came since the last game frame become ghost keys, lap starts and names (the game's
  * thread: the ghost lists are the game's) */
 static void live_extend(void) {
-    if (!P.live || P.pending != 2) return;
+    if (!P.live || P.pending != 2 || P.ghosts_later) return;
     const uint32_t n = frames_now();
     struct rr_header header;
     int new_header = 0;
@@ -2093,12 +2109,28 @@ void runtime_replay_play_frame(void) {
     put_choice_back();
     if (!P.set_up) set_up();
     camera_triggers();
+    if (P.ghosts_later) {                       /* live, before the friend's GO: wait for it on the grid */
+        live_go();
+        if (P.header.go_time < 0.0f) return;
+        P.ghosts_later = 0;
+        int ghosts = 0;
+        for (int i = 0; i < RR_RACERS; i++)
+            if (P.kart_slot[i] >= 0) ghosts += !!(P.ghost[i] = build_ghost(i));
+        for (int r = 0; r < RR_RACERS; r++)
+            for (uint32_t i = 1; i < P.count; i++) {
+                const int was = P.frames[i - 1].racer[r].lap, now = P.frames[i].racer[r].lap;
+                if (now > was && was >= 1 && now - 1 < MAX_LAPS) P.lap_start[r][now - 1] = P.frames[i].race_time;
+            }
+        printf("Replay: the friend's race reached GO: %d racers\n", ghosts);
+        fflush(stdout);
+    }
     const float go = P.started ? 0.0f : rr_race_clock();
     if (go > 0.0f && P.kart) {
         P.started = 1;
         P.time = go;
         const float newest = last_time() - 1.0f;   /* live: close to the race, not from its start */
         if (P.live && newest > go + 1.0f) P.time = newest, P.rewound = 1;
+        else if (P.live && newest < go) P.time = newest > 0.0f ? newest : 0.0f;   /* our GO came first: from the friend's */
     }
     live_extend();
     const float dt = frame ? RR_AT(frame, 0x18, float) : 0.0f;
@@ -2121,23 +2153,27 @@ void runtime_replay_play_frame(void) {
 static void skip_intro(void) {
     char *manager = rr_ptr(D_CUTSCENE_MANAGER);
     if (!manager) return;
+    /* the game's own option, Auto-skip fly-by (COctaneGlobalOptionsData +0x2a, reached by the game +0xdb0 global save
+     * data, +0x78 _octaneGlobalOptions): on from the replay's level start until GO, then back as the player had it
+     * (only that long: the options are saved now and then, and the player's own choice must stay theirs) */
+    char *g = rr_ptr(RR_D_GAME);
+    char *save = g ? RR_AT(g, 0xdb0, char *) : 0;
+    char *options = save ? RR_AT(save, 0x78, char *) : 0;
+    const int want = P.pending == 2 && !P.started;
+    if (options && want && !P.option_set) {
+        P.option_set = 1, P.option_was = RR_AT(options, 0x2a, uint8_t);
+        RR_AT(options, 0x2a, uint8_t) = 1;
+    } else if (P.option_set && !want) {
+        P.option_set = 0;
+        if (options) RR_AT(options, 0x2a, uint8_t) = P.option_was;
+    }
     if (P.pending) {
         if (!P.skip_set) P.skip_set = 1, P.skip_was = RR_AT(manager, 0x7a, uint8_t), P.flyby_seen = 0;
         RR_AT(manager, 0x7a, uint8_t) = 1;
         char *active = RR_AT(manager, 0xa0, char *);   /* _activeCutsceneData, _isFlybyIntro +0x30 */
-        if (active && RR_AT(active, 0x30, uint8_t)) {
-            /* _skipCutscenes does not stop the fly-over: _scheduledToStop (+0x20), written only while it reads as
-             * a bool (0 or 1: its type is not known for sure) */
-            const uint64_t stop = RR_AT(manager, 0x20, uint64_t);
-            if (stop <= 1) RR_AT(manager, 0x20, uint8_t) = 1;
-            if (!P.flyby_seen) {
-                P.flyby_seen = 1;
-                printf("Replay: the track's fly-over: stopping it (_scheduledToStop was %#llx)\n", (unsigned long long)stop);
-                fflush(stdout);
-            }
-        } else if (P.flyby_seen == 1 && P.pending == 2) {
-            P.flyby_seen = 2;
-            printf("Replay: the track's fly-over is over\n");
+        if (active && RR_AT(active, 0x30, uint8_t) && !P.flyby_seen) {
+            P.flyby_seen = 1;
+            printf("Replay: the track's fly-over plays (auto-skip %s)\n", options ? "on" : "not found");
             fflush(stdout);
         }
     } else if (P.skip_set) {
@@ -2386,7 +2422,7 @@ static int take_live(const struct rr_header *header, const uint8_t *packed, size
 }
 
 int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames) {
-    if (!header || memcmp(header->magic, RR_MAGIC, 8) || header->go_time < 0.0f) return 0;
+    if (!header || memcmp(header->magic, RR_MAGIC, 8)) return 0;      /* (live: GO may come later, ghosts_later) */
     if (runtime_replay_can_chain()) {
         uint8_t *copy = malloc(size ? size : 1);
         if (!copy) return 0;
