@@ -1596,6 +1596,7 @@ typedef int ABI take_damage_fn(void *damage, int type, void **attacker, int flag
 typedef void *ABI event_new_fn(int pool);
 typedef int ABI faction_fn(void *entity);
 typedef void ABI hud_event_fn(void *project, void *event);
+static event_new_fn *TAGS_SPAWN;        /* the kart markers' spawn event: nicknames() */
 
 static struct {
     item_give_fn *give;
@@ -1761,7 +1762,9 @@ static struct {
     int dropped_count, dropped_wait;
 } TRACK;
 
+static void tags_reset(void);
 static void items_reset(void) {
+    tags_reset();
     items_restore = 0;
     TRACK.dropped_count = TRACK.dropped_wait = 0;
     IT.last = 0;
@@ -2093,6 +2096,7 @@ static int items_install(int eu) {
     IT.charges = (event_new_fn *)fn(0x117f530, 1, eu);
     IT.reset = (event_new_fn *)fn(0x117f410, 1, eu);
     IT.faction = (faction_fn *)fn(0xfe5790, 1, eu);
+    if (!memcmp(fn(0x1198390, 1, eu), "\x55\x48\x89\xe5", 4)) TAGS_SPAWN = (event_new_fn *)fn(0x1198390, 1, eu);
     TRACK.crate_attach = (crate_attach_fn *)fn(0xe40d60, 0, eu);
     if (memcmp(TRACK.crate_attach, "\x55\x48\x89\xe5", 4)) TRACK.crate_attach = 0;      /* no TNT on heads */
     /* (0xf0b070 and 0xe330e0 start with jumps: the recorder's gate, the online mode's damage wrap) */
@@ -2104,6 +2108,95 @@ static int items_install(int eu) {
         }
     IT.ready = 1;
     return 1;
+}
+
+/* ---- Nicknames over the karts: the game's own kart markers. The HUD's project has a CGuiBehaviorKartMarkerManager (+0x18
+ * _markers: handles to spawned placeables, each with a CGuiBehaviorKartMarker). On the spawn event (0x1198390, sent by the
+ * HUD in the races that show them, 0xe5bd19) it makes a marker for every racer but the screen's own, AI too (0x9d82d0).
+ * A replay sends that event; each marker (+0x70 _racerHandle) then gets its racer's name in +0x50 _playerTagPlaceable, a
+ * text. The watched racer's stays empty: the camera is on it. ---- */
+#define KART_MARKER_MANAGER_VTABLE 0x2545970
+#define KART_MARKER_VTABLE 0x2545878
+
+static struct {
+    event_new_fn *spawn;
+    int sent, tries, told;
+    void *manager;
+    uint32_t frames;
+} TAGS;
+
+static void *find_behavior(void *placeable, size_t vtable, int depth) {
+    if (!placeable || depth > 24) return 0;
+    void *list = RR_AT(placeable, 0xe8, void *);
+    for (int i = 0; i < rr_count(list); i++) {
+        void *b = rr_item(list, i);
+        if (b && RR_AT(b, 0, const void *) == (const void *)rr_game(vtable)) return b;
+    }
+    void *children = RR_AT(placeable, 0x48, void *);
+    for (int i = 0; i < rr_count(children); i++) {
+        void *found = find_behavior(rr_item(children, i), vtable, depth + 1);
+        if (found) return found;
+    }
+    return find_behavior(content(placeable), vtable, depth + 1);
+}
+
+static void nicknames(void) {
+    TAGS.spawn = TAGS_SPAWN;
+    if (!TAGS.spawn || !P.kart || !P.started) return;
+    if (++TAGS.frames % 15) return;                     /* 4 times a second are enough */
+    void *meta = rr_ptr(D_HUD_META);
+    void *hud = meta ? rr_find_component(P.kart, meta) : 0;
+    void *project = hud ? rr_handle_object(&RR_AT(hud, 0x38, void *)) : 0;
+    if (!project) return;
+    if (!TAGS.manager) {
+        if (TAGS.tries > 12) return;
+        if (!TAGS.tries++ ) printf("Replay: looking for the HUD's kart markers\n");
+        TAGS.manager = find_behavior(RR_AT(project, 0x10, void *), KART_MARKER_MANAGER_VTABLE, 0);
+        if (!TAGS.manager) {
+            if (TAGS.tries > 12) printf("Replay: this HUD has no kart markers: no nicknames over the karts\n");
+            fflush(stdout);
+            return;
+        }
+    }
+    if (!TAGS.sent) {
+        TAGS.sent = 1;
+        send_event(TAGS.spawn(0));
+        printf("Replay: kart markers asked for\n");
+        fflush(stdout);
+        return;
+    }
+    char *racers = rr_ptr(RR_D_RACER_MANAGER);
+    void *list = RR_AT(TAGS.manager, 0x18, void *);
+    const int n = rr_count(list);
+    int named = 0;
+    for (int i = 0; racers && i < n; i++) {
+        void *placeable = rr_handle_object(&RR_AT(list, 0x20, void **)[i]);
+        void *marker = placeable ? find_behavior(placeable, KART_MARKER_VTABLE, 0) : 0;
+        void *racer = marker ? rr_handle_object(&RR_AT(marker, 0x70, void *)) : 0;
+        void *tag = marker ? RR_AT(marker, 0x50, void *) : 0;
+        if (!racer || !tag) continue;
+        for (int r = 0; r < RR_RACERS; r++) {
+            void *kart = kart_of_racer(r);
+            if (!kart || game.racer_of(racers, kart) != racer) continue;
+            const char *want = r == P.watch ? "" : P.names[r];
+            const char *now = RR_AT(tag, 0x30, const char *);
+            if (!now || strcmp(now, want)) game.set_text(tag, want);
+            RR_AT(marker, 0x8a, uint8_t) = 0;           /* _keepDisplayTextUpdated: the text stays ours */
+            named++;
+            break;
+        }
+    }
+    if (TAGS.told != n) {
+        TAGS.told = n;
+        printf("Replay: %d kart markers, %d named\n", n, named);
+        fflush(stdout);
+    }
+}
+
+static void tags_reset(void) {
+    TAGS.sent = TAGS.tries = TAGS.told = 0;
+    TAGS.manager = 0;
+    TAGS.frames = 0;
 }
 
 void runtime_replay_play_frame(void) {
@@ -2144,6 +2237,7 @@ void runtime_replay_play_frame(void) {
     unghost();
     follow();
     items_frame();
+    nicknames();
     hud();
     speed_now(dt);
     publish_view();
