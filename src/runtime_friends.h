@@ -83,6 +83,7 @@ int runtime_friends_take_message(char text[RF_MESSAGE]);
 
 /* The friends' names, comma-separated (the game's friend list), and when they changed. */
 const char *runtime_friends_names(unsigned *serial);
+unsigned runtime_friends_names_serial(void);
 
 /* The game's Invite button (sceInvitationDialogOpenA): every friend online is invited, with a
  * notice. 0 when the friends list is not available (offline, not registered). */

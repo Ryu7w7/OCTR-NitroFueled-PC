@@ -32,6 +32,7 @@ int32_t runtime_np_check_callback(void);
 
 uint64_t runtime_np_calculate_account_id(const char *name);
 const char *runtime_np_get_online_name(void);
+#define NP_FRIENDS_CSV_CAPACITY 4096
 const char *runtime_np_get_friends_csv(void);
 
 #ifdef __cplusplus
