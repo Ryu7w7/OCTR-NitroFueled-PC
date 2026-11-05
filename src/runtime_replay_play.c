@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define RACE_START 3.80f        /* ghost time of GO, as the game's own ghosts */
 #define KEY_STEP 2              /* move keys every 2/100 s */
