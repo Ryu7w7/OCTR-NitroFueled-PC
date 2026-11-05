@@ -216,6 +216,8 @@ const char* Spanish(const char* english) {
     {"Invite", "Invitar"},
     {"Spectate", "Espectar"},
     {"Stop spectating", "Dejar de espectar"},
+    {"RESULTS", "RESULTADOS"},
+    {"Pause > Quit: back to the menu.", "Pausa > Salir: volver al menú."},
     {"Spectating %s: their next race loads by itself.", "Espectando a %s: su próxima carrera se cargará sola."},
     {"Watching %s live.", "Viendo a %s en directo."},
     {"%s is live: waiting for the race to start...", "%s está en directo: esperando a que empiece la carrera..."},
