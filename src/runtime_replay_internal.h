@@ -40,6 +40,7 @@ void *rr_game_data(int list, const char *name);
 int rr_item_type(void *handle);              /* a stored item's EPowerUpType, -1 not known */
 void rr_race_dir(char *out, size_t size);
 const char *rr_current_level(void);         /* the level loaded now, 0 none */
+uint32_t rr_world_id(void);
 /* Replaces the call at `site` (to `expected`) by a call to `target`, through a trampoline. 1 = done. */
 int rr_redirect_call(unsigned char *site, const unsigned char *expected, void (*target)(void));
 
