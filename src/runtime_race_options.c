@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "runtime_tt_reference.h"
+#include "runtime_ai_catchup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -109,6 +110,7 @@ static _Thread_local void *pending_item_use;
 static void trace_native_controls(void *self);
 static void register_ai_physics(void *self);
 static void reset_ai_physics(void);
+static void update_ai_catchup(void *self);
 typedef void *(ABI *NetContext)(void);
 typedef unsigned char (ABI *OwnsObject)(void *, void *);
 static NetContext net_context;
@@ -137,12 +139,17 @@ static int custom_ai_menu_allowed(void) {
 void runtime_race_options_leave_room(void) {
     followed_ai_profile = followed_ai_base = -1;
     lobby_personal_difficulty = 0;
+    runtime_ai_catchup_reset(NULL,NULL,0);
 }
 
 void runtime_race_options_map_loading(const char *map) {
     if (!map) return;
     reset_ai_physics();
     const int lobby = !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
+    if (!lobby) {
+        char host[24]; runtime_room_mode_host_name(host);
+        runtime_ai_catchup_reset(map,host,!runtime_room_mode_following());
+    }
     const int was_lobby = atomic_exchange(&lobby_personal_difficulty, lobby);
     if (lobby || was_lobby) followed_ai_profile = followed_ai_base = -1;
     if (lobby) {
@@ -228,12 +235,16 @@ static float real(const void *p, size_t offset) {
     return value;
 }
 
-static int selected_driving_level(void) {
+static int configured_driving_level(void) {
     if (!custom_ai_allowed() || !difficulty_manager || !*difficulty_manager) return -1;
     const int level = native_difficulty(*difficulty_manager);
-    if (runtime_speed_race_active() && level < 2) return -1;
     const int profile = effective_profile();
     return level >= 0 && level <= 2 ? level + (level == 2 && profile >= 1 && profile <= 3 ? profile : 0) : -1;
+}
+
+static int selected_driving_level(void) {
+    const int level=configured_driving_level();
+    return runtime_speed_race_active() && level<2 ? -1 : level;
 }
 
 static int driving_level(void) { return peer_decision ? -1 : selected_driving_level(); }
@@ -252,9 +263,10 @@ static void ABI ai_input(void *self, void *input) {
     const int online = client && *client && integer(*client, 0x144) == 16;
     const int owner = !entity || (entity[0x3b] & 1);
     const int saved_peer = peer_decision;
-    if (online && wire && !owner) {
-        const int profile = wire[0x10] >> 6;
-        const int base = profile ? 2 : difficulty_manager && *difficulty_manager ?
+    if (online && runtime_room_mode_following() && wire && (!owner || runtime_ai_catchup_level()>=0)) {
+        const int canonical=runtime_ai_catchup_level();
+        const int profile = canonical>=0 ? (canonical>2 ? canonical-2 : 0) : wire[0x10] >> 6;
+        const int base = canonical>=0 ? (canonical>2 ? 2 : canonical) : profile ? 2 : difficulty_manager && *difficulty_manager ?
                          integer(*difficulty_manager, 16) : -1;
         if (base >= 0 && base <= 2) followed_ai_base = base;
         const int previous = atomic_exchange(&followed_ai_profile, profile);
@@ -282,6 +294,7 @@ static void ABI ai_input(void *self, void *input) {
     if (ai_data && *ai_data) tune_ai(*ai_data);
     native_ai_input(self, input);
     register_ai_physics(self);
+    update_ai_catchup(self);
     if (!peer_decision) {
         apply_tt_technique(self, input);
         apply_item_during_slide(self, input);
@@ -311,54 +324,301 @@ static void *race_handle(void **slot) {
     return NULL;
 }
 
-static struct { void *kart, *entity; unsigned id; } ai_physics[8];
+static struct { void *kart, *entity; unsigned id; int identity_valid; float catchup, air_floor, approach_floor, jump_reference; int fire, airborne, motion_clock_valid; uint32_t motion_tick; uint64_t updated, next_report, air_until, motion_updated, jump_report, pad_report, exhaust_report; } ai_physics[8];
+typedef unsigned char (ABI *RacerAhead)(void *, void *);
+static RacerAhead catchup_racer_ahead;
 typedef float (ABI *KartSpeed)(void *, void *, int, float, float);
 typedef void (ABI *SpeedModifiers)(void *, float);
 static KartSpeed native_kart_speed;
 static SpeedModifiers native_speed_modifiers;
+static BoostDuration native_jump_impulse;
+static BoostDuration native_trick_impulse;
+typedef void (ABI *KartMotion)(void *, void *, void *);
+static KartMotion native_kart_motion;
+typedef void (ABI *SetVelocity)(void *, const float *);
+static SetVelocity native_set_velocity;
 
-static void reset_ai_physics(void) { memset(ai_physics,0,sizeof ai_physics); }
+static void reset_ai_physics(void) {
+    memset(ai_physics,0,sizeof ai_physics);
+    runtime_ai_catchup_reset(NULL,NULL,0);
+}
+/* An AI component can also drive a human kart. Require a current racer with
+ * no player handle; an unresolved human handle is still a human. */
+static int live_ai_id(void *entity) {
+    void *list=racer_manager && *racer_manager ? ptr(*racer_manager,0x10) : NULL;
+    int count=list ? integer(list,12) : 0;
+    void **racers=list ? ptr(list,0x20) : NULL;
+    if (!entity || !racers || count<1 || count>8) return -1;
+    for (int i=0;i<count;++i) {
+        unsigned char *racer=racers[i];
+        if (!racer || race_handle((void **)(racer+0x20))!=entity) continue;
+        if (ptr(racer,0x10)) return -1;
+        int id=integer(racer,0x164);
+        return id>=0 && id<8 ? id : -1;
+    }
+    return -1;
+}
 static void register_ai_physics(void *self) {
     unsigned char *control=ptr(self,0x48);
     void *kart=control ? race_handle((void **)(control+0x58)) : NULL;
     void *entity=ptr(self,0x18);
     if (!kart || !entity || ptr(kart,0x18)!=entity) return;
+    const int id=live_ai_id(entity);
     unsigned free_slot=8;
     for (unsigned i=0;i<8;++i) {
         if (ai_physics[i].kart==kart || ai_physics[i].entity==entity) { free_slot=i; break; }
         if (!ai_physics[i].kart && free_slot==8) free_slot=i;
     }
-    if (free_slot<8) {
-        ai_physics[free_slot].kart=kart; ai_physics[free_slot].entity=entity;
-        /* AI+28 holds steering targets. Match the live racer by entity instead. */
-        void *list=racer_manager && *racer_manager ? ptr(*racer_manager,0x10) : NULL;
-        const int count=list ? integer(list,12) : 0;
-        void **racers=list ? ptr(list,0x20) : NULL;
-        ai_physics[free_slot].id=0;
-        if (racers && count>=0 && count<=8) for (int i=0;i<count;++i) {
-            unsigned char *racer=racers[i];
-            if (!racer || race_handle((void **)(racer+0x20))!=entity) continue;
-            void *player=race_handle((void **)(racer+0x10));
-            const int id=player ? integer(player,0xc8) : integer(racer,0x164);
-            if (id>=0 && id<8) ai_physics[free_slot].id=(unsigned)id;
-            break;
-        }
-    }
+    if (free_slot==8) return;
+    if (id<0 || ai_physics[free_slot].kart!=kart || ai_physics[free_slot].entity!=entity ||
+        !ai_physics[free_slot].identity_valid || ai_physics[free_slot].id!=(unsigned)id)
+        memset(ai_physics+free_slot,0,sizeof ai_physics[free_slot]);
+    if (id<0) return;
+    ai_physics[free_slot].kart=kart; ai_physics[free_slot].entity=entity;
+    ai_physics[free_slot].id=(unsigned)id; ai_physics[free_slot].identity_valid=1;
 }
-static int physics_ai_level(void *kart) {
+static int registered_ai_level(void *kart) {
     if (!kart || !client || !*client || !manager || !*manager ||
         (integer(*manager,0xd4c)!=1 && integer(*manager,0xd4c)!=6)) return -1;
     int mode=integer(*client,0x144);
     if (mode!=8 && (mode!=16 || !runtime_private_match_active())) return -1;
     for (unsigned i=0;i<8;++i)
-        if (ai_physics[i].kart==kart && ai_physics[i].entity==ptr(kart,0x18))
-            return selected_driving_level(); /* Replicated AI physics needs the same profile on peers. */
+        if (ai_physics[i].identity_valid && ai_physics[i].kart==kart &&
+            ai_physics[i].entity==ptr(kart,0x18) &&
+            live_ai_id(ai_physics[i].entity)==(int)ai_physics[i].id)
+            return configured_driving_level();
     return -1;
 }
+static int recovering_ai_kart(void *kart);
+typedef void (ABI *BoostUpdate)(void *, float);
+static BoostUpdate native_boost_update;
+
+/* Run before native expiry on both peers. The native entry is the state: no
+ * local colour latch, synthetic pad contact, or shared boost-data mutation. */
+static unsigned char *maintained_ai_pad(void *boost) {
+    if (!boost || !maintained_duration) return NULL;
+    void *entity=ptr(boost,0x18), *kart=NULL;
+    for (unsigned i=0;i<8;++i)
+        if (ai_physics[i].entity==entity && ai_physics[i].identity_valid) {
+            kart=ai_physics[i].kart; break;
+        }
+    const int level=registered_ai_level(kart);
+    if (level<4 || level>5) return NULL;
+    void *list=ptr(boost,0x28);
+    int count=list ? integer(list,12) : 0;
+    void **items=list ? ptr(list,0x20) : NULL;
+    if (!items || count<1 || count>256) return NULL;
+    unsigned char *best=NULL;
+    float fastest=0;
+    for (int i=0;i<count;++i) {
+        unsigned char *entry=items[i], *data=entry ? ptr(entry,0x10) : NULL;
+        if (!data || !data[0x3c] || entry[0x48]) continue;
+        float speed=real(data,0xc);
+        float left=maintained_duration(entry)+real(data,0x1c)+real(entry,0x28)-real(entry,0x18);
+        if (!isfinite(speed) || !isfinite(left) || left<=0 || speed<=fastest) continue;
+        best=entry; fastest=speed;
+    }
+    return best;
+}
+static void maintain_ai_pad_fire(void *boost, float dt) {
+    if (!isfinite(dt) || dt<=0) return;
+    unsigned char *best=maintained_ai_pad(boost);
+    if (!best) return;
+    void *data=ptr(best,0x10);
+    float remaining=maintained_duration(best)+real(data,0x1c)+real(best,0x28)-real(best,0x18);
+    if (remaining<dt+2) {
+        float reserve=real(best,0x28)+(dt+2-remaining);
+        if (isfinite(reserve)) memcpy(best+0x28,&reserve,4);
+    }
+}
+
+typedef unsigned char (ABI *KeepBoost)(void *, void *, void *);
+static KeepBoost native_keep_boost;
+static unsigned char ABI keep_boost(void *boost, void *data, void *entry) {
+    /* Native e2f1d0 removes fire while braking, independently of its reserve.
+     * Keep the acquired pad entry; do not change the AI's braking or steering. */
+    if (entry && maintained_ai_pad(boost)==entry) return 1;
+    return native_keep_boost(boost,data,entry);
+}
+
+void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *)) {
+    unsigned char *entry=maintained_ai_pad(boost);
+    /* e92e90 skips entries in maintained contact. Scope that flag to this
+     * call so only the retained pad survives; other boosts still cancel. */
+    unsigned char contact=entry ? entry[0x30] : 0;
+    if (entry) entry[0x30]=1;
+    stop(boost);
+    if (entry) entry[0x30]=contact;
+}
+static void ABI boost_update(void *boost, float dt) {
+    maintain_ai_pad_fire(boost,dt);
+    native_boost_update(boost,dt);
+    const uint64_t now=runtime_ai_catchup_now();
+    for (unsigned i=0;i<8;++i) if (ai_physics[i].entity==ptr(boost,0x18) &&
+        registered_ai_level(ai_physics[i].kart)>=4 && now>=ai_physics[i].pad_report) {
+        unsigned char *entry=maintained_ai_pad(boost);
+        void *data=entry ? ptr(entry,0x10) : NULL;
+        printf("Native AI pad fire: id=%u pad_speed=%.1f applied_boost=%.1f reserve=%.3f owner=%d\n",
+               ai_physics[i].id,data ? real(data,0xc) : 0,real(boost,0x38),
+               fire_remaining(ai_physics[i].kart),!!(((unsigned char *)ai_physics[i].entity)[0x3b]&1));
+        ai_physics[i].pad_report=now+5000;
+        break;
+    }
+}
+
+static int physics_ai_level(void *kart) {
+    if (recovering_ai_kart(kart)) return -1;
+    int level=registered_ai_level(kart);
+    return runtime_speed_race_active() && level<2 ? -1 : level;
+}
+
+static float catchup_for_kart(void *kart) {
+    if (registered_ai_level(kart)<0 || recovering_ai_kart(kart)) return 0;
+    for (unsigned i=0;i<8;++i) if (ai_physics[i].kart==kart && ai_physics[i].identity_valid) {
+        void *list=racer_manager && *racer_manager ? ptr(*racer_manager,0x10) : NULL;
+        int count=list ? integer(list,12) : 0;
+        unsigned char **racers=list ? ptr(list,0x20) : NULL;
+        if (racers && count>0 && count<=8) for (int j=0;j<count;++j) {
+            unsigned char *r=racers[j];
+            if (r && !r[0x8c] && race_handle((void **)(r+0x20))==ai_physics[i].entity &&
+                !race_handle((void **)(r+0x10))) return runtime_ai_catchup_bonus(ai_physics[i].id);
+        }
+    }
+    return 0;
+}
+
+typedef int (ABI *ExhaustState)(void *);
+static ExhaustState native_exhaust_state;
+/* Native exhaust update copies this result to its replicated next-state field. */
+static int ABI exhaust_state(void *self) {
+    const int state=native_exhaust_state(self);
+    void *effects=race_handle((void **)((char *)self+0x18));
+    void *entity=effects ? ptr(effects,0x18) : NULL;
+    if (!entity) return state;
+    for (unsigned i=0;i<8;++i) if (ai_physics[i].entity==entity &&
+        registered_ai_level(ai_physics[i].kart)>=0) {
+        const uint64_t now=runtime_ai_catchup_now();
+        if (registered_ai_level(ai_physics[i].kart)>=4 && now>=ai_physics[i].exhaust_report) {
+            printf("Native AI fire visual: id=%u native_state=%d tier=%s\n",ai_physics[i].id,state,
+                   state==10 || state==11 ? "blue" : state==8 || state==9 ? "red" : "other");
+            ai_physics[i].exhaust_report=now+5000;
+        }
+        if (!runtime_speed_race_active()) return state;
+        /* Seed a migrated owner from the exhaust state already replicated by native. */
+        const int previous=integer(self,0xc);
+        if (!ai_physics[i].fire && previous>=8 && previous<=11) ai_physics[i].fire=previous;
+        /* Remember the latest actual tier, including blue -> red transitions. */
+        if (state>=8 && state<=11) ai_physics[i].fire=state;
+        if (state<12 && ai_physics[i].fire && catchup_for_kart(ai_physics[i].kart)>0)
+            return ai_physics[i].fire;
+        break;
+    }
+    return state;
+}
+
+/* Stable racer identity gives different surge periods and peak strengths.
+ * Only the host evaluates time; peers consume its already-quantized result. */
+static float catchup_pace(unsigned id, uint64_t now) {
+    const unsigned trait=(id*5+3)%8;
+    const uint64_t period=8000+trait*1100;
+    const float wave=.5f+.5f*sinf(6.28318530718f*((now%period)/(float)period+trait/8.f));
+    return .78f+.12f*(trait/7.f)+.10f*wave;
+}
+
+static float normal_catchup_cap(int level, float gap, float speed) {
+    static const float caps[]={.04f,.06f,.08f,.11f,.15f,.20f};
+    if (level<0 || level>5 || !isfinite(gap) || !isfinite(speed) || speed<=0) return 0;
+    /* Remove assistance at bumper distance; reach the cap only several seconds behind. */
+    return caps[level]*fminf(1,fmaxf(0,(gap/speed-.35f)/3.f));
+}
+
+/* The room host computes every AI bonus, even when native ownership migrates. */
+static void update_ai_catchup(void *self) {
+    unsigned char *entity=ptr(self,0x18);
+    if (!entity || !custom_ai_allowed() ||
+        (integer(*client,0x144)==16 && runtime_room_mode_following())) return;
+    unsigned slot=8;
+    for (unsigned i=0;i<8;++i) if (ai_physics[i].entity==entity) { slot=i; break; }
+    if (slot==8 || !ai_physics[slot].identity_valid) return;
+    void *kart=ai_physics[slot].kart;
+    int level=registered_ai_level(kart);
+    runtime_ai_catchup_level_publish(level);
+    void *list=racer_manager && *racer_manager ? ptr(*racer_manager,0x10) : NULL;
+    int count=list ? integer(list,12) : 0;
+    unsigned char **racers=list ? ptr(list,0x20) : NULL, *me=NULL, *target=NULL;
+    if (racers && count>0 && count<=8) for (int i=0;i<count;++i)
+        if (racers[i] && race_handle((void **)(racers[i]+0x20))==entity) me=racers[i];
+    int remote_human=0;
+    if (racers && count>0 && count<=8 && integer(*client,0x144)==16) for (int i=0;i<count;++i) {
+        unsigned char *r=racers[i];
+        unsigned char *e=r ? race_handle((void **)(r+0x20)) : NULL;
+        if (e && !(e[0x3b]&1) && race_handle((void **)(r+0x10))) ++remote_human;
+    }
+    runtime_ai_catchup_require_peers(remote_human);
+    const int ready=runtime_ai_catchup_ready();
+    const uint64_t now=runtime_ai_catchup_now();
+    float desired=0, normal_limit=0;
+    int target_ai=0;
+    if (ready && level>=0 && me && !me[0x8c] && !race_handle((void **)(me+0x10)) &&
+        catchup_racer_ahead && world_position) {
+        for (int i=0;i<count;++i) {
+            unsigned char *r= racers[i];
+            if (!r || r==me || r[0x8c] || !catchup_racer_ahead(r,me)) continue;
+            if (!target || catchup_racer_ahead(target,r)) target=r;
+        }
+        target_ai=target && !ptr(target,0x10);
+        void *other=target ? race_handle((void **)(target+0x20)) : NULL;
+        if (other) {
+            float a[3],b[3]; world_position(a,entity); world_position(b,other);
+            float gap=hypotf(a[0]-b[0],a[1]-b[1]);
+            float human_speed=hypotf(real(other,0x60),real(other,0x64));
+            float ai_speed=hypotf(real(entity,0x60),real(entity,0x64));
+            if (!runtime_speed_race_active()) {
+                const int other_id=live_ai_id(other);
+                if (other_id>=0) human_speed/=1+runtime_ai_catchup_bonus((unsigned)other_id);
+                normal_limit=normal_catchup_cap(level,gap,ai_speed);
+            }
+            desired=runtime_ai_catchup_target(level,gap,human_speed,ai_speed,runtime_ai_catchup_bonus(ai_physics[slot].id));
+            if (!runtime_speed_race_active()) desired=fminf(desired,normal_limit);
+        }
+    }
+    const float pace=catchup_pace(ai_physics[slot].id,now);
+    desired*=pace;
+    const uint64_t last=ai_physics[slot].updated;
+    float dt=last && now>=last ? fminf((now-last)*.001f,.1f) : 0;
+    float old=ai_physics[slot].catchup, rate=desired>old ? .55f+.40f*pace : 1.0f;
+    float bonus=old+fminf(fmaxf(desired-old,-rate*dt),rate*dt);
+    if (!ready || level<0 || !me || me[0x8c]) bonus=0;
+    if (!runtime_speed_race_active()) bonus=fminf(bonus,normal_limit);
+    /* Preserve accumulated demand through a protected section. Only the
+     * applied bonus is restricted; otherwise every hop restarts catch-up at zero. */
+    ai_physics[slot].catchup=bonus;
+    /* Sharp turns cannot use the same closing speed as a straight. Publish
+     * this restriction from the host, including normal-mode native routes. */
+    const float curve=fabsf(real(self,0x40));
+    const float turn_allowance=isfinite(curve) ? fmaxf(0,fminf(1,(.5f-curve)/.4f)) : 0;
+    bonus=fminf(bonus,2.5f*fminf(turn_allowance,
+        runtime_speed_race_active() ? runtime_tt_reference_turn_allowance(ai_physics[slot].id,(uintptr_t)entity) : 1));
+    /* Publish the jump restriction with the bonus so peers use one decision. */
+    const float jump_lead=runtime_tt_reference_jump_lead(ai_physics[slot].id,(uintptr_t)entity);
+    const int terrain_jump=runtime_speed_race_active() &&
+        (!((unsigned char *)kart)[0x214] || (jump_lead>=0 && jump_lead<=.35f));
+    if (!ready || level<0 || !me || me[0x8c] || terrain_jump) bonus=0;
+    if (!(entity[0x3b]&1) || !me || me[0x8c]) runtime_ai_catchup_recovery_publish(ai_physics[slot].id,0);
+    ai_physics[slot].updated=now;
+    runtime_ai_catchup_publish(ai_physics[slot].id,bonus);
+    if (now>=ai_physics[slot].next_report && me && !me[0x8c]) {
+        printf("Native AI catch-up: ai_slot=%u level=%d itemless=%d target_position=%d target_ai=%d pace=%.2f bonus=%.2f demand=%.2f protected_jump=%d turn_allowance=%.2f authority=1 ready=%d native_owner=%d\n",
+               ai_physics[slot].id,level,runtime_speed_race_active(),target ? integer(target,0x58) : -1,target_ai,pace,
+               runtime_ai_catchup_bonus(ai_physics[slot].id),ai_physics[slot].catchup,terrain_jump,turn_allowance,ready,!!(entity[0x3b]&1));
+        ai_physics[slot].next_report=now+5000;
+    }
+}
+
 static float ai_speed_scale(int level, int itemless, uint32_t ticks, unsigned id) {
     static const float middle[]={0,0,.04f,.06f,.08f,.105f};
     if (level<0 || level>5 || !level || (level==1 && !itemless)) return 1;
-    const float center=level==1 ? .015f : middle[level];
+    const float center=level==1 ? .015f : middle[level] + (itemless ? .04f * (level-1) : 0);
     const float amplitude=level==1 ? .005f : level==5 ? .015f : .01f;
     /* Sixteen simulation seconds per cycle; wrapping and pauses stay continuous.
      * Network racer identity offsets each kart, never process pointers or RNG. */
@@ -372,6 +632,9 @@ static float kart_speed_scale(void *kart, int level, int itemless) {
     unsigned id=0;
     for (unsigned i=0;i<8;++i)
         if (ai_physics[i].kart==kart) { id=ai_physics[i].id; break; }
+    /* Network peers can enter simulation at different local timer values. */
+    if (client && *client && integer(*client, 0x144) == 16)
+        return ai_speed_scale(level, itemless, 0, id);
     return ai_speed_scale(level,itemless,now_fn ? now_fn(timer) : 0,id);
 }
 /* Native e4a220 reads speed-data +c and curve pointers +18/+20/+28.
@@ -379,7 +642,9 @@ static float kart_speed_scale(void *kart, int level, int itemless) {
 static float ABI kart_speed(void *kart, void *data, int kind, float speed, float dt) {
     int level=physics_ai_level(kart);
     const int itemless=runtime_speed_race_active();
-    float scale=level>=0 ? kart_speed_scale(kart,level,itemless) : 1;
+    float scale=(level>=0 ? kart_speed_scale(kart,level,itemless) : 1)*(1+catchup_for_kart(kart));
+    if (itemless && level >= 2 && !((unsigned char *)kart)[0x214])
+        scale *= 1.10f + .03f * (level-2);
     static int reported_policy=-1;
     const int policy=level+(itemless ? 16 : 0);
     if (level>=0 && reported_policy!=policy) {
@@ -393,6 +658,122 @@ static float ABI kart_speed(void *kart, void *data, int kind, float speed, float
     float top=real(data,12)*scale; memcpy(tuned+12,&top,4);
     return native_kart_speed(kart,tuned,kind,speed,dt);
 }
+/* Keep native vertical impulses on both peers. Extra height changes the
+ * flight time assumed by the recording, even at the correct planar speed. */
+static float ABI jump_impulse(void *kart) { return native_jump_impulse(kart); }
+static float ABI trick_jump_impulse(void *kart) { return native_trick_impulse(kart); }
+
+/* e46250 reads the per-kart boost contribution and its native speed limits.
+ * Scale all three for this call, then restore them; reserves never change. */
+static void ABI kart_motion(void *kart, void *data, void *velocity) {
+    const int level = physics_ai_level(kart);
+    void *entity = kart ? ptr(kart, 0x18) : NULL;
+    const float catchup=catchup_for_kart(kart);
+    const float boost_scale=(runtime_speed_race_active() && level>=2 ? 1.12f+.03f*(level-2) : 1)*(1+catchup);
+    unsigned char *boost = boost_scale>1 && entity &&
+        component && boost_type && *boost_type ? component(entity, *boost_type, 0) : NULL;
+    float saved[3];
+    const size_t offsets[] = {0x38, 0x4c, 0x50};
+    int tuned = boost && isfinite(real(boost, 0x38)) && real(boost, 0x38) > 0;
+    if (tuned) for (int i = 0; i < 3; ++i) {
+        saved[i] = real(boost, offsets[i]);
+        if (!isfinite(saved[i]) || saved[i] < 0) tuned = 0;
+    }
+    if (tuned) for (int i = 0; i < 3; ++i) {
+        const float value = saved[i] * boost_scale;
+        memcpy(boost + offsets[i], &value, 4);
+    }
+    int slot=-1;
+    const uint64_t now=runtime_ai_catchup_now();
+    if (runtime_speed_race_active() && level>=2 && entity==data && native_set_velocity &&
+        (integer(*client,0x144)!=16 || (((unsigned char *)entity)[0x3b]&1)))
+        for (int i=0;i<8;++i) if (ai_physics[i].kart==kart) { slot=i; break; }
+    float approach=0, route_speed=0, motion_dt=0;
+    if (slot>=0) {
+        uint64_t last=ai_physics[slot].motion_updated;
+        motion_dt=last && now>=last ? fminf((now-last)*.001f,.05f) : 0;
+        ai_physics[slot].motion_updated=now;
+        void *timer=ptr(kart,0xf8), *vtable=timer ? ptr(timer,0) : NULL;
+        typedef uint32_t (ABI *MotionNow)(void *);
+        MotionNow simulation_now=vtable ? (MotionNow)ptr(vtable,0xb0) : NULL;
+        if (simulation_now) {
+            const uint32_t tick=simulation_now(timer);
+            motion_dt=ai_physics[slot].motion_clock_valid ?
+                fminf((uint32_t)(tick-ai_physics[slot].motion_tick)/8192.f,.05f) : 0;
+            ai_physics[slot].motion_tick=tick; ai_physics[slot].motion_clock_valid=1;
+        } else ai_physics[slot].motion_clock_valid=0;
+        if (ai_physics[slot].identity_valid) {
+            approach=runtime_tt_reference_jump_speed(ai_physics[slot].id,(uintptr_t)entity);
+            route_speed=runtime_tt_reference_route_speed(ai_physics[slot].id,(uintptr_t)entity);
+        }
+        const int air=!((unsigned char *)kart)[0x214];
+        if (air || approach<=0) ai_physics[slot].approach_floor=0;
+        const float speed=hypotf(real(entity,0x60),real(entity,0x64));
+        if (!air) {
+            ai_physics[slot].air_floor=0; ai_physics[slot].air_until=0;
+            ai_physics[slot].jump_reference=approach;
+        }
+        else if (!ai_physics[slot].airborne && real(entity,0x68)>0 && isfinite(speed)) {
+            const float reference=approach>0 ? approach : ai_physics[slot].jump_reference;
+            ai_physics[slot].jump_reference=reference;
+            /* Catch-up can exceed the recorded landing speed. Do not lock
+             * that overspeed in for the entire flight and undo native braking. */
+            ai_physics[slot].air_floor=reference>0 ? fminf(speed,reference) : 0;
+            if (now>=ai_physics[slot].jump_report) {
+                printf("Native AI jump: ai_slot=%u takeoff_speed=%.1f reference_speed=%.1f\n",
+                       ai_physics[slot].id,speed,reference);
+                ai_physics[slot].jump_report=now+1000;
+            }
+            ai_physics[slot].air_until=reference>0 ? now+3000 : 0;
+        }
+        ai_physics[slot].airborne=air;
+    }
+    native_kart_motion(kart, data, velocity);
+    /* The recorded landing corridor has a speed budget. Catch-up must not
+     * carry several times that speed over an edge; only the native owner writes velocity. */
+    if (slot>=0) {
+        const float lead=runtime_tt_reference_jump_lead(ai_physics[slot].id,(uintptr_t)entity);
+        const float reference=ai_physics[slot].airborne ? route_speed :
+            (lead>=0 && lead<=.35f ? approach : 0);
+        if (reference>0 && (!ai_physics[slot].airborne || now<ai_physics[slot].air_until)) {
+            float v[3]; memcpy(v,(char *)entity+0x60,sizeof v);
+            const float speed=hypotf(v[0],v[1]), limit=reference*1.05f;
+            if (isfinite(speed) && isfinite(v[2]) && speed>limit) {
+                v[0]*=limit/speed; v[1]*=limit/speed;
+                native_set_velocity(entity,v);
+            }
+        }
+    }
+    if (slot>=0 && !ai_physics[slot].airborne && approach>0 && motion_dt>0) {
+        float v[3]; memcpy(v,(char *)entity+0x60,sizeof v);
+        const float speed=hypotf(v[0],v[1]);
+        /* Accelerate along the existing approach, never teleport or revive a
+         * stopped kart. The recorded jump determines the target, not difficulty. */
+        if (isfinite(speed) && isfinite(v[2]) && speed>100 && speed<approach) {
+            float previous=ai_physics[slot].approach_floor;
+            if (speed<fminf(previous,route_speed)*.75f) previous=0; /* Collision cancels accumulated assistance. */
+            float target=fminf(approach,fmaxf(speed,previous)+6000.f*motion_dt);
+            ai_physics[slot].approach_floor=target;
+            v[0]*=target/speed; v[1]*=target/speed;
+            native_set_velocity(entity,v);
+        }
+    }
+    if (slot>=0 && world_position && motion_dt>0) {
+        float position[3],v[3],guided[3]; world_position(position,entity);
+        memcpy(v,(char *)entity+0x60,sizeof v);
+        if (runtime_tt_reference_motion(ai_physics[slot].id,(uintptr_t)entity,position,v,
+                                         ai_physics[slot].airborne,motion_dt,guided)) {
+            native_set_velocity(entity,guided);
+            if (ai_physics[slot].airborne && now>=ai_physics[slot].jump_report) {
+                printf("Native AI flight: ai_slot=%u position=%.1f,%.1f,%.1f velocity=%.1f,%.1f,%.1f guided=%.1f,%.1f,%.1f\n",
+                       ai_physics[slot].id,position[0],position[1],position[2],v[0],v[1],v[2],guided[0],guided[1],guided[2]);
+                ai_physics[slot].jump_report=now+1000;
+            }
+        } else ai_physics[slot].air_until=0;
+    }
+    if (tuned) for (int i = 0; i < 3; ++i) memcpy(boost + offsets[i], &saved[i], 4);
+}
+
 /* e452c0 expires native modifiers and combines positive multipliers with the
  * strongest slowdown. Itemless AI retains positives and ignores that slowdown. */
 static void ABI speed_modifiers(void *kart, float dt) {
@@ -564,6 +945,22 @@ struct StuckRecovery {
 static struct StuckRecovery stuck_recovery[8];
 static _Thread_local int native_recovery_context;
 
+/* Native recovery follows a different lane with its own braking and hop
+ * decisions. Ghost-route physics must not boost it through that lane. */
+static int recovering_ai_kart(void *kart) {
+    if (!kart || !runtime_speed_race_active()) return 0;
+    void *entity=ptr(kart,0x18);
+    if (client && *client && integer(*client,0x144)==16) {
+        for (unsigned i=0;entity && i<8;++i)
+            if (ai_physics[i].kart==kart && ai_physics[i].entity==entity && ai_physics[i].identity_valid)
+                return runtime_ai_catchup_recovery(ai_physics[i].id);
+        return 0;
+    }
+    for (unsigned i=0;entity && i<8;++i)
+        if (stuck_recovery[i].owner==entity && stuck_recovery[i].active) return 1;
+    return 0;
+}
+
 /* Simulation-clock deadlines, not render-frame counts. Hysteresis prevents
  * alternating controllers at a blocked shortcut or while still reversing. */
 static int recover_stuck(unsigned id, void *owner, int lap, uint32_t now,
@@ -572,6 +969,7 @@ static int recover_stuck(unsigned id, void *owner, int lap, uint32_t now,
     if (!r->initialized || r->owner != owner || r->lap != lap || !driving) {
         *r = (struct StuckRecovery){.owner=owner,.lap=lap,.initialized=1,.since=now};
         memcpy(r->anchor,position,sizeof r->anchor);
+        runtime_ai_catchup_recovery_publish(id,0);
         return 0;
     }
     const float moved = hypotf(position[0]-r->anchor[0],position[1]-r->anchor[1]);
@@ -584,6 +982,11 @@ static int recover_stuck(unsigned id, void *owner, int lap, uint32_t now,
         const int missed_landing=r->below && speed<300 && (uint32_t)(now-r->below_since)>=2048;
         if (missed_landing || ((uint32_t)(now-r->since) >= 8192 && speed < 100)) {
             r->active=1; r->entered=now; r->moving=0;
+            for (unsigned i=0;i<8;++i) if (ai_physics[i].entity==owner) {
+                ai_physics[i].air_until=0;
+                ai_physics[i].air_floor=ai_physics[i].approach_floor=ai_physics[i].jump_reference=0;
+                ai_physics[i].airborne=0;
+            }
             printf("Native AI: stuck id=%u native_recovery=1 speed=%.1f moved=%.1f missed_landing=%d lap=%d position=%.1f,%.1f,%.1f\n",
                    id,speed,moved,missed_landing,lap,position[0],position[1],position[2]);
         }
@@ -597,6 +1000,7 @@ static int recover_stuck(unsigned id, void *owner, int lap, uint32_t now,
             }
         } else r->moving=0;
     }
+    runtime_ai_catchup_recovery_publish(id,r->active);
     return r->active;
 }
 
@@ -613,8 +1017,9 @@ static unsigned guide_hop(unsigned char *ai, unsigned intent) {
 /* Itemless can pass nearby racers on a straight instead of sharing one lane.
  * Keep the recorded line through bends and terrain jumps. */
 static void avoid_reference_traffic(void *entity, unsigned id, const float position[3],
-                                    float targets[2][3], unsigned intent) {
-    if ((intent & (4u|2u|512u)) || !racer_manager || !*racer_manager || !world_position) return;
+                                    float targets[2][3], unsigned intent, int grounded) {
+    const float lead=runtime_tt_reference_jump_lead(id,(uintptr_t)entity);
+    if (!grounded || (intent & (2u|512u)) || ((intent & 4u) && lead<.6f) || !racer_manager || !*racer_manager || !world_position) return;
     float dx=targets[0][0]-position[0], dy=targets[0][1]-position[1];
     float fx=targets[1][0]-targets[0][0], fy=targets[1][1]-targets[0][1];
     float length=hypotf(dx,dy), far_length=hypotf(fx,fy);
@@ -624,7 +1029,7 @@ static void avoid_reference_traffic(void *entity, unsigned id, const float posit
     int count=list ? integer(list,12) : 0;
     void **items=list ? ptr(list,0x20) : NULL;
     if (!items || count<0 || count>8) return;
-    float offset=0;
+    float offset=0, nearest=900;
     for (int i=0;i<count;++i) {
         unsigned char *other=items[i];
         if (!other || other[0x8c]) continue;
@@ -633,12 +1038,13 @@ static void avoid_reference_traffic(void *entity, unsigned id, const float posit
         float p[3]; world_position(p,other_entity);
         float x=p[0]-position[0], y=p[1]-position[1];
         float ahead=x*dx+y*dy, side=y*dx-x*dy;
-        if (ahead<=-250 || ahead>=900 || fabsf(side)>=240 || fabsf(p[2]-position[2])>120) continue;
+        if (ahead<0 || ahead>=nearest || fabsf(side)>=240 || fabsf(p[2]-position[2])>120) continue;
         unsigned char *player=race_handle((void **)(other+0x10));
         int other_id=player ? integer(player,0xc8) : integer(other,0x164);
         if (other_id<0 || other_id>=8) continue;
-        float weight=(ahead>=0 ? 1-ahead/900 : 1+ahead/250)*(1-fabsf(side)/240);
-        offset+=(id<(unsigned)other_id ? -90.f : 90.f)*weight;
+        float weight=(1-ahead/900)*(1-fabsf(side)/240);
+        offset=(id<(unsigned)other_id ? -90.f : 90.f)*weight;
+        nearest=ahead;
     }
     offset=fmaxf(-90,fminf(90,offset));
     for (int i=0;i<2;++i) { targets[i][0]-=dy*offset; targets[i][1]+=dx*offset; }
@@ -669,7 +1075,7 @@ static void ABI race_targets(unsigned char *self, unsigned char *ai) {
     unsigned char *entity = ptr(self, 0x18);
     if (!entity || (integer(*client, 0x144) == 16 && !(entity[0x3b] & 1))) return;
     unsigned char *racer = race_handle((void **)(self + 0x28));
-    if (!racer || racer[0x8c]) return;
+    if (!racer || racer[0x8c] || ptr(racer,0x10)) return;
     unsigned char *player = race_handle((void **)(racer + 0x10));
     const int id = player ? integer(player, 0xc8) : integer(racer, 0x164);
     if (id < 0 || id >= 8) return;
@@ -709,7 +1115,12 @@ static void ABI race_targets(unsigned char *self, unsigned char *ai) {
      * whose geometry assumes a different target. Native active slides are kept. */
     if (box) intent &= ~(1u | TT_REFERENCE_ALIGNED);
     if (!guided && !box) return;
-    if (guided) avoid_reference_traffic(entity,(unsigned)id,position,targets,intent);
+    if (guided) {
+        unsigned char *driving=ptr(ai,0x48);
+        unsigned char *kart=driving ? race_handle((void **)(driving+0x58)) : NULL;
+        avoid_reference_traffic(entity,(unsigned)id,position,targets,intent,
+                                kart && ptr(kart,0x18)==entity && kart[0x214]);
+    }
     memcpy(ai + 0x28, targets, sizeof targets);
     reference_native_hop = ai[0x7d];
     if (guided) intent = guide_hop(ai, intent);
@@ -891,7 +1302,7 @@ static void apply_tt_technique(void *self, void *input) {
 }
 
 /* Read the remaining duration of the fastest fire, using native reserve carry
- * arithmetic (e2e6b0). Never refill reserves or suppress boost cancellation. */
+ * arithmetic (e2e6b0). This query never changes reserves. */
 static float fire_remaining(void *controller) {
     void *entity = ptr(controller, 0x18);
     void *boost = entity && boost_type && *boost_type && component ? component(entity, *boost_type, 0) : NULL;
@@ -1238,7 +1649,7 @@ static unsigned char ABI item_decision(unsigned char *self, unsigned char *racer
     const int level = driving_level();
     unsigned char *entity = ptr(self, 0x18);
     if (client && *client && integer(*client,0x144)==16 && !runtime_private_match_active()) return result;
-    if (level < 0 || level > 5 || !racer || racer[0x8c] || runtime_speed_race_active() ||
+    if (level < 0 || level > 5 || !racer || racer[0x8c] || ptr(racer,0x10) || runtime_speed_race_active() ||
         !manager || !*manager || (integer(*manager, 0xd4c) != 1 && integer(*manager, 0xd4c) != 6) ||
         !entity || (integer(*client, 0x144) == 16 && !(entity[0x3b] & 1))) return result;
     unsigned char *player = race_handle((void **)(racer + 0x10));
@@ -1481,14 +1892,25 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     const unsigned char speed_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28};
     if (memcmp(image+0xe452c0,modifier_prefix,sizeof modifier_prefix) ||
         memcmp(image+0xe4a220,speed_prefix,sizeof speed_prefix)) return 0;
+    const unsigned char hop_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x83,0xec,0x20};
+    const unsigned char exhaust_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x49,0x89,0xff,0x31,0xdb};
+    if (memcmp(image+0xe8ad70-shift,exhaust_prefix,sizeof exhaust_prefix)) return 0;
+    const unsigned char keep_boost_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x49,0x89,0xff};
+    if (memcmp(image+0xe2f1d0,keep_boost_prefix,sizeof keep_boost_prefix)) return 0;
+    const unsigned char boost_update_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28};
+    if (memcmp(image+0xe75250-shift,boost_update_prefix,sizeof boost_update_prefix)) return 0;
+    if (memcmp(image+0xbb5060,"\xc5\xfa\x10\x06\xc5\xfa\x5c\x47\x60",9)) return 0;
+    const unsigned char motion_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x01,0,0};
+    if (memcmp(image+0xe33d80,hop_prefix,sizeof hop_prefix) || memcmp(image+0xe49d90,hop_prefix,sizeof hop_prefix) ||
+        memcmp(image+0xe46250,motion_prefix,sizeof motion_prefix)) return 0;
 #ifdef _WIN32
-    unsigned char *cold = VirtualAlloc(NULL, 512, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    unsigned char *cold = VirtualAlloc(NULL, 784, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #else
-    unsigned char *cold = mmap(NULL, 512, PROT_READ | PROT_WRITE | PROT_EXEC,
+    unsigned char *cold = mmap(NULL, 784, PROT_READ | PROT_WRITE | PROT_EXEC,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cold == MAP_FAILED) cold = NULL;
 #endif
-    if (!cold || !writable(image+0xe452c0,17) || !writable(image+0xe4a220,17) || !writable(image + 0xdcd930, 20) || !writable(image + 0xc0a3b0, 14) || !writable(image + 0xdcdd30, 20) || !writable(image + 0xdd0210, 20) || !writable(image + 0xc59b10, 14) || !writable(image + 0x2770de0, sizeof(void *)) ||
+    if (!cold || !writable(image+0xe2f1d0,sizeof keep_boost_prefix) || !writable(image+0xe75250-shift,sizeof boost_update_prefix) || !writable(image+0xe8ad70-shift,sizeof exhaust_prefix) || !writable(image+0xe33d80,15) || !writable(image+0xe49d90,15) || !writable(image+0xe46250,20) || !writable(image+0xe452c0,17) || !writable(image+0xe4a220,17) || !writable(image + 0xdcd930, 20) || !writable(image + 0xc0a3b0, 14) || !writable(image + 0xdcdd30, 20) || !writable(image + 0xdd0210, 20) || !writable(image + 0xc59b10, 14) || !writable(image + 0x2770de0, sizeof(void *)) ||
         !writable(image + 0xf4c840 - shift, 14) || !writable(image + 0xe0f9b0, 14) ||
         !writable(image + 0xdcfc10, 14) || !writable(image + 0xdcb630, 17) || !writable(image + 0xdcfb10, 14) || !writable(image + 0xe0efa0, 14)) return 0;
     cold[0] = 0x55; /* Replaced native cold-path push rbp; rest stays in place. */
@@ -1542,6 +1964,7 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     collectible_manager = (void **)(image + 0x2acdc40);
     power_use_type = (void **)(image + 0x2ac3a38);
     racer_manager = (void **)(image + 0x2ad4b70);
+    catchup_racer_ahead=(RacerAhead)(image+0xff11a0-shift);
     world_position = (WorldPosition)(image + 0x3dc720);
     race_resolve_handle = (ResolveHandle)(image + 0x149fca0 - shift);
     difficulty_event_original = (Event)ptr(image, 0x2770de0);
@@ -1576,6 +1999,32 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     jump(image + 0xdcd930, item_decision);
     jump(image+0xe452c0,speed_modifiers);
     jump(image+0xe4a220,kart_speed);
+    memcpy(cold+544,hop_prefix,sizeof hop_prefix);
+    jump(cold+544+sizeof hop_prefix,image+0xe49d90+sizeof hop_prefix);
+    native_jump_impulse=(BoostDuration)(cold+544);
+    memcpy(cold+576,motion_prefix,sizeof motion_prefix);
+    jump(cold+576+sizeof motion_prefix,image+0xe46250+sizeof motion_prefix);
+    native_kart_motion=(KartMotion)(cold+576);
+    memcpy(cold+624,hop_prefix,sizeof hop_prefix);
+    jump(cold+624+sizeof hop_prefix,image+0xe33d80+sizeof hop_prefix);
+    native_trick_impulse=(BoostDuration)(cold+624);
+    jump(image+0xe33d80,trick_jump_impulse);
+    jump(image+0xe49d90,jump_impulse);
+    jump(image+0xe46250,kart_motion);
+    native_set_velocity=(SetVelocity)(image+0xbb5060);
+    memcpy(cold+672,exhaust_prefix,sizeof exhaust_prefix);
+    jump(cold+672+sizeof exhaust_prefix,image+0xe8ad70-shift+sizeof exhaust_prefix);
+    native_exhaust_state=(ExhaustState)(cold+672);
+    jump(image+0xe8ad70-shift,exhaust_state);
+    memcpy(cold+704,boost_update_prefix,sizeof boost_update_prefix);
+    jump(cold+704+sizeof boost_update_prefix,image+0xe75250-shift+sizeof boost_update_prefix);
+    native_boost_update=(BoostUpdate)(cold+704);
+    jump(image+0xe75250-shift,boost_update);
+    memcpy(cold+752,keep_boost_prefix,sizeof keep_boost_prefix);
+    jump(cold+752+sizeof keep_boost_prefix,image+0xe2f1d0+sizeof keep_boost_prefix);
+    native_keep_boost=(KeepBoost)(cold+752);
+    jump(image+0xe2f1d0,keep_boost);
+    puts("Native AI: Extreme/Nightmare retain fastest pad fire through braking/contact; players excluded");
     printf("Native AI: loaded %d TT track references\n",
            runtime_tt_reference_load(getenv("BB_TT_REFERENCE")));
 #ifdef _WIN32

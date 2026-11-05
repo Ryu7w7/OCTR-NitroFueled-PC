@@ -343,6 +343,8 @@ def private_team_settings(blob):
     if hashlib.sha256(blob).hexdigest() not in {
         'a2259e5840343814fa5901ce16de69a3c7295760a5ceb8ed51baf2176608fbc4',  # USA 1.21
         'e8667f50355f3b0cfa35df6b25f159715c068e53bba86cc1ebecb948d4a97cb4',  # EU 1.21
+        '759c89e2d1d9f19e312cc25b009df3a0375497672c40507434c475c886892df9',  # USA widescreen
+        '841c6f4ee3727b95ad6c3c9438020dda3e0fb401d4ca3e143549e4e7290db161',  # EU widescreen
     }:
         raise ValueError('unsupported native private team settings')
     g = Igz(blob)
@@ -659,6 +661,8 @@ def public_lobby_card(blob):
     if hashlib.sha256(blob).hexdigest() not in {
         'b57ea5c3a619e01b2439b08d2c4e07905b6aad4b8c1efd35f8c5aa00e015c492',
         'df61f393a9da879a82154a634d1431b2bba31e303543ad106a3b2ef5edd28bb8',
+        '9e17b0b1575d35768cca8c6235642867df5ebb94a6ba22bbe5b15fad40b306cc',  # USA widescreen
+        '1af38cd0fcb77576ec6276a7e78732409ac8ceded2aad2934d8ca0ee34388884',  # EU widescreen
     }:
         raise ValueError('unsupported native public lobby card')
     g = Igz(blob)
@@ -748,7 +752,7 @@ def prepare(game, out, elf, bases):
         lobby_root_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
         lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
         public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
-        public_lobby = public_lobby_card(iga.read_entry(f, *entries[public_index][1:]))
+        public_lobby = public_lobby_card(current_entry(pak, entries, public_index, base))
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
@@ -782,7 +786,7 @@ def prepare(game, out, elf, bases):
                                       {index: payload, lobby_index: lobby, package_index: package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
                                        lobby_root_index: lobby_root, music_index: music, public_index: public_lobby}, base,
-                                      override={index, settings_index, ranking_ui_index, lobby_index})
+                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)

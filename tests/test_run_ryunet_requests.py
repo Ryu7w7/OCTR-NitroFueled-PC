@@ -7,8 +7,10 @@ import json
 import sys
 import threading
 import unittest
+from unittest import mock
 
 from paths import ROOT
+import ryunet_session
 
 sys.path.insert(0, str(ROOT))
 
@@ -23,10 +25,12 @@ class FilteredServerTests(unittest.TestCase):
         self.addCleanup(setattr, run, 'say', said)
         self.filter = 'redirect'
         self.seen = []
+        self.connections = []
         test = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def answer(self):
+                test.connections.append(self.connection)
                 host = self.headers.get('Host', '').split(':')[0]
                 test.seen.append((self.command, host, self.path.split('?')[0],
                                   self.headers.get('X-RyuNET-Proof')))
@@ -69,10 +73,10 @@ class FilteredServerTests(unittest.TestCase):
         run.HTTPS_FAILED.clear()
         self.addCleanup(run.HTTPS_FAILED.clear)
 
-    def claim_through(self, kind):
+    def claim_through(self, kind, session=None):
         self.filter = kind
-        self.assertEqual(self.run.server_settings('localhost', self.port), {'theme': 'halloween'})
-        self.run.claim_nick('localhost', self.port, 'Tester', 'ab' * 32)
+        self.assertEqual(self.run.server_settings('localhost', self.port, session=session), {'theme': 'halloween'})
+        self.run.claim_nick('localhost', self.port, 'Tester', 'ab' * 32, session=session)
         self.assertEqual(self.lines, ['Nickname Tester: claimed on localhost'])
         # Each request went by name, then by address; a signature is never sent twice.
         self.assertEqual([(m, h, p) for m, h, p, _ in self.seen],
@@ -112,6 +116,78 @@ class FilteredServerTests(unittest.TestCase):
         self.assertEqual(self.run.server_settings('127.0.0.1', self.port), {'theme': 'halloween'})
         self.assertEqual(self.run.HTTPS_FAILED, set())
         self.assertEqual([(m, h) for m, h, _, _ in self.seen], [('GET', '127.0.0.1')])
+
+    def test_session_reuses_connection_and_fetches_fresh_settings(self):
+        self.filter = 'none'
+        self.server.RequestHandlerClass.protocol_version = 'HTTP/1.1'
+        with mock.patch('urllib.request.getproxies', return_value={}):
+            with ryunet_session.Session() as session:
+                for _ in range(2):
+                    self.assertEqual(self.run.server_settings('127.0.0.1', self.port, session=session),
+                                     {'theme': 'halloween'})
+                self.assertEqual(len(self.seen), 2)  # A fresh request, not a cached response.
+                self.assertIs(self.connections[0], self.connections[1])
+            self.assertFalse(session.connections)
+
+    def test_session_preserves_filter_fallback_and_fresh_signatures(self):
+        with mock.patch('urllib.request.getproxies', return_value={}):
+            with ryunet_session.Session() as session:
+                self.claim_through('redirect', session=session)
+
+    def test_successful_named_request_skips_extra_address_lookup(self):
+        self.filter = 'none'
+        with mock.patch('socket.gethostbyname', side_effect=AssertionError('unnecessary fallback DNS')):
+            self.assertEqual(self.run.server_settings('localhost', self.port), {'theme': 'halloween'})
+
+
+class SessionFailureTests(unittest.TestCase):
+    def test_unconsumed_response_discards_connection(self):
+        import urllib.request
+        connection = mock.Mock()
+        connection.sock = None
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.will_close = False
+        response.isclosed.return_value = False
+        request = urllib.request.Request('https://example.test/ryunet/theme')
+        with mock.patch('urllib.request.getproxies', return_value={}), \
+                mock.patch('http.client.HTTPSConnection', return_value=connection):
+            with ryunet_session.Session() as session:
+                with session.open(request, 3, mock.Mock()):
+                    pass
+                self.assertFalse(session.connections)
+            connection.close.assert_called_once()
+            response.close.assert_called_once()
+
+    def test_proxy_uses_original_opener(self):
+        import urllib.request
+        opener = mock.MagicMock()
+        request = urllib.request.Request('https://example.test/ryunet/theme')
+        with mock.patch('urllib.request.getproxies', return_value={'https': 'http://proxy.test'}), \
+                mock.patch('http.client.HTTPSConnection') as factory:
+            with ryunet_session.Session() as session:
+                with session.open(request, 3, opener):
+                    pass
+            opener.open.assert_called_once_with(request, timeout=3)
+            factory.assert_not_called()
+
+    def test_failed_post_is_closed_without_replay(self):
+        import http.client
+        import urllib.request
+        connection = mock.Mock()
+        connection.sock = None
+        connection.getresponse.side_effect = http.client.RemoteDisconnected('closed')
+        request = urllib.request.Request('https://example.test/ryunet/nick/claim', data=b'')
+        with mock.patch('urllib.request.getproxies', return_value={}), \
+                mock.patch('http.client.HTTPSConnection', return_value=connection) as factory:
+            with ryunet_session.Session() as session:
+                with self.assertRaises(OSError):
+                    with session.open(request, 4, mock.Mock()):
+                        self.fail('disconnected request succeeded')
+                self.assertFalse(session.connections)
+            factory.assert_called_once_with('example.test', None, timeout=4)
+            self.assertEqual(connection.request.call_count, 1)
+            connection.close.assert_called_once()
 
 
 if __name__ == '__main__':
