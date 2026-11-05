@@ -841,8 +841,14 @@ void FriendsTab() {
             ImGui::SameLine();
             if (ImGui::Button(BbSettings::MenuText("Invite", "Пригласить"))) act("invite", f.name);
             ImGui::SameLine();
-            // Spectator build: the friend's newest shared race, watched from REPLAYS.
-            if (ImGui::Button(BbSettings::MenuText("Spectate", "Смотреть"))) runtime_spectate_watch(f.name);
+            // Spectator build: the friend's live race (else their newest shared race), then each next race of
+            // theirs by itself until Stop spectating.
+            char followed[32] = "";
+            if (runtime_spectate_following(followed, sizeof followed) && !std::strcmp(followed, f.name)) {
+                if (ImGui::Button(BbSettings::MenuText("Stop spectating", "Не смотреть"))) runtime_spectate_stop();
+            } else if (ImGui::Button(BbSettings::MenuText("Spectate", "Смотреть"))) {
+                runtime_spectate_watch(f.name);
+            }
         }
         ImGui::SameLine();
         if (confirm_remove == f.name) {
@@ -869,15 +875,18 @@ void FriendsTab() {
         case RS_FAILED: line = BbSettings::MenuText("Could not download %s's race.", "Не удалось загрузить гонку %s."); break;
         case RS_LIVE: line = BbSettings::MenuText("Watching %s live.", "Смотрите %s в прямом эфире."); break;
         case RS_WAITING: line = BbSettings::MenuText("%s is live: waiting for the race to start...", "%s в эфире: ждём старта..."); break;
-        case RS_BUSY: line = BbSettings::MenuText("Spectate works from the menus, not during a race or a replay.",
-                                                  "Смотреть можно из меню, не во время гонки или повтора."); break;
+        case RS_BUSY: line = BbSettings::MenuText("%s's race loads when you are back in the menus.",
+                                                  "Гонка %s загрузится, когда вы вернётесь в меню."); break;
         case RS_PLAYING: line = BbSettings::MenuText("Playing %s's last race.", "Идёт последняя гонка %s."); break;
+        case RS_FOLLOW: line = BbSettings::MenuText("Spectating %s: their next race loads by itself.",
+                                                    "Смотрите %s: следующая гонка загрузится сама."); break;
         default: break;
         }
         if (line) {
             char text[200];
             std::snprintf(text, sizeof text, line, who);
-            ImGui::TextColored(spectate == RS_READY || spectate == RS_LIVE || spectate == RS_PLAYING ? kFriendGreen : kMenuGrey, "%s", text);
+            ImGui::TextColored(spectate == RS_READY || spectate == RS_LIVE || spectate == RS_PLAYING || spectate == RS_FOLLOW
+                                   ? kFriendGreen : kMenuGrey, "%s", text);
         }
     }
     // online friends first and open; offline ones folded (a long list hid everything below it)
@@ -1750,6 +1759,32 @@ void PingCounter() {
     ImGui::End();
 }
 
+/// SPECTATOR (n): friends watching this player's race live, in the top right corner under the FPS
+/// counter and the ping; nothing when nobody watches.
+void SpectatorBadge(int viewers) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    const float below = (BbSettings::Get().show_fps ? corner_fps_height + 6.0f * base_scale : 0.0f) +
+                        corner_ping_height;
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, viewport->WorkPos.y + pad + below),
+        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##spectators", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    // a red "live" dot before the text
+    const float dot = ImGui::GetTextLineHeight() * 0.3f;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddCircleFilled(
+        ImVec2(at.x + dot, at.y + ImGui::GetTextLineHeight() * 0.5f), dot, IM_COL32(230, 40, 40, 255));
+    ImGui::Dummy(ImVec2(dot * 2.0f, ImGui::GetTextLineHeight()));
+    ImGui::SameLine();
+    ImGui::Text("SPECTATOR (%d)", viewers);
+    ImGui::End();
+}
+
 // RyuNET server announcements ("maintenance in 5 minutes"): the launcher writes
 // ryunet_announce.txt next to bbport.ini (id, level, expires, text) and each new one is drawn
 // over the picture for a few seconds. No input is taken: the game goes on underneath.
@@ -2236,7 +2271,8 @@ bool Visible() {
         notice = !notices.empty();
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
-                           (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice);
+                           (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
+                           runtime_spectate_viewers() > 0);
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -2322,6 +2358,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     corner_ping_height = 0.0f;
     if (BbSettings::Get().show_ping && !menu_open && InOnlineRoom()) {
         PingCounter();
+    }
+    if (const int viewers = runtime_spectate_viewers(); viewers > 0 && !menu_open) {
+        SpectatorBadge(viewers);
     }
     if (prompt_active && !menu_open) {
         TextPrompt();

@@ -175,7 +175,19 @@ static struct {
     uint32_t input_frame[RR_RACERS];    /* the next frame to make input keys from */
     int input_last[RR_RACERS];
     uint32_t laps_scanned;
+    int skip_set, flyby_seen;           /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
+    uint8_t skip_was;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
+static int drop_ghosts_at_end;          /* a chained live race: the level that ends still has the last race's ghosts */
+/* The friend's next live race while the last one is still on screen (ended): kept for the game's thread,
+ * which swaps the races (P.lock) */
+static struct {
+    struct rr_header header;
+    uint8_t *packed;
+    size_t size;
+    uint32_t frames;
+} NEXT;
+static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
@@ -432,11 +444,11 @@ static void cast_player(int ask) {
         printf("Replay: the player's kart shows %s / %s (outfit %p)\n", rec->driver, rec->kart, outfit);
         request_character(player, rec->driver, outfit, rec->kart);
         char *settings = rr_ptr(RR_D_RACE_SETTINGS);
-        if (settings && P.mirror_was < 0) {
+        if (settings && P.mirror_was < 0) {             /* the player's own settings (a chained race keeps them) */
             P.mirror_was = RR_AT(settings, 0x3c, uint8_t);
             P.laps_was = RR_AT(settings, 0xc, int32_t);
-            RR_AT(settings, 0x3c, uint8_t) = P.header.mirror;
         }
+        if (settings) RR_AT(settings, 0x3c, uint8_t) = P.header.mirror;
     }
 }
 
@@ -1306,6 +1318,7 @@ void ABI runtime_replay_level_start(void *manager) {
     }
     cast_player(0);
     P.pending = 2;
+    drop_ghosts_at_end = 0;
     P.level_time = 0.0f;
     if (settings) RR_AT(settings, 0xc, int32_t) = 99;   /* laps: the player's kart never finishes */
     drop_ghosts();
@@ -1334,6 +1347,11 @@ void runtime_replay_play_level_end(void) {
     char *frame = rr_ptr(RR_D_FRAME);
     if (P.pending && frame) RR_AT(frame, 0x2c, float) = 1.0f;
     accolades(0);
+    if (drop_ghosts_at_end) {
+        drop_ghosts_at_end = 0;
+        drop_ghosts();
+        return;
+    }
     if (P.pending != 2) return;
     P.pending = 0;
     P.live = 0;
@@ -1427,8 +1445,31 @@ void runtime_replay_play_frame(void) {
     set_race_clock((frame_now()->racer[P.watch].flags & RS_FINISHED) && finish > 0.0f && finish < P.time ? finish : P.time);
 }
 
+/* A replay's race starts without the camera fly-over over the track: CCutsceneManager's own _skipCutscenes
+ * (+0x7a) is on while a replay loads or plays, and goes back to what it was after. _Instance and the field
+ * offsets: the game's reflection data (scripts/patches.py cutscene_state; the same in the EU edition). */
+#define D_CUTSCENE_MANAGER 0x2ab67f0
+static void skip_intro(void) {
+    char *manager = rr_ptr(D_CUTSCENE_MANAGER);
+    if (!manager) return;
+    if (P.pending) {
+        if (!P.skip_set) P.skip_set = 1, P.skip_was = RR_AT(manager, 0x7a, uint8_t), P.flyby_seen = 0;
+        RR_AT(manager, 0x7a, uint8_t) = 1;
+        char *active = RR_AT(manager, 0xa0, char *);   /* _activeCutsceneData, _isFlybyIntro +0x30 */
+        if (active && RR_AT(active, 0x30, uint8_t) && !P.flyby_seen) {
+            P.flyby_seen = 1;
+            printf("Replay: the track's fly-over plays anyway\n");
+            fflush(stdout);
+        }
+    } else if (P.skip_set) {
+        P.skip_set = 0;
+        RR_AT(manager, 0x7a, uint8_t) = P.skip_was;
+    }
+}
+
 /* Every frame (the pad read, runtime_replay.c): the menu's request, the start sequence, the character given back */
 void ABI runtime_replay_tick(void) {
+    skip_intro();
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
     if (number == P.last_frame) return;
@@ -1441,27 +1482,53 @@ void ABI runtime_replay_tick(void) {
     pthread_mutex_lock(&P.lock);
     const int live = P.live_request;
     P.live_request = 0;
+    struct rr_header next_header;
+    uint8_t *next = 0;
+    size_t next_size = 0;
+    uint32_t next_frames = 0;
+    if (live == 2) {
+        next_header = NEXT.header, next = NEXT.packed, next_size = NEXT.size, next_frames = NEXT.frames;
+        NEXT.packed = 0;
+    }
     pthread_mutex_unlock(&P.lock);
-    if ((path[0] || live) && !P.pending && P.step == STEP_NONE) {
+    /* the followed friend's next race in place of the one that ended on screen: this level goes (its ghosts
+     * with it, runtime_replay_play_level_end) and the next race starts as from the menus */
+    int chain = 0;
+    if (live == 2 && next && runtime_replay_can_chain()) {
+        drop_ghosts_at_end = 1;
+        P.pending = 1;
+        if (take_live(&next_header, next, next_size, next_frames)) {
+            chain = 1;
+            if (frame) RR_AT(frame, 0x2c, float) = 1.0f;
+            printf("Replay: the friend's next race: leaving this one for it\n");
+        } else {
+            P.pending = 2;
+            drop_ghosts_at_end = 0;
+        }
+    }
+    free(next);
+    if (chain || ((path[0] || live == 1) && !P.pending && P.step == STEP_NONE)) {
         char full[800];
         rr_race_dir(full, sizeof full - 80);
         strncat(full, "/", sizeof full - strlen(full) - 1);
         strncat(full, path, sizeof full - strlen(full) - 1);
         accolades(0);
-        memset(P.ghost, 0, sizeof P.ghost);
+        if (!chain) {                   /* a chain keeps this level's ghosts until it goes, and the saved settings */
+            memset(P.ghost, 0, sizeof P.ghost);
+            memset(P.attached, 0, sizeof P.attached);
+            P.mirror_was = -1;
+        }
         P.accolade_player = -2;
-        P.mirror_was = -1;
         P.set_up = P.started = P.paused = P.scrubbing = P.rewound = 0;
         P.camera = P.target = P.kart = 0;
         P.time = 0.0f;
-        memset(P.attached, 0, sizeof P.attached);
         memset(P.fed, 0, sizeof P.fed);
         if (live) {
             P.live_ended = 0;
             P.laps_scanned = 0;
             snprintf(path, sizeof path, "%s", "(live)");
         }
-        if (!live && !load(full)) {
+        if (!chain && !live && !load(full)) {
             printf("Replay: %s cannot be played\n", path);
         } else {
             P.player_slot = -1;
@@ -1608,8 +1675,10 @@ static uint32_t unpack_more(const uint8_t *packed, size_t size, uint32_t frames)
     return n;
 }
 
-int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames) {
-    if (P.pending || P.step != STEP_NONE || !header || memcmp(header->magic, RR_MAGIC, 8) || header->go_time < 0.0f) return 0;
+/* 1 when a replay is over on screen: a friend's next live race can take its place */
+int runtime_replay_can_chain(void) { return P.pending == 2 && P.step == STEP_NONE && ended(); }
+
+static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames) {
     if (!P.frames && !(P.frames = malloc(sizeof(struct rr_frame) * RR_MAX_FRAMES))) return 0;
     P.header = *header;
     P.header.level[sizeof P.header.level - 1] = 0;
@@ -1626,6 +1695,23 @@ int runtime_replay_play_live(const struct rr_header *header, const uint8_t *pack
     __atomic_store_n(&P.count, n, __ATOMIC_RELEASE);
     P.live = 1;
     __atomic_store_n(&P.live_ended, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+
+int runtime_replay_play_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames) {
+    if (!header || memcmp(header->magic, RR_MAGIC, 8) || header->go_time < 0.0f) return 0;
+    if (runtime_replay_can_chain()) {
+        uint8_t *copy = malloc(size ? size : 1);
+        if (!copy) return 0;
+        memcpy(copy, packed, size);
+        pthread_mutex_lock(&P.lock);
+        free(NEXT.packed);
+        NEXT.header = *header, NEXT.packed = copy, NEXT.size = size, NEXT.frames = frames;
+        P.live_request = 2;
+        pthread_mutex_unlock(&P.lock);
+        return 1;
+    }
+    if (P.pending || P.step != STEP_NONE || !take_live(header, packed, size, frames)) return 0;
     pthread_mutex_lock(&P.lock);
     P.live_request = 1;
     pthread_mutex_unlock(&P.lock);
