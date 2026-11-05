@@ -14,6 +14,7 @@
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
 #include "runtime_replay_list.h"
+#include "runtime_net_ping.h"
 #include "runtime.h"
 
 #include <math.h>
@@ -1943,8 +1944,8 @@ static void tnt(uint32_t now) {
 /* A recorded explosive hit (a missile's or a bomb's): online it flew on the other PC's path, here it can be far from the
  * kart at the hit. In the last GUIDE_TIME the nearest thrown missile or bomb (not the racer's own) flies to the kart and
  * arrives at the recorded time, with the hit (ported from Replay Mode). */
-#define GUIDE_TIME 0.7f
-#define GUIDE_RANGE 6000.0f
+#define GUIDE_TIME 1.0f
+#define GUIDE_RANGE 9000.0f
 static struct {
     struct { int slot; uint16_t generation; uint32_t hit; float t0, from[3]; } racer[RR_RACERS];
     uint32_t hit[RR_RACERS], last;
@@ -2383,7 +2384,10 @@ int runtime_replay_play_install(int eu) {
 
 /* The menu may start a replay: none is starting or playing, and no race is on (no player kart). */
 int runtime_replay_can_start(void) {
-    return !P.pending && P.step == STEP_NONE && rr_game(0) && !rr_kart_of(0, 0);
+    /* not in a race (a race clock on the world; the menus' karts, the online menu's too, do not count) and not in an
+     * online room (a local race there would break it: the followed race loads once the room is left) */
+    PingPeer peers[PING_MAX_PEERS];
+    return !P.pending && P.step == STEP_NONE && rr_game(0) && !race_timer() && runtime_net_ping_view(peers, PING_MAX_PEERS) <= 0;
 }
 
 /* ---- live (runtime_replay.h): runtime_spectate.c's thread gives the frames ---- */

@@ -221,7 +221,7 @@ const char* Spanish(const char* english) {
     {"Spectating %s: their next race loads by itself.", "Espectando a %s: su próxima carrera se cargará sola."},
     {"Watching %s live.", "Viendo a %s en directo."},
     {"%s is live: waiting for the race to start...", "%s está en directo: esperando a que empiece la carrera..."},
-    {"%s's race loads when you are back in the menus.", "La carrera de %s se cargará cuando vuelvas a los menús."},
+    {"%s's race loads once you are not racing or in an online room.", "La carrera de %s se cargará cuando no estés en una carrera ni en una sala online."},
     {"Playing %s's last race.", "Reproduciendo la última carrera de %s."},
     {"Replays", "Replays"},
     {"Every race is recorded. Watch one from the main menu: L1 / R1 lap, L2 / R2 racer, Square pause, Up / Down speed, Left / Right rewind and fast forward; leave with the pause menu's Quit.",
