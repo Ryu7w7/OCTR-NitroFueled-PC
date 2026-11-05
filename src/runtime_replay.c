@@ -1102,3 +1102,138 @@ int runtime_replay_list(RrListEntry *out, int max) {
     free(all);
     return n;
 }
+
+/* ---- managing the list (the menu's Replays tab): export, import, delete ----
+ * The shared folder is "replays" next to bbport.ini (BB_CONFIG's folder, else the game's folder): exported races go
+ * there with a readable name, and the races put there are imported (each once: a race already in RaceReplay, the same
+ * date, track and length, is not copied again). */
+void runtime_replay_folder(char *out, size_t size) {
+    char base[600] = ".";
+    const char *config = getenv("BB_CONFIG");
+    if (config && *config) {
+        snprintf(base, sizeof base, "%s", config);
+        char *slash = strrchr(base, '/'), *back = strrchr(base, '\\');
+        if (back > slash) slash = back;
+        if (slash) *slash = 0;
+        else snprintf(base, sizeof base, ".");
+    }
+    char folder[700];
+    snprintf(folder, sizeof folder, "%s/replays", base);
+#ifdef _WIN32
+    _mkdir(folder);
+    if (!_fullpath(out, folder, size)) snprintf(out, size, "%s", folder);
+#else
+    mkdir(folder, 0755);
+    char *full = realpath(folder, NULL);
+    snprintf(out, size, "%s", full ? full : folder);
+    free(full);
+#endif
+}
+
+static int copy_file(const char *from, const char *to) {
+    FILE *in = fopen(from, "rb");
+    if (!in) return 0;
+    FILE *out = fopen(to, "wb");
+    int ok = out != NULL;
+    char buffer[65536];
+    for (size_t n; ok && (n = fread(buffer, 1, sizeof buffer, in)) > 0;) ok = fwrite(buffer, 1, n, out) == n;
+    ok = ok && !ferror(in);
+    fclose(in);
+    if (out && fclose(out)) ok = 0;
+    if (!ok) remove(to);
+    return ok;
+}
+
+static int read_header(const char *path, struct rr_header *h) {
+    FILE *f = fopen(path, "rb");
+    const int ok = f && fread(h, 1, sizeof *h, f) == sizeof *h && !memcmp(h->magic, RR_MAGIC, 8);
+    if (f) fclose(f);
+    return ok;
+}
+
+/* a name of the list (not a path) */
+static int plain_name(const char *name) {
+    const size_t n = name ? strlen(name) : 0;
+    return n > 4 && n < 64 && !strchr(name, '/') && !strchr(name, '\\') && !strstr(name, "..") && !strcmp(name + n - 4, ".crr");
+}
+
+static void safe_part(char *out, size_t size, const char *in) {
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 1 < size; i++) {
+        const unsigned char c = (unsigned char)in[i];
+        out[o++] = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ? (char)c
+                   : c >= 0x80 ? (char)c : '_';
+    }
+    out[o] = 0;
+}
+
+int runtime_replay_export(const char *name, char *saved_as, size_t size) {
+    if (!plain_name(name)) return 0;
+    char dir[700], from[800], folder[700], to[900], track[48], player[40];
+    race_dir(dir, sizeof dir);
+    snprintf(from, sizeof from, "%s/%s", dir, name);
+    struct rr_header h;
+    if (!read_header(from, &h)) return 0;
+    h.track[sizeof h.track - 1] = h.player[sizeof h.player - 1] = 0;
+    safe_part(track, sizeof track, h.track[0] ? h.track : "race");
+    safe_part(player, sizeof player, h.player[0] ? h.player : "player");
+    runtime_replay_folder(folder, sizeof folder);
+    snprintf(to, sizeof to, "%s/20%02u-%02u-%02u_%02u%02u%02u_%s_%s.crr", folder, h.date[0], h.date[1], h.date[2], h.date[3],
+             h.date[4], h.date[5], track, player);
+    const int ok = copy_file(from, to);
+    if (ok && saved_as) snprintf(saved_as, size, "%s", strrchr(to, '/') + 1);
+    printf("Replay: %s %s to %s\n", name, ok ? "exported" : "could not be exported", to);
+    fflush(stdout);
+    return ok;
+}
+
+int runtime_replay_delete(const char *name) {
+    if (!plain_name(name)) return 0;
+    char dir[700], path[800];
+    race_dir(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    const int ok = !remove(path);
+    printf("Replay: %s %s\n", name, ok ? "deleted" : "could not be deleted");
+    fflush(stdout);
+    return ok;
+}
+
+static int same_race(const struct rr_header *a, const struct rr_header *b) {
+    return !memcmp(a->date, b->date, sizeof a->date) && a->frames == b->frames && !strncmp(a->level, b->level, sizeof a->level);
+}
+
+/* The races in the shared folder that RaceReplay does not have: copied in as I_<name>. The number copied, -1 none there */
+int runtime_replay_import(void) {
+    char folder[700], dir[700], path[1000], to[1000];
+    runtime_replay_folder(folder, sizeof folder);
+    race_dir(dir, sizeof dir);
+    make_dirs(dir);
+    struct rr_header *have = calloc(512, sizeof *have);
+    int had = 0, found = 0, copied = 0;
+    DIR *d = have ? opendir(dir) : NULL;
+    for (struct dirent *e; d && had < 512 && (e = readdir(d));) {
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (plain_name(e->d_name) && read_header(path, &have[had])) had++;
+    }
+    if (d) closedir(d);
+    d = have ? opendir(folder) : NULL;
+    for (struct dirent *e; d && (e = readdir(d));) {
+        struct rr_header h;
+        snprintf(path, sizeof path, "%s/%s", folder, e->d_name);
+        if (!plain_name(e->d_name) || !read_header(path, &h)) continue;
+        found++;
+        int known = 0;
+        for (int i = 0; i < had && !known; i++) known = same_race(&have[i], &h);
+        if (known) continue;
+        snprintf(to, sizeof to, "%s/I_%s", dir, e->d_name);
+        if (copy_file(path, to)) {
+            copied++;
+            if (had < 512) have[had++] = h;
+        }
+    }
+    if (d) closedir(d);
+    free(have);
+    printf("Replay: imported %d of %d races from %s\n", copied, found, folder);
+    fflush(stdout);
+    return found ? copied : -1;
+}
