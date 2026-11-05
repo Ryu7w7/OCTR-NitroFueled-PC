@@ -75,6 +75,10 @@ struct rr_sample {
 _Static_assert(sizeof(struct rr_sample) == 52, "sample layout");
 enum { RS_PRESENT = 1, RS_FINISHED = 2, RS_ON_GROUND = 4, RS_BOOSTING = 8, RS_DRIFTING = 16, RS_HONK = 32,
        RS_SHUFFLING = 64, RS_WRONG_WAY = 128, RS_PAD_BOOST = 256, RS_DRIFT_BOOST = 512, RS_TNT = 1024, RS_SHIELD = 2048 };
+/* flags bits 12-13: the direction of the racer's last item use + 1 (power-up controller +0x28 _launchDirection: 0
+ * forward, 1 neutral, 2 backward), 0 not known (older files, other PCs' karts) */
+#define RS_LAUNCH_SHIFT 12
+#define RS_LAUNCH_MASK (3u << RS_LAUNCH_SHIFT)
 
 struct rr_frame {
     float time;

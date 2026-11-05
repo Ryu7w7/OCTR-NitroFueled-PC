@@ -68,6 +68,7 @@ static struct {
     struct rr_frame *frames;
     void *race;
     uint8_t uses[RR_RACERS];
+    uint8_t launch[RR_RACERS];          /* the direction of each racer's last use + 1 (RS_LAUNCH_SHIFT), 0 not known */
     struct { void *object; int32_t type; } made[RR_MADE];
     int made_next;
     float time, next, end_at, end_local;
@@ -243,6 +244,7 @@ static void sample(struct rr_sample *s, void *kart, int slot) {
         }
     }
     s->item_uses = rr.uses[slot];
+    s->flags |= (uint16_t)((rr.launch[slot] & 3u) << RS_LAUNCH_SHIFT);
     void *horn = component(kart, D_HORN_META);
     if (horn && AT(horn, 0x30, uint8_t)) s->flags |= RS_HONK;
     void *damage = component(kart, D_DAMAGE_META);
@@ -418,6 +420,7 @@ static void start(void *race) {
     rr.done = 0;
     rr.recording = 1;
     memset(rr.uses, 0, sizeof rr.uses);
+    memset(rr.launch, 0, sizeof rr.launch);
     pthread_mutex_lock(&live.lock);
     live.race_id++;
     live.header = rr.header;
@@ -667,6 +670,13 @@ float rr_race_clock(void) { return race_clock(); }
 void *rr_game_data(int list, const char *name) { return game_data(list, name); }
 void rr_race_dir(char *out, size_t size) { race_dir(out, size); }
 
+/* The level loaded now (its zone's name), 0 none */
+const char *rr_current_level(void) {
+    void *zones = PTR(D_ZONE_SYSTEM);
+    void *zone = zones && game_current_zone ? game_current_zone(zones) : 0;
+    return zone ? AT(zone, 0x10, const char *) : 0;
+}
+
 /* ---- hooks: the game calls these on its own threads ---- */
 void ABI runtime_replay_level_end(void) {
     runtime_replay_play_level_end();
@@ -769,6 +779,8 @@ int ABI runtime_replay_item_used(void *controller) {
         void *kart = kart_of(i, 0);
         if (kart && component(kart, D_POWER_UP_META) == controller) {
             rr.uses[i]++;
+            const int32_t direction = AT(controller, 0x28, int32_t);   /* _launchDirection, set by the use input */
+            rr.launch[i] = direction >= 0 && direction <= 2 ? (uint8_t)(direction + 1) : 0;
             return 1;
         }
     }
