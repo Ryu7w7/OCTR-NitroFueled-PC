@@ -23,9 +23,18 @@ class NativeItemless(unittest.TestCase):
             (0xe918c8,"43 f6 44 2f 42 04"), # body has entity
             (0xe91904,"4e 8b ac 28 88 00 00 00"), # entity user data
             (0xfd4230,"55 48 89 e5 41 57 41 56 41 55 41 54 53 50"),
+            (0xfe44c0,"55 48 89 e5 41 56 53 41 89 d6 48 89 fb 48 85 f6"),
+            (0xeeba80,"55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 50"),
+            (0xeebab8,"83 78 18 00 8d 51 ff 75 2f"),
+            (0xeebad0,"80 78 20 00 75 2e"), # spawnRegardlessOfGamemode override
         ]:
             expected = bytes.fromhex(code)
             self.assertEqual(read(address - shift, len(expected)), expected, hex(address))
+        import struct
+        expected = bytes.fromhex('48 8b 0d')
+        expected += struct.pack('<i', 0x2acde48 - (0xeebaad - shift))
+        expected += bytes.fromhex('49 8b 44 24 10 8b 89 4c 0d 00 00')
+        self.assertEqual(read(0xeebaa6 - shift, 18), expected)
 
     def test_itemless_ai_motion_hooks(self):
         game = Path(os.environ["BB_TEST_GAME"])
