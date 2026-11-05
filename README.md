@@ -466,7 +466,9 @@ renderer this builds on), [shadPS4](https://github.com/shadps4-emu/shadPS4) vide
 recompiler, [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.sourceforge.net/),
 [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) by FireBurn (MIT), AMD FidelityFX SDK (MIT),
 [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) (MIT), [Dear ImGui](https://github.com/ocornut/imgui)
-(MIT), DejaVu fonts, [miniz](https://github.com/richgel999/miniz) (MIT). Game patches by illusion
+(MIT), DejaVu fonts, [miniz](https://github.com/richgel999/miniz) (MIT). Replays and spectating are
+ported from [Replay Mode](https://github.com/Erluinzo/ctrnf-replay-mode) by Erluinzo (MIT,
+[third_party/ctrnf-replay-mode/LICENSE](third_party/ctrnf-replay-mode/LICENSE)). Game patches by illusion
 and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch)). Import
 names from shadPS4's aerolib list.
 

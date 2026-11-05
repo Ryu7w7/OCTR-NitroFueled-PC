@@ -152,6 +152,8 @@ def third_party(dlls, python=None, dlss=False):
               'https://github.com/FireBurn/FSR-Vulkan).', '']
     lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
+    lines += ['sacredfire.exe includes code ported from Replay Mode by Erluinzo (MIT,',
+              'licenses\\ctrnf-replay-mode-LICENSE.txt, https://github.com/Erluinzo/ctrnf-replay-mode).', '']
     lines += ['art\\ctr-menu.ttf: the Lilita One font by Juan Montoreano (SIL Open Font License 1.1,',
               'art\\ctr-menu-font-license.txt). art\\ctr-hero.png and art\\ctr-logo.png: game artwork',
               'from SteamGridDB, the property of its owners (art\\README.txt).', '']
@@ -249,10 +251,12 @@ def main():
     loader = CLANG_BIN / 'vulkan-1.dll'
     if loader.is_file():
         shutil.copy2(loader, folder / 'bin')
+    (folder / 'licenses').mkdir()
+    write_text(folder / 'licenses' / 'ctrnf-replay-mode-LICENSE.txt',
+               (ROOT / 'third_party' / 'ctrnf-replay-mode' / 'LICENSE').read_text(encoding='utf-8'))
     if dlss_files:
         for path in dlss_files:
             shutil.copy2(path, folder / 'bin')
-        (folder / 'licenses').mkdir()
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
