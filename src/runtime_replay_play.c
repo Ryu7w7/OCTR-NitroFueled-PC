@@ -1827,18 +1827,21 @@ static int thrown_seconds(int type) {
     return type == 0 || type == 9 ? 3 : type == 1 || type == 10 ? 4 : type == 2 || type == 3 ? 90 : type == 4 || type == 8 || type == 12 ? 12 : 0;
 }
 
-/* A crate or beaker dropped at frame k at `at`: a racer took a hit near it since (it went off), up to frame now */
+/* A crate or beaker dropped by racer `owner` at frame k at `at` went off before frame now: a racer took a hit near it,
+ * or a racer drove over it (a mask or a shield takes it without a hit; the owner only after it left it behind) */
 #define HIT_RANGE 450.0f
-static int went_off(const float *at, uint32_t k, uint32_t now) {
+#define OVER_RANGE 220.0f
+static int went_off(const float *at, uint32_t k, uint32_t now, int owner) {
     for (uint32_t j = k + 1; j <= now; j++)
         for (int r = 0; r < RR_RACERS; r++) {
-            if (!hit_starts(r, j)) continue;
+            if (!(P.frames[j].racer[r].flags & RS_PRESENT)) continue;
             float d = 0.0f;
             for (int c = 0; c < 3; c++) {
                 const float x = (float)P.frames[j].racer[r].position[c] / RR_POSITION - at[c];
                 d += x * x;
             }
-            if (d < HIT_RANGE * HIT_RANGE) return 1;
+            if (hit_starts(r, j) && d < HIT_RANGE * HIT_RANGE) return 1;
+            if (d < OVER_RANGE * OVER_RANGE && (r != owner || j > k + RR_RATE * 2)) return 1;
         }
     return 0;
 }
@@ -1858,9 +1861,13 @@ static void restore_items(uint32_t now) {
             const int dropped = a->item == 2 || a->item == 3;
             float at[3];
             for (int c = 0; c < 3; c++) at[c] = (float)b->position[c] / RR_POSITION;
-            if (dropped && (went_off(at, k, now) || TRACK.dropped_count >= DROPPED)) continue;
+            /* thrown forward (launch 1: forward + 1), it landed somewhere ahead the recording does not tell: only while
+             * it can still be in the air */
+            const unsigned launch = (b->flags & RS_LAUNCH_MASK) >> RS_LAUNCH_SHIFT;
+            if (dropped && launch == 1 && now - k > (uint32_t)RR_RATE * 2) continue;
+            if (dropped && (went_off(at, k, now, r) || TRACK.dropped_count >= DROPPED)) continue;
             use_item(kart, a->item, b->flags);
-            if (dropped) {
+            if (dropped && launch != 1) {
                 TRACK.dropped[TRACK.dropped_count].kart = kart;
                 TRACK.dropped[TRACK.dropped_count].type = a->item;
                 for (int c = 0; c < 3; c++) TRACK.dropped[TRACK.dropped_count].at[c] = at[c];
@@ -1916,6 +1923,83 @@ static void tnt(uint32_t now) {
     }
 }
 
+
+/* A recorded explosive hit (a missile's or a bomb's): online it flew on the other PC's path, here it can be far from the
+ * kart at the hit. In the last GUIDE_TIME the nearest thrown missile or bomb (not the racer's own) flies to the kart and
+ * arrives at the recorded time, with the hit (ported from Replay Mode). */
+#define GUIDE_TIME 0.7f
+#define GUIDE_RANGE 6000.0f
+static struct {
+    struct { int slot; uint16_t generation; uint32_t hit; float t0, from[3]; } racer[RR_RACERS];
+    uint32_t hit[RR_RACERS], last;
+} GUIDE;
+
+static int guide_start(int r, void *kart, uint32_t hit) {
+    char *table = rr_ptr(D_ENTITY_TABLE);
+    float best = GUIDE_RANGE * GUIDE_RANGE;
+    int found = -1;
+    void *component;
+    for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
+        const int type = RR_AT(component, 0x34, int32_t);
+        int taken = 0;
+        if ((type != 0 && type != 1 && type != 9 && type != 10) || rr_handle_object(&RR_AT(component, 0x28, void *)) == kart) continue;
+        for (int g = 0; g < RR_RACERS; g++) taken |= GUIDE.racer[g].slot == i + 1;
+        void *entity = entity_at(i);
+        if (!entity || taken) continue;
+        const float d = distance2(entity, &RR_AT(kart, 0x20, float));
+        if (d < best) best = d, found = i;
+    }
+    if (found < 0 || !table) return 0;
+    void *entity = entity_at(found);
+    GUIDE.racer[r].slot = found + 1;
+    GUIDE.racer[r].generation = RR_AT(RR_AT(table, 0x28, void *), 0x20, uint16_t *)[found];
+    GUIDE.racer[r].hit = hit;
+    GUIDE.racer[r].t0 = P.time;
+    for (int c = 0; c < 3; c++) GUIDE.racer[r].from[c] = RR_AT(entity, 0x20 + 4 * c, float);
+    return 1;
+}
+
+static void guide_items(uint32_t now) {
+    char *table = rr_ptr(D_ENTITY_TABLE);
+    if (now < GUIDE.last) memset(&GUIDE, 0, sizeof GUIDE);
+    GUIDE.last = now;
+    if (P.paused || P.scrubbing || !P.started || !table) return;
+    const uint32_t n = frames_now();
+    for (int r = 0; r < RR_RACERS; r++) {
+        void *kart = kart_of_racer(r);
+        if (!kart) continue;
+        if (!GUIDE.racer[r].slot) {
+            for (uint32_t k = now + 1; k < n && k < now + (uint32_t)(GUIDE_TIME * RR_RATE); k++)
+                if (hit_starts(r, k) && P.frames[k].racer[r].damage == 2 + 1 && k > GUIDE.hit[r] && k > IT.hit_used[r]) {
+                    GUIDE.hit[r] = k;
+                    guide_start(r, kart, k);
+                    break;
+                }
+            continue;
+        }
+        const int slot = GUIDE.racer[r].slot - 1;
+        void *gens = RR_AT(table, 0x28, void *);
+        void *entity = entity_at(slot);
+        if (slot >= rr_count(gens) || RR_AT(gens, 0x20, uint16_t *)[slot] != GUIDE.racer[r].generation || !entity) {
+            GUIDE.racer[r].slot = 0;        /* it went off on the way: the hit comes by itself */
+            continue;
+        }
+        const uint32_t hit = GUIDE.racer[r].hit;
+        const float end = P.frames[hit].time - P.header.go_time, span = end - GUIDE.racer[r].t0;
+        float part = span > 0.0f ? (P.time - GUIDE.racer[r].t0) / span : 1.0f;
+        if (part > 1.0f) part = 1.0f;
+        for (int c = 0; c < 3; c++)
+            RR_AT(entity, 0x20 + 4 * c, float) = GUIDE.racer[r].from[c] + (RR_AT(kart, 0x20 + 4 * c, float) - GUIDE.racer[r].from[c]) * part;
+        if (part < 1.0f) continue;
+        GUIDE.racer[r].slot = 0;
+        if (hit > IT.hit_used[r]) {
+            IT.hit_used[r] = hit;
+            IT.hit_frame[r] = 0;
+            hurt(kart, P.frames[hit].racer[r].damage - 1);
+        }
+    }
+}
+
 /* After the frame's item events (items_frame): the items back after a jump, the dropped ones in place, TNT and shields */
 static void track_items(void) {
     if (!IT.ready || !P.started) return;
@@ -1926,6 +2010,7 @@ static void track_items(void) {
     }
     if (TRACK.dropped_wait && !--TRACK.dropped_wait) place_dropped();
     if (!P.paused && !P.scrubbing && now) tnt(now);
+    guide_items(now);
 }
 
 /* Every frame, each racer: its wumpa count (CRacer +0x9c: the HUD's, and an item is juiced from 10) and, while the
