@@ -62,6 +62,11 @@ typedef void ABI set_text_fn(void *placeable, const char *text);
 typedef void ABI set_hidden_fn(void *placeable, int hidden);
 typedef void ABI hud_set_lap_fn(void *hud, int lap);
 typedef void *ABI find_driver_fn(void *drivers, const char *name);
+typedef void *ABI spawn_fn(void *project, void *source, void *parent);
+typedef void ABI vector_fn(void *placeable, const float *v);
+typedef void ABI opacity_fn(void *placeable, float opacity);
+typedef void ABI color_fn(void *placeable, const uint8_t *rgba);
+typedef void ABI hud_style_fn(void *hud, int player);
 
 static struct {
     ghost_new_fn *ghost_new, *move_key_new, *input_key_new;
@@ -94,6 +99,11 @@ static struct {
     set_hidden_fn *set_hidden;
     hud_set_lap_fn *hud_set_lap;
     find_driver_fn *find_driver;
+    spawn_fn *spawn_placeable;
+    vector_fn *set_position, *set_pivot, *set_scale, *set_rotation;
+    opacity_fn *set_opacity;
+    color_fn *set_color;
+    hud_style_fn *hud_style_next;
 } game;
 
 #define D_HUD_META 0x2ad4940
@@ -103,6 +113,9 @@ enum {
     D_PLAYERS = 0x2ad1160, D_INPUT_MANAGER = 0x2ac2e90, D_KART_CAMERA_META = 0x2ac42e8, D_PLAYER_ENTITIES = 0x2ad0730,
     D_STRING_POOL = 0x2af2600,
 };
+
+#define HELP_LINES 6
+#define LINES 3
 
 /* ---- state ---- */
 static struct {
@@ -148,6 +161,13 @@ static struct {
     float speed_clock;
     int shown_speed, speed_watch, scrub_dir;
     RrView view;                /* the panel's copy, under lock */
+    char drivers[RR_RACERS][48];   /* each racer's driver as the status line shows it */
+    void *line[LINES], *help[HELP_LINES], *help_arrow[4], *lap_line[7], *line_copy[7];
+    float lap_start[RR_RACERS][MAX_LAPS];
+    char shown_text[200];
+    void *pad_piece[12], *pad_seen, *pad_root;
+    int pad_frames;
+    uint32_t pad_shown;
 } P = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
@@ -680,6 +700,13 @@ static void read_buttons(float dt) {
         }
     }
     if (PRESSED(S_SQUARE)) P.paused = !P.paused;
+    {
+        int id = 0;
+        local_controller(&id);
+        void *meta = rr_ptr(D_HUD_META);
+        void *hud_component = PRESSED(S_TRIANGLE) && P.kart && meta ? rr_find_component(P.kart, meta) : 0;
+        if (hud_component && RR_AT(hud_component, 0x80, uint8_t)) game.hud_style_next(hud_component, id);
+    }
     if (PRESSED(S_UP) && P.speed < (int)(sizeof SPEEDS / sizeof SPEEDS[0]) - 1) P.speed++;
     if (PRESSED(S_DOWN) && P.speed > 0) P.speed--;
     const float end = ghost_time(&P.frames[P.count - 1]) - RACE_START;
@@ -772,6 +799,193 @@ static void show_text(void *piece, const char *text) {
     if (!same_text(RR_AT(piece, 0x30, const char *), text)) game.set_text(piece, text);
 }
 
+/* ---- The replay's HUD, as the Replay Mode draws it (play.c hud(), pad.c): three status lines at the bottom
+ * centre (the watched racer, its speed, the replay's state), the button legend under the lap display, the
+ * timer's lap lines with the watched racer's laps, and its controller. All are copies of the race HUD's own
+ * pieces (the lap counter's text, the boost arrow), so they have its font and look. ---- */
+static void *find_asset(void *placeable, const char *name, int depth) {
+    if (!placeable || depth > 24) return 0;
+    void *a = asset_of(placeable);
+    if (a && same_text(RR_AT(a, 0x10, const char *), name)) return placeable;
+    void *children = RR_AT(placeable, 0x48, void *);
+    for (int i = 0; i < rr_count(children); i++) {
+        void *found = find_asset(rr_item(children, i), name, depth + 1);
+        if (found) return found;
+    }
+    return find_asset(content(placeable), name, depth + 1);
+}
+
+static void v3(float *v, float a, float b, float c) { v[0] = a, v[1] = b, v[2] = c; }
+
+/* The legend; the font has the button symbols but not the D-pad: arrows drawn over the spaces of lines 1, 2 */
+static const char HELP[HELP_LINES][48] = {"\xee\x80\x83 : PAUSE", "     /     : REWIND / FORWARD", "     /     : SPEED",
+    "\xee\x80\x84 / \xee\x80\x86 : PREVIOUS / NEXT LAP", "\xee\x80\x87 / \xee\x80\x88 : OTHER RACER", "\xee\x80\x82 : HUD STYLE"};
+static const float HELP_ARROW[4][4] = {{1, 17, -1, 90}, {1, 65, -1, 270}, {2, 16, -2, 180}, {2, 65, 0, 0}};
+static const float HELP_BOX_FIX[HELP_LINES] = {0, 0, -37, 0, 0, 0};
+#define HELP_X 1555.0f
+#define HELP_Y 170.0f
+#define HELP_STEP 32.0f
+#define HELP_SCALE 0.62f
+#define HELP_BOX 0.11f
+
+static void make_legend(void *project, void *root, void *template) {
+    void *source = template ? RR_AT(template, 0x18, void *) : 0;
+    const float extent = template ? RR_AT(template, 0x90, float) : 0.0f;
+    float scale[3], pivot[3], at[3];
+    v3(scale, HELP_SCALE, HELP_SCALE, 1.0f);
+    for (int i = 0; template && i < HELP_LINES; i++) {
+        void *piece = P.help[i] = game.spawn_placeable(project, source ? source : template, root);
+        if (!piece) continue;
+        RR_AT(piece, 0xa0, int32_t) = RR_AT(piece, 0xa4, int32_t) = 0;
+        v3(pivot, 0.0f, 0.5f, 0.5f);
+        v3(at, HELP_X, HELP_Y + HELP_STEP * i, 0.0f);
+        game.set_pivot(piece, pivot);
+        game.set_position(piece, at);
+        game.set_scale(piece, scale);
+        RR_AT(piece, 0x90, float) = extent * HELP_BOX * (float)strlen(HELP[i]) + HELP_BOX_FIX[i];
+        game.set_opacity(piece, 1.0f);
+        game.set_hidden(piece, 0);
+        game.set_text(piece, HELP[i]);
+    }
+    void *arrow = find_asset(root, "[octane_ui_hud_boost_nf_arrow.tga]", 0);
+    void *from = arrow ? RR_AT(arrow, 0x18, void *) : 0;
+    float small[3], turn[3];
+    v3(small, 0.8f, 0.8f, 1.0f);
+    for (int i = 0; arrow && i < 4; i++) {
+        void *piece = P.help_arrow[i] = game.spawn_placeable(project, from ? from : arrow, root);
+        if (!piece) continue;
+        RR_AT(piece, 0xa0, int32_t) = RR_AT(piece, 0xa4, int32_t) = 0;
+        v3(pivot, 0.5f, 0.5f, 0.5f);
+        v3(turn, 0.0f, 0.0f, HELP_ARROW[i][3]);
+        v3(at, HELP_X + HELP_ARROW[i][1], HELP_Y + HELP_STEP * HELP_ARROW[i][0] + HELP_ARROW[i][2], 0.0f);
+        game.set_pivot(piece, pivot);
+        game.set_rotation(piece, turn);
+        game.set_scale(piece, small);
+        game.set_position(piece, at);
+        game.set_opacity(piece, 1.0f);
+        game.set_hidden(piece, 0);
+    }
+}
+
+static const char SPEED_TEXT[6][6] = {"x0.1", "x0.5", "", "x2", "x3", "x4"};
+
+static void status_text(char *out, size_t size) {
+    const struct rr_racer *r = &P.header.racer[P.watch];
+    const struct rr_sample *s = &frame_now()->racer[P.watch];
+    char first[96];
+    snprintf(first, sizeof first, "%s", P.drivers[P.watch]);
+    if (r->name[0]) snprintf(first + strlen(first), sizeof first - strlen(first), " (%s)", r->name);
+    if ((s->flags & RS_FINISHED) && r->finished)
+        snprintf(first + strlen(first), sizeof first - strlen(first), "   FINISHED %d%s", r->finished,
+                 r->finished == 1 ? "ST" : r->finished == 2 ? "ND" : r->finished == 3 ? "RD" : "TH");
+    const char *state = ended() ? "REPLAY ENDED" : P.paused ? "REPLAY PAUSED" : "";
+    char speed[16] = "";
+    if (!state[0] && SPEED_TEXT[P.speed][0]) snprintf(speed, sizeof speed, "REPLAY %s", SPEED_TEXT[P.speed]);
+    snprintf(out, size, "%s\n%d KM/H\n%s", first, P.shown_speed, state[0] ? state : speed);
+}
+
+/* The watched racer's controller (pad.c): bit per piece; button symbols and a D-pad of four arrows */
+enum { PAD_SYMBOLS = 8, PAD_COUNT = 12 };
+static const char PAD_TEXT[PAD_SYMBOLS][4] = {"\xee\x80\x87", "\xee\x80\x88", "\xee\x80\x84", "\xee\x80\x86",
+    "\xee\x80\x82", "\xee\x80\x83", "\xee\x80\x81", "\xee\x80\x80"};
+static const float PAD_AT[PAD_COUNT][3] = {
+    {60, 30, 0.195f}, {220, 30, 0.195f}, {60, 88, 0.222f}, {222, 88, 0.222f},
+    {221.5f, 130, 0.18f}, {175, 175, 0.18f}, {265, 175, 0.18f},
+    {219.5f, 220, 0.164f},
+    {66, 129, 180}, {63.5f, 211, 0}, {24, 170, 90}, {106, 170, 270}};
+#define PAD_X 345.0f
+#define PAD_Y 815.0f
+#define PAD_SCALE 2.0f
+#define PAD_WIDTH 270.0f
+#define PRESSED_SCALE 1.2f
+#define ARROW_SCALE 2.0f
+#define DARK_OPACITY 0.45f
+
+static uint32_t pad_bits(void) {
+    const struct rr_frame *f = frame_now();
+    const struct rr_sample *s = &f->racer[P.watch];
+    uint32_t pad = 0;
+    if (s->ghost_bits & 0x100) pad |= 1u << 7;      /* accelerate: Cross */
+    if (s->ghost_bits & 0x200) pad |= 1u << 9;      /* reverse: down */
+    if (s->ghost_bits & 0x400) pad |= 1u << 5;      /* brake: Square */
+    if (s->ghost_bits & 0x800) pad |= 1u << 3;      /* first jump: R1 */
+    if (s->ghost_bits & 0x1000) pad |= 1u << 2;     /* second jump: L1 */
+    if (s->steer < -RR_STEER / 10) pad |= 1u << 10;
+    if (s->steer > RR_STEER / 10) pad |= 1u << 11;
+    const struct rr_frame *before = f - (f - P.frames > RR_RATE / 4 ? RR_RATE / 4 : f - P.frames);
+    if (s->item_uses != before->racer[P.watch].item_uses) pad |= 1u << 6;   /* an item used: Circle */
+    return pad;
+}
+
+static void *copy_piece(void *project, void *template, void *root) {
+    if (!template) return 0;
+    void *source = RR_AT(template, 0x18, void *);
+    void *piece = game.spawn_placeable(project, source ? source : template, root);
+    if (!piece) return 0;
+    RR_AT(piece, 0xa0, int32_t) = RR_AT(piece, 0xa4, int32_t) = 0;
+    game.set_opacity(piece, 1.0f);
+    game.set_hidden(piece, 0);
+    return piece;
+}
+
+static void show_button(int i, int pressed) {
+    void *piece = P.pad_piece[i];
+    if (!piece) return;
+    game.set_opacity(piece, pressed ? 1.0f : DARK_OPACITY);
+    const uint8_t light = pressed ? 255 : 150;
+    const uint8_t rgba[4] = {light, light, light, 255};
+    game.set_color(piece, rgba);
+    const float size = i < PAD_SYMBOLS && pressed ? PRESSED_SCALE : 1.0f;
+    float x = PAD_X + PAD_AT[i][0], v[3];
+    if (i < PAD_SYMBOLS) {
+        x -= PAD_AT[i][2] * PAD_WIDTH * size / 2;
+        v3(v, PAD_SCALE * size, PAD_SCALE * size, 1.0f);
+        game.set_scale(piece, v);
+    }
+    v3(v, x, PAD_Y + PAD_AT[i][1], 0.0f);
+    game.set_position(piece, v);
+}
+
+static void show_pad(void *project, void *root) {
+    if (root != P.pad_seen) P.pad_seen = root, P.pad_frames = 0;
+    if (P.pad_frames < 3) {
+        P.pad_frames++;
+        return;
+    }
+    int there = 0;
+    void *children = RR_AT(root, 0x48, void *);
+    for (int i = 0; i < rr_count(children); i++)
+        if (rr_item(children, i) == P.pad_piece[PAD_SYMBOLS]) there = 1;
+    if (root != P.pad_root || !there) {
+        P.pad_root = root;
+        P.pad_shown = (uint32_t)-1;
+        void *label = find(root, "Laps Label 1", 0), *arrow = find_asset(root, "[octane_ui_hud_boost_nf_arrow.tga]", 0);
+        if (!label) label = find(root, "[LapCounterText]", 0);
+        float v[3];
+        for (int i = 0; i < PAD_COUNT; i++) {
+            void *piece = P.pad_piece[i] = copy_piece(project, i < PAD_SYMBOLS ? label : arrow, root);
+            if (!piece) continue;
+            if (i < PAD_SYMBOLS) {
+                v3(v, 0.0f, 0.5f, 0.5f);
+                game.set_pivot(piece, v);
+                game.set_text(piece, PAD_TEXT[i]);
+                continue;
+            }
+            v3(v, 0.5f, 0.5f, 0.5f);
+            game.set_pivot(piece, v);
+            v3(v, 0.0f, 0.0f, PAD_AT[i][2]);
+            game.set_rotation(piece, v);
+            v3(v, ARROW_SCALE, ARROW_SCALE, 1.0f);
+            game.set_scale(piece, v);
+        }
+    }
+    const uint32_t pieces = pad_bits() & ((1u << PAD_COUNT) - 1);
+    if (pieces == P.pad_shown) return;
+    for (int i = 0; i < PAD_COUNT; i++)
+        if (((pieces ^ P.pad_shown) >> i & 1) || P.pad_shown == (uint32_t)-1) show_button(i, pieces >> i & 1);
+    P.pad_shown = pieces;
+}
+
 static void hud(void) {
     void *meta = rr_ptr(D_HUD_META);
     void *component = P.kart && meta ? rr_find_component(P.kart, meta) : 0;
@@ -791,28 +1005,94 @@ static void hud(void) {
         P.place = find(root, "[PositionNumber]", 0);
         P.place_suffix = find(root, "[PositionText]", 0);
         P.wumpa = find(root, "[WumpaFruitText]", 0);
+        char name[] = "Lap Timer 1";
+        float at[3];
+        for (int i = 0; i < 7; i++, name[sizeof name - 2]++) {
+            void *line = P.lap_line[i] = find(root, name, 0);
+            void *parent = line ? RR_AT(line, 0x40, void *) : 0;
+            void *piece = parent ? game.spawn_placeable(project, RR_AT(line, 0x18, void *) ? RR_AT(line, 0x18, void *) : line, parent) : 0;
+            P.line_copy[i] = piece;
+            if (!piece) continue;
+            set_string(piece, 0x28, "[ReplayLapTime]");     /* the timer's script finds its lines by name */
+            memcpy(at, &RR_AT(line, 0x60, float), sizeof at);
+            game.set_position(piece, at);
+            game.set_opacity(piece, 1.0f);
+        }
+        P.shown_text[0] = 0;
+        void *template = find(root, "[LapCounterText]", 0);
+        void *source = template ? RR_AT(template, 0x18, void *) : 0;
+        for (int line = 0; line < LINES; line++) {
+            P.line[line] = 0;
+            if (!template) continue;
+            void *piece = game.spawn_placeable(project, source ? source : template, root);
+            if (!piece) break;
+            RR_AT(piece, 0xa0, int32_t) = RR_AT(piece, 0xa4, int32_t) = 0;
+            float pivot[3], position[3], scale[3];
+            v3(pivot, 0.5f, 0.5f, 0.5f);
+            v3(position, 960.0f, 952.0f + 38.0f * line, 0.0f);
+            v3(scale, 0.6f, 0.6f, 1.0f);
+            game.set_pivot(piece, pivot);
+            game.set_position(piece, position);
+            game.set_scale(piece, scale);
+            RR_AT(piece, 0x90, float) *= 6.0f;               /* a wide box: one long line */
+            game.set_opacity(piece, 1.0f);
+            game.set_hidden(piece, 0);
+            P.line[line] = piece;
+        }
+        make_legend(project, root, template);
         P.shown_lap = 0;
+    }
+    char text[200];
+    status_text(text, sizeof text);
+    if (!same_text(P.shown_text, text)) {
+        snprintf(P.shown_text, sizeof P.shown_text, "%s", text);
+        char *at = text;
+        for (int line = 0; line < LINES; line++) {
+            char *start = at;
+            while (*at && *at != '\n') at++;
+            if (*at) *at++ = 0;
+            if (P.line[line]) game.set_text(P.line[line], start);
+        }
     }
     const struct rr_sample *s = &frame_now()->racer[P.watch];
     char number[16];
     snprintf(number, sizeof number, "%d", s->rank);
     show_text(P.place, s->rank ? number : "");
-    /* the English suffixes follow the number; other languages keep the game's own */
-    const char *suffix = P.place_suffix ? RR_AT(P.place_suffix, 0x30, const char *) : 0;
-    if (suffix && (same_text(suffix, "ST") || same_text(suffix, "ND") || same_text(suffix, "RD") || same_text(suffix, "TH")))
-        show_text(P.place_suffix, s->rank == 1 ? "ST" : s->rank == 2 ? "ND" : s->rank == 3 ? "RD" : "TH");
+    show_text(P.place_suffix, s->rank == 1 ? "ST" : s->rank == 2 ? "ND" : s->rank == 3 ? "RD" : s->rank ? "TH" : "");
     snprintf(number, sizeof number, "%d", s->wumpa);
     show_text(P.wumpa, number);
     snprintf(number, sizeof number, "%d", laps);
     if (P.total_lap && !same_text(RR_AT(P.total_lap, 0x30, const char *), number)) game.set_text(P.total_lap, number);
     const int lap = s->lap > laps ? laps : s->lap;
-    if (lap && (lap != P.shown_lap || ++P.lap_refresh >= 60)) {
+    if (lap && lap != P.shown_lap) {
         P.shown_lap = lap;
-        P.lap_refresh = 0;
         P.setting_lap = 1;
         game.hud_set_lap(component, lap);
         P.setting_lap = 0;
     }
+    /* the timer's lap lines: the player's kart's own are hidden (every frame: the game shows them again); the copies
+     * show the watched racer's, each finished lap, then the one it is on */
+    float lines[7];
+    int shown = 0;
+    const float *starts = P.lap_start[P.watch];
+    float now = P.time > 0.0f ? P.time : 0.0f;
+    const float finish = P.header.racer[P.watch].finish_time;
+    if ((s->flags & RS_FINISHED) && finish > 0.0f && finish < now) now = finish;
+    for (int k = 0; k < MAX_LAPS && shown < 7 && starts[k] >= 0.0f && starts[k] <= now; k++) {
+        const float end = k + 1 < MAX_LAPS && starts[k + 1] >= 0.0f && starts[k + 1] <= now ? starts[k + 1] : now;
+        if (P.header.laps > 0 && k >= P.header.laps) break;
+        lines[shown++] = end - starts[k];
+    }
+    for (int i = 0; i < 7; i++) {
+        if (P.lap_line[i]) game.set_hidden(P.lap_line[i], 1);
+        if (!P.line_copy[i]) continue;
+        game.set_hidden(P.line_copy[i], i >= shown || P.time <= 0.0f);
+        if (i >= shown) continue;
+        const int cs = (int)(lines[i] * 100.0f + 0.5f);
+        snprintf(text, sizeof text, "%d:%02d:%02d", cs / 6000, cs / 100 % 60, cs % 100);
+        game.set_text(P.line_copy[i], text);
+    }
+    show_pad(project, root);
 }
 
 /* The display name of each racer: the online name, else the driver's shown name */
@@ -820,8 +1100,20 @@ static void racer_names(void) {
     char *racers = rr_ptr(RR_D_RACER_MANAGER);
     for (int i = 0; i < RR_RACERS; i++) {
         const struct rr_racer *r = &P.header.racer[i];
-        P.names[i][0] = 0;
+        P.names[i][0] = P.drivers[i][0] = 0;
         if (!r->kind) continue;
+        {   /* the driver, upper case (the HUD font) */
+            void *d = racers && r->driver[0] ? game.find_driver(RR_AT(racers, 0x18, void *), r->driver) : 0;
+            const char *shown = d ? RR_AT(d, 0x60, const char *) : 0;
+            const char *name = shown && *shown ? shown : r->driver;
+            if (!strncmp(name, "Driver", 6)) name += 6;
+            size_t o = 0;
+            for (size_t k = 0; name[k] && o + 2 < sizeof P.drivers[i]; k++) {
+                if (!shown && k && name[k] >= 'A' && name[k] <= 'Z' && name[k - 1] >= 'a' && name[k - 1] <= 'z') P.drivers[i][o++] = ' ';
+                P.drivers[i][o++] = name[k] >= 'a' && name[k] <= 'z' ? (char)(name[k] - 32) : name[k];
+            }
+            P.drivers[i][o] = 0;
+        }
         if (r->name[0] && strcmp(r->name, "GHOST")) {
             snprintf(P.names[i], sizeof P.names[i], "%s", r->name);
             continue;
@@ -972,8 +1264,17 @@ void ABI runtime_replay_level_start(void *manager) {
     P.watch = P.player_slot >= 0 ? P.player_slot : 0;
     P.speed = NORMAL_SPEED;
     P.hud_root = 0;
+    P.pad_root = P.pad_seen = 0;
     P.shown_speed = 0;
     racer_names();
+    for (int r = 0; r < RR_RACERS; r++) {      /* each racer's lap starts (race time when its lap goes up) */
+        for (int k = 0; k < MAX_LAPS; k++) P.lap_start[r][k] = -1.0f;
+        P.lap_start[r][0] = 0.0f;
+        for (uint32_t i = 1; i < P.count; i++) {
+            const int was = P.frames[i - 1].racer[r].lap, now = P.frames[i].racer[r].lap;
+            if (now > was && was >= 1 && now - 1 < MAX_LAPS) P.lap_start[r][now - 1] = P.frames[i].race_time;
+        }
+    }
     printf("Replay: playing %s (%d racers)\n", P.header.track, ghosts);
     fflush(stdout);
 }
@@ -1120,6 +1421,14 @@ int runtime_replay_play_install(int eu) {
     game.set_hidden = fn(0x2694d0, 0, eu);
     game.hud_set_lap = fn(0xe63f20, 0, eu);
     game.find_driver = fn(0xf9c610, 1, eu);
+    game.spawn_placeable = fn(0x253c00, 0, eu);
+    game.set_position = fn(0x268f90, 0, eu);
+    game.set_pivot = fn(0x269190, 0, eu);
+    game.set_scale = fn(0x269120, 0, eu);
+    game.set_rotation = fn(0x2690b0, 0, eu);
+    game.set_opacity = fn(0x2694a0, 0, eu);
+    game.set_color = fn(0x269460, 0, eu);
+    game.hud_style_next = fn(0xe31f80, 0, eu);
     /* every function but player_at starts "push rbp; mov rbp, rsp" */
     void *const check[] = {game.ghost_new, game.move_key_new, game.input_key_new, game.list_reserve, game.list_set_count,
                            game.ghost_reset, game.ghost_attach, game.ghost_update, game.ai_load, game.ai_count, game.racer_of,
@@ -1127,7 +1436,7 @@ int runtime_replay_play_install(int eu) {
                            game.ghost_look_end_new, game.send_message, game.player_kart, game.despawn_items, game.string,
                            game.string_release, game.release, game.set_next_race_mode, game.set_next_map, game.load_next_map,
                            game.apply_choice, game.apply_player_count, game.enter_customization, game.zone_by_name,
-                           game.decal_find, game.set_text, game.hud_set_lap, game.find_driver};
+                           game.decal_find, game.set_text, game.hud_set_lap, game.find_driver, game.spawn_placeable, game.hud_style_next};
     for (size_t i = 0; i < sizeof check / sizeof *check; i++)
         if (memcmp(check[i], "\x55\x48\x89\xe5", 4)) {
             printf("Replay: player function %zu is not the expected code: no replays\n", i);
