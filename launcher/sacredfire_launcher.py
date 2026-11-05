@@ -323,7 +323,10 @@ def game_environment(s):
     env["BB_FULLSCREEN"] = "1" if s["fullscreen"] else "0"
     env["BB_PRESENT_MODE"] = s["present_mode"]
     if s.get("display"):
-        env["BB_DISPLAY"] = s["display"]  # the monitor's number (gpu/shim/window.cpp)
+        val = str(s["display"]).strip()
+        if ":" in val:
+            val = val.split(":", 1)[0].strip()
+        env["BB_DISPLAY"] = val  # the monitor's number (gpu/shim/window.cpp)
     if s.get("gamepad"):
         env["BB_GAMEPAD"] = s["gamepad"]
     env["BB_NEO"] = "1" if s.get("neo") else "0"
@@ -383,7 +386,7 @@ def connected_gpus():
 
 
 def connected_displays():
-    """(number, label) of the monitors (bb-gpu-capabilities --displays: name, size, primary),
+    """(label, number) of the monitors (bb-gpu-capabilities --displays: name, size, primary),
     numbered from 1 as BB_DISPLAY takes them; [] if unknown."""
     tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
     try:
@@ -399,7 +402,7 @@ def connected_displays():
         label = f"{number}: {parts[0]} ({parts[1]})"
         if len(parts) > 2 and parts[2] == "1":
             label += " - " + tr("primary")
-        found.append((number, label))
+        found.append((label, number))
     return found
 
 
@@ -1291,10 +1294,13 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.borderless_row)
         displays = connected_displays()
         display_choices = [(tr("Primary"), "")] + displays
-        if self.settings.get("display") and self.settings["display"] not in [n for n, _ in displays]:
-            display_choices.append((tr("Monitor {} (not connected)").format(self.settings["display"]), self.settings["display"]))
+        current_display = str(self.settings.get("display", "")).strip()
+        if ":" in current_display:
+            current_display = current_display.split(":", 1)[0].strip()
+        if current_display and current_display not in [val for _l, val in displays]:
+            display_choices.append((tr("Monitor {} (not connected)").format(current_display), current_display))
         self.display_row = combo_row(tr("Monitor"), tr("The screen the game window and fullscreen go to"),
-                                     display_choices, self.settings.get("display", ""))
+                                     display_choices, current_display)
         screen.add(self.display_row)
         self.present_row = combo_row(tr("Presentation"), None, PRESENT_MODES, self.settings["present_mode"])
         screen.add(self.present_row)
