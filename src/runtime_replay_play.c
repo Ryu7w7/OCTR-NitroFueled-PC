@@ -190,6 +190,7 @@ static struct {
 } NEXT;
 static int take_live(const struct rr_header *header, const uint8_t *packed, size_t size, uint32_t frames);
 static void items_reset(void);
+static void left_level(void);
 static int items_restore;            /* drive cleared the track: the recent items come back (track_items) */
 
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
@@ -1379,12 +1380,13 @@ static ai_count_fn *native_ai_count;
 static int ABI ai_count(void **out) {
     const int n = native_ai_count(out);
     int racers = 0;
-    for (int i = 0; P.pending == 1 && i < RR_RACERS; i++) racers += P.kart_slot[i] > 0;
-    return P.pending == 1 && racers < n ? racers : n;
+    const int replay = P.pending == 1 || P.pending == 3;     /* 3: a restart reloads them */
+    for (int i = 0; replay && i < RR_RACERS; i++) racers += P.kart_slot[i] > 0;
+    return replay && racers < n ? racers : n;
 }
 
 static void ABI ai_load(void *manager) {
-    if (P.pending == 1 && manager) {
+    if ((P.pending == 1 || P.pending == 3) && manager) {
         void *infos = RR_AT(manager, 0x30, void *);
         int r = 0;
         for (int host = 1; host < RR_RACERS; host++) {
@@ -1424,6 +1426,21 @@ void ABI runtime_replay_level_start(void *manager) {
         if (P.give_back) give_back();           /* not given back in the menus (no world there): now */
         return;
     }
+    if (P.pending == 3) {                       /* the pause menu's Restart: the replay starts again */
+        const char *level = rr_current_level();
+        if (level && !strcasecmp(level, P.header.level)) {
+            P.pending = 1;
+            P.set_up = P.started = P.paused = P.scrubbing = P.rewound = 0;
+            P.camera = P.target = P.kart = 0;
+            P.time = 0.0f;
+            memset(P.attached, 0, sizeof P.attached);
+            memset(P.fed, 0, sizeof P.fed);
+            puts("Replay: the race restarted: the replay starts again");
+        } else {
+            left_level();
+            return;
+        }
+    }
     char *g = rr_ptr(RR_D_GAME), *settings = rr_ptr(RR_D_RACE_SETTINGS);
     if (P.pending != 1 || !manager || !g || RR_AT(g, 0xd4c, int32_t) != 1) {
         P.pending = 0;                                  /* another level: the replay is over */
@@ -1460,6 +1477,19 @@ void ABI runtime_replay_level_start(void *manager) {
     fflush(stdout);
 }
 
+/* A replay's level went (pending 3): the next one decides. The same level (the pause menu's Restart) starts the replay
+ * again (runtime_replay_level_start); another one (Quit: the menus) ends it (left_level, from the tick). */
+static void left_level(void) {
+    if (P.pending != 3) return;
+    const char *level = rr_current_level();
+    if (!level || !strcasecmp(level, P.header.level)) return;     /* still the race's (or nothing yet): wait */
+    P.pending = 0;
+    P.live = 0;
+    play_end(0);
+    printf("Replay: left for %s: the replay is over\n", level);
+    fflush(stdout);
+}
+
 void runtime_replay_play_level_end(void) {
     char *frame = rr_ptr(RR_D_FRAME);
     if (P.pending && frame) RR_AT(frame, 0x2c, float) = 1.0f;
@@ -1470,10 +1500,8 @@ void runtime_replay_play_level_end(void) {
         return;
     }
     if (P.pending != 2) return;
-    P.pending = 0;
-    P.live = 0;
+    P.pending = 3;                                      /* left_level or a restart decides */
     drop_ghosts();
-    play_end(0);
 }
 
 /* Live: the frames that came since the last game frame become ghost keys, lap starts and names (the game's
@@ -1626,9 +1654,11 @@ static void hold(void *controller, int type) {
 
 static int shield_up(void *kart);
 static void hurt(void *kart, int type);
-static void use_item(void *kart, int type) {
+static void use_item(void *kart, int type, uint16_t flags) {
     void *controller = items_of(kart);
     if (!controller) return;
+    const unsigned launch = (flags & RS_LAUNCH_MASK) >> RS_LAUNCH_SHIFT;
+    if (launch) RR_AT(controller, 0x28, int32_t) = (int32_t)launch - 1;     /* forward, neutral, backward as recorded */
     /* a shield still up (the replay had no hit to end it): the next use would throw it, not this item */
     if (type != 8 && shield_up(kart)) hurt(kart, 4);
     hold(controller, type);
@@ -1794,7 +1824,23 @@ static void sync_item(void *controller, int r, uint32_t i) {
 }
 
 static int thrown_seconds(int type) {
-    return type == 0 || type == 9 ? 3 : type == 1 || type == 10 ? 4 : type == 2 || type == 3 ? 20 : type == 4 || type == 8 || type == 12 ? 12 : 0;
+    return type == 0 || type == 9 ? 3 : type == 1 || type == 10 ? 4 : type == 2 || type == 3 ? 90 : type == 4 || type == 8 || type == 12 ? 12 : 0;
+}
+
+/* A crate or beaker dropped at frame k at `at`: a racer took a hit near it since (it went off), up to frame now */
+#define HIT_RANGE 450.0f
+static int went_off(const float *at, uint32_t k, uint32_t now) {
+    for (uint32_t j = k + 1; j <= now; j++)
+        for (int r = 0; r < RR_RACERS; r++) {
+            if (!hit_starts(r, j)) continue;
+            float d = 0.0f;
+            for (int c = 0; c < 3; c++) {
+                const float x = (float)P.frames[j].racer[r].position[c] / RR_POSITION - at[c];
+                d += x * x;
+            }
+            if (d < HIT_RANGE * HIT_RANGE) return 1;
+        }
+    return 0;
 }
 
 /* After a jump (the track cleared): the items thrown, dropped or worn not long before come back. Thrown ones start
@@ -1804,16 +1850,20 @@ static void restore_items(uint32_t now) {
     for (int r = 0; r < RR_RACERS; r++) {
         void *kart = kart_of_racer(r), *controller = items_of(kart);
         if (!controller) continue;
-        for (uint32_t k = now > 20 * RR_RATE ? now - 20 * RR_RATE : 1; k <= now; k++) {
+        for (uint32_t k = now > 90 * RR_RATE ? now - 90 * RR_RATE : 1; k <= now; k++) {
             const struct rr_sample *a = &P.frames[k - 1].racer[r], *b = &P.frames[k].racer[r];
             if (b->item_uses == a->item_uses || a->item < 0 || a->item >= 13 ||
                 (now - k) / RR_RATE >= (uint32_t)thrown_seconds(a->item))
                 continue;
-            use_item(kart, a->item);
-            if ((a->item == 2 || a->item == 3) && TRACK.dropped_count < DROPPED) {
+            const int dropped = a->item == 2 || a->item == 3;
+            float at[3];
+            for (int c = 0; c < 3; c++) at[c] = (float)b->position[c] / RR_POSITION;
+            if (dropped && (went_off(at, k, now) || TRACK.dropped_count >= DROPPED)) continue;
+            use_item(kart, a->item, b->flags);
+            if (dropped) {
                 TRACK.dropped[TRACK.dropped_count].kart = kart;
                 TRACK.dropped[TRACK.dropped_count].type = a->item;
-                for (int c = 0; c < 3; c++) TRACK.dropped[TRACK.dropped_count].at[c] = (float)b->position[c] / RR_POSITION;
+                for (int c = 0; c < 3; c++) TRACK.dropped[TRACK.dropped_count].at[c] = at[c];
                 TRACK.dropped_count++;
             }
         }
@@ -1903,7 +1953,7 @@ static void items_frame(void) {
         }
         for (uint32_t i = last + 1; i <= now; i++) {
             const struct rr_sample *a = &P.frames[i - 1].racer[r], *b = &P.frames[i].racer[r];
-            if (b->item_uses != a->item_uses && a->item >= 0 && a->item < 13) use_item(kart, a->item);
+            if (b->item_uses != a->item_uses && a->item >= 0 && a->item < 13) use_item(kart, a->item, b->flags);
             const int type = next_item(r, i);
             if ((b->flags & RS_SHUFFLING) && !(a->flags & RS_SHUFFLING) && type >= 0 && !RR_AT(controller, 0x40, uint8_t) &&
                 !rr_handle_object(&RR_AT(controller, 0x30, void *))) {
@@ -2013,6 +2063,7 @@ static void skip_intro(void) {
 
 /* Every frame (the pad read, runtime_replay.c): the menu's request, the start sequence, the character given back */
 void ABI runtime_replay_tick(void) {
+    left_level();
     skip_intro();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
