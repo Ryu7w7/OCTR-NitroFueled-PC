@@ -768,6 +768,17 @@ static void feed(void *kart) {
 
 static int running(void) { return P.pending == 2 && P.started; }
 
+/* Parts of a track are shown or hidden by occlusion triggers where the player's kart is; the camera follows
+ * another kart in a replay, so they use the camera's place instead (COcclusionTrigger +0x5a
+ * _useCameraPosition, a level setting the game already has). COcclusionTriggerManager: +0x10 triggers. */
+#define D_OCCLUSION_TRIGGERS 0x2acdb48
+static void camera_triggers(void) {
+    char *manager = rr_ptr(D_OCCLUSION_TRIGGERS);
+    void *list = manager ? RR_AT(manager, 0x10, void *) : 0;
+    for (int i = 0; i < rr_count(list); i++)
+        if (rr_item(list, i)) RR_AT(rr_item(list, i), 0x5a, uint8_t) = 1;
+}
+
 /* In a replay the items come from the recording: what old items do after a rewind cleared them would run on
  * freed memory (runtime_replay.c's item stubs), crates give nothing, the HUD's lap is ours. */
 int ABI runtime_replay_on(void) { return P.pending == 2; }
@@ -1295,6 +1306,7 @@ void runtime_replay_play_frame(void) {
     if (frame && !RR_AT(frame, 0x28, uint8_t)) P.level_time += RR_AT(frame, 0x24, float);
     put_choice_back();
     if (!P.set_up) set_up();
+    camera_triggers();
     const float go = P.started ? 0.0f : rr_race_clock();
     if (go > 0.0f && P.kart) {
         P.started = 1;
