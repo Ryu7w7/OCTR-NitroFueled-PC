@@ -42,7 +42,8 @@ struct rr_header {
     uint32_t packed;
     char track[40];
     uint8_t mirror;
-    uint8_t reserved[19];
+    uint8_t no_crates;          /* a race without item crates (Time Trial, Itemless); 0 in older files */
+    uint8_t reserved[18];
 };
 
 #define RR_POSITION 16.0f

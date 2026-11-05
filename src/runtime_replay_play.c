@@ -193,6 +193,12 @@ static int ended(void) {
 }
 
 int runtime_replay_playing(void) { return P.pending != 0; }
+/* read by the file thread too (runtime_file.c): the track's archive without crates */
+int runtime_replay_no_crates(void) {
+    return __atomic_load_n(&P.pending, __ATOMIC_ACQUIRE) && (P.header.no_crates || P.header.mode == 2);
+}
+/* live: a friend's race still going on (the play time cannot go past what has come) */
+static int live_open(void) { return P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE); }
 
 /* ---- loading ---- */
 #define GAP 6
@@ -700,7 +706,7 @@ static void lap_skip(int step) {
         if (step < 0 && t <= now) target = current, current = t;
         if (step > 0 && t > now && target < 0.0f) target = t;
     }
-    if (target < 0.0f) return;
+    if (target < 0.0f || (step > 0 && target > last_time())) return;   /* live: a lap not here yet */
     P.rewound = 1;
     P.time = target;
 }
@@ -733,16 +739,21 @@ static void read_buttons(float dt) {
         void *hud_component = PRESSED(S_TRIANGLE) && P.kart && meta ? rr_find_component(P.kart, meta) : 0;
         if (hud_component && RR_AT(hud_component, 0x80, uint8_t)) game.hud_style_next(hud_component, id);
     }
-    if (PRESSED(S_UP) && P.speed < (int)(sizeof SPEEDS / sizeof SPEEDS[0]) - 1) P.speed++;
+    /* live: no faster than the race itself, and forward only back up to the live point (after a rewind) */
+    const int open = live_open();
+    const int fastest = open ? NORMAL_SPEED : (int)(sizeof SPEEDS / sizeof SPEEDS[0]) - 1;
+    if (PRESSED(S_UP) && P.speed < fastest) P.speed++;
     if (PRESSED(S_DOWN) && P.speed > 0) P.speed--;
+    if (P.speed > fastest) P.speed = fastest;
     const float end = last_time();
-    P.scrubbing = HELD(S_LEFT) || HELD(S_RIGHT);
-    P.scrub_dir = HELD(S_LEFT) ? -1 : HELD(S_RIGHT) ? 1 : 0;
+    const int forward = HELD(S_RIGHT) && !HELD(S_LEFT) && (!open || P.time < end - 0.05f);
+    P.scrubbing = HELD(S_LEFT) || forward;
+    P.scrub_dir = HELD(S_LEFT) ? -1 : forward ? 1 : 0;
     if (HELD(S_LEFT)) {
         P.time -= dt * SCRUB;
         if (P.time < 0.0f) P.time = 0.0f;
         P.rewound = 1;
-    } else if (HELD(S_RIGHT)) {
+    } else if (forward) {
         P.time += dt * SCRUB;
         P.rewound = 1;
     } else if (!P.paused) {
@@ -750,7 +761,7 @@ static void read_buttons(float dt) {
     }
     P.buffering = P.live && !P.paused && !P.scrubbing && P.time >= end;
     if (P.time > end) P.time = end;
-    if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : HELD(S_RIGHT) ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
+    if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : forward ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
 #undef PRESSED
 #undef HELD
 }
