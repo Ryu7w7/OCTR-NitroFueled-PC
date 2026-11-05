@@ -195,12 +195,16 @@ static int items_restore;            /* drive cleared the track: the recent item
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
 static float ghost_time(const struct rr_frame *f) { return f->time - P.header.go_time + RACE_START; }
-#define LIVE_DELAY 2.0f        /* live: the play time stays this far behind the newest frame */
+/* live: the play time stays this far behind the newest frame. It grows by 1 s (up to 6 s) each time the stream
+ * ran dry (a sender with a slow or uneven connection), and comes back down by 0.5 s after 90 s without that. */
+#define LIVE_DELAY 2.0f
+#define LIVE_DELAY_MAX 6.0f
+static float live_delay = LIVE_DELAY, live_smooth;
 static uint32_t frames_now(void) { return __atomic_load_n(&P.count, __ATOMIC_ACQUIRE); }
 /* the last play time there is: live, a little behind the newest frame until the race is over */
 static float last_time(void) {
     const float end = ghost_time(&P.frames[frames_now() - 1]) - RACE_START;
-    return P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE) ? end - LIVE_DELAY : end;
+    return P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE) ? end - live_delay : end;
 }
 static int ended(void) {
     if (P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE)) return 0;
@@ -825,6 +829,7 @@ static void read_buttons(float dt) {
     if (!ctrl) return;
     const uint64_t now = RR_AT(ctrl, 0xe8, uint64_t), pressed = now & ~P.buttons;
     P.buttons = now;
+    const float before = P.time;
 #define PRESSED(s) (bit_of(ctrl, s) >= 0 && (pressed >> bit_of(ctrl, s) & 1))
 #define HELD(s) (bit_of(ctrl, s) >= 0 && (now >> bit_of(ctrl, s) & 1))
     if (PRESSED(S_L1)) lap_skip(-1);
@@ -867,8 +872,17 @@ static void read_buttons(float dt) {
     } else if (!P.paused) {
         P.time += dt * SPEEDS[P.speed];
     }
+    const int was_buffering = P.buffering;
     P.buffering = P.live && !P.paused && !P.scrubbing && P.time >= end;
-    if (P.time > end) P.time = end;
+    if (P.buffering && !was_buffering && P.started && live_delay < LIVE_DELAY_MAX) {
+        live_delay += 1.0f;
+        printf("Replay: the live stream ran dry: now %.0f s behind\n", live_delay);
+        fflush(stdout);
+    }
+    live_smooth = P.buffering ? 0.0f : live_smooth + dt;
+    if (live_smooth > 90.0f && live_delay > LIVE_DELAY) live_delay -= 0.5f, live_smooth = 0.0f;
+    /* live, past the point (the delay just grew): it waits there, it does not jump back */
+    if (P.time > end) P.time = live_open() && before > end && !P.scrubbing ? before : end;
     if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : forward ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
 #undef PRESSED
 #undef HELD
