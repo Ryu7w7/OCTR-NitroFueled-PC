@@ -21,6 +21,9 @@ static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
 static int installed, selected, searching, allow_party;
 static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
+static uint64_t matchmaking_room;
+static unsigned char *matchmaking_owner;
+static int matchmaking_search;
 
 typedef void *(ABI *Search)(void **, void *, const char *, unsigned, void *);
 typedef void *(ABI *Register)(void **, void *, const char *, unsigned);
@@ -58,6 +61,9 @@ int runtime_public_itemless_available(void) {
 }
 
 static void reset_locked(void) {
+    matchmaking_room = 0;
+    matchmaking_owner = NULL;
+    matchmaking_search = 0;
     confirmed_room = 0;
     room_owner = NULL;
     request_nonce = 0;
@@ -91,6 +97,16 @@ int runtime_public_itemless_active(void) {
     uint64_t native_room = 0;
     if (room_owner) memcpy(&native_room, room_owner + 0x958, 8);
     const int active = confirmed_room && native_room == confirmed_room;
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+
+/* Public Normal also overrides a party's lingering private-scene flag. */
+int runtime_public_match_active(void) {
+    pthread_mutex_lock(&mode_lock);
+    uint64_t room = 0;
+    if (matchmaking_owner) memcpy(&room, matchmaking_owner + 0x958, 8);
+    const int active = matchmaking_search || (matchmaking_room && room == matchmaking_room);
     pthread_mutex_unlock(&mode_lock);
     return active;
 }
@@ -347,7 +363,14 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     if (rejection[0]) { *result = NULL; return result; }
     runtime_public_itemless_reset();
     fprintf(stderr, "Public ITEMLESS: starting %s search\n", selected ? "ITEMLESS" : "NORMAL");
-    if (!selected) return native_search(result, self, raw, limit, response);
+    if (!selected) {
+        pthread_mutex_lock(&mode_lock);
+        matchmaking_search = 1;
+        pthread_mutex_unlock(&mode_lock);
+        void *r = native_search(result, self, raw, limit, response);
+        if (!*result) runtime_public_itemless_reset();
+        return r;
+    }
     if (!runtime_public_itemless_available() || !raw || strnlen(raw, limit) == limit || !party_check(raw)) {
         *result = NULL;
         if (!rejection[0]) reject_search("Cannot verify party compatibility. Please retry before starting ITEMLESS.");
@@ -359,6 +382,7 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     pthread_mutex_lock(&mode_lock);
     request_nonce = token;
     searching = 1;
+    matchmaking_search = 1;
     pthread_mutex_unlock(&mode_lock);
     void *r = native_search(result, self, doc, (unsigned)strlen(doc)+1, response);
     free(doc);
@@ -408,6 +432,11 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
     if (!valid && confirmed_room == room) { confirmed_room = 0; room_owner = NULL; }
     if (valid) { confirmed_room = room; room_owner = owner; }
     else if (!advertised && !wants) { confirmed_room = 0; room_owner = NULL; }
+    if (valid || (!advertised && !wants)) {
+        matchmaking_room = room;
+        matchmaking_owner = owner;
+        matchmaking_search = 0;
+    }
     pthread_mutex_unlock(&mode_lock);
     if (!valid && (advertised || wants)) {
         reject_search("ITEMLESS lobby confirmation failed. Please search again.");
@@ -418,7 +447,7 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
 static void *ptr(const void *p, size_t offset) { void *v; memcpy(&v,(const char *)p+offset,8); return v; }
 static int replacement(uint64_t room) {
     pthread_mutex_lock(&mode_lock);
-    int different = confirmed_room && confirmed_room != room;
+    int different = matchmaking_room && matchmaking_room != room;
     pthread_mutex_unlock(&mode_lock);
     return different;
 }
@@ -446,7 +475,8 @@ static void ABI merged(void *self, uint64_t search, uint64_t from, uint64_t to, 
 /* A native lobby's lifetime, not map transitions, owns its confirmation. */
 static void retire(void *owner, uint64_t room) {
     pthread_mutex_lock(&mode_lock);
-    if (room_owner == owner && (!room || room == confirmed_room)) reset_locked();
+    if ((room_owner == owner && (!room || room == confirmed_room)) ||
+        (matchmaking_owner == owner && (!room || room == matchmaking_room))) reset_locked();
     pthread_mutex_unlock(&mode_lock);
 }
 static void ABI destroyed(void *self) {

@@ -257,7 +257,9 @@ int main(void) {
     runtime_public_itemless_select(0);
     start_search(&result,NULL,doc,sizeof doc,NULL);
     assert(sent==1 && !strcmp(payload,doc) && !runtime_public_itemless_active());
+    assert(runtime_public_match_active()); /* Normal search is public before a room exists. */
     runtime_public_itemless_select(1);
+    assert(!runtime_public_match_active());
     status=409; strcpy(reply,"Cannot start ITEMLESS. These players need the latest Itemless patch: OldPlayer");
     start_search(&result,NULL,doc,sizeof doc,NULL);
     assert(!result && sent==1 && dialogs==0);
@@ -337,6 +339,15 @@ int main(void) {
     assert(!confirmation("{\"octr_itemless_v1\":\"1/42/1/0000000000000001\",\"octr_itemless_v1\":\"bad\"}",42,1));
     runtime_public_itemless_reset();
     assert(accept(owner,43,"{}",2) && !runtime_public_itemless_active());
+    *(uint64_t *)(owner + 0x958) = 43;
+    assert(runtime_public_match_active()); /* Normal party guests never need an Itemless token. */
+    disbanded(owner, 42);
+    assert(runtime_public_match_active());
+    *(uint64_t *)(owner + 0x958) = 44;
+    assert(!runtime_public_match_active());
+    *(uint64_t *)(owner + 0x958) = 43;
+    kicked(owner, 43);
+    assert(!runtime_public_match_active());
     runtime_public_itemless_update();
     test_early_gate();
     test_full_lobby_confirmation();
