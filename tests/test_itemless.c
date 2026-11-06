@@ -7,6 +7,7 @@ static unsigned char owner[32], other[32], ai[32], ai2[32], obstacle[32], human_
 static unsigned char boost[32], wall_context[40], collision_data[16];
 static int boost_alive;
 int runtime_speed_race_active(void) { return active; }
+int runtime_replay_no_crates(void) { return 0; }
 static void put(void *p, size_t off, void *v) { memcpy((char *)p+off, &v, sizeof v); }
 static void *ABI lookup(void *manager, void *entity) {
     (void)manager;
