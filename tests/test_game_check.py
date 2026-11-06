@@ -52,6 +52,22 @@ class GameCheckTests(unittest.TestCase):
             self.assertEqual(game_check.problem(game)[0], 'wrong_eboot')
             self.assertIsNone(game_check.profile(game))
 
+    def test_european_base_executable(self):
+        # Issues 199 and 200: nothing told the player, and the game stopped at a black screen.
+        for version, kind in (('01.21', 'wrong_eboot'), ('01.00', 'missing_update')):
+            game = self.game('CUSA14876', version)
+            with mock.patch.dict(game_check.OLD_IMAGES, {game_check.image_sha256(game): '01.00'}):
+                self.assertEqual(game_check.problem(game), (kind, 'CUSA14876', version))
+                self.assertIn('CUSA14876-patch' if kind == 'missing_update' else '01.21',
+                              game_check.explain(*game_check.problem(game)))
+                self.assertIsNone(game_check.profile(game))
+
+    def test_other_european_builds_stay_accepted(self):
+        game = self.game('CUSA14876', '01.21')
+        self.assertIsNone(game_check.problem(game))
+        self.assertEqual(game_check.profile(game)['variant'], 'experimental')
+        self.assertIsNone(game_check.problem(self.game('CUSA14876', '01.21', b'junk')))
+
     def test_other_121_build_is_accepted_as_672(self):
         # The 1.21 update for firmware 6.72+: another executable, same game.
         game = self.game('CUSA13795', '01.21')

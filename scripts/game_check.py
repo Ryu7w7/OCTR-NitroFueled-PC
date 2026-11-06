@@ -12,9 +12,10 @@ firmware 6.72+. Same game, different executable. A 1.21 executable that is not a
 accepted as `variant='6.72+'`: patches.py finds its patch sites by signature instead of address,
 and the log says it is the less-tested build.
 
-Experimental: the European edition (CUSA14876) is accepted by title at any version, untested
-(variant='experimental'). It has its own executable, so the community patches (written for
-CUSA13795 1.21 addresses) are not applied; the signed render patches apply where found.
+Experimental: the European edition (CUSA14876) is accepted by title, untested
+(variant='experimental'), except with its base game's executable, which has none of the 1.21 code
+the port hooks and stops at start. It has its own executable, so the community patches (written
+for CUSA13795 1.21 addresses) are not applied; the signed render patches apply where found.
 """
 import hashlib
 import os
@@ -41,6 +42,7 @@ EXPERIMENTAL = {
 # these mean the update's eboot.bin was not copied in.
 OLD_IMAGES = {
     'a9cdc80f2170624e08bdddab128fc9cdaf5c71aa90c00fc669d830e366ba6833': '01.00',
+    'da391ad520838261ec4421636afd4bd1d178ee63623333b035e42fc219f1f855': '01.00',  # CUSA14876
 }
 SUPPORTED_TITLE = 'CUSA13795'
 SUPPORTED_VERSION = '01.21'
@@ -68,7 +70,7 @@ def profile(game, image_hash=None):
     if image_hash in SUPPORTED:
         return dict(SUPPORTED[image_hash], variant='5.05')
     info = sfo_info(game)
-    if info.get('TITLE_ID') in EXPERIMENTAL:
+    if info.get('TITLE_ID') in EXPERIMENTAL and problem(game, image_hash) is None:
         return dict(EXPERIMENTAL[info['TITLE_ID']], version=info.get('APP_VER', '?'), variant='experimental')
     if image_hash and problem(game, image_hash) is None and os.environ.get('BB_SKIP_GAME_CHECK') != '1':
         info = sfo_info(game)
@@ -142,7 +144,13 @@ def problem(game, image_hash=None):
         info = {}
     title, version = info.get('TITLE_ID', '?'), info.get('APP_VER', '?')
     if title in EXPERIMENTAL:
-        return None
+        try:
+            old = (image_hash or image_sha256(game)) in OLD_IMAGES
+        except (OSError, ValueError, IndexError, StopIteration, KeyError):
+            old = False
+        if not old:
+            return None
+        return ('wrong_eboot' if version == EXPERIMENTAL[title]['version'] else 'missing_update'), title, version
     try:
         image_hash = image_hash or image_sha256(game)
     except (OSError, ValueError, IndexError, StopIteration, KeyError):
@@ -163,7 +171,7 @@ def problem(game, image_hash=None):
 def explain(kind, title, version):
     """What is wrong and what to do, for the log (English)."""
     found = f'Found {title} version {version} (sce_sys/param.sfo).'
-    p = BY_TITLE.get(title, BY_TITLE[SUPPORTED_TITLE])
+    p = BY_TITLE.get(title) or EXPERIMENTAL.get(title) or BY_TITLE[SUPPORTED_TITLE]
     supported = ', '.join(f"{q['game']} {q['title']} {q['version']}" for q in SUPPORTED.values())
     return {
         'missing_update': f"{found} The port needs the {p['version']} update merged into the game folder: copy "
