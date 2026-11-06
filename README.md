@@ -169,7 +169,7 @@ choose a folder, the launcher says in green or red what it found.
 | Dumped from your own PS4 with a game dumper | `eboot.bin`, `sce_module\`, `sce_sys\param.sfo`… directly in each folder (base, update) | Yes |
 | Extracted with **PS4 PKG Tool** | `Image0\` (eboot.bin, sce_module, the game data) and `Sc0\` (param.sfo and the rest of sce_sys) | Yes, from v0.3: choose the folder that holds `Image0` and `Sc0` and press *Prepare the game*. With v0.2.1, first copy **everything** in `Image0` to that folder and everything in `Sc0` to a new `sce_sys` folder in it |
 | Any other tool | Works if the files end up in one of the two layouts above | Yes |
-| A `.pkg` file that was not extracted | | No: extract it first. Only the DLC tab takes `.pkg` files |
+| A `.pkg` file that was not extracted | | No: extract it first (on Linux, [`tools/install_from_pkg.sh`](tools/install_from_pkg.sh) extracts and merges both packages: see [docs/LINUX_PKG_INSTALL.md](docs/LINUX_PKG_INSTALL.md)). Only the DLC tab takes `.pkg` files |
 | The European edition (CUSA14876) | | Yes, from v0.5.3, also online with the USA edition |
 | Another region or edition (JP…) | | No: each one has a different executable |
 | Encrypted files (straight from a disc or an official package) | `eboot.bin could not be read as a decrypted PS4 executable` | No: dump the game again |
