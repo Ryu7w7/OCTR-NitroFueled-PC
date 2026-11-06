@@ -660,7 +660,14 @@ struct Backup {
     std::uintmax_t bytes = 0;
 };
 
+struct ModOption {
+    bool advanced=false;
+    std::string id, type, label, description, value, default_value, row, column;
+    std::vector<std::pair<std::string,std::string>> choices;
+};
+
 struct PatchInfo {
+    std::vector<ModOption> mod_options;
     std::string mod_name, mod_hash, mod_source, mod_description, mod_versions;
     std::string key, name, author, note, version;
     std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
@@ -2426,6 +2433,31 @@ std::vector<PatchInfo> LoadPatches() {
             p.mod_source = get("ModSource");
             p.mod_description = get("ModDescription");
             p.mod_versions = get("ModVersions");
+            // Only our generated package catalog declares configurable controls.
+            if (file.filename() == L"OCTR-Mod-Library.xml" && !p.mod_hash.empty()) {
+                const size_t meta_end=xml.find("</Metadata>",close);
+                for (size_t pos=close; meta_end!=std::string::npos && p.mod_options.size()<16 &&
+                     (pos=xml.find("<ModOption ",pos))!=std::string::npos && pos<meta_end; ++pos) {
+                    const size_t end=xml.find('>',pos), tail=xml.find("</ModOption>",end);
+                    if (end==std::string::npos || end>meta_end) break;
+                    const auto fields=XmlAttributes(xml.substr(pos+11,end-pos-11));
+                    auto field=[&](const char* key) { const auto i=fields.find(key); return i==fields.end()?std::string():i->second; };
+                    ModOption option; option.id=field("Id");option.type=field("Type");option.label=field("Label");
+                    option.description=field("Description");option.value=field("Value");option.default_value=field("Default");
+                    option.advanced=field("Advanced")=="true";
+                    option.row=field("Row");option.column=field("Column");
+                    if (option.type=="choice" && tail!=std::string::npos && tail<meta_end) {
+                        for (size_t c=end;option.choices.size()<32 && (c=xml.find("<Choice ",c))!=std::string::npos && c<tail;++c) {
+                            const size_t ce=xml.find('>',c);if(ce==std::string::npos || ce>tail)break;
+                            const auto choice=XmlAttributes(xml.substr(c+8,ce-c-8));
+                            if(choice.count("Value") && choice.count("Label"))option.choices.emplace_back(choice.at("Value"),choice.at("Label"));
+                        }
+                    }
+                    if (!option.id.empty() && !option.label.empty() &&
+                        (option.type=="boolean" || (option.type=="choice" && !option.choices.empty())))
+                        p.mod_options.push_back(std::move(option));
+                }
+            }
             for (const auto& [key, ini] : kIniPatches)
                 if (p.key == key) p.ini_key = ini;
             list.push_back(std::move(p));
@@ -3976,6 +4008,128 @@ void ModSection(const char* title, bool builtin) {
     ImGui::TextColored(ImVec4(.65f,.72f,.85f,1), T("%d de %d activos", "%d of %d on"),on,total);
 }
 
+struct ModConfigurationDraft { PatchInfo mod; std::string error; bool open=false,advanced=false; };
+ModConfigurationDraft g_mod_configuration;
+
+void ModConfigurationDialog() {
+    auto& draft=g_mod_configuration;
+    const char* title=T("Configurar mod","Mod configuration");
+    if(draft.open) { draft.error.clear();ImGui::OpenPopup(title);draft.open=false; }
+    ImGui::SetNextWindowSize(ImVec2(540,0),ImGuiCond_Appearing);
+    if(!ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+    ImGui::TextWrapped("%s",draft.mod.mod_name.c_str());
+    ImGui::Separator();
+    ImGui::BeginDisabled(g_app.game_running || !g_app.python);
+    const auto advanced_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return o.advanced;});
+    const auto grid_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return !o.row.empty();});
+    const float normal_count=static_cast<float>(draft.mod.mod_options.size()-advanced_count-grid_count);
+    const float options_height=std::min({420.0f,150.0f*normal_count+(grid_count?140.0f:0.0f)+(advanced_count?45.0f:0.0f)+(draft.advanced?40.0f*advanced_count:0.0f),
+                                      ImGui::GetMainViewport()->WorkSize.y*.55f});
+    ImGui::BeginChild("options",ImVec2(0,options_height));
+    auto render_option=[&](ModOption& option) {
+        ImGui::PushID(option.id.c_str());
+        if(option.type=="boolean") {
+            bool on=option.value=="true";
+            if(ImGui::Checkbox("##enabled",&on))option.value=on?"true":"false";
+            ImGui::SameLine();ImGui::TextUnformatted(option.label.c_str());
+        } else {
+            ImGui::TextUnformatted(option.label.c_str());
+            std::string preview=option.value;
+            for(const auto& [value,label]:option.choices)if(value==option.value)preview=label;
+            ImGui::SetNextItemWidth(-1);
+            if(ImGui::BeginCombo("##choice",preview.c_str())) {
+                for(const auto& [value,label]:option.choices) {
+                    bool selected=value==option.value;
+                    if(ImGui::Selectable(label.c_str(),selected))option.value=value;
+                    if(selected)ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        if(!option.description.empty())ImGui::TextWrapped("%s",option.description.c_str());
+        ImGui::Spacing();ImGui::PopID();
+    };
+    for(auto& option:draft.mod.mod_options)if(!option.advanced&&option.row.empty())render_option(option);
+    std::vector<std::string> rows,columns;
+    for(const auto& o:draft.mod.mod_options)if(!o.row.empty()) {
+        if(std::find(rows.begin(),rows.end(),o.row)==rows.end())rows.push_back(o.row);
+        if(std::find(columns.begin(),columns.end(),o.column)==columns.end())columns.push_back(o.column);
+    }
+    if(!rows.empty()&&ImGui::BeginTable("mod-pieces",static_cast<int>(columns.size()+1),ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn(T("Grupo","Group"),ImGuiTableColumnFlags_WidthStretch,1.3f);
+        for(const auto& column:columns)ImGui::TableSetupColumn(column.c_str());
+        ImGui::TableHeadersRow();
+        for(const auto& row:rows) {
+            ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::TextUnformatted(row.c_str());
+            for(const auto& column:columns) {
+                ImGui::TableNextColumn();
+                for(auto& o:draft.mod.mod_options)if(o.row==row&&o.column==column) {
+                    ImGui::PushID(o.id.c_str());bool on=o.value=="true";
+                    if(ImGui::Checkbox("##piece",&on))o.value=on?"true":"false";
+                    if(!o.description.empty()&&ImGui::IsItemHovered())ImGui::SetTooltip("%s",o.description.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    if(advanced_count) {
+        draft.advanced=ImGui::CollapsingHeader(T("Opciones avanzadas","Advanced settings"));
+        if(draft.advanced)for(auto& option:draft.mod.mod_options)if(option.advanced)render_option(option);
+    }
+    ImGui::EndChild();
+    if(!draft.error.empty())ImGui::TextWrapped("%s",draft.error.c_str());
+    if(ImGui::Button(T("Restablecer valores","Reset to defaults")))
+        for(auto& option:draft.mod.mod_options)option.value=option.default_value;
+    ImGui::SameLine();
+    bool saved=false;
+    if(ImGui::Button(T("Guardar","Save"))) {
+        draft.error.clear();
+        const std::string ident=PackagePatchId(draft.mod);
+        const bool valid=!ident.empty() && std::all_of(ident.begin(),ident.end(),[](unsigned char c){return std::isalnum(c)||c=='-';});
+        if(valid && g_app.python) {
+            const auto& a=g_app;
+            std::wstring cmd=Quote(a.python->exe)+L" "+a.python->args+L"-X utf8 "+
+                Quote((a.root/L"scripts"/L"mod_packages.py").wstring())+L" --scan "+Quote(a.root.wstring())+
+                L" --configure "+Quote(Widen(ident))+L" --expected-sha "+Quote(Widen(draft.mod.mod_hash));
+            for(const auto& o:draft.mod.mod_options)cmd+=L" --option "+Quote(Widen(o.id+"="+o.value));
+            const Captured r=RunCaptured(a.python->exe,cmd,a.root,120000);
+            if(!r.output.empty())AddLog(r.output);
+            saved=r.started && r.code==0;
+            if(!saved) {
+                draft.error=T("No se pudieron guardar las opciones. Revisa el registro.","Could not save mod options. Check the log.");
+                const auto reason=r.output.rfind("ValueError: ");
+                if(reason!=std::string::npos) {
+                    draft.error=r.output.substr(reason+12);
+                    const auto end=draft.error.find_first_of("\r\n");
+                    if(end!=std::string::npos)draft.error.resize(end);
+                }
+            }
+            g_app.notice=saved?T("Opciones guardadas. Se aplican al iniciar el juego.","Mod options saved. Applied when you start the game."):
+                T("No se pudieron guardar las opciones. Revisa el registro.","Could not save mod options. Check the log.");
+        }
+        if(saved)ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();ImGui::SameLine();
+    if(ImGui::Button(T("Cancelar","Cancel")))ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    if(saved)g_app.patches=LoadPatches();
+}
+
+bool ModConfigureIcon() {
+    bool clicked=ImGui::Button("##configure",ImVec2(32,25));
+    const ImVec2 q=ImGui::GetItemRectMin();auto* d=ImGui::GetWindowDrawList();
+    const ImU32 ink=ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 c{q.x+16,q.y+12};
+    // Thin outline and the same button frame/ink as the adjacent trash icon.
+    const ImVec2 outline[]={{c.x-6,c.y+7},{c.x-8,c.y+5},{c.x-1,c.y-2},
+        {c.x-2,c.y-5},{c.x+1,c.y-8},{c.x+1,c.y-4},{c.x+4,c.y-2},
+        {c.x+7,c.y-4},{c.x+6,c.y+1},{c.x+3,c.y+3},{c.x,c.y+2}};
+    d->AddPolyline(outline,IM_ARRAYSIZE(outline),ink,1.0f,ImDrawFlags_Closed);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",T("Configurar mod","Configure mod"));
+    return clicked;
+}
+
 bool ModCard(const PatchInfo& p) {
     const bool package = !PackagePatchId(p).empty();
     bool on = ModIsOn(p), remove = false;
@@ -3995,7 +4149,7 @@ bool ModCard(const PatchInfo& p) {
     const float right = ImGui::GetWindowContentRegionMax().x;
     static std::set<std::string> expanded;
     const bool details = expanded.count(p.key) != 0;
-    const float action_width = package ? 76.0f : 32.0f;
+    const float action_width = package ? (p.mod_options.empty()?76.0f:112.0f) : 32.0f;
     // A separate text child wraps long names/metadata without colliding with actions.
     ImGui::BeginChild("summary", ImVec2(std::max(80.0f,right-text_x-action_width-12),0), ImGuiChildFlags_AutoResizeY,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -4047,6 +4201,10 @@ bool ModCard(const PatchInfo& p) {
     ImGui::SetCursorPos(ImVec2(right-action_width,top));
     if (package) {
         ImGui::BeginDisabled(g_app.game_running || !g_app.python);
+        if (!p.mod_options.empty()) {
+            if(ModConfigureIcon()){g_mod_configuration.mod=p;g_mod_configuration.open=true;g_mod_configuration.advanced=false;}
+            ImGui::SameLine(0,4);
+        }
         if (ImGui::Button("##remove",ImVec2(32,25))) remove=true;
         const ImVec2 q=ImGui::GetItemRectMin();
         const ImVec2 c{q.x+16,q.y+12};
@@ -4192,6 +4350,7 @@ void ModsTab() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    ModConfigurationDialog();
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);
     // Reload only after rendering: the loop's references must remain valid.
