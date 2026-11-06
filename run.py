@@ -975,7 +975,7 @@ def launch(args, restarted=False):
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
-                        say(f'ITEMLESS: {track_count} tracks prepared for private rooms')
+                        say(f'ITEMLESS: HUD prepared; native Time Trial track rules cover {track_count} tracks')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
             else:
