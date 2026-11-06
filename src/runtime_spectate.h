@@ -20,6 +20,7 @@ enum {
     RS_BUSY = 8,        /* a replay or a race is on: Spectate works from the menus */
     RS_PLAYING = 9,     /* the friend's last race is playing */
     RS_FOLLOW = 10,     /* following: the friend's next race loads by itself */
+    RS_OLD = 11,        /* the friend's game is too old to send its races */
 };
 
 void runtime_spectate_start(void);
