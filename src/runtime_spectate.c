@@ -266,6 +266,11 @@ static void follow_next(void) {
         follow_name[0] = 0;
         pthread_mutex_unlock(&lock);
         set_state(RS_REFUSED, who);
+    } else if (live == 426) {
+        pthread_mutex_lock(&lock);
+        follow_name[0] = 0;
+        pthread_mutex_unlock(&lock);
+        set_state(RS_OLD, who);
     } else if (live == 404 && (now == RS_LIVE || now == RS_WAITING)) {
         set_state(RS_FOLLOW, who);
     }
@@ -302,6 +307,11 @@ static void *worker(void *unused) {
                 follow_name[0] = 0;
                 pthread_mutex_unlock(&lock);
                 set_state(RS_REFUSED, who);
+            } else if (live == 426) {       /* it would wait for ever */
+                pthread_mutex_lock(&lock);
+                follow_name[0] = 0;
+                pthread_mutex_unlock(&lock);
+                set_state(RS_OLD, who);
             } else {                        /* live only: no race now, the next one loads by itself */
                 set_state(RS_FOLLOW, who);
             }

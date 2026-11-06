@@ -280,6 +280,7 @@ const char* Spanish(const char* english) {
     {"%s's last race is ready: main menu > REPLAYS (top of the list).",
      "La última carrera de %s está lista: menú principal > REPLAYS (arriba de la lista)."},
     {"%s has no recent race to watch.", "%s no tiene carreras recientes para ver."},
+    {"%s's game is too old to be watched: they need to update it.", "El juego de %s es demasiado antiguo para verlo: tiene que actualizarlo."},
     {"%s does not share races with you.", "%s no comparte sus carreras contigo."},
     {"Could not download %s's race.", "No se pudo descargar la carrera de %s."},
     {"Let my friends watch my races", "Permitir que mis amigos vean mis carreras"},

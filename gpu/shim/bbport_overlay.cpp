@@ -25,6 +25,7 @@
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_spectate.h"
 #include "../../src/runtime_chat.h"
+#include "../../src/runtime_name_colors.h"
 #include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
 #include "imgui.h"
@@ -431,6 +432,7 @@ void PollFriends() {
         runtime_chat_set_enabled(s.chat_enabled);
         runtime_chat_set_public(s.chat_public);
         runtime_chat_start();
+        runtime_name_colors_start();
     }
     // The server administrators' messages: always shown, whatever the
     // friends options say.
@@ -636,7 +638,11 @@ const char* ChatOwnName() {
 
 void ChatLine(const RcLine& line) {
     const bool mine = !SDL_strcasecmp(line.nick, ChatOwnName());
-    ImGui::TextColored(mine ? kFriendGreen : kMenuYellow, "%s:", line.nick);
+    float own[3];
+    const ImVec4 color = runtime_name_color(line.nick, own) ? ImVec4(own[0], own[1], own[2], 1.0f)
+                         : mine                             ? kFriendGreen
+                                                            : kMenuYellow;
+    ImGui::TextColored(color, "%s:", line.nick);
     ImGui::SameLine();
     ImGui::TextWrapped("%s", line.text);
 }
@@ -1107,6 +1113,8 @@ void FriendsTab() {
         case RS_PLAYING: line = BbSettings::MenuText("Playing %s's last race.", "Идёт последняя гонка %s."); break;
         case RS_FOLLOW: line = BbSettings::MenuText("Spectating %s: their next race loads by itself.",
                                                     "Смотрите %s: следующая гонка загрузится сама."); break;
+        case RS_OLD: line = BbSettings::MenuText("%s's game is too old to be watched: they need to update it.",
+                                                 "Чтобы смотреть гонки %s, нужно обновить игру."); break;
         default: break;
         }
         if (line) {
