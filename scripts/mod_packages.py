@@ -170,10 +170,23 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scan',type=Path,required=True,metavar='PORTABLE_ROOT')
     parser.add_argument('--remove',metavar='MOD_ID')
+    parser.add_argument('--configure',metavar='MOD_ID')
+    parser.add_argument('--option',action='append',default=[],metavar='ID=VALUE')
     parser.add_argument('--expected-sha',metavar='ZIP_SHA256')
     args=parser.parse_args()
-    if bool(args.remove)!=bool(args.expected_sha):parser.error('--remove requires --expected-sha')
-    if args.remove:
+    if args.remove and args.configure:parser.error('Choose remove or configure')
+    if bool(args.remove or args.configure)!=bool(args.expected_sha):parser.error('--remove/--configure requires --expected-sha')
+    if args.option and not args.configure:parser.error('--option requires --configure')
+    if args.configure:
+        from mod_library import configure
+        values={}
+        for value in args.option:
+            key,sep,choice=value.partition('=')
+            if not sep or key in values:parser.error('Invalid or duplicate --option')
+            values[key]=choice
+        configure(args.scan/'mods',args.scan/'patches',args.configure,args.expected_sha,values)
+        print('Mod options saved.')
+    elif args.remove:
         from mod_library import remove
         print('Mod moved to:',remove(args.scan/'mods',args.scan/'patches',args.remove,args.expected_sha))
     else:

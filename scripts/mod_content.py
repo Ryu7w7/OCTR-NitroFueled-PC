@@ -57,13 +57,13 @@ def selected(root,config):
     for key in ('order','disabled'):
         if not isinstance(prefs.get(key,[]),list) or not all(isinstance(n,str) for n in prefs.get(key,[])):raise ValueError('Invalid mod selection '+key)
     return list(dict.fromkeys(n for n in [*prefs.get('order',[]),*available] if n in available and n not in prefs.get('disabled',[])))
-def claims(folder,settings=None):
+def claims(folder,settings=None,options=None):
     folder=Path(folder)
     if not extended(folder):return [(p.as_posix().casefold(),source) for p,source in mods.mod_files(folder)]
     m=fmt.validate_manifest(metadata(folder));items=[]
     for r in m['files']:
         if r['file'].startswith('archives/'):items.append((r['file'].casefold(),under(folder,r['file'])))
-    alternatives=[fmt.resolve(m,settings)[1]] if settings is not None else [flat for _,flat in fmt.expanded_variants(m)]
+    alternatives=[fmt.resolve(m,settings,options)[1]] if settings is not None else [flat for _,flat in fmt.expanded_variants(m)]
     operations=[op for flat in alternatives for op in flat.get('operations',[])]
     for op in operations:
         # Texts claim object::field under their entry: packages changing different texts of one
@@ -76,10 +76,12 @@ def claims(folder,settings=None):
         items.extend((key.casefold(),folder/'mod.json') for key in keys)
     return list(dict(items).items()) if settings is None else items
 def mod_files(folder):return [(Path(key),source) for key,source in claims(folder)]
-def conflicts(root,config,settings=None):
+def conflicts(root,config,settings=None,options=None):
+    from mod_options import load as load_options
+    saved_options=options if options is not None else load_options(Path(root).parent/'mod-state/options.json')
     names=selected(root,config);owners=[];problems=[];installed={n:metadata(package_folder(root,n)) for n in names}
     for name in names:
-        for key,source in claims(package_folder(root,name),settings):
+        for key,source in claims(package_folder(root,name),settings,saved_options.get(name)):
             for prior,owner in owners:
                 if key==prior or key.startswith(prior+'::') or prior.startswith(key+'::'):
                     problems.append(key+': '+owner+' / '+name)
@@ -113,14 +115,16 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     title_id,app_version=game_info.get('TITLE_ID'),game_info.get('APP_VER')
     if title_id not in ('CUSA13795','CUSA14876') or app_version!='01.21':
         raise ValueError('Mod packages require a supported CTR edition at 01.21')
+    from mod_options import load as load_options,effective as effective_options
+    saved_options=load_options(state/'options.json')
     base=read_ini(base_config)
     base.setdefault('widescreen_layout','off')
-    problems=conflicts(mod_root,selection)
+    problems=conflicts(mod_root,selection,options=saved_options)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
     names=selected(mod_root,selection)
     from mod_variants import choose
     base,automatic_settings=choose([metadata(package_folder(mod_root,n)) for n in names],base)
-    problems=conflicts(mod_root,selection,base)
+    problems=conflicts(mod_root,selection,base,saved_options)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
     runtime=sha(engine(root))
@@ -130,7 +134,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
         folder=package_folder(mod_root,name)
         if extended(folder):
             raw=fmt.validate_folder(folder)
-            variant,m=fmt.resolve(raw,base)
+            option_values=effective_options(raw,saved_options.get(name))
+            variant,m=fmt.resolve(raw,base,option_values)
             if variant:chosen_variants[name]=variant
             if m['id']!=name:raise ValueError('Package ID/folder mismatch: '+name)
             compat=m['compatibility']
@@ -153,7 +158,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             whole.extend((under(folder,r['file']),r['file']) for r in m['files'] if r['file'].startswith('archives/'))
             added[name]=[r['file'] for r in m['files'] if r['file'].startswith('archives/')]+\
                 [op['target'] for op in m.get('operations',[]) if op['kind']=='game_file']
-            packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant})
+            packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant,'options':option_values})
         else:
             files=list(mods.mod_files(folder));whole.extend((source,path.as_posix()) for path,source in files)
             added[name]=[path.as_posix() for path,_ in files]
@@ -161,7 +166,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     effective.update(settings)
     for name in names:
         raw=metadata(package_folder(mod_root,name))
-        m=fmt.resolve(raw,base)[1] if 'schemaVersion' in raw else raw
+        m=fmt.resolve(raw,base,saved_options.get(name))[1] if 'schemaVersion' in raw else raw
         for key,values in m.get('constraints',{}).items():
             if effective.get(key) not in values:raise ValueError(name+': '+key+' must be one of '+', '.join(values))
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
