@@ -552,8 +552,12 @@ def compile_external(selected, segments, elf=None, strict=False, require_verific
                     for start,pos,size in load_segments(elf):
                         if start<=offset and offset+len(data)<=start+size:
                             original=elf[pos+offset-start:pos+offset-start+len(data)];break
-                    # Past a segment's file bytes (its zero fill, or the mod code area) memory starts as zeros.
-                    if original is None and not any(start<=offset<start+size for start,_,size in load_segments(elf)):
+                    # The mod code area starts as zeros. Anything else without file bytes (a segment's
+                    # zero fill) is not code a signature can vouch for: it stays a mismatch.
+                    loads=program_loads(elf)
+                    area_end=code_extension(loads)
+                    area_start=next((vaddr+memsz for kind,flags,vaddr,memsz in loads if kind==1 and flags&1),None)
+                    if original is None and area_end and area_start<=offset and offset+len(data)<=area_end:
                         original=bytes(len(data))
                     if original is None or hashlib.sha256(original).hexdigest()!=expected:
                         raise ValueError('executable code signature mismatch at '+str(line.get('Address')))
