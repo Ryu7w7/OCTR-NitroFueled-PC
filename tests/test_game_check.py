@@ -115,6 +115,9 @@ class GameCheckTests(unittest.TestCase):
         self.archive(game, 'gamestartup.pak', b'names/table.igz\0')
         self.assertEqual(game_check.problem(game), ('damaged_archives', 'CUSA13795', '01.21'))
         self.assertEqual(game_check.damaged_archives(game), ['loosefiles.pak'])
+        (Path(game) / 'archives' / 'loosefiles.pak').unlink()
+        self.archive(game, 'update2.pak', b'localizationData.igz\0')
+        self.assertEqual(game_check.damaged_archives(game), ['loosefiles.pak'])  # not there at all
         self.assertIn('extract', game_check.explain(*game_check.problem(game)))
 
     def test_intact_archives_pass(self):
