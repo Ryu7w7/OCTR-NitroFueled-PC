@@ -1,8 +1,9 @@
 /* Spectator build (experimental): friends watch each other's races, live only.
  *
- * While a sharing player (bbport.ini spectate_share=1, in-game menu > Friends > Options) races, the race goes
- * to the RyuNET server as it is recorded (POST /ryunet/spectate/live, about twice a second; the answer says
- * how many friends watch: SPECTATOR (n)). Spectate (Friends) follows a friend: their live race plays a few
+ * While a sharing player (bbport.ini spectate_share=1, in-game menu > Friends > Options) races, their game asks
+ * every 2 s whether a friend wants to watch and sends nothing else. With a viewer, the race goes to the RyuNET
+ * server from its first frame, as it is recorded (POST /ryunet/spectate/live, about twice a second; the answer
+ * says how many friends watch: SPECTATOR (n)). Spectate (Friends) follows a friend: their live race plays a few
  * seconds behind (GET /ryunet/spectate/live, new frames as they come), and each next race of theirs loads by
  * itself until Stop spectating. Finished races are not sent or downloaded. */
 #include "runtime_spectate.h"
@@ -49,8 +50,11 @@ static void set_state(int value, const char *who) {
 /* ---- live: the race being recorded goes to the server while it is driven; a friend's comes back ---- */
 #define LIVE_HEADER 1136
 #define LIVE_MAX_FRAMES 600         /* at most 10 s of frames per request */
+#define LIVE_ASK_TURNS 4            /* nobody watching: whether somebody does, about every 2 s */
+#define LIVE_QUIET_SECONDS 15       /* with no viewer this long the sending stops (a viewer's map load may hide them) */
 static uint32_t live_sent_race, live_sent;
-static int live_sent_end, live_backoff;
+static int live_sent_end, live_backoff, live_ask_in;
+static time_t live_wanted_at;       /* the last answer with a viewer */
 static char live_host[32];          /* the friend watched live, "" none */
 static uint32_t live_race;
 static char follow_name[32];        /* Spectate on: this friend's next races load by themselves ("" off; lock) */
@@ -61,6 +65,36 @@ static void put32(uint8_t *at, uint32_t v) {
 }
 static uint32_t get32(const uint8_t *at) {
     return (uint32_t)at[0] | (uint32_t)at[1] << 8 | (uint32_t)at[2] << 16 | (uint32_t)at[3] << 24;
+}
+
+static int reply_viewers(const char *reply) {
+    const int n = reply && !strncmp(reply, "ok ", 3) ? atoi(reply + 3) : 0;
+    const time_t now = time(NULL);
+    if (n > 0) live_wanted_at = now;
+    pthread_mutex_lock(&lock);
+    if ((n > 0 ? n : 0) != viewers) printf("Spectate: %d friend(s) watching live\n", n > 0 ? n : 0);
+    viewers = n > 0 ? n : 0;
+    viewers_at = now;
+    pthread_mutex_unlock(&lock);
+    return n;
+}
+
+/* Nobody was watching: 1 when somebody does now. */
+static int live_wanted(const char *me) {
+    if (live_ask_in > 0) {
+        live_ask_in--;
+        return 0;
+    }
+    live_ask_in = LIVE_ASK_TURNS - 1;
+    char target[120];
+    snprintf(target, sizeof target, "/ryunet/spectate/live?name=%s&viewers=1", me);
+    char *reply = NULL;
+    size_t reply_size = 0;
+    const int status = runtime_ryunet_transfer("GET", target, NULL, 0, &reply, &reply_size, 256);
+    const int n = status == 200 ? reply_viewers(reply) : 0;
+    if (status != 200) live_backoff = 10;       /* the server did not answer: again in about 5 s */
+    free(reply);
+    return n > 0;
 }
 
 static void share_live(void) {
@@ -74,8 +108,10 @@ static void share_live(void) {
     int ended = 0;
     struct rr_header header;
     if (!runtime_replay_live_state(&race, &header, &frames, &ended)) return;
-    if (race != live_sent_race) live_sent_race = race, live_sent = 0, live_sent_end = 0;
-    if (live_sent_end || (frames <= live_sent && !ended)) return;
+    if (race != live_sent_race) live_sent_race = race, live_sent = 0, live_sent_end = 0, live_ask_in = 0;
+    if (live_sent_end) return;
+    if (time(NULL) - live_wanted_at > LIVE_QUIET_SECONDS && (ended || !live_wanted(me))) return;
+    if (frames <= live_sent && !ended) return;
     uint32_t n = frames > live_sent ? frames - live_sent : 0;
     if (n > LIVE_MAX_FRAMES) n = LIVE_MAX_FRAMES;
     const size_t cap = LIVE_HEADER + 4 + 4 * (size_t)n + (size_t)n * 2 * sizeof(struct rr_frame) + 64;
@@ -102,13 +138,7 @@ static void share_live(void) {
     free(body);
     if (status == 200) {
         if (!live_sent) printf("Spectate: live race %u on the server\n", race);
-        int watching = 0;
-        if (reply && !strncmp(reply, "ok ", 3)) watching = atoi(reply + 3);
-        pthread_mutex_lock(&lock);
-        if (watching != viewers) printf("Spectate: %d friend(s) watching live\n", watching);
-        viewers = watching > 0 ? watching : 0;
-        viewers_at = time(NULL);
-        pthread_mutex_unlock(&lock);
+        reply_viewers(reply);
         live_sent += n;
         live_sent_end = last;
     } else if (status == 409 && reply && !strncmp(reply, "need ", 5)) {
