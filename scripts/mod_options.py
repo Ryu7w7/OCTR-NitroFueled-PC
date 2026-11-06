@@ -1,7 +1,7 @@
 """Declarative mod choices. No mod-supplied scripts are evaluated.
 SPDX-License-Identifier: GPL-2.0-or-later
 """
-import itertools,json,re
+import itertools,json,re,sys
 from pathlib import Path
 from mod_components import save_json
 
@@ -72,9 +72,14 @@ def combinations(manifest):
 def load(path):
     path=Path(path)
     if not path.exists():return {}
-    data=json.loads(path.read_text(encoding='utf-8'))
-    if not isinstance(data,dict) or data.get('version')!=1 or not isinstance(data.get('mods'),dict):
-        raise ValueError('Invalid mod options file')
+    try:
+        data=json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data,dict) or data.get('version')!=1 or not isinstance(data.get('mods'),dict):
+            raise ValueError('unexpected contents')
+    except (OSError,ValueError) as error:
+        # Saved choices must not stop the mods page or the game: the defaults apply until the next Save.
+        print('Mod options not read, using defaults ('+path.name+': '+str(error)+')',file=sys.stderr)
+        return {}
     return data['mods']
 def save(path,ident,manifest,values):
     rules=manifest.get('configuration',{})
