@@ -99,6 +99,29 @@ class ModOptionTests(unittest.TestCase):
             library.configure(self.mods,self.port/'patches','sample',digest,{'placement':'center','all-huds':'true'})
         self.assertFalse((self.port/'mod-state/options.json').exists())
 
+    def test_refresh_after_external_upgrade_saves_and_reopens_latest_options(self):
+        old=self.install();self.configure(old,placement='corner',all_huds='false')
+        m,files=self.configured();m['version']='1.1.0'
+        latest=self.package(manifest=m,files=files,filename='external-update.zip')
+        refreshed=self.scan()['entries']['sample']
+        self.assertEqual(refreshed['sha256'],sha(latest))
+        library.configure(self.mods,self.port/'patches','sample',refreshed['sha256'],
+                          {'placement':'center','all-huds':'true'})
+        reopened=self.scan()['entries']['sample']
+        self.assertEqual(reopened['version'],'1.1.0')
+        self.assertEqual(reopened['option_values'],{'placement':'center','all-huds':True})
+
+    def test_cached_manifest_still_rejects_mutation_overlap_gap_and_payload_tampering(self):
+        self.install();folder=library.folder(self.mods,'sample')
+        manifest=fmt.validate_folder(folder)
+        duplicate=copy.deepcopy(manifest);duplicate['variants'][1]['whenOptions']=copy.deepcopy(duplicate['variants'][0]['whenOptions'])
+        with self.assertRaisesRegex(ValueError,'exactly one variant'):fmt.validate_manifest(duplicate)
+        gap=copy.deepcopy(manifest);gap['variants'].pop()
+        with self.assertRaisesRegex(ValueError,'exactly one variant'):fmt.validate_manifest(gap)
+        folder=library.folder(self.mods,'sample');fmt.validate_folder(folder)
+        (folder/'centerTrue.txt').write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError,'checksum/size mismatch'):fmt.validate_folder(folder)
+
     def test_bad_values_are_rejected_without_changing_saved_choices(self):
         package=self.install();self.configure(package)
         path=self.port/'mod-state/options.json';before=path.read_bytes()

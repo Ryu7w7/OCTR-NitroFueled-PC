@@ -2,7 +2,8 @@
 Author: tcosi. SPDX-License-Identifier: GPL-2.0-or-later
 """
 from pathlib import Path
-import json,math,re,stat,zipfile
+import json,math,re,stat,zipfile,hashlib,itertools
+from collections import OrderedDict
 import xml.etree.ElementTree as ET
 from mod_components import safe_path,under,sha,regular_tree
 
@@ -110,7 +111,22 @@ def resolve(m,settings,options=None):
             if name not in used_sets:flat['operations'].extend(m['operationSets'][name]);used_sets.add(name)
     return (v['id'] if v else None),flat
 
+_validated_manifests=OrderedDict()
+
 def validate_manifest(m):
+    # Cache declarative checks only, by complete content, within this process.
+    # validate_folder still inventories/hashes every payload on every call.
+    try:key=hashlib.sha256(json.dumps(m,sort_keys=True,separators=(',',':')).encode()).digest()
+    except (TypeError,ValueError):return _validate_manifest(m)
+    if key in _validated_manifests:
+        _validated_manifests.move_to_end(key)
+        return m
+    result=_validate_manifest(m)
+    _validated_manifests[key]=None
+    if len(_validated_manifests)>4096:_validated_manifests.popitem(last=False)
+    return result
+
+def _validate_manifest(m):
     if not isinstance(m,dict) or m.get('schemaVersion')!=2:error('unsupported schemaVersion')
     if 'variants' in m or 'operationSets' in m:
         alternatives=expanded_variants(m)
@@ -126,10 +142,18 @@ def validate_manifest(m):
         for key,rule in m.get('variantSettings',{}).items():
             domains=[set(v.get('when',{})[key]) for v,_ in alternatives if key in v.get('when',{})]
             if domains and not set(rule['allowed'])<=set.union(*domains):error('variantSettings allowed values are not covered by variants: '+key)
-        from mod_options import combinations
+        from mod_options import combinations,domain
         if 'configuration' in m and all(not v.get('when') for v,_ in alternatives):
-            for values in combinations(m):
-                if sum(all(values[k] in domain for k,domain in v.get('whenOptions',{}).items()) for v,_ in alternatives)!=1:error('Each mod option combination must select exactly one variant')
+            # Enumerate each variant's supported choices once instead of testing
+            # every choice against every variant. Duplicates and gaps still fail.
+            rules=m['configuration'];covered=set()
+            for variant,_ in alternatives:
+                conditions=variant.get('whenOptions',{})
+                domains=[[v for v in domain(rule) if v in conditions.get(k,domain(rule))] for k,rule in rules.items()]
+                for values in itertools.product(*domains):
+                    if values in covered:error('Each mod option combination must select exactly one variant')
+                    covered.add(values)
+            if len(covered)!=len(combinations(m)):error('Each mod option combination must select exactly one variant')
         defaults={k:r['default'] for k,r in m.get('variantSettings',{}).items()}
         if defaults and not m.get('configuration') and all(set(v.get('when',{}))<=set(defaults) for v,_ in alternatives):
             if sum(all(defaults[k] in values for k,values in v.get('when',{}).items()) for v,_ in alternatives)!=1:error('variantSettings defaults must select exactly one variant')
