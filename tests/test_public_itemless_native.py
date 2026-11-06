@@ -38,6 +38,12 @@ class PublicItemlessNative(unittest.TestCase):
         self.assertEqual(read(field_name, 18), b'_isInPrivateLobby\0')
         data_shift = 0x1d34380 - field_name
         self.assertIn(data_shift, (0, 0x40))
+        shift = 0x10 if data_shift else 0
+        # Deferred Ready copies this concrete event, retaining its sender handle.
+        self.assertEqual(read(0x16ae81f - shift, 6), bytes.fromhex('41 b9 28 00 00 00'))
+        self.assertEqual(read(0x2793bd, 5), bytes.fromhex('4d 8b 74 24 10'))
+        # make_handle ignores objects without a registered low-19-bit identity.
+        self.assertEqual(read(0x14bea9b - shift, 9), bytes.fromhex('41 f7 44 24 08 ff ff 07 00'))
         self.assertEqual(struct.unpack('<H', read(0x1da7f30 - data_shift + 15 * 2, 2))[0], 0x6c)
         # Native setter and party reset use that field on the persistent manager.
         setter = 0x115b6b2 - (0x10 if data_shift else 0)

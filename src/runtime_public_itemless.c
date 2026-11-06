@@ -25,6 +25,9 @@ static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
 static int installed, selected, searching, allow_party;
 static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
+static uint64_t matchmaking_room;
+static unsigned char *matchmaking_owner;
+static int matchmaking_search;
 
 typedef void *(ABI *Search)(void **, void *, const char *, unsigned, void *);
 typedef void *(ABI *Register)(void **, void *, const char *, unsigned);
@@ -50,7 +53,10 @@ static void **party_manager;
 static void (ABI *native_placeable_event)(void *, void *);
 static void (ABI *native_stop_matchmaking)(void *);
 static void (ABI *native_return_to_lobby)(void);
-static void prefetch_compatibility(void);
+static uint64_t session_generation;
+static void (ABI *native_make_handle)(void **, void *);
+static void (ABI *native_resolve_handle)(void **);
+static void (ABI *native_destroy_handle)(void **);
 
 static int itemless_client_available(void) {
     const char *assets = getenv("BB_PRIVATE_ARCHIVE_PATCHES");
@@ -63,6 +69,10 @@ int runtime_public_itemless_available(void) {
 }
 
 static void reset_locked(void) {
+    __atomic_add_fetch(&session_generation, 1, __ATOMIC_SEQ_CST);
+    matchmaking_room = 0;
+    matchmaking_owner = NULL;
+    matchmaking_search = 0;
     confirmed_room = 0;
     room_owner = NULL;
     request_nonce = 0;
@@ -100,6 +110,16 @@ int runtime_public_itemless_active(void) {
     return active;
 }
 
+/* Public Normal also overrides a party's lingering private-scene flag. */
+int runtime_public_match_active(void) {
+    pthread_mutex_lock(&mode_lock);
+    uint64_t room = 0;
+    if (matchmaking_owner) memcpy(&room, matchmaking_owner + 0x958, 8);
+    const int active = matchmaking_search || (matchmaking_room && room == matchmaking_room);
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+
 static void notice(const char *message) {
     fprintf(stderr, "Public ITEMLESS: %s\n", message);
     /* Use the Online/offline error helper: one OK button and native modal input. */
@@ -114,7 +134,6 @@ static void reject_search(const char *message) {
 }
 
 void runtime_public_itemless_update(void) {
-    prefetch_compatibility();
     char message[sizeof rejection];
     pthread_mutex_lock(&mode_lock);
     memcpy(message, rejection, sizeof message);
@@ -191,71 +210,57 @@ static const char *field(const char *json, const char *key) {
 static pthread_mutex_t check_lock=PTHREAD_MUTEX_INITIALIZER;
 static char check_key[512], check_body[512];
 static int check_running, check_done, check_status;
-static uint64_t check_until;
+static uint64_t check_until, check_generation;
+struct CheckRequest { uint64_t generation; char key[512]; };
 static uint64_t check_clock(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
     return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
 }
 static void *check_worker(void *arg) {
-    char *key=arg, body[512]="";
+    struct CheckRequest *request=arg;
+    char *key=request->key, body[512]="";
     int status=runtime_public_itemless_announce() ? runtime_ryunet_request("GET",key,body,sizeof body) : 0;
     pthread_mutex_lock(&check_lock);
-    if (!strcmp(key,check_key)) {
+    if (request->generation == __atomic_load_n(&session_generation, __ATOMIC_SEQ_CST) &&
+        request->generation == check_generation && !strcmp(key,check_key)) {
         check_status=status; memcpy(check_body,body,sizeof body);
         check_done=1; check_until=check_clock()+5000;
     }
     check_running=0;
     pthread_mutex_unlock(&check_lock);
-    free(key); return NULL;
+    free(request); return NULL;
 }
 /* -1 means pending: never wait for a network operation on the game thread. */
 static int compatibility_check(const char *target,char *body,size_t size) {
     pthread_mutex_lock(&check_lock);
-    if (strcmp(check_key,target)) {
+    uint64_t generation=__atomic_load_n(&session_generation, __ATOMIC_SEQ_CST);
+    if (check_generation != generation || strcmp(check_key,target)) {
+        check_generation=generation;
         snprintf(check_key,sizeof check_key,"%s",target); check_done=0;
     }
     int result=-1;
     if (check_done && check_clock()<check_until) {
         result=check_status; snprintf(body,size,"%s",check_body);
     } else if (!check_running) {
-        char *key=strdup(target); pthread_t worker;
+        struct CheckRequest *request=malloc(sizeof *request); pthread_t worker;
+        if (request) { request->generation=generation; snprintf(request->key,sizeof request->key,"%s",target); }
         check_done=0; check_running=1;
-        if (!key || pthread_create(&worker,NULL,check_worker,key)) {
-            free(key); check_running=0; result=0;
+        if (!request || pthread_create(&worker,NULL,check_worker,request)) {
+            free(request); check_running=0; result=0;
         } else pthread_detach(worker);
     }
     pthread_mutex_unlock(&check_lock);
     return result;
 }
 
-static int party_check(const char *doc) {
-    const char *members = field(doc, "members");
-    char ids[192], target[512], body[512];
-    size_t n = 0;
-    if (!members || *members++ != '[') return 0;
-    while (*members && *members != ']') {
-        if (isdigit((unsigned char)*members) || *members == ',') {
-            if (n + 1 >= sizeof ids) return 0;
-            ids[n++] = *members;
-        } else if (!isspace((unsigned char)*members)) return 0;
-        ++members;
-    }
-    ids[n] = 0;
-    const char *name = runtime_np_get_online_name();
-    if (*members != ']' || !n || !name) return 0;
-    snprintf(target, sizeof target, "/ryunet/itemless-party?name=%s&members=%s", name, ids);
-    int status = compatibility_check(target, body, sizeof body);
-    if (status == 200 && !strcmp(body, "ok")) return 1;
-    reject_search(status == 409 ? body : "Cannot verify party compatibility. Please retry before starting ITEMLESS.");
-    return 0;
-}
-
-/* Check before Go To Lobby or private Ready/Start can run their VSC side effects.
+/* Check before private Ready/Start can run its VSC side effects.
  * Read the same participant IDs used by the native manager. */
 static _Thread_local const char *dispatch_approved_party;
 static _Thread_local char checked_party[512];
 static int early_party_check(const char *feature, int notify) {
     char ids[192] = "", target[512], body[512] = "";
+    checked_party[0]=0;
+    const char *online_name=runtime_np_get_online_name();
     void *manager = participants ? *participants : NULL;
     void *list = manager ? *(void **)((char *)manager + 0x10) : NULL;
     int count = list ? *(int *)((char *)list + 0xc) : 0;
@@ -263,7 +268,7 @@ static int early_party_check(const char *feature, int notify) {
     uint64_t seen[8];
     int total = 0;
     size_t length = 0;
-    if (!itemless_client_available() || !items || count < 1 || count > 8)
+    if (!itemless_client_available() || !online_name || !*online_name || !items || count < 1 || count > 8)
         goto unavailable;
     /* Native search constructor (a5d286) takes the primary local account. */
     for (int i = 0; i < count; ++i) {
@@ -296,19 +301,19 @@ static int early_party_check(const char *feature, int notify) {
     if (notify) fprintf(stderr, "ITEMLESS: pre-transition roster members=%s local=1 remote=%d\n", ids, total-1);
     if (feature)
         snprintf(target, sizeof target, "/ryunet/private-party?name=%s&feature=%s&release=%s&members=%s",
-                 runtime_np_get_online_name(), feature, SACREDFIRE_RELEASE, ids);
+                 online_name, feature, SACREDFIRE_RELEASE, ids);
     else
         snprintf(target, sizeof target, "/ryunet/itemless-party?name=%s&members=%s",
-                 runtime_np_get_online_name(), ids);
+                 online_name, ids);
+    snprintf(checked_party, sizeof checked_party, "%s", target);
     if (dispatch_approved_party && !strcmp(dispatch_approved_party, target)) return 1;
     int status = compatibility_check(target, body, sizeof body);
     if (status == 200 && !strcmp(body, feature ? "ok-private-release:" SACREDFIRE_RELEASE : "ok")) {
-        snprintf(checked_party, sizeof checked_party, "%s", target);
         if (notify) fprintf(stderr, "ITEMLESS: pre-transition gate accepted %d party members\n", total);
         return 1;
     }
-    if (notify) notice(status == -1 ? "Checking player compatibility. Please press Play again shortly." :
-                       status == 409 ? body : "Cannot verify party compatibility. Please retry before starting this race.");
+    if (status == -1) return -1;
+    if (notify) notice(status == 409 ? body : "Cannot verify party compatibility. Please retry before starting this race.");
     return 0;
 unavailable:
     if (notify) notice("Cannot verify party compatibility. Please retry before starting this race.");
@@ -322,18 +327,110 @@ static const char *private_feature(void) {
     return difficulty ? "difficulty" : runtime_speed_mode_enabled() ? "itemless" : NULL;
 }
 
-static void prefetch_compatibility(void) {
-    const int private_room=runtime_online_mode_in_private();
-    const char *feature=private_room ? private_feature() : NULL;
-    if ((private_room && (runtime_speed_mode_enabled() || feature)) || (!private_room && selected))
-        (void)early_party_check(feature,0);
-}
-
 /* Recheck at native Start as well: the roster can change in team selection. */
 int runtime_private_party_check(void) {
     if (!runtime_online_mode_in_private()) return 1;
     const char *feature = private_feature();
-    return (!feature && !runtime_speed_mode_enabled()) || early_party_check(feature,1);
+    if (!feature && !runtime_speed_mode_enabled()) return 1;
+    return early_party_check(feature,1);
+}
+
+/* Native handles track object lifetime; never retain a raw UI pointer across frames.
+ * FocusInputPressed is 0x28 bytes: sender handle at +0x10, signal at +0x18. */
+static struct PendingPrivate {
+    void *target;
+    struct {
+        void *vtable;
+        uint64_t flags;
+        void *sender;
+        unsigned signal;
+        unsigned char tail[12];
+    } event;
+    void (ABI *resume)(void *);
+    uint64_t generation, deadline;
+    char party[512];
+} pending_private;
+
+static void release_handle(void **slot) {
+    void *handle=*slot;
+    if (!handle) return;
+    unsigned before=__atomic_fetch_sub((unsigned *)handle,1,__ATOMIC_SEQ_CST);
+    if ((before & 0xffff) == ((before & 0x90000000) ? 3u : 2u)) native_destroy_handle(slot);
+    *slot=NULL;
+}
+static void *resolve_private_target(void **slot) {
+    for (int depth=0; depth<16 && *slot; ++depth) {
+        unsigned flags=*(unsigned *)*slot;
+        if (flags & 0x10000000) native_resolve_handle(slot);
+        if (!*slot) return NULL;
+        flags=*(unsigned *)*slot;
+        void *object=*(void **)((char *)*slot+0x28);
+        if (!(flags & 0x20000000) || !object) return object;
+        slot=(void **)((char *)object+0x10);
+    }
+    return NULL;
+}
+static void clear_private_pending(void) {
+    struct PendingPrivate cancelled=pending_private;
+    memset(&pending_private,0,sizeof pending_private);
+    release_handle(&cancelled.target);
+    release_handle(&cancelled.event.sender);
+}
+void runtime_private_party_cancel(void) { clear_private_pending(); }
+
+static void defer_private(void *self, void *event, void (ABI *resume)(void *)) {
+    if (pending_private.target) return; /* Repeated confirm must not restart the deadline. */
+    if (!native_make_handle || !checked_party[0]) return;
+    native_make_handle(&pending_private.target,self);
+    if (!pending_private.target) {
+        notice("Cannot prepare the compatibility check. Please try again.");
+        return;
+    }
+    if (event) {
+        memcpy(&pending_private.event,event,sizeof pending_private.event);
+        /* The copied event has no registered object identity of its own. */
+        pending_private.event.flags &= ~UINT64_C(0x7ffff);
+        void *sender=pending_private.event.sender;
+        if (sender) __atomic_fetch_add((unsigned *)sender,1,__ATOMIC_SEQ_CST);
+    }
+    pending_private.resume=resume;
+    pending_private.generation=__atomic_load_n(&session_generation,__ATOMIC_SEQ_CST);
+    pending_private.deadline=check_clock()+15000;
+    snprintf(pending_private.party,sizeof pending_private.party,"%s",checked_party);
+    fputs("Private compatibility: waiting before Ready/Start\n",stderr);
+}
+void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *)) {
+    defer_private(self,NULL,resume);
+}
+
+/* Returns 1 after dispatch: callers must not touch the old scene afterward. */
+int runtime_private_party_update(void) {
+    const char *feature=runtime_online_mode_in_private() ? private_feature() : NULL;
+    if (!feature) { clear_private_pending(); return 0; }
+    if (!pending_private.target) { (void)early_party_check(feature,0); return 0; }
+    void *target=resolve_private_target(&pending_private.target);
+    if (!target || pending_private.generation != __atomic_load_n(&session_generation,__ATOMIC_SEQ_CST)) {
+        clear_private_pending(); return 0;
+    }
+    int status=early_party_check(feature,0);
+    if (strcmp(pending_private.party,checked_party)) { clear_private_pending(); return 0; }
+    if (status == -1 && check_clock()<pending_private.deadline) return 0;
+    if (status != 1) {
+        clear_private_pending();
+        if (status == -1) notice("Player compatibility check timed out. Please try again.");
+        else (void)early_party_check(feature,1);
+        return 0;
+    }
+    struct PendingPrivate ready=pending_private;
+    memset(&pending_private,0,sizeof pending_private);
+    const char *previous=dispatch_approved_party;
+    dispatch_approved_party=ready.party;
+    if (ready.resume) ready.resume(target);
+    else native_placeable_event(target,&ready.event);
+    dispatch_approved_party=previous;
+    release_handle(&ready.target);
+    release_handle(&ready.event.sender);
+    return 1;
 }
 
 static const char *meta_name(void *object) {
@@ -348,12 +445,23 @@ static void ABI placeable_event(void *self, void *event) {
     int private_room = runtime_online_mode_in_private();
     const char *feature = private_room ? private_feature() : NULL;
     int private_gate = private_room && (runtime_speed_mode_enabled() || feature);
-    int public_itemless = !runtime_online_mode_in_private() && selected;
-    if ((private_gate || public_itemless) && self && event) {
+    if (private_gate && self && event) {
         const char *type = meta_name(event);
         int signal = 0;
-        if (type && !strcmp(type, "igGuiEventFocusInputPressed"))
+        if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
             memcpy(&signal, (char *)event + 0x18, sizeof signal);
+            if (signal != 8) clear_private_pending();
+            else if (pending_private.target && resolve_private_target(&pending_private.target)==self) return;
+        }
+        if (type && pending_private.target &&
+            ((!strcmp(type,"igGuiEventPlaceableLoseFocus") && resolve_private_target(&pending_private.target)==self) ||
+             !strcmp(type,"igGuiEventProjectLoseFocus"))) clear_private_pending();
+        if (type && (!strcmp(type,"igGuiEventProjectInputPressed") ||
+                     !strcmp(type,"igGuiEventFocusInputRepeated") ||
+                     !strcmp(type,"igGuiEventProjectInputRepeated"))) {
+            memcpy(&signal,(char *)event+0x18,sizeof signal);
+            if (signal != 8) clear_private_pending();
+        }
         /* Confirm (8) is the input filter in both native button graphs. */
         if (type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8) {
             void *list = *(void **)((char *)self + 0xe8);
@@ -366,12 +474,12 @@ static void ABI placeable_event(void *self, void *event) {
                     void *graph = *(void **)((char *)items[i] + 0x20);
                     name = graph ? *(const char **)((char *)graph + 0x10) : NULL;
                 }
-                if (name && ((public_itemless && !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) ||
-                             (private_gate && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")))) {
-                    fprintf(stderr, "ITEMLESS: %s gate reached before native transition\n",
-                            private_gate ? "private ready/start" : "public Go To Lobby");
-                    if (!early_party_check(feature,1)) return;
-                    if (private_gate) memcpy(approval, checked_party, sizeof approval);
+                if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
+                    fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
+                    int status=early_party_check(feature,1);
+                    if (status == -1) { defer_private(self,event,NULL); return; }
+                    if (status != 1) return;
+                    memcpy(approval, checked_party, sizeof approval);
                     break;
                 }
             }
@@ -411,18 +519,28 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     if (rejection[0]) { *result = NULL; return result; }
     runtime_public_itemless_reset();
     fprintf(stderr, "Public ITEMLESS: starting %s search\n", selected ? "ITEMLESS" : "NORMAL");
-    if (!selected) return native_search(result, self, raw, limit, response);
-    if (!runtime_public_itemless_available() || !raw || strnlen(raw, limit) == limit || !party_check(raw)) {
+    if (!selected) {
+        pthread_mutex_lock(&mode_lock);
+        matchmaking_search = 1;
+        pthread_mutex_unlock(&mode_lock);
+        void *r = native_search(result, self, raw, limit, response);
+        if (!*result) runtime_public_itemless_reset();
+        return r;
+    }
+    if (!runtime_public_itemless_available() || !raw || strnlen(raw, limit) == limit) {
         *result = NULL;
         if (!rejection[0]) reject_search("Cannot verify party compatibility. Please retry before starting ITEMLESS.");
         return result;
     }
+    /* Public startSearch validates the full party on the server. Let its native
+     * async task own waiting/errors; an HTTP preflight can expire mid-transition. */
     uint64_t token = nonce();
     char *doc = extend(raw, limit, token, 1);
     if (!doc) { *result = NULL; reject_search("Cannot prepare ITEMLESS search."); return result; }
     pthread_mutex_lock(&mode_lock);
     request_nonce = token;
     searching = 1;
+    matchmaking_search = 1;
     pthread_mutex_unlock(&mode_lock);
     void *r = native_search(result, self, doc, (unsigned)strlen(doc)+1, response);
     free(doc);
@@ -472,6 +590,11 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
     if (!valid && confirmed_room == room) { confirmed_room = 0; room_owner = NULL; }
     if (valid) { confirmed_room = room; room_owner = owner; }
     else if (!advertised && !wants) { confirmed_room = 0; room_owner = NULL; }
+    if (valid || (!advertised && !wants)) {
+        matchmaking_room = room;
+        matchmaking_owner = owner;
+        matchmaking_search = 0;
+    }
     pthread_mutex_unlock(&mode_lock);
     if (!valid && (advertised || wants)) {
         reject_search("ITEMLESS lobby confirmation failed. Please search again.");
@@ -482,7 +605,7 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
 static void *ptr(const void *p, size_t offset) { void *v; memcpy(&v,(const char *)p+offset,8); return v; }
 static int replacement(uint64_t room) {
     pthread_mutex_lock(&mode_lock);
-    int different = confirmed_room && confirmed_room != room;
+    int different = matchmaking_room && matchmaking_room != room;
     pthread_mutex_unlock(&mode_lock);
     return different;
 }
@@ -510,7 +633,8 @@ static void ABI merged(void *self, uint64_t search, uint64_t from, uint64_t to, 
 /* A native lobby's lifetime, not map transitions, owns its confirmation. */
 static void retire(void *owner, uint64_t room) {
     pthread_mutex_lock(&mode_lock);
-    if (room_owner == owner && (!room || room == confirmed_room)) reset_locked();
+    if ((room_owner == owner && (!room || room == confirmed_room)) ||
+        (matchmaking_owner == owner && (!room || room == matchmaking_room))) reset_locked();
     pthread_mutex_unlock(&mode_lock);
 }
 static void ABI destroyed(void *self) {
@@ -586,6 +710,10 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         jump(image+sites[i],handlers[i]);
     }
     for (int i=0;i<6;++i) memcpy(image+slots[i],&events[i],8);
+    size_t shift=!strcmp(hook,"1277df0") ? 0x10 : 0;
+    native_make_handle=(void (ABI *)(void **,void *))(image+0x14bea20-shift);
+    native_resolve_handle=(void (ABI *)(void **))(image+0x149fca0-shift);
+    native_destroy_handle=(void (ABI *)(void **))(image+0x149f280-shift);
     installed=1;
     puts("Public ITEMLESS: isolated matchmaking hooks installed (full-party gate, native OK notice)");
     return 1;

@@ -121,8 +121,13 @@ int runtime_public_itemless_start(unsigned char *image, size_t size);
 int runtime_public_itemless_available(void);
 int runtime_public_itemless_announce(void);
 int runtime_public_itemless_active(void);
+int runtime_public_match_active(void);
 int runtime_private_match_active(void);
+/* 1 accepted, 0 rejected, -1 asynchronous check pending. */
 int runtime_private_party_check(void);
+void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *));
+int runtime_private_party_update(void);
+void runtime_private_party_cancel(void);
 int runtime_private_difficulty_modified(void);
 int runtime_public_itemless_selected(void);
 void runtime_public_itemless_select(int enabled);
