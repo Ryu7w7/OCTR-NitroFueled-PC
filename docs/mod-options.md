@@ -111,5 +111,18 @@ submitted values. If the package changed, reload before editing again. Standard
 signature, archive checksum, edition, online, and conflict checks still apply to
 the selected variant. This feature does not establish compatibility by itself.
 
+The Windows dialog opens immediately from the existing library catalog; opening
+the wrench does not rescan or extract packages. Use Reload after adding/replacing
+files manually. Save runs in the background, shows progress, and closes the dialog
+only after the backend confirms success. Failed saves keep the draft and show the
+reason. The dialog stays centered and within the launcher window, with room for
+the checkbox grid. The game must still be closed before saving.
+
+Repeated declarative manifest and path-syntax checks are cached only within one
+Python process, with bounded caches keyed by complete content. Payload inventory,
+payload hashes, XML, source-package identity, and launch/session checks still run;
+the cache does not establish that a file on disk is unchanged. Option-only variant
+coverage still rejects both overlapping choices and missing choices.
+
 This change adds Windows UI and shared Python package support. A configuration
 editor in the Linux launcher is not included.
