@@ -550,6 +550,13 @@ const char *runtime_friends_names(unsigned *serial) {
     return copy[cur];
 }
 
+unsigned runtime_friends_names_serial(void) {
+    pthread_mutex_lock(&s_lock);
+    const unsigned serial = s_names_serial;
+    pthread_mutex_unlock(&s_lock);
+    return serial;
+}
+
 int runtime_friends_invite_online(void) {
     pthread_mutex_lock(&s_lock);
     if (!s_started || s_view.state != RF_READY) {
