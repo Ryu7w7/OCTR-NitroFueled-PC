@@ -6,16 +6,22 @@ confirmed lobby mode. Both the party leader and members see
 
 ## Parties and compatibility
 
-The party compatibility check runs before Go To Lobby starts matchmaking.
-If a member is incompatible, the leader sees a native notice naming that player,
-and the party stays in place. Confirming the notice only closes it.
-Itemless rejection does not fall back to Normal matchmaking.
+The server validates every party member as part of the native asynchronous
+matchmaking request. Go To Lobby does not wait for a separate HTTP preflight or
+its cache. Incompatible parties are rejected through the native matchmaking task;
+rejection does not fall back to Normal. The client still verifies the server's
+Itemless lobby confirmation before enabling Itemless gameplay.
 
 ## Mode lifetime
 
 Itemless assets and gameplay follow the confirmed lobby identity. Leaving,
 cancelling, disconnecting, or changing rooms clears the confirmation. Loading a
 track and rematching retain the current mode.
+
+Public Itemless uses valid final times when the host builds finish order, rather
+than stale stored positions. Clients retain the validated host order for final
+results even if their local times or positions differ. Malformed orders cannot
+replace the last validated result, and loading the next map clears it.
 
 Cup, Team Race, and modified AI difficulty remain unavailable in public
 matchmaking. See [private race modes](PRIVATE_RACE_MODES.md) for those features.

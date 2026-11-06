@@ -803,7 +803,13 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         self.assertEqual(at(0xfff160 - shift, 14), bytes.fromhex('55 48 89 e5 41 57 41 56 41 54 53 49 89 fe'))
         self.assertEqual(at(0xf34437 - shift, 7), bytes.fromhex('4c 8b 40 10 4d 85 c0'))
         self.assertEqual(at(0xe9ba00 - shift, 9), bytes.fromhex('48 8b 78 28 e8 c7 c4 65 00'))
+        # Native team movement checks the raw next index before wrapping it.
+        # When every team is full this can miss the starting team indefinitely.
+        self.assertEqual(at(0x9c493c, 15),
+                         bytes.fromhex('44 39 d8 7c 0f 44 01 c9 44 39 d1 89 ce 75 b5'))
         self.assertEqual(at(0xff2320 - shift, 8), bytes.fromhex('55 48 89 e5 41 57 41 56'))
+        self.assertEqual(at(0xff11a0 - shift, 14),
+                         bytes.fromhex('55 48 89 e5 41 57 41 56 41 55 41 54 53 50'))
         # R15D counts every finisher; R13D only the finished human players.
         self.assertEqual(at(0xf344db - shift, 3), bytes.fromhex('45 01 e7'))
         # The native next-track function forwards its incoming zone (RDI) to

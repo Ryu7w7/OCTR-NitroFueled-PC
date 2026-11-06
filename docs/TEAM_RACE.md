@@ -10,9 +10,18 @@ incompatible players; confirming it closes the notice without starting the race.
 Compatibility checks also cover roster changes during team selection.
 
 The selector shows READY while unready and UNREADY while ready, with the matching
-confirm/cancel button. Only the current action is shown. The Lobby Members
+confirm/cancel button. Only the current action is shown.
+When every other team is full, movement input is ignored before entering the
+native slot search, which can loop indefinitely at the wrap boundary. Ready and
+Unready remain available; movement resumes when another team has room. The Lobby Members
 overlay is hidden during selection and restored when leaving the selector, so
 its roster cannot cover the team slots.
+
+Leaving a room or changing race mode resets inherited team counts in both active
+and lobby settings. The retired selector is hidden, loses input, and releases
+its Ready/Unready target. Delayed opens are rejected for No Teams, Cup, public
+Normal/Itemless, and other non-team modes. Public matchmaking overrides a party's
+lingering private flag. Explicitly selected native Battle teams remain supported.
 
 ## Points and results
 
@@ -20,6 +29,11 @@ Team Itemless requires completed laps and a valid final time. A racer who does
 not finish receives zero points, even if native race teardown marks that racer
 finished. Zero points do not increase the team total. Team Normal retains its
 existing placement awards.
+
+Team Race sorts valid finishers by their final time before the host publishes
+results, so a stale stored position cannot demote a finisher to a one-point
+last place. Valid finishers precede DNF racers; equal times and DNF ordering
+retain native tie rules. The host's published order still determines team points.
 
 Repeated result updates recompute totals without accumulating points. If nobody
 finishes an Itemless race, the panel shows `NO FINISHERS` and zero points.
@@ -55,6 +69,10 @@ Automated USA/EU tests cover team totals, Itemless DNF scoring, repeated result
 updates, finish/scoreboard colors, DNF fading, Battle icon isolation, and selector
 overlay visibility. Effect tests cover a winning DNF racer, a losing first-place
 racer, local-player lookup, and duplicate-result suppression.
+
+The stale-position regression covers a second-place time with a stored eighth
+place, host-order scoring in Normal and Itemless, and native fallback outside
+Team Race. This correction still needs verification in a live desynced race.
 
 The latest highlight colors, Lobby Members hiding, and local-player effect
 changes still need in-game verification. Automated tests do not establish full
