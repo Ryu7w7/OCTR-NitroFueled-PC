@@ -129,6 +129,8 @@ def sync_xml(root,patchdir):
     return messages
 
 def scan(root,patchdir):
+    from mod_options import load as load_options,effective
+    saved_options=load_options(storage(Path(root))/'options.json')
     root=Path(root);root.mkdir(parents=True,exist_ok=True);patchdir=Path(patchdir)
     cache=storage(root)/'packages';cache.mkdir(parents=True,exist_ok=True)
     found={};messages=sync_xml(root,patchdir);candidates={}
@@ -173,6 +175,9 @@ def scan(root,patchdir):
             item=dict(source=source.name,sha256=digest,name=manifest['name'] if manifest else source.stem,
                 version=manifest['version'] if manifest else '1.0.0',author=manifest['author'] if manifest else 'Local asset mod',
                 description=manifest['description'] if manifest else '',kind='package' if manifest else 'assets')
+            if manifest and manifest.get('configuration'):
+                item['configuration']=manifest['configuration']
+                item['option_values']=effective(manifest,saved_options.get(ident))
             item['content_sha256']=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest() if manifest else digest
             candidates.setdefault(ident,[]).append(item)
         except (ValueError,OSError,KeyError,TypeError,zipfile.BadZipFile,RuntimeError,AssertionError,struct.error,IndexError) as error:
@@ -198,6 +203,12 @@ def scan(root,patchdir):
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',
             ModName=item['name'],ModHash=item['sha256'],ModSource=item['source'],ModDescription=item['description'],Note='OCTR mod: assets and any logic patches switch together. Relaunch after changes.')
         meta.set('ModVersions',item['version_notice'])
+        for key,rule in item.get('configuration',{}).items():
+            node=ET.SubElement(meta,'ModOption',Id=key,Type=rule['type'],Label=rule['label'],Description=rule.get('description',''),Advanced='true' if rule.get('advanced',False) else 'false',
+                Value=json.dumps(item['option_values'][key]) if rule['type']=='boolean' else item['option_values'][key],
+                Default=json.dumps(rule['default']) if rule['type']=='boolean' else rule['default'])
+            node.set('Row',rule.get('row',''));node.set('Column',rule.get('column',''))
+            for value,label in rule.get('choices',{}).items():ET.SubElement(node,'Choice',Value=value,Label=label)
         ET.SubElement(meta,'PatchList')
     patchdir.mkdir(parents=True,exist_ok=True);target=patchdir/FILENAME
     payload=ET.tostring(xml,encoding='utf-8',xml_declaration=True)
@@ -223,3 +234,30 @@ def remove(root,patchdir,ident,expected_sha256):
         try:source.rename(target)
         except OSError:save_json(config,previous);raise
         scan(root,patchdir);return plain_path(target)
+
+
+def configure(root,patchdir,ident,expected_sha256,values):
+    """Save validated choices for exactly the package displayed by the launcher."""
+    from mod_session import launch_lock
+    from mod_options import save
+    from mod_components import read_ini
+    fmt.slug(ident);fmt.hash_string(expected_sha256);root=Path(root)
+    with launch_lock(storage(root)):
+        catalog=scan(root,patchdir);item=catalog['entries'].get(ident)
+        if not item or item['sha256']!=expected_sha256:raise ValueError('Mod changed; Reload before configuring')
+        manifest=fmt.validate_folder(folder(root,ident))
+        if not manifest.get('configuration'):raise ValueError('This mod has no configuration')
+        rules=manifest['configuration']
+        converted={}
+        for key,value in values.items():
+            if key not in rules:raise ValueError('Unknown mod option '+key)
+            if rules[key]['type']=='boolean':
+                if value not in ('true','false'):raise ValueError('Expected true/false')
+                value=value=='true'
+            converted[key]=value
+        # Missing choices are rejected; a stale UI cannot reset newly added options.
+        from mod_options import valid
+        if set(converted)!=set(rules) or any(not valid(rules[k],v) for k,v in converted.items()):raise ValueError('Invalid option selection')
+        fmt.resolve(manifest,read_ini(root.parent/'bbport.ini'),converted)
+        save(storage(root)/'options.json',ident,manifest,converted)
+        return scan(root,patchdir)
