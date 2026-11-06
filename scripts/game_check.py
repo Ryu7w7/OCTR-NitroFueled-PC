@@ -105,6 +105,9 @@ def damaged_archives(game):
     they land on an archive's name table the game cannot find its files, and with loosefiles.pak
     (localizationData.igz) it stops at start with a read of address 0x20 (code 3)."""
     damaged = []
+    # The same stop at start when the file is not there at all (a dump extracted only in part)
+    if any((Path(game) / 'archives').glob('*.pak')) and not (Path(game) / 'archives' / 'loosefiles.pak').is_file():
+        damaged.append('loosefiles.pak')
     for path in sorted((Path(game) / 'archives').glob('*.pak')):
         try:
             with open(path, 'rb') as f:

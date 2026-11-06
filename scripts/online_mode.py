@@ -515,6 +515,9 @@ def ranking_stream_archive(game, dest, package_blob, project, replacements):
             if path in needed or path not in kinds:
                 continue  # Other dependencies belong to native permanent chunks.
             if path not in files:
+                # As in the Cup assets: a manifest can name languages this regional dump lacks
+                if kinds[path] == 'lang_file' and path.endswith('.lng') and not path.endswith('_en.lng'):
+                    continue
                 raise ValueError('missing ranking dependency: ' + path)
             archive, index = files[path]
             data = replacements.get(path)
