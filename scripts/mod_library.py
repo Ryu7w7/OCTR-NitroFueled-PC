@@ -258,6 +258,10 @@ def configure(root,patchdir,ident,expected_sha256,values):
         # Missing choices are rejected; a stale UI cannot reset newly added options.
         from mod_options import valid
         if set(converted)!=set(rules) or any(not valid(rules[k],v) for k,v in converted.items()):raise ValueError('Invalid option selection')
-        fmt.resolve(manifest,read_ini(root.parent/'bbport.ini'),converted)
+        # The settings as a launch reads them (mod_content.prepare); a new install has no bbport.ini yet.
+        ini=root.parent/'bbport.ini'
+        settings=read_ini(ini) if ini.is_file() else {}
+        settings.setdefault('widescreen_layout','off')
+        fmt.resolve(manifest,settings,converted)
         save(storage(root)/'options.json',ident,manifest,converted)
         return scan(root,patchdir)

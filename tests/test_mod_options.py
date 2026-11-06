@@ -39,6 +39,26 @@ class ModOptionTests(unittest.TestCase):
         m,files=self.configured();package=self.package(manifest=m,files=files);self.scan();self.enable('sample')
         return package
 
+    def test_damaged_options_file_keeps_mods_usable(self):
+        package=self.install()
+        path=self.port/'mod-state/options.json'
+        for broken in ('{ broken','[]','{"version":9,"mods":{}}'):
+            path.write_text(broken,encoding='utf-8')
+            self.assertEqual(options.load(path),{})
+            self.scan()
+        self.configure(package)         # saving replaces the damaged file
+        self.assertEqual(options.load(path)['sample'],{'placement':'center','all-huds':True})
+
+    def test_saving_reads_settings_as_a_launch_does(self):
+        m,files=self.configured()
+        for variant in m['variants']:variant['when']={'widescreen_layout':['off']}
+        package=self.package(manifest=m,files=files);self.scan();self.enable('sample')
+        ini=self.port/'bbport.ini'
+        ini.write_text('output_res=1920x1080\n',encoding='utf-8')
+        self.configure(package)         # the line is missing: 'off', as in mod_content.prepare
+        ini.unlink()
+        self.configure(package,placement='corner')      # no settings file yet
+
     def configure(self,package,placement='center',all_huds='true'):
         return library.configure(self.mods,self.port/'patches','sample',sha(package),
                                  {'placement':placement,'all-huds':all_huds})
