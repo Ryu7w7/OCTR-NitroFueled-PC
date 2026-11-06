@@ -429,7 +429,13 @@ WIDGET_RESOURCES = {
     'textures/guistandard_diffuse,textures@!ui!octane!icons!octane_ui_ico_singlerace`tga,101.igz',
 }
 
-def build(game, dest, dump):
+def build(game, dest, dump, *, asset_transform=None):
+    # Compose layout corrections before adding widgets: the generated update3 archive
+    # loads after the native archives and would otherwise hide their layout changes.
+    def source(archive, index, name, logical):
+        data = archive.read(index)
+        return asset_transform(name, logical, data) if asset_transform else data
+
     with ExitStack() as stack:
         found = {}  # logical name (lower case) -> (archive, index, archive name)
         archives = []
@@ -459,7 +465,8 @@ def build(game, dest, dump):
         for low in sorted((set(CHANGES) | WIDGET_RESOURCES) & set(found)):
             archive, i, name = found[low]
             full, logical = archive.names[i]
-            files.append((full, logical, archive.infos[i][1] & ~0xFF, (CHANGES[low](archive.read(i)) if low in CHANGES else archive.read(i))))
+            data = source(archive, i, name, low)
+            files.append((full, logical, archive.infos[i][1] & ~0xFF, (CHANGES[low](data) if low in CHANGES else data)))
             print(f'Graphics tab: {logical} from {name}')
         # Quit is all-or-nothing for the languages present in this edition, after the Graphics files.
         quit_required = {name for name in OPTIONAL if not name.endswith('.lng')}
@@ -469,10 +476,10 @@ def build(game, dest, dump):
             try:
                 quit_files = []
                 for low in sorted(quit_required):
-                    archive, i, _name = found[low]
+                    archive, i, name = found[low]
                     full, logical = archive.names[i]
                     quit_files.append((full, logical, archive.infos[i][1] & ~0xFF,
-                                       OPTIONAL[low](archive.read(i))))
+                                       OPTIONAL[low](source(archive, i, name, low))))
                 files += quit_files
                 print('Graphics tab: Quit Game button in the main menu')
             except (ValueError, KeyError, IndexError, struct.error, ImportError) as error:
