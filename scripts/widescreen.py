@@ -206,6 +206,43 @@ def misfit(xml, out):
     return None
 
 
+def graphics_overlay(game, out, env, folder, operations):
+    """Keep the generated Graphics/Quit menus consistent with the accepted layout.
+
+    Called only after the executable and asset checks pass. Return an environment
+    override so changing back to 16:9 restores the original generated archive.
+    """
+    source = env.get('BB_GRAPHICS_TAB_ARCHIVE')
+    if not source:
+        return {}
+    import contextlib
+    import io
+    import graphics_tab
+    relevant = {(op['archive'].casefold(), op['asset'].casefold()): op for op in operations
+                if op['kind'] == 'archive_asset' and
+                op['asset'].casefold() in (set(graphics_tab.CHANGES) | set(graphics_tab.OPTIONAL))}
+    if not relevant:
+        return {}
+    stamp = {'format': 1, 'generated': sha(Path(source)),
+             'operations': list(relevant.values())}
+    key = hashlib.sha256(json.dumps(stamp, sort_keys=True).encode()).hexdigest()[:16]
+    target = Path(out) / 'widescreen' / 'graphics-tab' / key / 'update3.pak'
+    if not target.is_file():
+        def transform(archive, logical, data):
+            op = relevant.get((archive.casefold(), logical.casefold()))
+            return payload_bytes(op, folder, data) if op else data
+        # Build into a temporary file; a failed composition cannot leave a reusable cache.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix('.tmp')
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                graphics_tab.build(Path(game), temp, target.parent / 'dump', asset_transform=transform)
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+    return {'BB_GRAPHICS_TAB_ARCHIVE': str(target.resolve())}
+
+
 def prepare(game, out, config, env, title_id, app_version, base_patches, *, boot_dir=None):
     """The launch with the layout bbport.ini picks: a dict with `config` (the settings file
     scripts/patches.py and the render path read), `patches_dir` (the executable variant),
@@ -270,6 +307,11 @@ def prepare(game, out, config, env, title_id, app_version, base_patches, *, boot
     effective_config.write_text('\n'.join(lines + [f'{k}={v}' for k, v in effective.items()]) + '\n',
                                 encoding='utf-8')
     extra = dict(flat.get('environment', {}), BB_TEMPORAL='off', BB_HUD_SCALE=hud)
+    try:
+        extra.update(graphics_overlay(game, out, env, EU if eu else folder, assets))
+    except (OSError, ValueError, KeyError, struct_error) as error:
+        # Keep the existing menus if this optional composition cannot be made.
+        say(f'Graphics/Quit menu layout not composed ({error})')
     say(f'{label} at {output}, internal {internal}p ({variant}): menus, backgrounds and a centered HUD')
     return {'config': effective_config, 'patches_dir': patches_dir, 'archive_patches': made, 'env': extra}
 
