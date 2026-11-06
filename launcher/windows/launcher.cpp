@@ -35,6 +35,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -2383,8 +2384,8 @@ void ScanModPackages() {
     if (!r.started || r.code != 0) AddLog("Mod scan failed; check the log before enabling packages.");
 }
 
-std::vector<PatchInfo> LoadPatches() {
-    ScanModPackages();
+std::vector<PatchInfo> LoadPatches(bool scan = true) {
+    if(scan) ScanModPackages();
     std::vector<PatchInfo> list;
     std::error_code ec;
     std::vector<fs::path> files;
@@ -4008,23 +4009,64 @@ void ModSection(const char* title, bool builtin) {
     ImGui::TextColored(ImVec4(.65f,.72f,.85f,1), T("%d de %d activos", "%d of %d on"),on,total);
 }
 
-struct ModConfigurationDraft { PatchInfo mod; std::string error; bool open=false,advanced=false; };
+struct ModConfigurationDraft {
+    PatchInfo mod;
+    std::string error;
+    bool open=false,advanced=false,ready=false;
+    std::future<Captured> pending;
+};
 ModConfigurationDraft g_mod_configuration;
 
 void ModConfigurationDialog() {
     auto& draft=g_mod_configuration;
     const char* title=T("Configurar mod","Mod configuration");
-    if(draft.open) { draft.error.clear();ImGui::OpenPopup(title);draft.open=false; }
-    ImGui::SetNextWindowSize(ImVec2(540,0),ImGuiCond_Appearing);
-    if(!ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+    if(draft.open) {
+        draft.error.clear();draft.ready=false;
+        const std::string ident=PackagePatchId(draft.mod);
+        // Opening a dialog only reads the existing catalog. Full integrity and
+        // source-hash checks remain in Save; add/reload refreshes the library.
+        g_app.patches=LoadPatches(false);
+        const auto latest=std::find_if(g_app.patches.begin(),g_app.patches.end(),[&](const auto& p){return PackagePatchId(p)==ident;});
+        if(latest!=g_app.patches.end()) {draft.mod=*latest;draft.ready=true;}
+        else draft.error=T("El mod ya no está disponible.","This mod is no longer available.");
+        ImGui::OpenPopup(title);draft.open=false;
+    }
+    const auto* viewport=ImGui::GetMainViewport();
+    const ImVec2 dialog_size{std::min(760.f,viewport->WorkSize.x-48.f),std::min(520.f,viewport->WorkSize.y-48.f)};
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x+viewport->WorkSize.x*.5f,
+                                 viewport->WorkPos.y+viewport->WorkSize.y*.5f),ImGuiCond_Always,ImVec2(.5f,.5f));
+    ImGui::SetNextWindowSize(dialog_size,ImGuiCond_Always);
+    if(!ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_NoResize))return;
+    if(draft.pending.valid()) {
+        if(draft.pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) {
+            ImGui::TextUnformatted(T("Guardando...","Saving..."));
+            ImGui::EndPopup();return;
+        }
+        const Captured r=draft.pending.get();
+        if(!r.output.empty())AddLog(r.output);
+        const bool success=r.started && r.code==0;
+        if(!success) {
+            draft.error=T("No se pudieron guardar las opciones. Revisa el registro.","Could not update mod options. Check the log.");
+            const auto reason=r.output.rfind("ValueError: ");
+            if(reason!=std::string::npos) {
+                draft.error=r.output.substr(reason+12);
+                const auto end=draft.error.find_first_of("\r\n");
+                if(end!=std::string::npos)draft.error.resize(end);
+            }
+        } else {
+            g_app.patches=LoadPatches(false);
+            g_app.notice=T("Opciones guardadas. Se aplican al iniciar el juego.","Mod options saved. Applied when you start the game.");
+            ImGui::CloseCurrentPopup();ImGui::EndPopup();return;
+        }
+    }
     ImGui::TextWrapped("%s",draft.mod.mod_name.c_str());
     ImGui::Separator();
-    ImGui::BeginDisabled(g_app.game_running || !g_app.python);
+    ImGui::BeginDisabled(g_app.game_running || !g_app.python || !draft.ready);
     const auto advanced_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return o.advanced;});
     const auto grid_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return !o.row.empty();});
-    const float normal_count=static_cast<float>(draft.mod.mod_options.size()-advanced_count-grid_count);
-    const float options_height=std::min({420.0f,150.0f*normal_count+(grid_count?140.0f:0.0f)+(advanced_count?45.0f:0.0f)+(draft.advanced?40.0f*advanced_count:0.0f),
-                                      ImGui::GetMainViewport()->WorkSize.y*.55f});
+    const float footer=(draft.error.empty()?62.f:110.f)+(advanced_count?45.f:0.f)+
+                       (draft.advanced?40.f*static_cast<float>(advanced_count):0.f);
+    const float options_height=std::max(80.f,ImGui::GetContentRegionAvail().y-footer);
     ImGui::BeginChild("options",ImVec2(0,options_height));
     auto render_option=[&](ModOption& option) {
         ImGui::PushID(option.id.c_str());
@@ -4055,7 +4097,11 @@ void ModConfigurationDialog() {
         if(std::find(rows.begin(),rows.end(),o.row)==rows.end())rows.push_back(o.row);
         if(std::find(columns.begin(),columns.end(),o.column)==columns.end())columns.push_back(o.column);
     }
-    if(!rows.empty()&&ImGui::BeginTable("mod-pieces",static_cast<int>(columns.size()+1),ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg)) {
+    ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+    ImGui::PushStyleColor(ImGuiCol_TableBorderLight,ImGui::GetStyleColorVec4(ImGuiCol_Border));
+    ImGui::PushStyleColor(ImGuiCol_TableBorderStrong,ImGui::GetStyleColorVec4(ImGuiCol_Border));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,ImVec2(10,8));
+    if(!rows.empty()&&ImGui::BeginTable("mod-pieces",static_cast<int>(columns.size()+1),ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersH)) {
         ImGui::TableSetupColumn(T("Grupo","Group"),ImGuiTableColumnFlags_WidthStretch,1.3f);
         for(const auto& column:columns)ImGui::TableSetupColumn(column.c_str());
         ImGui::TableHeadersRow();
@@ -4073,6 +4119,7 @@ void ModConfigurationDialog() {
         }
         ImGui::EndTable();
     }
+    ImGui::PopStyleVar();ImGui::PopStyleColor(3);
     if(advanced_count) {
         draft.advanced=ImGui::CollapsingHeader(T("Opciones avanzadas","Advanced settings"));
         if(draft.advanced)for(auto& option:draft.mod.mod_options)if(option.advanced)render_option(option);
@@ -4082,7 +4129,6 @@ void ModConfigurationDialog() {
     if(ImGui::Button(T("Restablecer valores","Reset to defaults")))
         for(auto& option:draft.mod.mod_options)option.value=option.default_value;
     ImGui::SameLine();
-    bool saved=false;
     if(ImGui::Button(T("Guardar","Save"))) {
         draft.error.clear();
         const std::string ident=PackagePatchId(draft.mod);
@@ -4093,27 +4139,14 @@ void ModConfigurationDialog() {
                 Quote((a.root/L"scripts"/L"mod_packages.py").wstring())+L" --scan "+Quote(a.root.wstring())+
                 L" --configure "+Quote(Widen(ident))+L" --expected-sha "+Quote(Widen(draft.mod.mod_hash));
             for(const auto& o:draft.mod.mod_options)cmd+=L" --option "+Quote(Widen(o.id+"="+o.value));
-            const Captured r=RunCaptured(a.python->exe,cmd,a.root,120000);
-            if(!r.output.empty())AddLog(r.output);
-            saved=r.started && r.code==0;
-            if(!saved) {
-                draft.error=T("No se pudieron guardar las opciones. Revisa el registro.","Could not save mod options. Check the log.");
-                const auto reason=r.output.rfind("ValueError: ");
-                if(reason!=std::string::npos) {
-                    draft.error=r.output.substr(reason+12);
-                    const auto end=draft.error.find_first_of("\r\n");
-                    if(end!=std::string::npos)draft.error.resize(end);
-                }
-            }
-            g_app.notice=saved?T("Opciones guardadas. Se aplican al iniciar el juego.","Mod options saved. Applied when you start the game."):
-                T("No se pudieron guardar las opciones. Revisa el registro.","Could not save mod options. Check the log.");
+            const auto exe=a.python->exe;
+            const auto root=a.root;
+            draft.pending=std::async(std::launch::async,[exe,cmd,root]{return RunCaptured(exe,cmd,root,120000);});
         }
-        if(saved)ImGui::CloseCurrentPopup();
     }
     ImGui::EndDisabled();ImGui::SameLine();
     if(ImGui::Button(T("Cancelar","Cancel")))ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
-    if(saved)g_app.patches=LoadPatches();
 }
 
 bool ModConfigureIcon() {

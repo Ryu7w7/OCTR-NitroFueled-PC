@@ -2,6 +2,7 @@
 from pathlib import Path, PurePosixPath
 import hashlib,json,os,re,shutil,struct,uuid
 from archive_reader import Archive
+from functools import lru_cache
 
 def sha_bytes(data):
     return hashlib.sha256(data).hexdigest()
@@ -37,6 +38,11 @@ def plain_path(path):
 def safe_path(value):
     if not isinstance(value, str) or not value or '\\' in value or (':' in value):
         raise ValueError('Expected a relative slash-separated path: ' + str(value))
+    return _safe_path(value)
+
+@lru_cache(maxsize=4096)
+def _safe_path(value):
+    # Pure syntax validation only. under() still resolves the real filesystem.
     p = PurePosixPath(value)
     if p.is_absolute() or any((x in ('', '..', '.') for x in value.split('/'))):
         raise ValueError('Unsafe path: ' + value)
