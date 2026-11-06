@@ -135,6 +135,8 @@ if [[ ${1:-} == --test ]]; then
     out/public-itemless-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_room_mode.c -o out/room-mode-test
     out/room-mode-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_chat.c -o out/chat-test
+    out/chat-test
     "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c -o out/private-peer-test
     out/private-peer-test
     "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_catchup_lan.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/catchup-lan-test

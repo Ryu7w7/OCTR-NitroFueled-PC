@@ -2302,10 +2302,17 @@ static void skip_intro(void) {
     }
 }
 
+static int racing;                              /* the last frame: a kart and a race clock */
+int runtime_replay_chat_allowed(void) {
+    return !__atomic_load_n(&racing, __ATOMIC_RELAXED) || runtime_replay_local_finished();
+}
+
 /* Every frame (the pad read, runtime_replay.c): the menu's request, the start sequence, the character given back */
 void ABI runtime_replay_tick(void) {
     left_level();
     skip_intro();
+    __atomic_store_n(&racing, rr_kart_of(0, 0) && race_timer(), __ATOMIC_RELAXED);
+    runtime_online_mode_note_frame();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
@@ -2353,7 +2360,7 @@ void ABI runtime_replay_tick(void) {
         if (!chain) {                   /* a chain keeps this level's ghosts until it goes, and the saved settings */
             memset(P.ghost, 0, sizeof P.ghost);
             memset(P.attached, 0, sizeof P.attached);
-            P.mirror_was = -1;
+            if (!P.give_back) P.mirror_was = -1;        /* (the last replay's not given back yet: still the player's) */
         }
         P.accolade_player = -2;
         P.hero_told = 0;
@@ -2504,17 +2511,29 @@ int runtime_replay_play_install(int eu) {
     return 1;
 }
 
-/* The menu may start a replay: none is starting or playing, and no race is on (no player kart). */
+/* The menu may start a replay: none is starting or playing, no race is on (no player kart), and not in the online mode:
+ * its lobby is the game's online session even alone in a room, and a local race started there came back with "not all
+ * players are ready" (the followed race loads once the online menus are left). That is the session, not the level:
+ * octane_onlinelobby is also where a race or a replay left outside the online mode comes back to.
+ * What stops it goes to the log when it changes. */
 int runtime_replay_can_start(void) {
-    /* no race on (no player kart), and not in the online mode: its lobby is the game's online session even alone in a
-     * room, and a local race started there came back with "not all players are ready" (the followed race loads once
-     * the online menus are left) */
+    static const char *told;
     PingPeer peers[PING_MAX_PEERS];
-    const char *level = rr_current_level();
-    int online = 0;
-    for (const char *c = level; c && *c && !online; c++) online = !strncasecmp(c, "onlinelobby", 11);
-    return !P.pending && P.step == STEP_NONE && rr_game(0) && !rr_kart_of(0, 0) && !race_timer() && !online &&
-           runtime_net_ping_view(peers, PING_MAX_PEERS) <= 0;
+    const char *why = P.pending || P.step != STEP_NONE ? "a replay is on"
+                      : !rr_game(0) ? "the game is not up"
+                      : rr_kart_of(0, 0) ? "the player has a kart"
+                      : race_timer() ? "a race clock is on"
+                      : runtime_online_mode_lobby_open() ? "an online lobby is on screen"
+                      : runtime_public_match_active() ? "a public match"
+                      : runtime_private_match_active() || runtime_online_mode_room_on() ? "a private room"
+                      : runtime_net_ping_view(peers, PING_MAX_PEERS) > 0 ? "players in the room"
+                                                                         : 0;
+    if (__atomic_exchange_n(&told, why, __ATOMIC_RELAXED) != why) {
+        const char *level = rr_current_level();
+        printf("Replay: %s%s (level %s)\n", why ? "cannot start now: " : "can start", why ? why : "", level ? level : "-");
+        fflush(stdout);
+    }
+    return !why;
 }
 
 /* ---- live (runtime_replay.h): runtime_spectate.c's thread gives the frames ---- */
