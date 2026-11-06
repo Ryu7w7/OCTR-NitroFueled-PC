@@ -1042,6 +1042,8 @@ static void sample(PadData *d) {
 static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER; /* the game side of sampling (sample) */
 static ABI int32_t pad_init(void) {
     pthread_mutex_lock(&lock);
+    /* Also cover pad initialization before the SDL window exists. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
     initialized=1;
     if (!pad_thread_state) {
         pthread_t thread;
