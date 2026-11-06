@@ -26,6 +26,17 @@ replace the last validated result, and loading the next map clears it.
 Cup, Team Race, and modified AI difficulty remain unavailable in public
 matchmaking. See [private race modes](PRIVATE_RACE_MODES.md) for those features.
 
+## Ranked queue
+
+The main lobby has a Ranked button below Matchmaking. Ranked offers Race Normal
+and Race Itemless; Battle is disabled. It uses the `octr_ranked` version 1 search
+extension and a server-owned queue filter, so neither Ranked mode joins a casual
+room. Before sending the search, the client checks the signed
+`/ryunet/ranked-party` endpoint. An older server cannot silently place a Ranked
+search in a casual queue. The client verifies `octr_ranked_v1` in the backend
+lobby document before accepting a room. Ranked currently separates queues; MMR
+and rating changes are not implemented.
+
 ## Verification
 
 I tested public matchmaking on a local server with two clients: Itemless matched

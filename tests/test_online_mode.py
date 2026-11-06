@@ -16,6 +16,46 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_ranked_button_below_matchmaking(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.MAIN_LOBBY_ENTRY)
+        with pak.open('rb') as f:
+            blob = iga.read_entry(f, *entry[1:])
+        old, new = Igz(blob), Igz(online_mode.ranked_main_button(blob))
+        button = next(o for o, t in new.objects() if o >= len(old.data) and
+                      t == 'igGuiPlaceable')
+        self.assertEqual(new.string_at(button + 0x28), 'OCTR_RANKED_BUTTON')
+        self.assertEqual(new.u64(0x970 + 0x50), button)
+        self.assertEqual(new.u64(button + 0x50), 0xa90)
+        self.assertEqual(new.u64(0xa90 + 0x58), button)
+        self.assertEqual(new.u32(0x900 + 12), 9)
+        self.assertEqual(dict(new.objects())[new.u64(button + 0xe8)], 'igGuiBehaviorList')
+        # The ranked button shares the matchmaking VSC behavior object (one graph instance,
+        # refcounted by both lists); the clone of that object is never instantiated.
+        behaviors = new.u64(button + 0xe8)
+        self.assertEqual(new.u32(behaviors + 0xc), 2)
+        self.assertEqual(new.u64(new.u64(behaviors + 0x20) + 8), 0x23b8)
+        self.assertNotIn(button + 0x3c8, new.sites['RVTB'])  # the cloned VSC (0x2110+0x2a8)
+        self.assertEqual(struct.unpack_from('<f', new.data, 0x970 + 0x64)[0], -315.0)
+        self.assertEqual(struct.unpack_from('<f', new.data, button + 0x64)[0], -210.0)
+        # A distinct icon, as the native Graphics-tab Restart button: the navigation's icon
+        # material fields (+0x158 with its +0x178/+0x1a8 mirrors) get the ready-button material
+        # id, and the focused icon sprite gets its name reference at +0x150.
+        behaviors = new.u64(button + 0xe8)
+        nav = next(new.u64(s) for s in new.sites['ROFS'] if behaviors <= s < behaviors + 0x40
+                   and dict(new.objects()).get(new.u64(s)) == 'CGuiBehaviorOctaneNavigationItem')
+        exid = new.fixup('EXID')
+        self.assertEqual((new.u64(nav + 0x158), new.u64(nav + 0x178), new.u64(nav + 0x1a8)),
+                         (18,) * 3)  # the grand prix button's material, already in this file
+        material_id, namespace_id = struct.unpack_from('<II', exid[3], 18 * 8)
+        self.assertEqual(material_id, 0x7c593110)  # 'octane_ui_ico_grandprix_tga__material'
+        self.assertEqual(namespace_id, 0x41e2d304)
+        self.assertIn(nav + 0x150, new.read_list('RNEX', unpack_offsets))
+        exnm_entries = struct.iter_unpack('<II', new.fixup('EXNM')[3][:new.fixup('EXNM')[1] * 8])
+        self.assertEqual(new.u64(nav + 0x150),
+                         sum(1 for _, ns in exnm_entries if not ns & 0x80000000) - 1)
+
     def test_cup_package_regional_languages(self):
         graph = 'ui/octane_cupselect.igz'
         english = 'ui/octane_cupselect_en.lng'

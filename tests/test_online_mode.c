@@ -20,10 +20,12 @@ int runtime_private_party_update(void) { return 0; }
 void runtime_private_party_cancel(void) {}
 static int mode_checks;
 void runtime_race_options_map_loading(const char *map) { (void)map; }
-static int public_available, public_selected, public_active;
+static int public_available, public_selected, public_active, ranked_selected;
 static int public_normal_active;
 int runtime_public_match_active(void) { return public_normal_active || public_active; }
 int runtime_public_itemless_active(void) { return public_active; }
+int runtime_ranked_active(void) { return 0; }
+int runtime_ranked_selected(void) { return ranked_selected; }
 int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_reset(void) {}
@@ -912,6 +914,13 @@ static void test_region(size_t shift) {
     event.index = 2; handle(self, &event, result);
     assert(public_selected == 0 && result[0] == 1);
     event.index = 0; handle(self, &event, result);
+    ranked_selected = 1;
+    event.index = -1; handle(self, &event, NULL);
+    assert(items[2] == 0); /* Ranked offers only Normal and Itemless. */
+    result[0] = 99;
+    event.index = 2; handle(self, &event, result);
+    assert(result[0] == 99);
+    ranked_selected = 0;
     public_available = 0;
     event.index = 1;
     /* Other native two-option selectors retain their original index meanings. */

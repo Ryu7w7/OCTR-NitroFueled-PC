@@ -22,7 +22,8 @@
 #endif
 
 static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
-static int installed, selected, searching, allow_party;
+static int installed, selected, ranked_selected, searching, allow_party;
+static int confirmed_itemless, confirmed_ranked;
 static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
 static uint64_t matchmaking_room;
@@ -74,6 +75,7 @@ static void reset_locked(void) {
     matchmaking_owner = NULL;
     matchmaking_search = 0;
     confirmed_room = 0;
+    confirmed_itemless = confirmed_ranked = 0;
     room_owner = NULL;
     request_nonce = 0;
     searching = 0;
@@ -94,6 +96,7 @@ void runtime_public_itemless_select(int enabled) {
     selected = !!enabled;
 }
 int runtime_public_itemless_selected(void) { return selected; }
+int runtime_ranked_selected(void) { return ranked_selected; }
 /* CPartyManager owns the private session across scene changes. The lobby
  * scene's COctaneLobby::_isPrivateGame disappears when that scene unloads. */
 int runtime_private_match_active(void) {
@@ -105,7 +108,16 @@ int runtime_public_itemless_active(void) {
     pthread_mutex_lock(&mode_lock);
     uint64_t native_room = 0;
     if (room_owner) memcpy(&native_room, room_owner + 0x958, 8);
-    const int active = confirmed_room && native_room == confirmed_room;
+    const int active = confirmed_itemless && confirmed_room && native_room == confirmed_room;
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+
+int runtime_ranked_active(void) {
+    pthread_mutex_lock(&mode_lock);
+    uint64_t native_room = 0;
+    if (room_owner) memcpy(&native_room, room_owner + 0x958, 8);
+    const int active = confirmed_ranked && confirmed_room && native_room == confirmed_room;
     pthread_mutex_unlock(&mode_lock);
     return active;
 }
@@ -168,7 +180,7 @@ int runtime_public_itemless_announce(void) {
     pthread_mutex_unlock(&mode_lock);
     if (!token) return 0;
     char target[512], body[128];
-    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&release=%s", name, token, SACREDFIRE_RELEASE);
+    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&ranked=1&release=%s", name, token, SACREDFIRE_RELEASE);
     int status = runtime_ryunet_request("POST", target, body, sizeof body);
     int accepted = status == 200 && !strcmp(body, "ok");
     pthread_mutex_lock(&mode_lock);
@@ -251,6 +263,41 @@ static int compatibility_check(const char *target,char *body,size_t size) {
     }
     pthread_mutex_unlock(&check_lock);
     return result;
+}
+
+static int ranked_party_check(const char *doc) {
+    const char *members = field(doc, "members");
+    char ids[192], target[512], body[512];
+    size_t n = 0;
+    if (!members || *members++ != '[') return 0;
+    while (*members && *members != ']') {
+        if (isdigit((unsigned char)*members) || *members == ',') {
+            if (n + 1 >= sizeof ids) return 0;
+            ids[n++] = *members;
+        } else if (!isspace((unsigned char)*members)) return 0;
+        ++members;
+    }
+    ids[n] = 0;
+    const char *name = runtime_np_get_online_name();
+    if (*members != ']' || !n || !name) return 0;
+    snprintf(target, sizeof target, "/ryunet/ranked-party?name=%s&members=%s&mode=%d", name, ids, selected);
+    int status = compatibility_check(target, body, sizeof body);
+    if (status == -1) {
+        /* The check just started: wait for it instead of bouncing the player out with a
+         * press-again notice. A healthy server answers in milliseconds; the notice stays
+         * as the timeout fallback. */
+        uint64_t deadline = check_clock() + 5000;
+        do {
+            usleep(50000);
+            status = compatibility_check(target, body, sizeof body);
+        } while (status == -1 && check_clock() < deadline);
+    }
+    if (status == -1) return -1;
+    if (status != 200 || strcmp(body, "ok")) {
+        reject_search(status == 409 ? body : "Cannot verify Ranked server and party compatibility. Please retry.");
+        return 0;
+    }
+    return 1;
 }
 
 /* Check before private Ready/Start can run its VSC side effects.
@@ -440,12 +487,94 @@ static const char *meta_name(void *object) {
     void *meta = type(object);
     return meta ? *(const char **)((char *)meta + 0x10) : NULL;
 }
+/* The navigation item resolves the shared prefab's label placeable at +0xf0 ('Text_LevelListName',
+ * the RNEX reference); the button's own tree has no children (the visuals live in the shared
+ * comp instance). Set the label on it and on the focused variant inside the same comp. */
+static void ranked_text_walk(void *node, int depth) {
+    if (!node || depth > 8) return;
+    const char *name = *(const char **)((char *)node + 0x28);
+    if (name && (!strcmp(name, "[LevelListName]") ||
+                 !strcmp(name, "LevelListName_focused")))
+        runtime_online_mode_set_text(node, "RANKED");
+    void *list = *(void **)((char *)node + 0x48);
+    int count = list ? *(int *)((char *)list + 0xc) : 0;
+    void **children = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; children && i < count && i < 40; ++i)
+        ranked_text_walk(children[i], depth + 1);
+}
+static void ranked_label(void *button) {
+    void *list = *(void **)((char *)button + 0xe8);
+    int count = list ? *(int *)((char *)list + 0xc) : 0;
+    void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; items && i < count && i < 16; ++i) {
+        const char *name = meta_name(items[i]);
+        if (!name || strcmp(name, "CGuiBehaviorOctaneNavigationItem")) continue;
+        void *text = *(void **)((char *)items[i] + 0xf0);
+        if (!text) continue;
+        ranked_text_walk(text, 0);
+        ranked_text_walk(*(void **)((char *)text + 0x40), 0);
+    }
+}
+
+/* BB_GUI_DUMP=1: print the whole placeable tree above the ranked button: children tables and
+ * sibling chains from the topmost ancestor, with names, sprite textures and behavior graphs. */
+static void *gui_seen[4096];
+static int gui_seen_count;
+static int gui_seen_add(void *node) {
+    for (int i = 0; i < gui_seen_count; ++i)
+        if (gui_seen[i] == node) return 0;
+    if (gui_seen_count < (int)(sizeof gui_seen / sizeof *gui_seen))
+        gui_seen[gui_seen_count++] = node;
+    return 1;
+}
+static void gui_dump_node(void *node, int depth) {
+    if (!node || depth > 12 || !gui_seen_add(node)) return;
+    const char *type = meta_name(node);
+    const char *name = *(const char **)((char *)node + 0x28);
+    fprintf(stderr, "GUI%d %*s%s \"%s\" [node=%p]", depth, depth * 2, "", type ? type : "?",
+            name ? name : "", node);
+    if (type && strstr(type, "Sprite")) {
+        const char *texture = *(const char **)((char *)node + 0x10);
+        fprintf(stderr, " texture=\"%s\"", texture ? texture : "");
+    } else if (type && strstr(type, "Text")) {
+        const char *text = *(const char **)((char *)node + 0x10);
+        fprintf(stderr, " text=\"%s\"", text ? text : "");
+    } else if (type && strstr(type, "VscBehavior")) {
+        void *graph = *(void **)((char *)node + 0x20);
+        fprintf(stderr, " graph=\"%s\"", graph ? *(const char **)((char *)graph + 0x10) : "");
+    }
+    fprintf(stderr, " asset=%p\n", *(void **)((char *)node + 0x38));
+    void *list = *(void **)((char *)node + 0x48);
+    int count = list ? *(int *)((char *)list + 0xc) : 0;
+    void **children = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; children && i < count && i < 40; ++i)
+        gui_dump_node(children[i], depth + 1);
+    gui_dump_node(*(void **)((char *)node + 0x58), depth); /* the next sibling */
+}
+static void gui_dump(void *button) {
+    void *node = button, *top = button;
+    for (int depth = 0; node && depth < 16; ++depth) {
+        void *parent = *(void **)((char *)node + 0x40);
+        if (!parent) break;
+        node = parent;
+        top = node;
+    }
+    gui_seen_count = 0;
+    fprintf(stderr, "==== GUI DUMP (ranked button %p, top ancestor %p) ====\n", button, top);
+    gui_dump_node(top, 0);
+    fprintf(stderr, "==== GUI DUMP end (%d nodes) ====\n", gui_seen_count);
+}
+/* The Ranked button shares the matchmaking button's VSC behavior object (one graph instance,
+ * refcounted by both behavior lists), so its Confirm runs the graph with the native owner
+ * exactly as when Matchmaking itself is pressed; the hook only flags the ranked mode. */
 static void ABI placeable_event(void *self, void *event) {
     char approval[sizeof checked_party] = "";
     int private_room = runtime_online_mode_in_private();
     const char *feature = private_room ? private_feature() : NULL;
     int private_gate = private_room && (runtime_speed_mode_enabled() || feature);
-    if (private_gate && self && event) {
+    const char *tag = self ? *(const char **)((char *)self + 0x28) : NULL;
+    int ranked_button = tag && !strcmp(tag, "OCTR_RANKED_BUTTON");
+    if (self && event) {
         const char *type = meta_name(event);
         int signal = 0;
         if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
@@ -474,7 +603,9 @@ static void ABI placeable_event(void *self, void *event) {
                     void *graph = *(void **)((char *)items[i] + 0x20);
                     name = graph ? *(const char **)((char *)graph + 0x10) : NULL;
                 }
-                if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
+                if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"))
+                    ranked_selected = ranked_button;
+                if (private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
                     int status=early_party_check(feature,1);
                     if (status == -1) { defer_private(self,event,NULL); return; }
@@ -488,24 +619,43 @@ static void ABI placeable_event(void *self, void *event) {
     const char *previous = dispatch_approved_party;
     if (approval[0]) dispatch_approved_party = approval;
     native_placeable_event(self, event);
+    /* The label override touches the shared comp instance through the nav's resolved text
+     * reference: safe while the scene is live (focus and input events), but the LoseFocus
+     * events also fire while the project is tearing down and the comp may already be gone. */
+    if (ranked_button && event) {
+        const char *event_type = meta_name(event);
+        if (!event_type || (strcmp(event_type, "igGuiEventPlaceableLoseFocus") &&
+                            strcmp(event_type, "igGuiEventProjectLoseFocus"))) {
+            ranked_label(self);
+            if (getenv("BB_GUI_DUMP")) gui_dump(self);
+        }
+    }
     dispatch_approved_party = previous;
 }
 
-static char *extend(const char *raw, unsigned limit, uint64_t token, int mode) {
+static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, int ranked) {
     if (!raw || *raw != '{' || !limit || limit > 65536 || !token) return NULL;
     size_t n = strnlen(raw, limit);
-    if (n == limit || field(raw, "octr_itemless")) return NULL;
-    char *out = malloc(n + 320);
-    if (out) snprintf(out, n + 320,
-        "{\"octr_itemless\":{\"version\":1,\"mode\":%d,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},%s",
-        mode, SACREDFIRE_RELEASE, token, raw + 1);
+    if (n == limit || field(raw, "octr_itemless") || field(raw, "octr_ranked")) return NULL;
+    char *out = malloc(n + 480);
+    if (out) {
+        size_t used = 0;
+        if (ranked) used = (size_t)snprintf(out, n + 480,
+            "{\"octr_ranked\":{\"version\":1,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\"},",
+            mode, token);
+        else { out[0] = '{'; out[1] = 0; used = 1; }
+        if (mode || !ranked) used += (size_t)snprintf(out + used, n + 480 - used,
+            "\"octr_itemless\":{\"version\":1,\"mode\":%d,\"ranked\":1,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},",
+            mode, SACREDFIRE_RELEASE, token);
+        snprintf(out + used, n + 480 - used, "%s", raw + 1);
+    }
     return out;
 }
 
 static void *ABI register_client(void **result, void *self, const char *raw, unsigned limit) {
     runtime_public_itemless_reset();
     uint64_t token = itemless_client_available() ? nonce() : 0;
-    char *doc = token ? extend(raw, limit, token, 0) : NULL;
+    char *doc = token ? extend(raw, limit, token, 0, 0) : NULL;
     pthread_mutex_lock(&mode_lock);
     registration_nonce = doc ? token : 0;
     allow_party = registration_nonce != 0;
@@ -517,9 +667,17 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
 }
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
     if (rejection[0]) { *result = NULL; return result; }
+    if (ranked_selected) {
+        int ready = ranked_party_check(raw);
+        if (ready != 1) {
+            *result = NULL;
+            if (ready == -1) notice("Checking Ranked compatibility. Please press Play again shortly.");
+            return result;
+        }
+    }
     runtime_public_itemless_reset();
-    fprintf(stderr, "Public ITEMLESS: starting %s search\n", selected ? "ITEMLESS" : "NORMAL");
-    if (!selected) {
+    fprintf(stderr, "Public matchmaking: starting %s %s search\n", ranked_selected ? "RANKED" : "CASUAL", selected ? "ITEMLESS" : "NORMAL");
+    if (!selected && !ranked_selected) {
         pthread_mutex_lock(&mode_lock);
         matchmaking_search = 1;
         pthread_mutex_unlock(&mode_lock);
@@ -527,16 +685,17 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
         if (!*result) runtime_public_itemless_reset();
         return r;
     }
-    if (!runtime_public_itemless_available() || !raw || strnlen(raw, limit) == limit) {
+    if (!itemless_client_available() || (selected && !runtime_public_itemless_available()) ||
+        !raw || strnlen(raw, limit) == limit) {
         *result = NULL;
-        if (!rejection[0]) reject_search("Cannot verify party compatibility. Please retry before starting ITEMLESS.");
+        if (!rejection[0]) reject_search("Cannot verify party compatibility. Please retry before matchmaking.");
         return result;
     }
     /* Public startSearch validates the full party on the server. Let its native
      * async task own waiting/errors; an HTTP preflight can expire mid-transition. */
     uint64_t token = nonce();
-    char *doc = extend(raw, limit, token, 1);
-    if (!doc) { *result = NULL; reject_search("Cannot prepare ITEMLESS search."); return result; }
+    char *doc = extend(raw, limit, token, selected, ranked_selected);
+    if (!doc) { *result = NULL; reject_search("Cannot prepare matchmaking search."); return result; }
     pthread_mutex_lock(&mode_lock);
     request_nonce = token;
     searching = 1;
@@ -557,15 +716,16 @@ static void *ABI leave_lobby(void **result, void *self, uint64_t id) {
 }
 
 /* Validate tokens against the authoritative confirmation document, never the host document. */
-static int confirmation(const char *confirmation_doc, uint64_t room, uint64_t token) {
-    const char *value = field(confirmation_doc, "octr_itemless_v1");
+static int confirmation_mode(const char *confirmation_doc, const char *key, uint64_t room, uint64_t token, int mode) {
+    const char *value = field(confirmation_doc, key);
     char prefix[80], wanted[17];
-    snprintf(prefix, sizeof prefix, "\"1/%" PRIu64 "/1/", room);
+    snprintf(prefix, sizeof prefix, "\"1/%" PRIu64 "/%d/", room, mode);
     snprintf(wanted, sizeof wanted, "%016" PRIx64, token);
     if (!value || !token || strncmp(value, prefix, strlen(prefix))) return 0;
     value += strlen(prefix);
     int match = 0, count = 0;
     while (*value && *value != '"') {
+        if (strnlen(value, 16) < 16) return 0;
         for (int i=0; i<16; ++i) if (!isxdigit((unsigned char)value[i])) return 0;
         if (!memcmp(value, wanted, 16)) match = 1;
         value += 16;
@@ -575,6 +735,9 @@ static int confirmation(const char *confirmation_doc, uint64_t room, uint64_t to
     }
     return *value == '"' && match;
 }
+static int confirmation(const char *doc, uint64_t room, uint64_t token) {
+    return confirmation_mode(doc, "octr_itemless_v1", room, token, 1);
+}
 static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsigned length) {
     if (!confirmation_doc || length > 65536 || strnlen(confirmation_doc, (size_t)length + 1) != length) {
         fprintf(stderr, "Public ITEMLESS: invalid confirmation length=%u room=%" PRIu64 "\n", length, room);
@@ -582,22 +745,33 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
     }
     pthread_mutex_lock(&mode_lock);
     uint64_t token = searching ? request_nonce : allow_party ? registration_nonce : 0;
-    int wants = searching;
-    int valid = runtime_public_itemless_available() && confirmation(confirmation_doc, room, token);
-    int advertised = field(confirmation_doc, "octr_itemless_v1") != NULL;
-    if (valid && confirmed_room != room)
-        fprintf(stderr, "Public ITEMLESS: confirmed room=%" PRIu64 "\n", room);
-    if (!valid && confirmed_room == room) { confirmed_room = 0; room_owner = NULL; }
-    if (valid) { confirmed_room = room; room_owner = owner; }
-    else if (!advertised && !wants) { confirmed_room = 0; room_owner = NULL; }
-    if (valid || (!advertised && !wants)) {
+    int wants_itemless = searching && selected;
+    int wants_ranked = searching && ranked_selected;
+    int itemless_advertised = field(confirmation_doc, "octr_itemless_v1") != NULL;
+    int ranked_advertised = field(confirmation_doc, "octr_ranked_v1") != NULL;
+    int itemless_valid = runtime_public_itemless_available() && confirmation(confirmation_doc, room, token);
+    int ranked_valid = itemless_client_available() &&
+        (confirmation_mode(confirmation_doc, "octr_ranked_v1", room, token, 0) ||
+         confirmation_mode(confirmation_doc, "octr_ranked_v1", room, token, 1));
+    int ranked_mode_ok = !wants_ranked || confirmation_mode(confirmation_doc, "octr_ranked_v1", room, token, selected);
+    int valid = ((!itemless_advertised && !wants_itemless) || itemless_valid) &&
+                ((!ranked_advertised && !wants_ranked) || (ranked_valid && ranked_mode_ok));
+    if (valid && (itemless_advertised || ranked_advertised)) {
+        confirmed_room = room; room_owner = owner;
+        confirmed_itemless = itemless_advertised;
+        confirmed_ranked = ranked_advertised;
+    } else if (confirmed_room == room || (!itemless_advertised && !ranked_advertised)) {
+        confirmed_room = 0; room_owner = NULL;
+        confirmed_itemless = confirmed_ranked = 0;
+    }
+    if (valid) {
         matchmaking_room = room;
         matchmaking_owner = owner;
         matchmaking_search = 0;
     }
     pthread_mutex_unlock(&mode_lock);
-    if (!valid && (advertised || wants)) {
-        reject_search("ITEMLESS lobby confirmation failed. Please search again.");
+    if (!valid) {
+        reject_search("Matchmaking lobby confirmation failed. Please search again.");
         return 0;
     }
     return 1;

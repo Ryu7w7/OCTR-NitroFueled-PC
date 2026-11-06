@@ -10,7 +10,7 @@ from pathlib import Path
 
 import archive_patch
 import gcn_shaders as iga
-from igz_file import Igz, unpack_offsets
+from igz_file import Igz, unpack_offsets, pack_offsets
 from mod_file_paths import resolve, records
 from mod_overlays import file_map
 from mod_components import long_path
@@ -23,6 +23,7 @@ TIMER_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_returntolobby_timer.ig
 LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategame.igz'
 SETTINGS_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategamesettings.igz'
 PUBLIC_LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_matchmaking.igz'
+MAIN_LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_main.igz'
 GRAPH_SHA256 = {
     '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
     'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
@@ -685,6 +686,92 @@ def public_lobby_card(blob):
     return g.build()
 
 
+def ranked_main_button(blob):
+    """Clone the native Matchmaking action and place Ranked directly below it."""
+    g = Igz(blob)
+    if (g.u64(0x970 + 0xe8) != 0x2110 or g.u64(0x970 + 0x50) != 0xa90 or
+            g.u64(0xa90 + 0x58) != 0x970 or g.u64(0x7e0 + 0x48) != 0x900 or
+            g.u32(0x900 + 12) != 8 or g.u64(0x2110 + 0x28) != 0x2148):
+        raise ValueError('unsupported native main lobby matchmaking button')
+    references = {tag: g.read_list(tag, unpack_offsets) for tag in ('RHND', 'RNEX')}
+    copies = [(0x970, 0xa90, g.append(g.data[0x970:0xa90])),
+              (0x2110, 0x2580, g.append(g.data[0x2110:0x2580]))]
+
+    def moved(value):
+        return next((new + value - lo for lo, hi, new in copies if lo <= value < hi), value)
+
+    for tag, sites in (*g.sites.items(), *references.items()):
+        for site in list(sites):
+            target = moved(site)
+            if target == site:
+                continue
+            if tag in references:
+                references[tag].append(target)
+            else:
+                g.add_site(tag, target)
+            if tag == 'ROFS':
+                g.set_u64(target, moved(g.u64(site)))
+    button = moved(0x970)
+    nav = moved(0x2148)
+    g.set_u64(button + 0x28, g.string_index('OCTR_RANKED_BUTTON'))
+    g.add_site('RSTT', button + 0x28)
+    g.set_u64(button + 0x50, 0xa90)
+    g.set_u64(button + 0x58, 0x970)
+    g.set_u64(0x970 + 0x50, button)
+    g.set_u64(0xa90 + 0x58, button)
+    struct.pack_into('<f', g.data, 0x970 + 0x64, -315.0)
+    struct.pack_into('<f', g.data, button + 0x64, -210.0)
+    # Native navigation fields: up, down. Keep every other button's links intact.
+    g.set_u64(0x2148 + 0x118, button)
+    g.set_u64(nav + 0x110, 0x970)
+    g.set_u64(nav + 0x118, 0xa90)
+    g.set_u64(0xd08 + 0x110, button)
+    # A distinct icon, exactly as the native Graphics-tab Restart button (graphics_widgets.py):
+    # the navigation's icon materials (+0x158 with its +0x178/+0x1a8 mirrors) get the grand prix
+    # button's material ('octane_ui_ico_grandprix_tga__material', already in this file's EXID),
+    # and the focused icon sprite gets its name reference at +0x150.
+    exid = g.fixup('EXID')
+    grandprix_material = next(i for i in range(exid[1]) if
+                              struct.unpack_from('<I', exid[3], i * 8)[0] == 0x7c593110)
+    exnm = g.fixup('EXNM')
+    entries = list(struct.iter_unpack('<II', exnm[3][:exnm[1] * 8]))
+
+    def reference(at, name, namespace):
+        index = sum(not (b & 0x80000000) for _, b in entries)
+        entries.append((g.string_index(name), g.string_index(namespace)))
+        g.set_u64(at, index)
+        references['RNEX'].append(at)
+
+    reference(nav + 0x150, 'Sprite_octane_ui_raceselect_ico_crashcove_tga001',
+              'Menu_ButtonWithIcon')
+    exnm[1], exnm[3] = len(entries), b''.join(struct.pack('<II', *e) for e in entries)
+    exnm[4] = (exnm[2] + len(exnm[3]) + 3) & ~3
+    g.set_u64(nav + 0x158, grandprix_material)
+    g.set_u64(nav + 0x178, grandprix_material)
+    g.set_u64(nav + 0x1a8, grandprix_material)
+    children = [g.u64(0x928 + i * 8) for i in range(8)]
+    children.insert(children.index(0x970) + 1, button)
+    array = g.append(struct.pack('<9Q', *children))
+    for i in range(9):
+        g.add_site('ROFS', array + i * 8)
+    g.set_u32(0x900 + 12, 9)
+    g.set_u32(0x900 + 16, 9)
+    g.set_u64(0x900 + 0x18, (g.u64(0x900 + 0x18) & ~0xffffffff) | 72)
+    g.set_u64(0x900 + 0x20, array)
+    # The Ranked button shares the matchmaking button's VSC behavior object instead of carrying
+    # a clone: the graph registers in a per-graph static instance map and a second live instance
+    # corrupts the heap at scene unload (its double destruction). Behaviors are refcounted, so
+    # both lists holding one instance is safe, and the graph runs with its native owner exactly
+    # as when Matchmaking itself is pressed. The clone of the object stays uninstantiated.
+    g.set_u64(moved(0x2140), 0x23b8)  # the cloned list's VSC slot now references the original
+    g.sites['RVTB'].remove(moved(0x23b8))
+    for tag, sites in references.items():
+        fixup = g.fixup(tag)
+        fixup[1], fixup[3] = len(sites), pack_offsets(sorted(sites))
+        fixup[4] = (fixup[2] + len(fixup[3]) + 3) & ~3
+    return g.build()
+
+
 def current_entry(pak, entries, index, base):
     """The entry's bytes as the game reads them now: base's own replacement (a widescreen layout's
     menu/HUD fix, kept uncompressed) when it already has one for this entry, else the archive's
@@ -756,6 +843,8 @@ def prepare(game, out, elf, bases):
         lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
         public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
         public_lobby = public_lobby_card(current_entry(pak, entries, public_index, base))
+        main_index = next(i for i, e in enumerate(entries) if e[0].lower() == MAIN_LOBBY_ENTRY)
+        main_lobby = ranked_main_button(current_entry(pak, entries, main_index, base))
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
@@ -786,10 +875,10 @@ def prepare(game, out, elf, bases):
         music = team_finish_sounds(iga.read_entry(f, *entries[music_index][1:]))
     target = out / 'online-mode.bbpatch'
     archive_patch.write_entries_patch(target, pak, guest,
-                                      {index: payload, lobby_index: lobby, package_index: package,
+                                      {index: payload, lobby_index: lobby, main_index: main_lobby, package_index: package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
                                        lobby_root_index: lobby_root, music_index: music, public_index: public_lobby}, base,
-                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index})
+                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index, main_index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)

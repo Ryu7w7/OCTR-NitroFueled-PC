@@ -381,6 +381,10 @@ static void set_text(unsigned char *placeable, const char *text) {
     memcpy(placeable + 12, &flags, 4);
 }
 
+void runtime_online_mode_set_text(void *placeable, const char *text) {
+    set_text(placeable, text);
+}
+
 /* The native handle may lazily resolve or redirect through another handle. */
 static unsigned char *handle_object(void **slot) {
     for (int depth = 0; depth < 16 && *slot; ++depth) {
@@ -2071,8 +2075,9 @@ static void refresh_lobby_card(unsigned char *owner) {
         int type = 0;
         if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);
         if (type != 2)
-            update_card(owner, NULL, runtime_public_itemless_active() ?
-                        "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL", NULL, 0);
+            update_card(owner, NULL, runtime_ranked_active() ?
+                        (runtime_public_itemless_active() ? "RANKED - ITEMLESS" : "RANKED - NORMAL") :
+                        (runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL"), NULL, 0);
         return;
     }
     if (battle_selected() || !runtime_online_mode_in_private()) return;
@@ -2352,9 +2357,10 @@ static void ABI select_mode(void *sender, int index) {
         original_choice(sender, index);
         return;
     }
-    selector_mode_index = index;
     const int private = is_private();
+    if (!private && index == 2 && runtime_ranked_selected()) return;
     if (!private && index == 1 && !runtime_public_itemless_available()) return;
+    selector_mode_index = index;
     clear_team_selector();
     cup_timer_pending = 0;
     reset_team_count();
@@ -2391,11 +2397,13 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         memcpy(&items, available + 0x20, sizeof items);
         const int private = is_private();
         items[1] = (unsigned char)(private || runtime_public_itemless_available());
+        items[2] = (unsigned char)(private || !runtime_ranked_selected());
         runtime_public_itemless_reset();
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
         const int private_speed = runtime_room_mode_following() ? runtime_speed_mode_enabled() : private_speed_selected;
-        const int index = type == 2 ? 2 : (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
+        const int index = type == 2 && items[2] ? 2 :
+                          (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
         if (!private || index == 2) {
             clear_team_selector();
             reset_team_count();

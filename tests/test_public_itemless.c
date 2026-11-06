@@ -9,6 +9,11 @@ int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
+static int ranked_labels;
+void runtime_online_mode_set_text(void *placeable, const char *text) {
+    assert(placeable && !strcmp(text, "RANKED"));
+    ++ranked_labels;
+}
 static void *test_network=(void *)1;
 static void ABI stop_matchmaking(void *self) { assert(self==test_network); ++stopped; }
 static void ABI return_to_lobby(void) { assert(stopped==returned+1); ++returned; }
@@ -23,6 +28,7 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
+        assert(strstr(target,"&ranked=1"));
         snprintf(body,size,"ok"); return 200;
     }
     assert(!strcmp(method,"GET"));
@@ -33,11 +39,13 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     while (block_get) pthread_cond_wait(&http_condition,&http_lock);
     pthread_mutex_unlock(&http_lock);
     assert(strstr(target,"/ryunet/itemless-party?name=LocalHost&members=") ||
+           strstr(target,"/ryunet/ranked-party?name=LocalHost&members=") ||
            strstr(target,"/ryunet/private-party?name=LocalHost&feature="));
     snprintf(body,size,"%s",strstr(target,"/ryunet/private-party?") && !strcmp(reply,"ok") ? "ok-private-release:" SACREDFIRE_RELEASE : reply); return status;
 }
 static void ABI show(const char *body, void *options) {
-    if (!early) assert(stopped==returned && returned==dialogs+1);
+    if (!early && !strstr(body, "Checking Ranked compatibility"))
+        assert(stopped==returned && returned==dialogs+1);
     assert(options==NULL); /* Exactly the offline Online-entry notice configuration. */
     snprintf(message,sizeof message,"%s",body); ++dialogs;
 }
@@ -183,6 +191,94 @@ static int resumed_starts;
 static void ABI resume_test_start(void *self) {
     assert(self && runtime_private_party_check()==1);
     ++resumed_starts;
+}
+static void prepare_public(void) {
+    if (!selected || rejection[0]) return;
+    expire_check(); char body[512];
+    (void)compatibility_check("/ryunet/ranked-party?name=LocalHost&members=1,2&mode=1",body,sizeof body);
+    await_check();
+}
+static void test_ranked(void) {
+    const char doc[] = "{\"members\":[1,2],\"ruleset_payload\":{\"filter\":{\"playlist_id\":0}}}";
+    char confirmation_doc[256];
+    unsigned char owner[0x960] = {0};
+    uint64_t room = 91;
+    void *result = NULL;
+    memcpy(owner + 0x958, &room, 8);
+    rejection[0] = 0;
+    status = 200;
+    snprintf(reply, sizeof reply, "ok");
+    runtime_public_itemless_select(0);
+    ranked_selected = 1;
+    expire_check();
+    int before = sent;
+    /* The ranked check now waits inline instead of bouncing the player with a notice. */
+    start_search(&result, NULL, doc, sizeof doc, NULL);
+    assert(result && sent == before + 1 && !rejection[0]);
+    assert(strstr(payload, "\"octr_ranked\"") && !strstr(payload, "\"octr_itemless\""));
+    assert(strstr(payload, "\"mode\":0"));
+    snprintf(confirmation_doc, sizeof confirmation_doc,
+             "{\"octr_ranked_v1\":\"1/91/0/%016" PRIx64 "\"}", request_nonce);
+    assert(accept(owner, room, confirmation_doc, (unsigned)strlen(confirmation_doc)));
+    assert(runtime_ranked_active() && !runtime_public_itemless_active());
+    runtime_public_itemless_select(1);
+    prepare_public();
+    start_search(&result, NULL, doc, sizeof doc, NULL);
+    assert(result && strstr(payload, "\"octr_ranked\"") && strstr(payload, "\"octr_itemless\""));
+    snprintf(confirmation_doc, sizeof confirmation_doc,
+             "{\"octr_ranked_v1\":\"1/91/1/%016" PRIx64 "\",\"octr_itemless_v1\":\"1/91/1/%016" PRIx64 "\"}",
+             request_nonce, request_nonce);
+    assert(accept(owner, room, confirmation_doc, (unsigned)strlen(confirmation_doc)));
+    assert(runtime_ranked_active() && runtime_public_itemless_active());
+    runtime_public_itemless_reset();
+    status = 404;
+    expire_check();
+    int before_unsupported = sent;
+    start_search(&result, NULL, doc, sizeof doc, NULL);
+    assert(!result && sent == before_unsupported && strstr(rejection, "Ranked server"));
+    rejection[0] = 0;
+    status = 200;
+    ranked_selected = 0;
+    runtime_public_itemless_select(0);
+}
+static void test_ranked_button_event(void) {
+    native_placeable_event = forward_event;
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *event_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
+    void *graph_meta[3] = {0, 0, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"};
+    void *event[4] = {vtable, event_meta, 0, (void *)8};
+    void *behavior_meta[3] = {0, 0, "igGuiVscBehavior"};
+    void *(ABI *graph_vtable[])(void *) = {graph_type};
+    void *graph[5] = {graph_vtable, behavior_meta, 0, 0, graph_meta};
+    /* The Ranked button shares the matchmaking VSC behavior object (one graph instance in both
+     * behavior lists), so its Confirm runs the graph: the hook flags the ranked mode. */
+    void *behavior_meta2[3] = {0, 0, "CGuiBehaviorOctaneNavigationItem"};
+    void *(ABI *nav_vtable[])(void *) = {object_type};
+    void *nav[70] = {nav_vtable, behavior_meta2};
+    void *behaviors[] = {nav, graph};
+    unsigned char button[0xf0] = {0}, list[0x28] = {0}, label[0x50] = {0}, comp[0x50] = {0};
+    int two = 2;
+    void *p = "OCTR_RANKED_BUTTON"; memcpy(button + 0x28, &p, 8);
+    p = list; memcpy(button + 0xe8, &p, 8);
+    p = behaviors; memcpy(list + 0x20, &p, 8);
+    memcpy(list + 12, &two, 4);
+    p = label; memcpy(nav + 30, &p, 8);
+    p = comp; memcpy(label + 0x40, &p, 8);
+    p = "[LevelListName]"; memcpy(label + 0x28, &p, 8);
+    ranked_selected = 0;
+    int before_forwarded = forwarded;
+    placeable_event(button, event);
+    assert(ranked_selected && ranked_labels == 1);
+    assert(forwarded == before_forwarded + 1); /* only its own dispatch: the shared graph ran natively */
+    /* LoseFocus fires during scene teardown, when the shared comp may already be gone. */
+    ranked_selected = 0;
+    event_meta[2] = (char *)"igGuiEventPlaceableLoseFocus";
+    placeable_event(button, event);
+    assert(ranked_labels == 1 && !ranked_selected);
+    event_meta[2] = (char *)"igGuiEventFocusInputPressed";
+    p = NULL; memcpy(button + 0x28, &p, 8);
+    placeable_event(button, event);
+    assert(!ranked_selected);
 }
 static void test_early_gate(void) {
     early=1;
@@ -484,6 +580,8 @@ int main(void) {
     runtime_public_itemless_update();
     test_early_gate();
     test_full_lobby_confirmation();
+    test_ranked();
+    test_ranked_button_event();
     test_installed_hooks("1277e00");
     test_installed_hooks("1277df0");
     /* The worker can be stuck in HTTP while repeated frame checks return. */
