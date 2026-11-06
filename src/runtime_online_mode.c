@@ -1,6 +1,7 @@
 /* Native Normal / Speed / Battle selector; Speed uses the game's race event. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_name_colors.h"
 #include "runtime_ai_catchup.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -828,7 +829,7 @@ static int refresh_cup_title(unsigned char *row, const char *title, int depth) {
 }
 
 static void synchronize_cup_finish_time(unsigned char *racer);
-static void gold_project(unsigned char *project);
+static void name_color_project(unsigned char *project);
 static void ABI cup_project_event(void *self, void *event) {
     if (private_cup_race_active &&
         (self==handle_object(&cup_finish_project) || self==handle_object(&cup_ranking_project))) {
@@ -890,7 +891,7 @@ static void ABI cup_project_event(void *self, void *event) {
         const char *title=cup ? pointer_at(cup,0x30) : NULL;
         if (title && *title) refresh_cup_title(pointer_at(self,0x10),title,0);
     }
-    gold_project(self);
+    name_color_project(self);
     refresh_lobby_members_visibility();
     if (trace_score_event) trace_team_score("event-after", self, event_type(event));
     if (team_ranking_project && self == handle_object(&team_ranking_project)) refresh_team_results();
@@ -1607,12 +1608,12 @@ static void ABI leader_event(unsigned char *self, void *event, void *owner) {
     team_leader_border(self);
 }
 
-static void gold_name(unsigned char *placeable, int allowed);
-static int gold_allowed(void);
+static void colored_name(unsigned char *placeable, int allowed);
+static int name_colors_allowed(void);
 static void ABI leader_update(unsigned char *self, unsigned char *owner, float dt) {
     original_leader_update(self, owner, dt);
     team_leader_border(self);
-    gold_name(pointer_at(self, 0x20), gold_allowed()); /* _playerTagText */
+    colored_name(pointer_at(self, 0x20), name_colors_allowed()); /* _playerTagText */
 }
 
 static void ABI race_team_setup(unsigned char *self) {
@@ -2036,7 +2037,7 @@ static int resume_private_map(void) {
 
 /* The lobby's screen is on: its behaviour updated just now. The level's name cannot say it: outside the online mode too,
  * a race that is left comes back to octane_onlinelobby, the menus' backdrop. */
-static uint64_t gold_now_ms(void);
+static uint64_t monotonic_ms(void);
 static uint64_t lobby_updated_ms;
 
 /* runtime_online_mode_in_private reads the game's entities, on the game's thread only */
@@ -2050,11 +2051,11 @@ int runtime_online_mode_public_on(void) { return __atomic_load_n(&public_on, __A
 
 int runtime_online_mode_lobby_open(void) {
     const uint64_t at = __atomic_load_n(&lobby_updated_ms, __ATOMIC_RELAXED);
-    return at && gold_now_ms() - at < 1000;
+    return at && monotonic_ms() - at < 1000;
 }
 
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
-    __atomic_store_n(&lobby_updated_ms, gold_now_ms(), __ATOMIC_RELAXED);
+    __atomic_store_n(&lobby_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
     original_lobby_update(self, owner, dt);
     refresh_lobby_card(owner);
     runtime_public_itemless_update();
@@ -2546,40 +2547,45 @@ static struct TeamNameLayout team_name_layouts[8];
 
 /* Native PLAYER n is a local controller index, not a shared lobby identity. */
 
-/* ---- v0.8: the administrator's name in gold --------------------------------------------------
- * Ryu7w7 (BB_ADMIN_NICK) shows in gold, a color no player has, wherever these behaviors draw a
- * player's name: the lobby's player slots, the race leaders list, the tag over each kart and the
- * results list. Never in Battle or a team race, where the names carry their team's color.
+/* ---- Nicknames with a color of their own (runtime_name_colors.c) ----------------------------
+ * Wherever these behaviors draw a player's name: the lobby's player slots, the race leaders list,
+ * the tag over each kart and the results list. Never in Battle or a team race, where the names
+ * carry their team's color. The whole name changes at once: the color is a tint of its element,
+ * not of a letter.
  * Offsets from the game's own field metadata (src/runtime_meta_dump.c, USA 1.21): igGuiPlaceable
  * _displayText +0x30 (its text), _color +0xc0 (RGBA floats, a tint over the whole element). A
  * placeable a list reuses for another player gets its own color back. */
-typedef struct { unsigned char *placeable; float color[4]; } GoldName;
-static GoldName gold_names[32];
+typedef struct { unsigned char *placeable; float color[4]; } ColoredName;
+static ColoredName colored_names[32];
 static BehaviorUpdate original_marker_update, original_results_item_update;
 
-static const char *admin_nick(void) {
-    const char *nick = getenv("BB_ADMIN_NICK");
-    return nick && *nick ? nick : "Ryu7w7";
-}
-
-static int gold_allowed(void) {
+static int name_colors_allowed(void) {
     if (battle_selected() || private_team_race()) return 0;
     int teams = 1;
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
     return !(runtime_online_mode_in_private() && teams >= 2 && teams <= 4 && !runtime_online_mode_private_cup());
 }
 
-static void gold_name(unsigned char *placeable, int allowed) {
+/* The game draws a placeable with the color it read last: its own setter (252c10) raises this bit. */
+static void name_color_changed(unsigned char *placeable) {
+    unsigned flags;
+    memcpy(&flags, placeable + 12, 4);
+    flags |= 0x1000;
+    memcpy(placeable + 12, &flags, 4);
+}
+
+static void colored_name(unsigned char *placeable, int allowed) {
     if (!placeable) return;
     const char *text = (const char *)pointer_at(placeable, 0x30);
-    const int admin = allowed && text && !strcasecmp(text, admin_nick());
-    GoldName *entry = NULL, *free_entry = NULL;
-    for (unsigned i = 0; i < sizeof gold_names / sizeof *gold_names; ++i) {
-        if (gold_names[i].placeable == placeable) entry = gold_names + i;
-        else if (!gold_names[i].placeable && !free_entry) free_entry = gold_names + i;
+    float rgb[3];
+    const int colored = allowed && text && runtime_name_color(text, rgb);
+    ColoredName *entry = NULL, *free_entry = NULL;
+    for (unsigned i = 0; i < sizeof colored_names / sizeof *colored_names; ++i) {
+        if (colored_names[i].placeable == placeable) entry = colored_names + i;
+        else if (!colored_names[i].placeable && !free_entry) free_entry = colored_names + i;
     }
     float *color = (float *)(placeable + 0xc0);
-    if (admin) {
+    if (colored) {
         if (!entry) {
             if (!free_entry) return;
             entry = free_entry;
@@ -2587,11 +2593,14 @@ static void gold_name(unsigned char *placeable, int allowed) {
             memcpy(entry->color, color, sizeof entry->color);
         }
         static int told;
-        if (!told) { told = 1; printf("Native Online: %s's name drawn in gold\n", admin_nick()); }
-        const float gold[3] = {1.0f, 0.80f, 0.20f};
-        memcpy(color, gold, sizeof gold); /* alpha kept: fades still work */
+        if (!told) { told = 1; puts("Native Online: a nickname drawn in its color"); }
+        if (memcmp(color, rgb, sizeof rgb)) { /* alpha kept: fades still work */
+            memcpy(color, rgb, sizeof rgb);
+            name_color_changed(placeable);
+        }
     } else if (entry) {
         memcpy(color, entry->color, 3 * sizeof(float));
+        name_color_changed(placeable);
         entry->placeable = NULL;
     }
 }
@@ -2599,11 +2608,11 @@ static void gold_name(unsigned char *placeable, int allowed) {
 /* Lists a script fills (the lobby's members, the pause menu's racers) have no behavior of
  * their own: through every placeable of a GUI project (_children +0x48: an igObjectList, count
  * +0x0c, data +0x20; a nested composition behind the handle at +0x38, its root at +0x20), the
- * texts that are the admin's name go gold (gold_project below). */
-static unsigned gold_visited;
-static int gold_debug; /* BB_GOLD_DEBUG=1: the walked trees, logged */
-static int gold_texts; /* BB_GOLD_DEBUG=1: every text the walks meet, once */
-static void gold_log_text(const unsigned char *placeable, const char *text, int depth) {
+ * texts that are such a nickname get its color (name_color_project below). */
+static unsigned name_color_visited;
+static int name_color_debug; /* BB_NAME_COLOR_DEBUG=1: the walked trees, logged */
+static int name_color_texts; /* BB_NAME_COLOR_DEBUG=1: every text the walks meet, once */
+static void name_color_log_text(const unsigned char *placeable, const char *text, int depth) {
     static char seen[512][48];
     static unsigned seen_count;
     if (!text || !*text || seen_count >= 512) return;
@@ -2612,35 +2621,35 @@ static void gold_log_text(const unsigned char *placeable, const char *text, int 
     snprintf(seen[seen_count++], sizeof seen[0], "%s", text);
     const char *name = pointer_at(placeable, 0x28);
     const float *c = (const float *)(placeable + 0xc0);
-    printf("Gold text: depth %d %s \"%.60s\" color %.2f %.2f %.2f\n", depth, name ? name : "-", text,
+    printf("Name color text: depth %d %s \"%.60s\" color %.2f %.2f %.2f\n", depth, name ? name : "-", text,
            c[0], c[1], c[2]);
 }
-static void gold_tree(unsigned char *placeable, int depth, int allowed) {
-    if (!placeable || depth > 32 || gold_visited > 4096) return;
-    ++gold_visited;
-    gold_name(placeable, allowed);
+static void name_color_tree(unsigned char *placeable, int depth, int allowed) {
+    if (!placeable || depth > 32 || name_color_visited > 4096) return;
+    ++name_color_visited;
+    colored_name(placeable, allowed);
     /* a placeable hosting another composition (a nested menu: the members list, a row) */
     unsigned char *composition = handle_object((void **)(placeable + 0x38));
-    if (gold_texts) gold_log_text(placeable, pointer_at(placeable, 0x30), depth);
-    if (gold_debug) {
+    if (name_color_texts) name_color_log_text(placeable, pointer_at(placeable, 0x30), depth);
+    if (name_color_debug) {
         const char *name = pointer_at(placeable, 0x28), *text = pointer_at(placeable, 0x30);
         const float *c = (const float *)(placeable + 0xc0);
-        printf("Gold tree: %*s%s \"%.40s\" color %.2f %.2f %.2f %.2f%s\n", depth * 2, "",
+        printf("Name color tree: %*s%s \"%.40s\" color %.2f %.2f %.2f %.2f%s\n", depth * 2, "",
                name ? name : "-", text ? text : "", c[0], c[1], c[2], c[3],
                composition && pointer_at(composition, 0) == composition_vtable ? " [composition]" : "");
     }
     if (composition && pointer_at(composition, 0) == composition_vtable)
-        gold_tree(pointer_at(composition, 0x20), depth + 1, allowed);
+        name_color_tree(pointer_at(composition, 0x20), depth + 1, allowed);
     unsigned char *list = pointer_at(placeable, 0x48);
     if (!list) return;
     uint32_t count;
     memcpy(&count, list + 0x0c, 4);
     unsigned char **items = (unsigned char **)pointer_at(list, 0x20);
     if (!items || count > 512) return;
-    for (uint32_t i = 0; i < count; ++i) gold_tree(items[i], depth + 1, allowed);
+    for (uint32_t i = 0; i < count; ++i) name_color_tree(items[i], depth + 1, allowed);
 }
 
-static uint64_t gold_now_ms(void) {
+static uint64_t monotonic_ms(void) {
 #ifdef _WIN32
     return GetTickCount64();
 #else
@@ -2653,12 +2662,12 @@ static uint64_t gold_now_ms(void) {
 /* Every GUI project (an igGuiProject: +0x10 its root placeable, whose +0x38 holds the menu's
  * composition) passes its events through cup_project_event: the lobby's members, the pause
  * menu's racers, the results. Each project's tree is walked at most every 150 ms. */
-static void gold_project(unsigned char *project) {
+static void name_color_project(unsigned char *project) {
     unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
     if (!root) return;
     static struct { unsigned char *root; uint64_t at; } roots[32];
     static unsigned next_root;
-    const uint64_t now = gold_now_ms();
+    const uint64_t now = monotonic_ms();
     unsigned i = 0;
     while (i < 32 && roots[i].root != root) ++i;
     if (i == 32) {
@@ -2669,37 +2678,37 @@ static void gold_project(unsigned char *project) {
     if (roots[i].at && now - roots[i].at < 150) return;
     const int first = !roots[i].at;
     roots[i].at = now ? now : 1;
-    gold_visited = 0;
+    name_color_visited = 0;
     static int debug_walks;
-    const char *debug = getenv("BB_GOLD_DEBUG");
-    gold_texts = debug && debug[0] == '1';
-    gold_debug = first && gold_texts && debug_walks++ < 60;
-    if (gold_debug) printf("Gold tree: project %p\n", (void *)project);
-    gold_tree(root, 0, gold_allowed());
-    gold_debug = 0;
+    const char *debug = getenv("BB_NAME_COLOR_DEBUG");
+    name_color_texts = debug && debug[0] == '1';
+    name_color_debug = first && name_color_texts && debug_walks++ < 60;
+    if (name_color_debug) printf("Name color tree: project %p\n", (void *)project);
+    name_color_tree(root, 0, name_colors_allowed());
+    name_color_debug = 0;
 }
 
 /* The lobby's members list and the pause menu's racers (ui/Octane_LobbyMembers): an igGuiList
  * whose rows (igGuiListItemList, not _children) each carry a CGuiBehaviorOctaneLobbyMemberItem
  * (vtable 0x2774cc0, USA 1.21). Its event handler (+0xc8) writes the player's name into the
  * placeable at +0x10 (_playerName) and plays the LocalPlayer / OtherMember animation that colors
- * it; its update (+0xd8) is the base one, called every frame. Both put the gold back on. */
+ * it; its update (+0xd8) is the base one, called every frame. Both put the nickname's back on. */
 static EventHandler original_member_event;
 static BehaviorUpdate original_member_update;
 
 static void ABI member_event(unsigned char *self, void *event, void *owner) {
     original_member_event(self, event, owner);
-    gold_name(pointer_at(self, 0x10), gold_allowed());
+    colored_name(pointer_at(self, 0x10), name_colors_allowed());
 }
 
 static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
     original_member_update(self, owner, dt);
-    gold_name(pointer_at(self, 0x10), gold_allowed());
+    colored_name(pointer_at(self, 0x10), name_colors_allowed());
 }
 
 static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {
     original_marker_update(self, owner, dt);
-    gold_name(pointer_at(self, 0x50), gold_allowed() && !self[0x88]); /* _playerTagPlaceable, _isBattle */
+    colored_name(pointer_at(self, 0x50), name_colors_allowed() && !self[0x88]); /* _playerTagPlaceable, _isBattle */
 }
 
 static void ABI results_item_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -2708,14 +2717,14 @@ static void ABI results_item_update(unsigned char *self, unsigned char *owner, f
         if (team_results_pending) refresh_team_results();
         team_ranking_row(self);
     }
-    gold_name(pointer_at(self, 0xa8), gold_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
+    colored_name(pointer_at(self, 0xa8), name_colors_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
 }
 
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
     if (runtime_private_party_update()) return;
     if (resume_private_map()) return; /* Loading may invalidate the old UI objects. */
     original_team_slot_update(self, owner, dt);
-    gold_name(pointer_at(self, 0x10), gold_allowed()); /* _namePlaceable */
+    colored_name(pointer_at(self, 0x10), name_colors_allowed()); /* _namePlaceable */
     refresh_lobby_members_visibility();
     if (!private_team_selector_allowed()) return;
     unsigned char *name = pointer_at(self, 0x10);
@@ -3422,7 +3431,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         !write_code(image + 0x2546018, &leader_tick, sizeof leader_tick)) return 0;
     const EventHandler ranking_replacement = ranking_row_event;
     if (!write_code(image + 0x25436c8, &ranking_replacement, sizeof ranking_replacement)) return 0;
-    /* The admin's gold name (above): the kart tags' and the results rows' own updates, each the
+    /* The nicknames' colors (above): the kart tags' and the results rows' own updates, each the
      * behavior's vtable +0xd8 like the slots' and leaders' (only when they are the game's). */
     unsigned char *marker_native = pointer_at(image, 0x2545950), *results_native = pointer_at(image, 0x25436d8);
     if (marker_native > image && marker_native < image + 0x2400000 &&
@@ -3432,7 +3441,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         const BehaviorUpdate marker_tick = marker_update, results_tick = results_item_update;
         if (!write_code(image + 0x2545950, &marker_tick, sizeof marker_tick) ||
             !write_code(image + 0x25436d8, &results_tick, sizeof results_tick)) return 0;
-        printf("Native Online: %s's name in gold (lobby, race, results)\n", admin_nick());
+        puts("Native Online: nicknames in color (lobby, race, results)");
     }
     /* the members rows' behavior: only when its slots hold the game's own functions */
     unsigned char *member_event_native = pointer_at(image, 0x2774d88), *member_update_native = pointer_at(image, 0x2774d98);
@@ -3443,7 +3452,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         const BehaviorUpdate member_tick = member_update;
         if (!write_code(image + 0x2774d88, &member_handler, sizeof member_handler) ||
             !write_code(image + 0x2774d98, &member_tick, sizeof member_tick)) return 0;
-        puts("Native Online: the lobby members list shows the admin's name in gold");
+        puts("Native Online: the lobby members list shows the nicknames' colors");
     }
     const NativeEvent results_replacement = race_results_received;
     if (!write_code(image + 0x254c430, &results_replacement, sizeof results_replacement)) return 0;

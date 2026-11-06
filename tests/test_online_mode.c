@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_name_colors.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/mman.h>
+
+int runtime_name_color(const char *nick, float rgb[3]) { (void)nick, (void)rgb; return 0; }
 
 static int compatibility_ready = 1;
 int runtime_private_party_check(void) { return compatibility_ready; }
