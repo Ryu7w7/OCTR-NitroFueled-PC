@@ -1824,10 +1824,17 @@ static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) 
     return 0;
 }
 #define TROPHY_ALREADY_UNLOCKED ((int32_t)0x8055160F)
+extern int runtime_replay_playing(void); /* runtime_replay_play.c */
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
     if (platinum) *platinum=-1;
     if (id<0 || id>=TROPHY_MAX) return TROPHY_INVALID;
+    /* A replay or a friend's race is played by the game as a race of this player: its trophy checks run on it. Not
+     * earned, and not kept as earned: the game does not read this answer (trophy wrapper, EU 0xb58210). */
+    if (runtime_replay_playing()) {
+        printf("Runtime: trophy %d not given: a replay is on\n",id);
+        return 0;
+    }
     pthread_mutex_lock(&trophy_lock);
     trophy_load();
     if (trophy_unlocked_at[id]) { pthread_mutex_unlock(&trophy_lock); return TROPHY_ALREADY_UNLOCKED; }
