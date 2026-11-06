@@ -1,5 +1,11 @@
 # Controllers
 
+Gamepad input stays active when the game window loses focus on Windows and Linux,
+including fullscreen, windowed, and borderless modes. SDL does not automatically
+minimize the fullscreen window on focus loss, so another application can receive
+keyboard input on a second monitor while the game remains playable with a controller.
+Keyboard and mouse input continue to follow window focus.
+
 - `BB_GAMEPAD=<part of the name or SDL GUID>`: the controller that starts active on port 1; while
   it is not connected the first gamepad is used and the choice is retried every second.
 - Inside the container SDL receives no hot-plug notifications (no udev). While the chosen
