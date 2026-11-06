@@ -676,6 +676,8 @@ void rr_race_dir(char *out, size_t size) { race_dir(out, size); }
 /* The world entity's id: another level's world has another one */
 uint32_t rr_world_id(void) { return AT(image, D_WORLD_ID, uint32_t); }
 
+int runtime_replay_local_finished(void) { return rr.recording && rr.end_local != 0.0f; }
+
 /* The level loaded now (its zone's name), 0 none */
 const char *rr_current_level(void) {
     void *zones = PTR(D_ZONE_SYSTEM);

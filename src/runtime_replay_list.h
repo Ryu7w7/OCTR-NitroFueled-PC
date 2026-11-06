@@ -30,6 +30,9 @@ int runtime_replay_play_file(const char *name);
 int runtime_replay_can_start(void);
 /* 1 while a replay is loading or playing. */
 int runtime_replay_playing(void);
+/* The chat stays out of a race: 1 with none on, or once this player finished it. */
+int runtime_replay_chat_allowed(void);
+int runtime_replay_local_finished(void);
 /* Managing the list. The shared folder: "replays" next to bbport.ini (made when missing), as a full path. */
 void runtime_replay_folder(char *out, size_t size);
 /* Copies a race of the list to the shared folder with a readable name (saved_as: that name). 1 = done. */

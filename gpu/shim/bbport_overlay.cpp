@@ -24,6 +24,7 @@
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_spectate.h"
+#include "../../src/runtime_chat.h"
 #include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
 #include "imgui.h"
@@ -427,6 +428,9 @@ void PollFriends() {
         privacy_sent = true;
         runtime_friends_set_hidden(s.friends_hide_me);
         runtime_spectate_set_share(s.spectate_share);
+        runtime_chat_set_enabled(s.chat_enabled);
+        runtime_chat_set_public(s.chat_public);
+        runtime_chat_start();
     }
     // The server administrators' messages: always shown, whatever the
     // friends options say.
@@ -522,16 +526,17 @@ void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
     static int reason = 0;
     static char comment[RF_REPORT_COMMENT] = "";
     static bool sent_here = false;
-    static const char* const reasons[] = {"cheating", "name", "behavior", "other"};
+    static const char* const reasons[] = {"cheating", "name", "chat", "behavior", "other"};
     MenuSection(BbSettings::MenuText("Report a player", "Пожаловаться на игрока"));
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
     ImGui::InputTextWithHint("##report_who", BbSettings::MenuText("Nickname", "Ник"), who, sizeof who);
     ImGui::SameLine();
     const char* labels[] = {BbSettings::MenuText("Cheating / hacks", "Читы / взлом"),
                             BbSettings::MenuText("Offensive name", "Оскорбительный ник"),
+                            BbSettings::MenuText("Offensive chat", "Оскорбления в чате"),
                             BbSettings::MenuText("Behavior", "Поведение"), BbSettings::MenuText("Other reason", "Другое")};
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
-    ImGui::Combo("##report_reason", &reason, labels, 4);
+    ImGui::Combo("##report_reason", &reason, labels, 5);
     ImGui::TextDisabled("%s", BbSettings::MenuText("Comment (optional): what happened, which track, when",
                                                    "Комментарий (необязательно): что случилось, трасса, когда"));
     ImGui::InputTextMultiline("##report_comment", comment, 301,
@@ -602,8 +607,175 @@ bool InOnlineRoom() {
     return runtime_net_ping_view(peers, PING_MAX_PEERS) > 0;
 }
 
+// The chat of a room (src/runtime_chat.c).
+std::atomic<bool> chat_typing{false}; // the keyboard is the chat's, with no menu open
+std::atomic<bool> chat_closing{false}; // it was, and the key that closed it may still be down
+bool chat_focus = false;
+char chat_input[RC_SEND] = "";
+RcLine chat_lines[RC_LINES];
+int chat_line_count = 0, chat_status = RC_STATUS_OK;
+unsigned chat_seen = 0;
+
+bool ChatShowing() {
+    return BbSettings::Get().chat_enabled && runtime_chat_available();
+}
+
+/// New lines since the last look; true when there are.
+bool ChatRefresh() {
+    if (const unsigned serial = runtime_chat_serial(); serial != chat_seen) {
+        chat_seen = runtime_chat_view(chat_lines, RC_LINES, &chat_line_count, &chat_status);
+        return true;
+    }
+    return false;
+}
+
+const char* ChatOwnName() {
+    const char* me = std::getenv("BB_ONLINE_NAME");
+    return me ? me : "";
+}
+
+void ChatLine(const RcLine& line) {
+    const bool mine = !SDL_strcasecmp(line.nick, ChatOwnName());
+    ImGui::TextColored(mine ? kFriendGreen : kMenuYellow, "%s:", line.nick);
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", line.text);
+}
+
+/// The lines over the lobby and the results, with no menu open. T writes (HandleEvent).
+void ChatBox() {
+    ChatRefresh();
+    constexpr int kShown = 6;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float em = ImGui::GetFontSize();
+    const bool typing = chat_typing;
+    ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : 0.40f);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
+    if (!typing) {
+        flags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav;
+    }
+    ImGui::Begin("##chat", nullptr, flags);
+    ImGui::PushTextWrapPos(em * 26.0f);
+    for (int i = std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
+        ChatLine(chat_lines[i]);
+    }
+    ImGui::PopTextWrapPos();
+    if (typing) {
+        if (chat_focus) {
+            ImGui::SetKeyboardFocusHere();
+            chat_focus = false;
+        }
+        ImGui::SetNextItemWidth(em * 26.0f);
+        const bool enter = ImGui::InputTextWithHint("##chat_input", BbSettings::MenuText("Write a message", "Введите сообщение"),
+                                                    chat_input, sizeof chat_input, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (enter && chat_input[0]) {
+                runtime_chat_send(chat_input);
+            }
+            chat_input[0] = '\0';
+            chat_typing = false;
+        }
+    } else {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("T: write   L3+R3 > Room", "T: написать   L3+R3 > Комната"));
+    }
+    ImGui::End();
+}
+
+/// In the Room tab: the same chat for a controller, muting and reporting.
+void ChatSection() {
+    auto& s = BbSettings::Get();
+    MenuSection(BbSettings::MenuText("Room chat", "Чат комнаты"));
+    bool on = s.chat_enabled;
+    if (ImGui::Checkbox(BbSettings::MenuText("Show the chat", "Показывать чат"), &on)) {
+        Store(s.chat_enabled, on, true);
+        runtime_chat_set_enabled(on);
+    }
+    if (!on) {
+        return;
+    }
+    bool open_rooms = s.chat_public;
+    if (ImGui::Checkbox(BbSettings::MenuText("Also in public lobbies", "Также в публичных лобби"), &open_rooms)) {
+        Store(s.chat_public, open_rooms, true);
+        runtime_chat_set_public(open_rooms);
+    }
+    if (!runtime_chat_available()) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race in private ones.",
+                                                       "Работает в комнатах: в лобби, а в приватных и после финиша."));
+        return;
+    }
+    const bool fresh = ChatRefresh();
+    const float em = ImGui::GetFontSize();
+    ImGui::BeginChild("##chat_log", ImVec2(em * 27.0f, ImGui::GetTextLineHeightWithSpacing() * 8.0f), ImGuiChildFlags_Borders);
+    for (int i = 0; i < chat_line_count; ++i) {
+        ChatLine(chat_lines[i]);
+    }
+    if (fresh) {
+        ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+    ImGui::SetNextItemWidth(em * 21.0f);
+    bool send = ImGui::InputTextWithHint("##chat_menu", BbSettings::MenuText("Write a message", "Введите сообщение"), chat_input,
+                                         sizeof chat_input, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (send) {
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+    ImGui::SameLine();
+    send |= ImGui::Button(BbSettings::MenuText("Send", "Отправить"));
+    if (send && chat_input[0]) {
+        runtime_chat_send(chat_input);
+        chat_input[0] = '\0';
+    }
+    if (chat_status != RC_STATUS_OK) {
+        const char* why =
+            chat_status == RC_STATUS_WAIT      ? BbSettings::MenuText("Too fast: wait a moment.", "Слишком быстро: подождите.")
+            : chat_status == RC_STATUS_REFUSED ? BbSettings::MenuText("The chat does not let you in this room right now.",
+                                                                      "Сейчас чат этой комнаты вам недоступен.")
+                                               : BbSettings::MenuText("The message could not be sent.", "Не удалось отправить сообщение.");
+        ImGui::TextColored(kMenuYellow, "%s", why);
+    }
+    ImGui::Spacing();
+    // Who can be muted or reported: the players of the room and who wrote.
+    std::vector<std::string> players;
+    const auto add = [&](const char* nick) {
+        if (nick[0] && SDL_strcasecmp(nick, ChatOwnName()) &&
+            std::find(players.begin(), players.end(), nick) == players.end()) {
+            players.emplace_back(nick);
+        }
+    };
+    PingPeer peers[PING_MAX_PEERS];
+    const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
+    for (int i = 0; i < count; ++i) {
+        add(peers[i].name);
+    }
+    for (int i = 0; i < chat_line_count; ++i) {
+        add(chat_lines[i].nick);
+    }
+    if (!players.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Players in the chat", "Игроки в чате"));
+    }
+    for (const std::string& nick : players) {
+        ImGui::PushID(nick.c_str());
+        ImGui::TextUnformatted(nick.c_str());
+        ImGui::SameLine(em * 11.0f);
+        const bool muted = runtime_chat_muted(nick.c_str());
+        if (ImGui::SmallButton(muted ? BbSettings::MenuText("Unmute", "Включить звук") : BbSettings::MenuText("Mute", "Заглушить"))) {
+            runtime_chat_mute(nick.c_str(), !muted);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(BbSettings::MenuText("Report", "Пожаловаться"))) {
+            std::snprintf(g_report_who, sizeof g_report_who, "%s", nick.c_str());
+            g_show_report_tab = true;
+        }
+        ImGui::PopID();
+    }
+    ImGui::Spacing();
+}
+
 void RoomTab() {
     auto& s = BbSettings::Get();
+    ChatSection();
     MenuSection(BbSettings::MenuText("Players in the room", "Игроки в комнате"));
     if (!InOnlineRoom()) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("You are not in an online room right now.",
@@ -2279,7 +2451,7 @@ void UpdateTextInput(SDL_Window* window) {
     bool want = false;
     {
         std::scoped_lock lock{imgui_mutex};
-        want = initialized && menu_open && ImGui::GetIO().WantTextInput;
+        want = initialized && (menu_open || chat_typing) && ImGui::GetIO().WantTextInput;
     }
     if (want != SDL_TextInputActive(window)) {
         if (want) {
@@ -2297,6 +2469,7 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open || ultrawide_prompt;
+    const bool typing = chat_typing;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -2306,7 +2479,17 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
-        if (!is_open) {
+        if (down && !event.key.repeat && !is_open && !typing && event.key.key == SDLK_T && ChatShowing()) {
+            chat_typing = true;
+            chat_focus = true;
+            return true;
+        }
+        if (!is_open && !typing) {
+            // The Enter or Esc that closed the chat comes up after it: ImGui must see that, or it
+            // keeps the key down and its repeat closes the chat the next time it opens.
+            if (const ImGuiKey key = KeyFromSdl(event.key.key); !down && key != ImGuiKey_None) {
+                io.AddKeyEvent(key, false);
+            }
             return false;
         }
         io.AddKeyEvent(ImGuiMod_Ctrl, (event.key.mod & SDL_KMOD_CTRL) != 0);
@@ -2341,7 +2524,7 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_TEXT_INPUT: {
         // Typed characters (Ctrl+click on a slider, a text field): key events alone erase but
         // do not type. SDL sends them while text input is on (UpdateTextInput).
-        if (!is_open) {
+        if (!is_open && !typing) {
             return false;
         }
         io.AddInputCharactersUTF8(event.text.text);
@@ -2397,7 +2580,7 @@ bool Visible() {
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
-                           runtime_spectate_viewers() > 0 || ReplayResultsShowing());
+                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -2442,9 +2625,27 @@ void SetPadStatus(int port, const std::string& name, bool pressing) {
     pad_status[port].pressing = pressing;
 }
 
+/// The game reads the keyboard's state itself (runtime_pad.c): what is typed in the chat must not
+/// move its menus, nor the Enter or Esc that closed it, still down, accept or leave the room.
+bool ChatHoldsKeyboard() {
+    if (chat_typing) {
+        chat_closing = true;
+        return true;
+    }
+    if (!chat_closing) {
+        return false;
+    }
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    if (keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER] || keys[SDL_SCANCODE_ESCAPE])) {
+        return true;
+    }
+    chat_closing = false;
+    return false;
+}
+
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active || ultrawide_prompt;
+    return menu_open || prompt_active || ultrawide_prompt || ChatHoldsKeyboard();
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -2489,6 +2690,12 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
         ReplayResults(replay);
+    }
+    if (menu_open || !ChatShowing()) {
+        chat_typing = false; // the race started, or the menu took the keyboard
+    }
+    if (!menu_open && ChatShowing()) {
+        ChatBox();
     }
     if (prompt_active && !menu_open) {
         TextPrompt();

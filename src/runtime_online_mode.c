@@ -2034,7 +2034,27 @@ static int resume_private_map(void) {
     return !pending_private_map[0];
 }
 
+/* The lobby's screen is on: its behaviour updated just now. The level's name cannot say it: outside the online mode too,
+ * a race that is left comes back to octane_onlinelobby, the menus' backdrop. */
+static uint64_t gold_now_ms(void);
+static uint64_t lobby_updated_ms;
+
+/* runtime_online_mode_in_private reads the game's entities, on the game's thread only */
+static int room_on, public_on;
+void runtime_online_mode_note_frame(void) {
+    __atomic_store_n(&room_on, runtime_online_mode_in_private(), __ATOMIC_RELAXED);
+    __atomic_store_n(&public_on, runtime_public_match_active() && runtime_online_mode_lobby_open(), __ATOMIC_RELAXED);
+}
+int runtime_online_mode_room_on(void) { return __atomic_load_n(&room_on, __ATOMIC_RELAXED); }
+int runtime_online_mode_public_on(void) { return __atomic_load_n(&public_on, __ATOMIC_RELAXED); }
+
+int runtime_online_mode_lobby_open(void) {
+    const uint64_t at = __atomic_load_n(&lobby_updated_ms, __ATOMIC_RELAXED);
+    return at && gold_now_ms() - at < 1000;
+}
+
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
+    __atomic_store_n(&lobby_updated_ms, gold_now_ms(), __ATOMIC_RELAXED);
     original_lobby_update(self, owner, dt);
     refresh_lobby_card(owner);
     runtime_public_itemless_update();

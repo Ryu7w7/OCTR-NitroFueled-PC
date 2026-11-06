@@ -76,6 +76,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.friends_no_notices = i != 0;
     } else if (key == "spectate_share") {
         v.spectate_share = i != 0;
+    } else if (key == "chat_enabled") {
+        v.chat_enabled = i != 0;
+    } else if (key == "chat_public") {
+        v.chat_public = i != 0;
     } else if (key == "notice_position") {
         v.notice_position = std::clamp(i, 0, int(NoticeCount) - 1);
     } else if (key == "fps_limit") {
@@ -426,6 +430,8 @@ void Save() {
     put("friends_hide_me", flag(v.friends_hide_me));
     put("friends_no_notices", flag(v.friends_no_notices));
     put("spectate_share", flag(v.spectate_share));
+    put("chat_enabled", flag(v.chat_enabled));
+    put("chat_public", flag(v.chat_public));
     put("notice_position", std::to_string(v.notice_position.load()));
     put("fps_limit", std::to_string(v.fps_limit.load()));
     put("async_pipelines", flag(v.async_pipelines));
