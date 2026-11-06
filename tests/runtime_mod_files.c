@@ -2,6 +2,7 @@
 #include "../src/runtime_file.c"
 #include <assert.h>
 void runtime_cinematic_video(int delta) { (void)delta; }
+int runtime_replay_no_crates(void) { return 0; }
 static int private_room, private_match, public_room;
 int runtime_public_itemless_active(void) { return public_room; }
 int runtime_private_room_active(void) { return private_room; }

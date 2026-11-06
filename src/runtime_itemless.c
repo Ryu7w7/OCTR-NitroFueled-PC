@@ -20,9 +20,10 @@ static _Thread_local void *contact_owner;
 typedef unsigned char (ABI *LayerFilter)(void *, const char *, int);
 static LayerFilter native_layer_filter;
 
-/* Only asset/spawn decisions see Time Trial; the multiplayer race mode stays intact. */
+/* Only asset/spawn decisions see Time Trial; the multiplayer race mode stays intact. A replay of a race
+ * without crates (Time Trial, Itemless) loads the track as that race did. */
 static int ABI track_mode(int mode) {
-    return (mode == 1 || mode == 6) && runtime_speed_race_active() ? 2 : mode;
+    return (mode == 1 || mode == 6) && (runtime_speed_race_active() || runtime_replay_no_crates()) ? 2 : mode;
 }
 
 static unsigned char ABI layer_filter(void *rule, const char *name, int mode) {
