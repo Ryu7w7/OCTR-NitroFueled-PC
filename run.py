@@ -678,6 +678,34 @@ def keep_corrupt_free_log():
         say(f'A corrupt memory block was caught: the log is kept in {kept.name}')
 
 
+def cloud_sync_game(env, config, progress, title_id, after):
+    """The account's trophies (before and after the game) and save (after) on the server
+    (scripts/cloud_sync.py). Online only, with a signed key; bbport.ini cloud_sync=0 turns it off.
+    Never stops anything."""
+    host, port = env.get('BB_ONLINE_SERVER'), env.get('BB_ONLINE_HTTP_PORT', '8080')
+    khash, name = env.get('BB_ONLINE_KEYHASH'), env.get('BB_ONLINE_NAME')
+    if env.get('BB_ONLINE') != '1' or not (host and khash and name) or title_id not in ('CUSA13795', 'CUSA14876'):
+        return
+    if ini_has(config, 'cloud_sync=0'):
+        return
+
+    def call(method, target, body=None, timeout=10):
+        answer, _ = ryunet_json(host, port, target, timeout, method=method, body=body,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+        return answer
+
+    import cloud_sync
+    try:
+        cloud_sync.sync_trophies(call, name, progress, title_id, say=say)
+    except (OSError, ValueError) as error:
+        say(f'Trophies: not synced with the server ({error})')
+    if after:
+        try:
+            cloud_sync.upload_save(call, name, progress, title_id, say=say)
+        except (OSError, ValueError) as error:
+            say(f'Cloud save: not uploaded ({error})')
+
+
 def finish_perf_report(env, config, data, version, title_id, code):
     """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
     RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
@@ -1076,6 +1104,8 @@ def launch(args, restarted=False):
                    '--content-profile', str(out / 'content.bin'), '--patches', str(out / 'patches.bin'),
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
+        progress_dir = Path(env.get('BB_PROGRESS_DIR') or user_dir)
+        startup_call('online.cloud_sync', cloud_sync_game, env, config, progress_dir, title_id, False)
         first = True
         range_tries = start_tries = 0
         global PERF
@@ -1163,6 +1193,7 @@ def launch(args, restarted=False):
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
                 finish_perf_report(env, config, data, version, title_id, code)
+                cloud_sync_game(env, config, progress_dir, title_id, True)
                 if code == RANGE_TAKEN_CODE:
                     say('--- Another program keeps taking the memory the game needs (see the "Module from '
                         'outside" lines above): close overlays and tuning tools, and exclude the game folder '

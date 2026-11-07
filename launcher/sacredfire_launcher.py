@@ -2603,7 +2603,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         total = len(t.trophies)
         points = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies)
         earned = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies if x["unlocked"])
-        progress = earned / points if points else (unlocked / total if total else 0.0)
+        # By grade points only when every trophy has its grade: OCTR's own graded trophy among the
+        # game's unknown ones made the progress that one trophy's alone (0 % with 20 of 49).
+        graded = all(trophies.POINTS.get(x["grade"], 0) for x in t.trophies)
+        progress = earned / points if graded and points else (unlocked / total if total else 0.0)
         group = Adw.PreferencesGroup()
         card = Gtk.Box(spacing=16)
         card.add_css_class("card")
