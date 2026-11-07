@@ -667,6 +667,17 @@ def setup_online(env, config, data):
         say(f'Item rules from the server: {items.get("name") or "custom"}')
 
 
+def keep_corrupt_free_log():
+    """The game goes on past a corrupt free (probe.c) and the next start writes over this log, the
+    only record of what the block held: a copy stays beside it, the last one."""
+    if LOG and PERF.corrupt_free:
+        LOG.flush()
+        log = Path(LOG.name)
+        kept = log.with_name(f'{log.stem}_corrupt_free.log')
+        shutil.copyfile(log, kept)
+        say(f'A corrupt memory block was caught: the log is kept in {kept.name}')
+
+
 def finish_perf_report(env, config, data, version, title_id, code):
     """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
     RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
@@ -674,6 +685,7 @@ def finish_perf_report(env, config, data, version, title_id, code):
     if not PERF:
         return
     try:
+        keep_corrupt_free_log()
         report = PERF.report({
             'octr': version[:40],
             'edition': title_id,

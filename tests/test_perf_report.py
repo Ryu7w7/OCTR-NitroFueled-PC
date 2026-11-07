@@ -112,6 +112,20 @@ class PerfReportTests(unittest.TestCase):
         self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
         self.assertNotIn('fault', self.collector().report({}))
 
+    def test_a_corrupt_free_the_game_survived_is_reported(self):
+        c = perf_report.Collector()
+        c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 000000106d171ef8, '
+               'r8=000000106d171ee8, pool=000000106cf73e10)\n')
+        self.assertTrue(c.corrupt_free)
+        self.assertEqual(c.fault, {'kind': 'corrupt free', 'where': 'guest offset 0x1590e5d'})
+
+    def test_a_crash_after_a_corrupt_free_is_the_one_reported(self):
+        c = perf_report.Collector()
+        c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 1, r8=2, pool=3)\n')
+        c.feed('Fault: read access to 0000000000000010 at guest offset 0x123456 (thread 7)\n')
+        self.assertTrue(c.corrupt_free)
+        self.assertEqual(c.fault['kind'], 'read access')
+
     def test_mods_in_use(self):
         with tempfile.TemporaryDirectory() as folder:
             mods = Path(folder) / 'mods'
