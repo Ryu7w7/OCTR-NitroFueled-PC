@@ -30,7 +30,7 @@ KEEP = 10
 SETTINGS = ('render_res', 'output_res', 'upscaler', 'temporal', 'fps_limit', 'present_mode', 'preset',
             'msaa', 'live_resolution', 'aspect_ratio', 'aspect_output', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
             'patch_60fps', 'patch_no_motion_blur', 'patch_pro_1080p', 'async_pipelines', 'model_lod')
-EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 75: 'restart'}
+EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 25: 'address_range_taken', 75: 'restart'}
 
 _PERF = re.compile(r'^Perf: frames (\d+) ms ([\d.]+) worst ([\d.]+) long (\d+) h ([\d,]+)\s*$')
 _LEVEL = re.compile(r"LOADING LEVEL: '([^']+)'")

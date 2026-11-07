@@ -3703,13 +3703,15 @@ void NatTypeSection(const std::string& server) {
     if (result.replies_blocked || result.error == "server") {
         ImGui::PushStyleColor(ImGuiCol_Text, kRed);
         ImGui::TextWrapped("%s", T("Tu red bloquea las respuestas del servidor (UDP 3074): el juego dirá \"Failed to initialize "
-                                   "network\" al entrar en Online. Permite sacredfire.exe en el Firewall de Windows (redes "
-                                   "privadas y públicas), revisa la protección de red del antivirus, reinicia el router o "
-                                   "prueba otra red (los datos del móvil).",
+                                   "network\" al entrar en Online. Permite el launcher y sacredfire.exe en el Firewall de "
+                                   "Windows (redes privadas y públicas), revisa la protección de red del antivirus y las VPN, "
+                                   "reinicia el router o prueba otra red (los datos del móvil). No hace falta abrir puertos "
+                                   "en el router.",
                                    "Your network blocks the server's replies (UDP 3074): the game will say \"Failed to "
-                                   "initialize network\" when you enter Online. Allow sacredfire.exe in Windows Firewall "
-                                   "(private and public networks), check your antivirus' network protection, restart your "
-                                   "router or try another network (a phone hotspot)."));
+                                   "initialize network\" when you enter Online. Allow the launcher and sacredfire.exe in "
+                                   "Windows Firewall (private and public networks), check your antivirus' network protection "
+                                   "and any VPN, restart your router or try another network (a phone hotspot). You don't need "
+                                   "to forward ports on your router."));
         ImGui::PopStyleColor();
     }
 }
