@@ -297,6 +297,17 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
+static long allocators_shift(void) {
+    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
+    static long shift = -2;
+    if (shift == -2) {
+        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
+              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
+    }
+    return shift;
+}
+
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -409,15 +420,23 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
-        /* TLSF free() coalescing unlink */
-        if (image && ((c->Rip >= (uintptr_t)image + 0x1590f46 && c->Rip <= (uintptr_t)image + 0x1590f70) ||
-                      (c->Rip >= (uintptr_t)image + 0x159101b && c->Rip <= (uintptr_t)image + 0x1591040))) {
-            static int count = 0;
-            if (!count) fprintf(stderr, "Runtime: bailing corrupt TLSF free (rip=%p, next=%p, prev=%p, pool=%p)\n",
-                (void *)c->Rip, (void *)c->Rcx, (void *)c->Rbx, (void *)c->Rdi);
-            ++count;
-            c->Rip = (uintptr_t)image + 0x1590eea;
-            return EXCEPTION_CONTINUE_EXECUTION;
+        /* A corrupt block given to the game's allocators: it stays allocated and the game goes on,
+         * where the free would have ended it. v0.8.2 meets these online, in the menus after a race:
+         * the block's size is gone before it is freed (guest offset 0x1590e5d, 0x14af64c). */
+        const long shift = image ? allocators_shift() : -1;
+        if (shift >= 0) {
+            const uintptr_t at = c->Rip - (uintptr_t)image + (uintptr_t)shift;
+            const int tlsf = (at >= 0x1590e1e && at <= 0x1590e65) || (at >= 0x1590f46 && at <= 0x1590f70) ||
+                             (at >= 0x159101b && at <= 0x1591040);
+            const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
+            if (tlsf || wrapper) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bailing corrupt free at guest offset 0x%llx (block %p, r8=%p, pool=%p)\n",
+                    (unsigned long long)(c->Rip - (uintptr_t)image), (void *)(wrapper ? c->R15 : c->Rsi), (void *)c->R8, (void *)c->Rdi);
+                ++count;
+                c->Rip = (uintptr_t)image + (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
         if (image && c->Rip==(uintptr_t)image+0x40e5f9) {
             static int count=0;
