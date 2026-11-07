@@ -319,5 +319,11 @@
  "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "游戏在菜单和提示中显示的按键。Xbox：A、B、X、Y、LB、RB、LT、RT 和 View。按“开始游戏”时生效。",
  "Ping counter in the corner": "角落显示延迟",
  "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "在线房间中，在 FPS 计数器下方显示每位玩家的延迟（毫秒）。也可在游戏内菜单（Insert 或 L3+R3）的“房间”标签中查看。",
- "Modding Discord (help making mods)": "MOD 制作 Discord（制作 MOD 的帮助）"
+ "Modding Discord (help making mods)": "MOD 制作 Discord（制作 MOD 的帮助）",
+ "Configure mod": "配置模组",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "保存配置前请关闭游戏。更改将在下次启动游戏时应用。",
+ "Advanced settings": "高级设置",
+ "Reset to defaults": "恢复默认设置",
+ "Saving...": "正在保存...",
+ "Mod options saved. Applied when you start the game.": "模组设置已保存，将在启动游戏时应用。"
 }
