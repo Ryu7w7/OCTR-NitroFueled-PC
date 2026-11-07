@@ -19,6 +19,7 @@
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -175,11 +176,45 @@ static void region_insert(size_t at, HostRegion r) {
 static void region_erase(size_t at, size_t n) {
     memmove(regions+at,regions+at+n,(region_count-at-n)*sizeof(*regions)); region_count-=n;
 }
-/* The guest range is reserved before anything else can be placed there (runtime_start). */
+/* For the log when the range cannot be had: what sits in it, and the modules in this process
+ * that neither Windows nor the game brought (an antivirus, an overlay). */
+static void report_range_users(void) {
+    const HANDLE self=GetCurrentProcess();
+    int shown=0;
+    for (uintptr_t at=USER_MIN; at<USER_MAX && shown<8;) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void *)at,&m,sizeof(m))) break;
+        if (m.State!=MEM_FREE) {
+            char name[MAX_PATH]="";
+            if (m.Type!=MEM_PRIVATE) K32GetMappedFileNameA(self,m.BaseAddress,name,sizeof name);
+            fprintf(stderr,"  In use: %p +0x%zx %s\n",m.BaseAddress,(size_t)m.RegionSize,name[0] ? name : "(private memory)");
+            ++shown;
+        }
+        at=(uintptr_t)m.BaseAddress+m.RegionSize;
+    }
+    static HMODULE modules[512];
+    char windows[MAX_PATH]="", game[MAX_PATH]="", path[MAX_PATH];
+    DWORD bytes=0;
+    const UINT windows_length=GetWindowsDirectoryA(windows,sizeof windows);
+    GetModuleFileNameA(NULL,game,sizeof game);
+    char *slash=strrchr(game,'\\');
+    if (slash) *slash=0;
+    if (!K32EnumProcessModules(self,modules,sizeof modules,&bytes)) return;
+    for (DWORD i=0; i<bytes/sizeof(modules[0]) && i<sizeof modules/sizeof(modules[0]); ++i)
+        if (GetModuleFileNameA(modules[i],path,sizeof path) && _strnicmp(path,windows,windows_length) && _strnicmp(path,game,strlen(game)))
+            fprintf(stderr,"  Module from outside: %s\n",path);
+}
+
+/* The guest range is reserved before anything else can be placed there (runtime_start). What gets
+ * there first arrives with the process, somewhere else each start: run.py tries again on this code. */
+#define RANGE_TAKEN_EXIT 25
 void runtime_memory_reserve(void) {
     if (region_count) return;
-    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
-        win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
+    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) {
+        fprintf(stderr,"STOP: something else already uses the PS4 address range (error %lu)\n",GetLastError());
+        report_range_users();
+        exit(RANGE_TAKEN_EXIT);
+    }
     region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
 }
 static void view_map(const HostRegion *r, DWORD protect) {

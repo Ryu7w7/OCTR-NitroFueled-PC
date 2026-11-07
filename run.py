@@ -33,6 +33,8 @@ PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
 APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
+RANGE_TAKEN_CODE = 25  # a program took part of the PS4 address range, a different place each start
+RANGE_TAKEN_TRIES = 8
 UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
 
 sys.path.insert(0, str(PORT / 'scripts'))
@@ -160,6 +162,12 @@ def run_python(script, *args, capture=False, check=True):
     if check and result.returncode:
         sys.exit(result.returncode)
     return result if capture else None
+
+
+def retry_taken_range(code, tries):
+    """Whether to start the game again because the PS4 address range was taken: it fails in an
+    instant, before the window opens, and the next start usually finds the range free."""
+    return code == RANGE_TAKEN_CODE and tries < RANGE_TAKEN_TRIES
 
 
 def find_executable(name):
@@ -1048,6 +1056,7 @@ def launch(args, restarted=False):
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
+        range_tries = 0
         global PERF
         PERF = perf_report.Collector()
         while True:
@@ -1117,9 +1126,18 @@ def launch(args, restarted=False):
                 env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
                 continue
+            if retry_taken_range(code, range_tries):
+                range_tries += 1
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
+                    f'(the memory the game needs was taken: try {range_tries + 1} of {RANGE_TAKEN_TRIES + 1})')
+                continue
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
                 finish_perf_report(env, config, data, version, title_id, code)
+                if code == RANGE_TAKEN_CODE:
+                    say('--- Another program keeps taking the memory the game needs (see the "Module from '
+                        'outside" lines above): close overlays and tuning tools, and exclude the game folder '
+                        'from your antivirus.')
                 if code == UNSUPPORTED_GPU_CODE:
                     say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
                         'sparse buffers; the STOP line above says which). Update the graphics driver; if it '
