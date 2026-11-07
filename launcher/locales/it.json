@@ -317,5 +317,11 @@
  "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. Applies when you press Play.": "I pulsanti che il gioco mostra nei menu e negli avvisi. Xbox: A, B, X, Y, LB, RB, LT, RT e View. Si applica premendo Gioca.",
  "Ping counter in the corner": "Contatore del ping nell'angolo",
  "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu (Insert or L3+R3), Room tab.": "In una stanza online, il ping di ogni giocatore in ms, sotto il contatore degli FPS. Anche nel menu del gioco (Insert o L3+R3), scheda Stanza.",
- "Modding Discord (help making mods)": "Discord di modding (aiuto per creare mod)"
+ "Modding Discord (help making mods)": "Discord di modding (aiuto per creare mod)",
+ "Configure mod": "Configura mod",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "Chiudi il gioco prima di salvare la configurazione. Le modifiche verranno applicate al prossimo avvio del gioco.",
+ "Advanced settings": "Impostazioni avanzate",
+ "Reset to defaults": "Ripristina valori predefiniti",
+ "Saving...": "Salvataggio...",
+ "Mod options saved. Applied when you start the game.": "Opzioni della mod salvate. Verranno applicate all’avvio del gioco."
 }
