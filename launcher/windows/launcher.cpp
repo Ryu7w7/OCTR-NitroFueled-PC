@@ -1977,11 +1977,13 @@ void PollAnnouncement() {
 
 /// Called every frame: picks up finished background work.
 void ApplyRecoveredNick();
+void ApplyAccountNick();
 
 void PollJobs() {
     App& a = g_app;
     UpdateDiscord();
     ApplyRecoveredNick();
+    ApplyAccountNick();
     PollAnnouncement();
     DiscordPresence::SetAcceptJoinRequests(a.launcher.Flag("discord_accept_requests", true));
     for (std::string secret; DiscordPresence::TakeJoin(secret);) OnDiscordJoin(secret);
@@ -3716,6 +3718,267 @@ void NatTypeSection(const std::string& server) {
     }
 }
 
+// ---- The account (the server's account_device.go; the site's /cuenta) ----
+// "Log in / Create account" opens the site with a code: the player logs in there with Discord (or
+// creates the account: nickname and password) and authorizes this PC; the launcher asks the server
+// every few seconds until the answer names the nickname. The installation's key never leaves the
+// launcher: the code names a request only this installation can collect. "Log in with nickname and
+// password" sends them to the server by HTTPS only, and the server adds this installation's key
+// to the account the same way.
+struct AccountLoginState {
+    std::mutex mutex;
+    bool busy = false, error = false, cancel = false;
+    std::string code, message;
+    std::string nick;  // the account's nickname, for the UI thread to put in place (ApplyAccountNick)
+};
+AccountLoginState g_account;
+
+void AccountResult(bool error, const std::string& message, const std::string& nick = {}) {
+    std::scoped_lock lock{g_account.mutex};
+    g_account.busy = false;
+    g_account.error = error;
+    g_account.message = message;
+    g_account.code.clear();
+    if (!nick.empty()) g_account.nick = nick;
+}
+
+void StartWebLogin() {
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    {
+        std::scoped_lock lock{g_account.mutex};
+        if (g_account.busy) return;
+        g_account.busy = true;
+        g_account.cancel = false;
+        g_account.error = false;
+        g_account.message.clear();
+        g_account.code.clear();
+    }
+    std::thread([server] {
+        const std::string started = HttpRequest(server, L"POST", L"/ryunet/device/start", {}, 10000, true);
+        const std::string code = JsonField(started, "code"), url = JsonField(started, "url");
+        if (code.empty() || url.rfind("http", 0) != 0) {
+            const std::string why = JsonField(started, "error");
+            AccountResult(true, started.empty() ? T("No se pudo contactar con el servidor.", "Could not reach the server.")
+                                : why.rfind("banned", 0) == 0 ? T("Este PC no puede iniciar sesión en este servidor.",
+                                                                 "This PC cannot log in on this server.")
+                                                              : T("Este servidor todavía no tiene cuentas: usa el apodo a mano (abajo).",
+                                                                  "This server has no accounts yet: type the nickname by hand (below)."));
+            return;
+        }
+        {
+            std::scoped_lock lock{g_account.mutex};
+            g_account.code = code;
+        }
+        OpenInShell(fs::path(Widen(url)));
+        const std::wstring poll = L"/ryunet/device/poll?code=" + Widen(code);
+        for (int i = 0; i < 200; ++i) {  // 10 minutes, as long as the code lives
+            for (int t = 0; t < 30; ++t) {
+                Sleep(100);
+                std::scoped_lock lock{g_account.mutex};
+                if (g_account.cancel) {
+                    g_account.busy = false;
+                    g_account.code.clear();
+                    return;
+                }
+            }
+            const std::string answer = HttpRequest(server, L"POST", poll, {}, 10000, true);
+            const std::string status = JsonField(answer, "status");
+            if (status == "approved") {
+                const std::string nick = JsonField(answer, "nick");
+                AccountResult(false, Format(T("Listo: este PC juega como %s.", "Done: this PC plays as %s."), nick), nick);
+                std::scoped_lock lock{g_nick_check.mutex};
+                g_nick_check.results.clear();
+                return;
+            }
+            if (status == "expired") break;
+        }
+        AccountResult(true, T("El código venció: pulsa Iniciar sesión otra vez.", "The code expired: press Log in again."));
+    }).detach();
+}
+
+/// POST of a JSON body to the server's HTTPS (443, its nginx), signed with this installation's key.
+std::string HttpsPostJson(const std::string& host, const std::wstring& path, const std::string& json) {
+    std::string body;
+    const std::string key_hash = ServerKeyHash(host);
+    HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return body;
+    WinHttpSetTimeouts(session, 10000, 10000, 10000, 15000);
+    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                         : nullptr;
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    const std::string proof = ProofHeader(key_hash, "POST", Narrow(path));
+    if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\nX-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
+    if (req && WinHttpSendRequest(req, headers.c_str(), DWORD(-1), const_cast<char*>(json.data()), DWORD(json.size()),
+                                  DWORD(json.size()), 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+        NoteServerClock(req);
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
+            std::string chunk(avail, '\0');
+            DWORD got = 0;
+            if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;
+            body.append(chunk.data(), got);
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (conn) WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    return body;
+}
+
+std::string JsonEscape(const std::string& s) {
+    std::string out;
+    for (const char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        if (static_cast<unsigned char>(c) < 0x20) continue;
+        out += c;
+    }
+    return out;
+}
+
+void StartPasswordLogin(const std::string& nick, const std::string& password) {
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+    {
+        std::scoped_lock lock{g_account.mutex};
+        if (g_account.busy) return;
+        g_account.busy = true;
+        g_account.error = false;
+        g_account.message.clear();
+    }
+    std::thread([host, nick, password] {
+        if (host.find_first_not_of("0123456789.") == std::string::npos) {
+            AccountResult(true, T("La contraseña solo viaja por HTTPS, que necesita el nombre del servidor (no su IP): "
+                                  "usa Iniciar sesión / Crear cuenta.",
+                                  "The password only travels by HTTPS, which needs the server's name (not its IP): use "
+                                  "Log in / Create account."));
+            return;
+        }
+        const std::string body = HttpsPostJson(host, L"/ryunet/account/login",
+                                               "{\"nick\":\"" + JsonEscape(nick) + "\",\"password\":\"" + JsonEscape(password) + "\"}");
+        const std::string status = JsonField(body, "status"), error = JsonField(body, "error");
+        if (status == "ok") {
+            const std::string account = JsonField(body, "nick");
+            AccountResult(false, Format(T("Listo: este PC juega como %s.", "Done: this PC plays as %s."), account), account);
+            std::scoped_lock lock{g_nick_check.mutex};
+            g_nick_check.results.clear();
+            return;
+        }
+        AccountResult(true, error == "wrong"      ? T("Apodo o contraseña incorrectos.", "Wrong nickname or password.")
+                            : error == "too_many" ? T("Demasiados intentos: espera 15 minutos.", "Too many attempts: wait 15 minutes.")
+                            : error.rfind("banned", 0) == 0 || error == "banned"
+                                ? T("Este PC no puede iniciar sesión en este servidor.", "This PC cannot log in on this server.")
+                            : body.empty() ? T("No se pudo contactar con el servidor por HTTPS.", "Could not reach the server by HTTPS.")
+                                           : T("El servidor no aceptó el inicio de sesión.", "The server did not accept the login."));
+    }).detach();
+}
+
+/// The account's nickname, put in place by the UI thread (PollJobs).
+void ApplyAccountNick() {
+    App& a = g_app;
+    std::string nick;
+    {
+        std::scoped_lock lock{g_account.mutex};
+        nick.swap(g_account.nick);
+    }
+    if (nick.empty() || NickProblem(nick)) return;
+    std::snprintf(a.online_name_buf, sizeof a.online_name_buf, "%s", nick.c_str());
+    a.game.Set("online_name", a.online_name_buf);
+    a.game.Set("user_name", a.online_name_buf);
+    SaveGameIni();
+}
+
+/// The Player section's top: who this PC plays as, or Log in / Create account.
+void AccountSection() {
+    App& a = g_app;
+    const NickCheck::Result info = NickInfo();
+    bool busy, error;
+    std::string message, code;
+    {
+        std::scoped_lock lock{g_account.mutex};
+        busy = g_account.busy;
+        error = g_account.error;
+        message = g_account.message;
+        code = g_account.code;
+    }
+    const std::string nick = CurrentNick();
+    const bool signed_in = !NickProblem(nick) && info.status == "yours";
+    if (signed_in) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada: %s", "Logged in: %s"), nick).c_str());
+        ImGui::SameLine();
+        static ULONGLONG out_armed = 0;
+        const bool armed = out_armed && GetTickCount64() - out_armed < 5000;
+        if (ImGui::SmallButton(armed ? T("Pulsa otra vez para cerrar sesión", "Press again to log out") : T("Cerrar sesión", "Log out"))) {
+            if (armed) {
+                out_armed = 0;
+                a.online_name_buf[0] = '\0';
+                a.game.Set("online_name", "");
+                SaveGameIni();
+            } else {
+                out_armed = GetTickCount64();
+            }
+        }
+        if (!armed && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", T("Este PC deja de jugar con tu cuenta hasta que vuelvas a iniciar sesión. Tu cuenta, "
+                                      "monedas y logros siguen en el servidor.",
+                                      "This PC stops playing with your account until you log in again. Your account, "
+                                      "coins and trophies stay on the server."));
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Mi cuenta en la web", "My account on the web"))) {
+            std::string host;
+            INTERNET_PORT port = 0;
+            SplitServer(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+            // The test servers (an address) serve the site on :8094 over HTTP; a named one by HTTPS.
+            const bool address = host.find_first_not_of("0123456789.") == std::string::npos;
+            OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
+        }
+    } else {
+        ImGui::TextWrapped("%s", T("Inicia sesión con tu cuenta, o créala en la web: se vincula a tu Discord y lleva una "
+                                   "contraseña por si pierdes Discord. Tu apodo, monedas, amigos, logros y partidas guardadas "
+                                   "te siguen a cualquier PC.",
+                                   "Log in with your account, or create it on the web: it is linked to your Discord and has a "
+                                   "password in case you lose Discord. Your nickname, coins, friends, trophies and saves "
+                                   "follow you to any PC."));
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button(T("Iniciar sesión / Crear cuenta", "Log in / Create account"))) StartWebLogin();
+        ImGui::EndDisabled();
+        if (busy && !code.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(T("Cancelar", "Cancel"))) {
+                std::scoped_lock lock{g_account.mutex};
+                g_account.cancel = true;
+            }
+            ImGui::TextColored(kGrey, "%s", Format(T("Se abrió la web: entra y autoriza este PC (código %s)...",
+                                                     "The web opened: log in and authorize this PC (code %s)..."),
+                                                   code).c_str());
+        }
+        static char login_nick[24] = "", login_password[132] = "";
+        if (ImGui::TreeNode(T("Entrar con apodo y contraseña", "Log in with nickname and password"))) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            ImGui::InputText(T("Apodo##login", "Nickname##login"), login_nick, sizeof login_nick);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            ImGui::InputText(T("Contraseña##login", "Password##login"), login_password, sizeof login_password,
+                             ImGuiInputTextFlags_Password);
+            ImGui::BeginDisabled(busy || !login_nick[0] || !login_password[0]);
+            if (ImGui::Button(T("Entrar", "Log in"))) {
+                StartPasswordLogin(Trim(login_nick), login_password);
+                std::memset(login_password, 0, sizeof login_password);
+            }
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+    }
+    if (!message.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(error ? kYellow : kGreen, "%s", message.c_str());
+        ImGui::PopTextWrapPos();
+    }
+}
+
 void OnlineTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
@@ -3766,30 +4029,38 @@ void OnlineTab() {
     {
         ImGui::BeginDisabled(!a.game.Flag("online", true));
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        // A nickname linked to this player's Discord account is their identity: it is changed by
-        // unlinking it first (DiscordAccountSection), not by typing over it.
-        const NickCheck::Result nick_info = NickInfo();
-        const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
-        ImGui::BeginDisabled(nick_locked);
-        NickInput(T("Apodo (Nickname)", "Nickname"));
-        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
-        ImGui::EndDisabled();
-        HelpMarker(nick_locked
-                       ? T("Este apodo está vinculado a tu cuenta de Discord y queda fijo. Para cambiarlo, pulsa "
-                           "Desvincular abajo.",
-                           "This nickname is linked to your Discord account and stays fixed. To change it, press "
-                           "Unlink below.")
-                       : T("Tu nombre en el online, obligatorio: de 3 a 16 letras, números, _ o -. Cada apodo es una cuenta "
-                           "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
-                           "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
-                           "on the server (coins, Pit Stop items), so do not use someone else's."));
-        if (const char* problem = NickProblem(CurrentNick())) {
-            ImGui::TextColored(kYellow, "%s", problem);
-            if (a.game.Flag("online", true)) DiscordRecoverOffer();
-        } else if (a.game.Flag("online", true)) {
-            NickAvailabilityLine();
-            DiscordAccountSection();
+        AccountSection();
+        const bool signed_in = !NickProblem(CurrentNick()) && NickInfo().status == "yours";
+        if (signed_in) {
+            if (a.game.Flag("online", true)) DiscordAccountSection();
+        } else if (ImGui::TreeNode(T("Escribir el apodo a mano (servidores sin cuentas)", "Type the nickname by hand (servers without accounts)"))) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+            // A nickname linked to this player's Discord account is their identity: it is changed by
+            // unlinking it first (DiscordAccountSection), not by typing over it.
+            const NickCheck::Result nick_info = NickInfo();
+            const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
+            ImGui::BeginDisabled(nick_locked);
+            NickInput(T("Apodo (Nickname)", "Nickname"));
+            if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+            ImGui::EndDisabled();
+            HelpMarker(nick_locked
+                           ? T("Este apodo está vinculado a tu cuenta de Discord y queda fijo. Para cambiarlo, pulsa "
+                               "Desvincular abajo.",
+                               "This nickname is linked to your Discord account and stays fixed. To change it, press "
+                               "Unlink below.")
+                           : T("Tu nombre en el online, obligatorio: de 3 a 16 letras, números, _ o -. Cada apodo es una cuenta "
+                               "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
+                               "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
+                               "on the server (coins, Pit Stop items), so do not use someone else's."));
+            if (const char* problem = NickProblem(CurrentNick())) {
+                ImGui::TextColored(kYellow, "%s", problem);
+                if (a.game.Flag("online", true)) DiscordRecoverOffer();
+            } else if (a.game.Flag("online", true)) {
+                NickAvailabilityLine();
+                DiscordAccountSection();
+            }
+
+            ImGui::TreePop();
         }
 
         // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
@@ -6507,6 +6778,18 @@ void LoadTrophies() {
             }
         }
     }
+    // Without the PS4's trophy key: CTR's own list (src/ctr_trophies.h), as the runtime's notice
+    // uses it: official names, grades and what to do. Until now these stayed "Trophy #n" with no
+    // grade, and the progress counted only OCTR's trophy below.
+    if (!t.names && (t.title_id == "CUSA13795" || t.title_id == "CUSA14876")) {
+        for (auto& tr : t.list)
+            for (const auto& c : kCtrTrophies)
+                if (c.id == tr.id) {
+                    tr.grade = c.grade;
+                    tr.name = c.name;
+                    tr.detail = T(c.es, c.en);
+                }
+    }
     // OCTR's own trophies, past the game's (src/ctr_trophies.h; the server gives them).
     if (!t.list.empty() && (t.title_id == "CUSA13795" || t.title_id == "CUSA14876")) {
         for (const auto& o : octr_trophies) {
@@ -6556,7 +6839,10 @@ void TrophiesTab() {
         }
     }
     const int total = int(t.list.size());
-    const float progress = total_points ? float(earned) / float(total_points) : total ? float(unlocked) / float(total) : 0.0f;
+    // By grade points, as a PS4 shows it, only when every trophy has its grade; else by count (one
+    // graded trophy among unknown ones made the progress that trophy's alone: 0 % with 20 of 49).
+    const bool every_graded = std::all_of(t.list.begin(), t.list.end(), [&](const Trophy& tr) { return points(tr.grade) > 0; });
+    const float progress = every_graded && total_points ? float(earned) / float(total_points) : total ? float(unlocked) / float(total) : 0.0f;
     static const ImVec4 grade_colors[] = {ImVec4(0.82f, 0.54f, 0.32f, 1.0f), ImVec4(0.80f, 0.83f, 0.88f, 1.0f),
                                           ImVec4(1.0f, 0.80f, 0.29f, 1.0f), ImVec4(0.55f, 0.83f, 1.0f, 1.0f)};
     auto grade_index = [](char g) { return g == 'B' ? 0 : g == 'S' ? 1 : g == 'G' ? 2 : g == 'P' ? 3 : -1; };
