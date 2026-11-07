@@ -101,7 +101,7 @@ static void *world(void) {
 static void *handle_object(void **slot) {
     for (int depth = 0; depth < 8; depth++) {
         int32_t *h = *slot;
-        if (!h) return 0;
+        if ((uintptr_t)h < 0x10000) return 0; /* no handle, or not one at all */
         if (*h & 0x10000000) {
             game_handle_resolve(slot);
             h = *slot;
@@ -368,7 +368,9 @@ static void record_items(struct rr_frame *f) {
         void *list = entities[rr.crates[c].slot] ? AT(entities[rr.crates[c].slot], 0x18, void *) : 0;
         int alive = 0;
         for (int k = 0; k < count(list); k++) alive |= item(list, k) == comp;
-        if (!alive) {
+        /* the game gives a freed component's address to another one, of any kind */
+        void *meta = alive ? (*(meta_fn ***)comp)[0](comp) : 0;
+        if (!meta || AT(meta, 0x40, void *) != spawned_meta) {
             rr.crates[c].component = 0;
             continue;
         }

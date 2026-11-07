@@ -383,7 +383,7 @@ static void set_text(unsigned char *placeable, const char *text) {
 
 /* The native handle may lazily resolve or redirect through another handle. */
 static unsigned char *handle_object(void **slot) {
-    for (int depth = 0; depth < 16 && *slot; ++depth) {
+    for (int depth = 0; depth < 16 && (uintptr_t)*slot >= 0x10000; ++depth) {
         unsigned flags;
         memcpy(&flags, *slot, 4);
         if (flags & 0x10000000) resolve_handle(slot);
@@ -2587,7 +2587,10 @@ static void colored_name(unsigned char *placeable, int allowed) {
     float *color = (float *)(placeable + 0xc0);
     if (colored) {
         if (!entry) {
-            if (!free_entry) return;
+            if (!free_entry) { /* full of names gone with their menus: the live ones come back */
+                memset(colored_names, 0, sizeof colored_names);
+                free_entry = colored_names;
+            }
             entry = free_entry;
             entry->placeable = placeable;
             memcpy(entry->color, color, sizeof entry->color);
@@ -2624,12 +2627,21 @@ static void name_color_log_text(const unsigned char *placeable, const char *text
     printf("Name color text: depth %d %s \"%.60s\" color %.2f %.2f %.2f\n", depth, name ? name : "-", text,
            c[0], c[1], c[2]);
 }
+/* A handle as it stands: this walk only looks, on objects the network thread can be destroying,
+ * so it never asks the game to resolve one (that writes). The game does when it uses it. */
+static unsigned char *resolved_object(void *handle) {
+    if ((uintptr_t)handle < 0x10000) return NULL;
+    unsigned flags;
+    memcpy(&flags, handle, 4);
+    return flags & 0x30000000 ? NULL : pointer_at(handle, 0x28);
+}
+
 static void name_color_tree(unsigned char *placeable, int depth, int allowed) {
     if (!placeable || depth > 32 || name_color_visited > 4096) return;
     ++name_color_visited;
     colored_name(placeable, allowed);
     /* a placeable hosting another composition (a nested menu: the members list, a row) */
-    unsigned char *composition = handle_object((void **)(placeable + 0x38));
+    unsigned char *composition = resolved_object(pointer_at(placeable, 0x38));
     if (name_color_texts) name_color_log_text(placeable, pointer_at(placeable, 0x30), depth);
     if (name_color_debug) {
         const char *name = pointer_at(placeable, 0x28), *text = pointer_at(placeable, 0x30);
