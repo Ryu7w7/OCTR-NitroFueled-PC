@@ -134,6 +134,46 @@ def discord_link(data_dir, server, nick, code, redirect_uri):
                    {"nick": nick, "code": code, "redirect_uri": redirect_uri}, timeout=25, register=True)
 
 
+def device_start(data_dir, server):
+    """The site's login for this installation (the server's account_device.go): {"code", "url"},
+    or {"error"}; None without an answer."""
+    return request(data_dir, server, "/ryunet/device/start", {}, timeout=10, register=True)
+
+
+def device_poll(data_dir, server, code):
+    """{"status": pending|approved|expired, "nick"} for a code device_start gave."""
+    return request(data_dir, server, "/ryunet/device/poll?code=" + urllib.parse.quote(code), {}, timeout=10,
+                   register=True)
+
+
+def password_login(data_dir, server, nick, password):
+    """Nickname and password, by HTTPS only (the server's nginx, 443): {"status": "ok", "nick"} or
+    {"error"}. A server given by its address has no certificate: {"error": "https_needs_name"}."""
+    import json
+    host, _ = split_server(server)
+    if all(c.isdigit() or c == "." for c in host):
+        return {"error": "https_needs_name"}
+    key = run.online_key(Path(data_dir))
+    if not key:
+        return {"error": "no_key"}
+    khash = run.key_hash(run.server_key(key, host))
+    path = "/ryunet/account/login"
+    req = urllib.request.Request(f"https://{host}{path}", method="POST",
+                                 data=json.dumps({"nick": nick, "password": password}).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "User-Agent": "SacredFire launcher",
+                                          "X-RyuNET-Proof": run.proof_header(khash, "POST", path), "X-RyuNET-Key-Hash": khash})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as reply:
+            return json.loads(reply.read(4096).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as error:
+        try:
+            return json.loads(error.read(4096).decode("utf-8", "replace"))
+        except (OSError, ValueError):
+            return {"error": "server"}
+    except (OSError, ValueError):
+        return None
+
+
 def discord_unlink(data_dir, server, nick):
     answer = request(data_dir, server, "/ryunet/discord/unlink", {"nick": nick}, timeout=10)
     return bool(answer and answer.get("unlinked"))
