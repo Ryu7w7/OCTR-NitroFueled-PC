@@ -1,11 +1,13 @@
-/* Ranked result reporting (src/runtime_ranked.c): the report the worker sends
- * and the lobby-card suffix it reads back. */
+/* Ranked result reporting (src/runtime_ranked.c): the sender's posts and the
+ * lobby-card suffix it leaves. The sender runs inline here (deterministic),
+ * with the retry sleep flattened to zero so the pending scenario is instant. */
+#define RANKED_RETRY_MS 0
 #define SACREDFIRE_RELEASE "v9.9.9"
 #include "../src/runtime_ranked.c"
 #include <assert.h>
 
 static char sent_target[256], sent_body[1024];
-static int sent, transfers;
+static int sent;
 static int transfer_status = 200;
 static char transfer_reply[512] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Gold Mask\"}";
 static int session_room = 42;
@@ -34,7 +36,6 @@ int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) 
 int runtime_ryunet_transfer(const char *method, const char *target, const void *data, size_t size,
                             char **reply, size_t *reply_size, size_t max_reply) {
     (void)size; (void)max_reply;
-    ++transfers;
     assert(!strcmp(method, "POST"));
     snprintf(sent_target, sizeof sent_target, "%s", target);
     snprintf(sent_body, sizeof sent_body, "%s", (const char *)data);
@@ -46,100 +47,87 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     return transfer_status;
 }
 
-static void reset_report(void) {
+static struct ranked_outbox *make_outbox(void) {
+    struct ranked_outbox *out = calloc(1, sizeof *out);
+    out->room = 42;
+    out->mode = 0;
+    out->count = 3;
+    snprintf(out->track, sizeof out->track, "electron_avenue");
+    runtime_online_mode_ranked_order(out->order, 8);
+    /* Honest on-screen positions: two AIs finished between first and second. */
+    out->order[0].pos = 1;
+    out->order[1].pos = 4;
+    out->order[2].pos = 3;
+    return out;
+}
+
+static void reset(void) {
     pthread_mutex_lock(&lock);
-    memset(&report, 0, sizeof report);
     result_text[0] = 0;
     result_room = 0;
     pthread_mutex_unlock(&lock);
-    sent = transfers = 0;
+    sent = 0;
 }
 
-static void test_report_and_resolution(void) {
-    reset_report();
-    runtime_ranked_race_end();
-    pthread_mutex_lock(&lock);
-    assert(report.count == 3);
-    assert(!strcmp(report.track, "electron_avenue")); /* the zone name, spaces folded */
-    pthread_mutex_unlock(&lock);
-    ranked_tick();
+static void test_resolution(void) {
+    reset();
+    ranked_sender(make_outbox());
     assert(sent == 1);
     assert(!strcmp(sent_target, "/ryunet/ranked-result?name=LocalHost"));
     assert(strstr(sent_body, "\"room\":42"));
     assert(strstr(sent_body, "\"mode\":0"));
     assert(strstr(sent_body, "\"track\":\"electron_avenue\""));
-    assert(strstr(sent_body, "\"order\":[\"HostRacer\",\"SecondRacer\",\"ThirdRacer\"]"));
-    assert(strstr(sent_body, "\"dnf\":[\"SecondRacer\"]"));
+    if (!strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false},"))
+        fprintf(stderr, "ACTUAL BODY: %s\n", sent_body);
+    assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false},"
+                 "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true},"
+                 "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false}]"));
     assert(!strcmp(runtime_ranked_result_text(), " +45 (1045 Gold Mask)"));
-    /* Scored once: the report is gone, no further posts. */
-    ranked_tick();
-    assert(sent == 1);
 }
 
 static void test_guest_pending_then_delta(void) {
-    reset_report();
+    reset();
     strcpy(transfer_reply, "{\"status\":\"pending\"}");
-    runtime_ranked_race_end();
-    ranked_tick();
-    assert(sent == 1);
+    ranked_sender(make_outbox());
+    assert(sent == RANKED_RETRIES);   /* the whole budget goes on waiting for the host */
     assert(runtime_ranked_result_text()[0] == 0); /* waits for the host */
-    /* The retry waits RANKED_RETRY_MS; the test pulls it due by hand. */
-    pthread_mutex_lock(&lock);
-    assert(report.tries == 1);
-    report.next_try_ms = 0;
-    pthread_mutex_unlock(&lock);
     strcpy(transfer_reply, "{\"status\":\"resolved\",\"race\":8,\"delta\":30,\"mmr\":1030,\"placements\":4,\"tier\":\"Gold Mask\"}");
-    ranked_tick();
-    assert(sent == 2);
+    ranked_sender(make_outbox());
+    assert(sent == RANKED_RETRIES + 1);
     assert(!strcmp(runtime_ranked_result_text(), " +30 (1030 Gold Mask)"));
 }
 
 static void test_room_change_clears_the_card(void) {
-    reset_report();
-    runtime_ranked_race_end();
-    ranked_tick();
+    reset();
+    ranked_sender(make_outbox());
     assert(runtime_ranked_result_text()[0] != 0);
     session_room = 43; /* the next room: the last room's delta has nowhere to show */
-    ranked_tick();
     assert(runtime_ranked_result_text()[0] == 0);
     session_room = 42;
 }
 
 static void test_gives_up_after_retries(void) {
-    reset_report();
+    reset();
     transfer_status = 0; /* the server cannot be reached */
     strcpy(transfer_reply, "");
-    runtime_ranked_race_end();
-    for (int i = 0; i < RANKED_RETRIES + 2; ++i) {
-        pthread_mutex_lock(&lock);
-        report.next_try_ms = 0;
-        pthread_mutex_unlock(&lock);
-        ranked_tick();
-    }
+    ranked_sender(make_outbox());
     assert(sent == RANKED_RETRIES);
     assert(runtime_ranked_result_text()[0] == 0);
-    pthread_mutex_lock(&lock);
-    assert(report.count == 0); /* dropped, no endless retrying */
-    pthread_mutex_unlock(&lock);
     transfer_status = 200;
 }
 
 static void test_rejected_report_drops_out(void) {
-    reset_report();
+    reset();
     strcpy(transfer_reply, "report does not match the room");
     transfer_status = 409;
-    runtime_ranked_race_end();
-    ranked_tick();
-    assert(sent == 1);
-    pthread_mutex_lock(&lock);
-    assert(report.count == 0); /* a refusal is an answer, not a reason to retry */
-    pthread_mutex_unlock(&lock);
+    ranked_sender(make_outbox());
+    assert(sent == 1); /* a refusal is an answer, not a reason to retry */
     assert(runtime_ranked_result_text()[0] == 0);
     transfer_status = 200;
 }
 
 int main(void) {
-    test_report_and_resolution();
+    test_resolution();
     test_guest_pending_then_delta();
     test_room_change_clears_the_card();
     test_gives_up_after_retries();

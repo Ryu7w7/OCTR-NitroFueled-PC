@@ -1165,6 +1165,7 @@ int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) 
             out[written].finished = team_result_count
                 ? !!(team_finished_mask & (1u << rank))
                 : team_racer_finished(racer);
+            out[written].pos = rank + 1; /* the on-screen position: AIs keep their slots */
             ++written;
             break;
         }

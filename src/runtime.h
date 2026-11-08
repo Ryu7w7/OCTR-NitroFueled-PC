@@ -140,7 +140,7 @@ int runtime_ranked_selected(void);
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode);
 /* One racer of the validated finish order, best first (runtime_ranked.c). */
-struct runtime_ranked_racer { char name[32]; int finished; };
+struct runtime_ranked_racer { char name[32]; int finished; int pos; }; /* pos: the on-screen finish position (AIs take their own slots, honestly) */
 /* The finish order of the race just ended, 0 none (runtime_online_mode.c). */
 int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
 /* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */
