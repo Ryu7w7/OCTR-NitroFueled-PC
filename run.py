@@ -33,6 +33,11 @@ PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
 APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
+RANGE_TAKEN_CODE = 25  # a program took part of the PS4 address range, a different place each start
+RANGE_TAKEN_TRIES = 8
+START_FAULT_CODE = 3  # a fault the game could not go on from (probe.c)
+START_FAULT_SECONDS = 45  # the title screen comes later than this
+START_FAULT_TRIES = 2
 UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
 
 sys.path.insert(0, str(PORT / 'scripts'))
@@ -160,6 +165,18 @@ def run_python(script, *args, capture=False, check=True):
     if check and result.returncode:
         sys.exit(result.returncode)
     return result if capture else None
+
+
+def retry_failed_start(code, seconds, tries):
+    """Whether to start the game again because it stopped on a fault while starting. Two such faults
+    (a global object not there yet) are races: the same PCs start the next time."""
+    return code == START_FAULT_CODE and seconds < START_FAULT_SECONDS and tries < START_FAULT_TRIES
+
+
+def retry_taken_range(code, tries):
+    """Whether to start the game again because the PS4 address range was taken: it fails in an
+    instant, before the window opens, and the next start usually finds the range free."""
+    return code == RANGE_TAKEN_CODE and tries < RANGE_TAKEN_TRIES
 
 
 def find_executable(name):
@@ -459,6 +476,38 @@ def claim_nick(host, port, name, khash, session=None):
         say(f'Nickname {name}: could not register it on {host} ({error})')
 
 
+def follow_rename(host, port, name, khash, session=None):
+    """The nickname this installation plays as when it was changed on the site (the server answers
+    "renamed" to its own installations only), else None."""
+    import urllib.parse
+    try:
+        status, _ = ryunet_json(host, port, f'/ryunet/nick?{urllib.parse.urlencode({"name": name})}', 4, session=session,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+    except (OSError, ValueError):
+        return None
+    new = status.get('renamed') if isinstance(status, dict) else None
+    return new if isinstance(new, str) and nick_ok(new) else None
+
+
+def set_ini_line(path, key, value):
+    """key=value in an ini file: the line replaced, or added."""
+    try:
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        lines = []
+    out, done = [], False
+    for line in lines:
+        if line.partition('=')[0].strip() == key:
+            if not done:
+                out.append(f'{key}={value}')
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f'{key}={value}')
+    Path(path).write_text('\n'.join(out) + '\n', encoding='utf-8')
+
+
 def server_settings(host, port, session=None):
     """What the server announces for every player (GET /ryunet/theme): the season theme, which
     scripts/patches.py loads in every level (THEME_VALUES), and the seconds an online race goes on
@@ -575,6 +624,17 @@ def setup_online(env, config, data):
         env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
         if key:
             env['BB_ONLINE_KEYHASH'] = key_hash(server_key(key, host))
+            # A nickname changed on the site: this installation plays as the new one from now on.
+            renamed = startup_call('online.follow_rename', follow_rename, host, auth_port, name, env['BB_ONLINE_KEYHASH'], session=session)
+            if renamed and renamed != name:
+                say(f'Nickname: {name} is now {renamed} (changed on the site)')
+                name = renamed
+                env['BB_ONLINE_NAME'] = env['BB_USER_NAME'] = name
+                for key_name in ('online_name', 'user_name'):
+                    try:
+                        set_ini_line(config, key_name, name)
+                    except OSError as error:
+                        say(f'Nickname: could not save the new one in bbport.ini ({error})')
             startup_call('online.claim_nick', claim_nick, host, auth_port, name, env['BB_ONLINE_KEYHASH'], session=session)
     # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
     # instead of the ones bought on the server, which are tied to the nickname.
@@ -650,6 +710,45 @@ def setup_online(env, config, data):
         say(f'Item rules from the server: {items.get("name") or "custom"}')
 
 
+def keep_corrupt_free_log():
+    """The game goes on past a corrupt free (probe.c) and the next start writes over this log, the
+    only record of what the block held: a copy stays beside it, the last one."""
+    if LOG and PERF.corrupt_free:
+        LOG.flush()
+        log = Path(LOG.name)
+        kept = log.with_name(f'{log.stem}_corrupt_free.log')
+        shutil.copyfile(log, kept)
+        say(f'A corrupt memory block was caught: the log is kept in {kept.name}')
+
+
+def cloud_sync_game(env, config, progress, title_id, after):
+    """The account's trophies (before and after the game) and save (after) on the server
+    (scripts/cloud_sync.py). Online only, with a signed key; bbport.ini cloud_sync=0 turns it off.
+    Never stops anything."""
+    host, port = env.get('BB_ONLINE_SERVER'), env.get('BB_ONLINE_HTTP_PORT', '8080')
+    khash, name = env.get('BB_ONLINE_KEYHASH'), env.get('BB_ONLINE_NAME')
+    if env.get('BB_ONLINE') != '1' or not (host and khash and name) or title_id not in ('CUSA13795', 'CUSA14876'):
+        return
+    if ini_has(config, 'cloud_sync=0'):
+        return
+
+    def call(method, target, body=None, timeout=10):
+        answer, _ = ryunet_json(host, port, target, timeout, method=method, body=body,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+        return answer
+
+    import cloud_sync
+    try:
+        cloud_sync.sync_trophies(call, name, progress, title_id, say=say)
+    except (OSError, ValueError) as error:
+        say(f'Trophies: not synced with the server ({error})')
+    if after:
+        try:
+            cloud_sync.upload_save(call, name, progress, title_id, say=say)
+        except (OSError, ValueError) as error:
+            say(f'Cloud save: not uploaded ({error})')
+
+
 def finish_perf_report(env, config, data, version, title_id, code):
     """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
     RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
@@ -657,6 +756,7 @@ def finish_perf_report(env, config, data, version, title_id, code):
     if not PERF:
         return
     try:
+        keep_corrupt_free_log()
         report = PERF.report({
             'octr': version[:40],
             'edition': title_id,
@@ -1047,7 +1147,10 @@ def launch(args, restarted=False):
                    '--content-profile', str(out / 'content.bin'), '--patches', str(out / 'patches.bin'),
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
+        progress_dir = Path(env.get('BB_PROGRESS_DIR') or user_dir)
+        startup_call('online.cloud_sync', cloud_sync_game, env, config, progress_dir, title_id, False)
         first = True
+        range_tries = start_tries = 0
         global PERF
         PERF = perf_report.Collector()
         while True:
@@ -1102,6 +1205,7 @@ def launch(args, restarted=False):
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.
             try:
+                start_time = time.monotonic()
                 process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, creationflags=no_console())
             except PermissionError as error:
@@ -1117,9 +1221,26 @@ def launch(args, restarted=False):
                 env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
                 continue
+            if retry_taken_range(code, range_tries):
+                range_tries += 1
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
+                    f'(the memory the game needs was taken: try {range_tries + 1} of {RANGE_TAKEN_TRIES + 1})')
+                continue
+            if retry_failed_start(code, time.monotonic() - start_time, start_tries):
+                start_tries += 1
+                finish_perf_report(env, config, data, version, title_id, code)  # each failed start is counted
+                PERF = perf_report.Collector()
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
+                    f'(the game stopped while starting: try {start_tries + 1} of {START_FAULT_TRIES + 1})')
+                continue
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
                 finish_perf_report(env, config, data, version, title_id, code)
+                cloud_sync_game(env, config, progress_dir, title_id, True)
+                if code == RANGE_TAKEN_CODE:
+                    say('--- Another program keeps taking the memory the game needs (see the "Module from '
+                        'outside" lines above): close overlays and tuning tools, and exclude the game folder '
+                        'from your antivirus.')
                 if code == UNSUPPORTED_GPU_CODE:
                     say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
                         'sparse buffers; the STOP line above says which). Update the graphics driver; if it '

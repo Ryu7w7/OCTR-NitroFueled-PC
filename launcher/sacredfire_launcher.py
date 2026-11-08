@@ -1166,6 +1166,35 @@ class LauncherWindow(Adw.ApplicationWindow):
                                                      "link it to Discord to recover it after a reinstall or on another PC."))
         self.online_row = Adw.SwitchRow(title=tr("Play online"), active=self.ini.get("online") == "1")
         online.add(self.online_row)
+        # The account (the site's /cuenta): log in or create it on the web, the launcher waits for
+        # its nickname; or nickname and password, by HTTPS. Typing a nickname stays below.
+        self.account_busy = None  # the running web login: {"code", "url", "cancel"}
+        self.account_row = Adw.ActionRow(title=tr("Account"))
+        self.account_login_button = Gtk.Button(label=tr("Log in / Create account"), valign=Gtk.Align.CENTER)
+        self.account_login_button.add_css_class("suggested-action")
+        self.account_login_button.connect("clicked", lambda _b: self.start_web_login())
+        self.account_row.add_suffix(self.account_login_button)
+        self.account_copy_button = Gtk.Button(label=tr("Copy link"), valign=Gtk.Align.CENTER)
+        self.account_copy_button.connect("clicked", lambda _b: self.copy_login_link())
+        self.account_row.add_suffix(self.account_copy_button)
+        self.account_cancel_button = Gtk.Button(label=tr("Cancel"), valign=Gtk.Align.CENTER)
+        self.account_cancel_button.add_css_class("flat")
+        self.account_cancel_button.connect("clicked", lambda _b: self.cancel_web_login())
+        self.account_row.add_suffix(self.account_cancel_button)
+        self.account_logout_button = Gtk.Button(label=tr("Log out"), valign=Gtk.Align.CENTER)
+        self.account_logout_button.add_css_class("flat")
+        self.account_logout_button.connect("clicked", lambda _b: self.account_logout())
+        self.account_row.add_suffix(self.account_logout_button)
+        online.add(self.account_row)
+        self.password_expander = Adw.ExpanderRow(title=tr("Log in with nickname and password"))
+        self.login_nick_row = Adw.EntryRow(title=tr("Nickname"))
+        self.login_password_row = Adw.PasswordEntryRow(title=tr("Password"))
+        login_button = Gtk.Button(label=tr("Log in"), valign=Gtk.Align.CENTER)
+        login_button.connect("clicked", lambda _b: self.password_login())
+        self.login_password_row.add_suffix(login_button)
+        self.password_expander.add_row(self.login_nick_row)
+        self.password_expander.add_row(self.login_password_row)
+        online.add(self.password_expander)
         self.nick_row = Adw.EntryRow(title=tr("Nickname (3-16 letters, digits, _ or -)"),
                                      text=self.ini.get("online_name", ""))
         self.nick_row.connect("changed", lambda _row: self.nick_changed())
@@ -2245,12 +2274,93 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.fill_saves()
         return page
 
+    def cloud_saves_group(self, locked, user):
+        """The account's saves on the server (scripts/cloud_cli.py): listed on request; bringing one
+        here keeps this PC's save in <user>/cloud/backup-<title>.zip first."""
+        group = Adw.PreferencesGroup(title=tr("Cloud saves"),
+                                     description=tr("After you play online, your save goes up to your account (the last 5 "
+                                                    "versions). Bring one to this PC: the one you have now is kept first as a "
+                                                    "backup."))
+        button = Gtk.Button(label=tr("See my cloud saves"), valign=Gtk.Align.CENTER)
+        head = Adw.ActionRow(title=tr("Your account's saves"))
+        head.add_suffix(button)
+        group.add(head)
+        rows = []
+
+        def listed(answer):
+            for row in rows:
+                group.remove(row)
+            rows.clear()
+            error = answer.get("error")
+            if error:
+                head.set_subtitle(tr("Log in with your account (Online page) to see your cloud saves.") if error == "no_account"
+                                  else tr("Could not ask the server."))
+                return
+            saves = answer.get("saves", [])
+            head.set_subtitle(tr("No cloud saves yet: they upload by themselves after you play online.") if not saves else "")
+            for v in saves:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.get("created", 0)))
+                row = Adw.ActionRow(title=when, subtitle=f"{'EU' if v.get('title') == 'CUSA14876' else 'USA'}  ·  "
+                                                          f"{format_size(v.get('size', 0))}")
+                bring = Gtk.Button(label=tr("Bring to this PC"), valign=Gtk.Align.CENTER, sensitive=not locked)
+                bring.connect("clicked", lambda _b, vid=v.get("id"): self.confirm_cloud_restore(vid, user))
+                row.add_suffix(bring)
+                group.add(row)
+                rows.append(row)
+
+        def ask(_b):
+            head.set_subtitle(tr("Working…"))
+            self.in_thread(lambda: self.cloud_cli(["list"], user), listed)
+        button.connect("clicked", ask)
+        return group
+
+    def cloud_cli(self, args, user):
+        """scripts/cloud_cli.py, in this process (its JSON object)."""
+        import contextlib
+        import io
+        sys.path.insert(0, str(PORT_DIR / "scripts"))
+        import cloud_cli
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                cloud_cli.main(args + ["--data", str(DATA_DIR), "--config", str(ini_path()), "--user", str(user)])
+        except SystemExit as stop:
+            if isinstance(stop.code, str):  # no account: the object comes in the exit
+                out.write("\n" + stop.code)
+        try:
+            return json.loads(out.getvalue().strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            return {"error": "cli"}
+
+    def confirm_cloud_restore(self, vid, user):
+        dialog = Adw.AlertDialog(heading=tr("Bring this save to this PC?"),
+                                 body=tr("It replaces this PC's save; the current one is kept as a backup first."))
+        dialog.add_response("cancel", tr("Cancel"))
+        dialog.add_response("bring", tr("Bring to this PC"))
+        dialog.set_response_appearance("bring", Adw.ResponseAppearance.SUGGESTED)
+
+        def done(answer):
+            if answer.get("error"):
+                self.toasts.add_toast(Adw.Toast(title=tr("Could not restore: {}").format(answer["error"]), timeout=10))
+            else:
+                self.toasts.add_toast(Adw.Toast(title=tr("Save restored. The one you had is in {}.").format(answer.get("backup")),
+                                                timeout=10))
+                self.fill_saves()
+
+        def chosen(_d, response):
+            if response == "bring":
+                self.in_thread(lambda: self.cloud_cli(["restore", "--id", str(vid)], user), done)
+        dialog.connect("response", chosen)
+        dialog.present(self)
+
     def fill_saves(self):
         for group in self.saves_groups:
             self.saves_page.remove(group)
         self.saves_groups = []
         locked = self.process is not None
         user = self.user_dir()
+        self.saves_groups.append(self.cloud_saves_group(locked, user))
+        self.saves_page.add(self.saves_groups[-1])
         saves = Adw.PreferencesGroup(
             title=tr("Saves"),
             description=(tr("Close the game to back up, import or restore saves.") + "\n" if locked else "") +
@@ -2609,7 +2719,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         total = len(t.trophies)
         points = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies)
         earned = sum(trophies.POINTS.get(x["grade"], 0) for x in t.trophies if x["unlocked"])
-        progress = earned / points if points else (unlocked / total if total else 0.0)
+        # By grade points only when every trophy has its grade: OCTR's own graded trophy among the
+        # game's unknown ones made the progress that one trophy's alone (0 % with 20 of 49).
+        graded = all(trophies.POINTS.get(x["grade"], 0) for x in t.trophies)
+        progress = earned / points if graded and points else (unlocked / total if total else 0.0)
         group = Adw.PreferencesGroup()
         card = Gtk.Box(spacing=16)
         card.add_css_class("card")
@@ -2905,6 +3018,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             text += " " + tr("This PC's clock is {} min off: online corrects it, but set the date and time "
                              "to automatic in the system settings.").format(round(clock_off / 60))
         self.nick_status_row.set_subtitle(GLib.markup_escape_text(text))
+        self.show_account()
         idle = not self.discord_busy
         self.discord_link_button.set_visible(link_available and idle and nick_ok(nick) and status in ("free", "yours")
                                              and not linked)
@@ -2914,6 +3028,138 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def discord_app_id(self):
         return self.settings.get("discord_app_id") or DISCORD_APP_ID
+
+    def show_account(self):
+        info = self.nick_info or {}
+        # An account: a nickname of this PC's linked to Discord (as the site's are); a typed one is not.
+        mine = nick_ok(self.nick()) and info.get("status") == "yours"
+        signed_in = mine and bool(info.get("linked"))
+        waiting = self.account_busy is not None
+        if signed_in:
+            text = tr("Logged in: {}").format(self.nick())
+        elif waiting:
+            text = tr("Log in on the web and authorize this PC (code {})…").format(self.account_busy.get("code") or "…")
+        else:
+            text = tr("Log in with your account, or create it on the web: your nickname, coins, friends, trophies and "
+                      "saves follow you to any PC.")
+            if info.get("account_required"):
+                text = tr("This server does not allow playing online with just a nickname: you must log in or create "
+                          "your account (with Discord, or with your nickname and password).") + "\n" + text
+            if mine:
+                text = tr("You play as {} without an account.").format(self.nick()) + "\n" + text
+        self.account_row.set_subtitle(GLib.markup_escape_text(text))
+        self.account_login_button.set_visible(not signed_in and not waiting)
+        self.account_copy_button.set_visible(waiting and bool(self.account_busy.get("url")))
+        self.account_cancel_button.set_visible(waiting)
+        self.account_logout_button.set_visible(signed_in and not waiting)
+        self.password_expander.set_visible(not signed_in)
+
+    def start_web_login(self):
+        if self.account_busy is not None:
+            return
+        self.store()
+        server = self.server()
+        state = {"code": "", "url": "", "cancel": False}
+        self.account_busy = state
+        self.show_account()
+
+        def opened(url, ok):
+            state["url"] = url
+            if not ok:
+                # No browser came up: the link is copied, ready to paste.
+                self.get_clipboard().set(url)
+                self.toasts.add_toast(Adw.Toast(title=tr("Could not open your browser: the link was copied. Paste it in your "
+                                                         "browser and authorize this PC."), timeout=0))
+            self.show_account()
+            return False
+
+        def work():
+            import time as _time
+            started = ryunet_http.device_start(DATA_DIR, server)
+            if not started or not started.get("code") or not str(started.get("url", "")).startswith("http"):
+                return {"error": (started or {}).get("error") or ("server" if started else "unreachable")}
+            state["code"] = started["code"]
+            url = started["url"]
+            GLib.idle_add(lambda: opened(url, open_external(url)))
+            deadline = _time.monotonic() + 600
+            while _time.monotonic() < deadline:
+                for _ in range(30):
+                    _time.sleep(0.1)
+                    if state["cancel"]:
+                        return {"cancelled": True}
+                answer = ryunet_http.device_poll(DATA_DIR, server, state["code"]) or {}
+                if answer.get("status") == "approved":
+                    return answer
+                if answer.get("status") == "expired":
+                    break
+            return {"error": "expired"}
+
+        def done(result):
+            self.account_busy = None
+            if result.get("status") == "approved" and nick_ok(result.get("nick", "")):
+                self.nick_row.set_text(result["nick"])
+                self.store()
+                self.toasts.add_toast(Adw.Toast(title=tr("Done: this PC plays as {}.").format(result["nick"]), timeout=8))
+                self.ask_nick_status()
+            elif not result.get("cancelled"):
+                error = result.get("error", "")
+                self.toasts.add_toast(Adw.Toast(title=tr("The code expired: press Log in again.") if error == "expired"
+                                                else tr("This PC cannot log in on this server.") if error.startswith("banned")
+                                                else tr("Could not reach the server.") if error == "unreachable"
+                                                else tr("This server has no accounts yet: type the nickname below."), timeout=10))
+            self.show_account()
+        self.in_thread(work, done)
+
+    def copy_login_link(self):
+        if self.account_busy and self.account_busy.get("url"):
+            self.get_clipboard().set(self.account_busy["url"])
+            self.toasts.add_toast(Adw.Toast(title=tr("Link copied: paste it in your browser.")))
+
+    def cancel_web_login(self):
+        if self.account_busy is not None:
+            self.account_busy["cancel"] = True
+
+    def account_logout(self):
+        dialog = Adw.AlertDialog(heading=tr("Log out?"),
+                                 body=tr("This PC stops playing with your account until you log in again. Your account, "
+                                         "coins and trophies stay on the server."))
+        dialog.add_response("cancel", tr("Cancel"))
+        dialog.add_response("logout", tr("Log out"))
+        dialog.set_response_appearance("logout", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def chosen(_d, response):
+            if response == "logout":
+                self.nick_row.set_text("")
+                self.store()
+                self.ask_nick_status()
+        dialog.connect("response", chosen)
+        dialog.present(self)
+
+    def password_login(self):
+        nick, password = self.login_nick_row.get_text().strip(), self.login_password_row.get_text()
+        if not nick or not password:
+            return
+        self.store()
+        server = self.server()
+        self.login_password_row.set_text("")
+
+        def done(answer):
+            answer = answer or {}
+            if answer.get("status") == "ok" and nick_ok(answer.get("nick", "")):
+                self.nick_row.set_text(answer["nick"])
+                self.store()
+                self.toasts.add_toast(Adw.Toast(title=tr("Done: this PC plays as {}.").format(answer["nick"]), timeout=8))
+                self.ask_nick_status()
+                return
+            error = answer.get("error", "")
+            self.toasts.add_toast(Adw.Toast(title={
+                "wrong": tr("Wrong nickname or password."),
+                "too_many": tr("Too many attempts: wait 15 minutes."),
+                "https_needs_name": tr("The password only travels by HTTPS, which needs the server's name (not its IP): "
+                                       "use Log in / Create account."),
+            }.get(error, tr("This PC cannot log in on this server.") if error.startswith("banned")
+                  else tr("Could not reach the server by HTTPS.")), timeout=10))
+        self.in_thread(lambda: ryunet_http.password_login(DATA_DIR, server, nick, password), done)
 
     def start_discord_link(self, mode):
         """mode: "link" this nickname, or "recover" the one linked to the Discord account."""

@@ -30,7 +30,7 @@ KEEP = 10
 SETTINGS = ('render_res', 'output_res', 'upscaler', 'temporal', 'fps_limit', 'present_mode', 'preset',
             'msaa', 'live_resolution', 'aspect_ratio', 'aspect_output', 'widescreen_layout', 'widescreen_output', 'fullscreen', 'borderless',
             'patch_60fps', 'patch_no_motion_blur', 'patch_pro_1080p', 'async_pipelines', 'model_lod')
-EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 75: 'restart'}
+EXIT_CODES = {0: 'normal', 23: 'gpu_device_lost', 24: 'gpu_unsupported', 25: 'address_range_taken', 75: 'restart'}
 
 _PERF = re.compile(r'^Perf: frames (\d+) ms ([\d.]+) worst ([\d.]+) long (\d+) h ([\d,]+)\s*$')
 _LEVEL = re.compile(r"LOADING LEVEL: '([^']+)'")
@@ -41,6 +41,7 @@ _FAULT_ACCESS = re.compile(r'^Fault: (read|write|execute) access to (?:0x)?([0-9
 _FAULT_ABORT = re.compile(r'^Fault: abort\(\) called \((.*)\) at (.+?) \(thread \d+\)')
 _FAULT_OTHER = re.compile(r'^Fault: exception (0x[0-9a-fA-F]+) at (.+?) \(thread \d+\)')
 _GUEST_STOP = re.compile(r'^STOP: guest raised debug exception code=(0x[0-9a-fA-F]+)')
+_CORRUPT_FREE = re.compile(r'^Runtime: bailing corrupt free at guest offset (0x[0-9a-fA-F]+)')
 _PATH = re.compile(r'([A-Za-z]:)?[\\/][^\s:;,()]+')
 _IP = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b')
 
@@ -139,6 +140,7 @@ class Collector:
         self.loads = {}  # level -> the game's own load times in seconds ("level finished loading")
         self.gpu = {}
         self.fault = None  # the crash's signature (fault_of), the first one only
+        self.corrupt_free = False  # probe.c kept the game going past a corrupt free
         self.started = time.time()
 
     def feed(self, text):
@@ -157,8 +159,13 @@ class Collector:
             if m:
                 self.loads.setdefault(self.level, []).append(round(float(m[1]), 2))
                 continue
-            if self.fault is None and line.startswith(('Fault: ', 'STOP: ')):
-                self.fault = fault_of(line)
+            m = _CORRUPT_FREE.match(line)
+            if m:
+                self.corrupt_free = True
+                self.fault = self.fault or {'kind': 'corrupt free', 'where': 'guest offset ' + m[1]}
+                continue
+            if (self.fault is None or self.fault['kind'] == 'corrupt free') and line.startswith(('Fault: ', 'STOP: ')):
+                self.fault = fault_of(line) or self.fault  # a crash says more than what it survived
                 continue
             if not self.gpu:
                 m = _GPU.match(line)

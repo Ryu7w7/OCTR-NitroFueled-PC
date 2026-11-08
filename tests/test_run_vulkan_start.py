@@ -14,6 +14,26 @@ def sleeper(seconds):
     return subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({seconds})'])
 
 
+class TakenRangeTests(unittest.TestCase):
+    def test_only_this_code_and_only_some_times(self):
+        self.assertTrue(run.retry_taken_range(run.RANGE_TAKEN_CODE, 0))
+        self.assertTrue(run.retry_taken_range(run.RANGE_TAKEN_CODE, run.RANGE_TAKEN_TRIES - 1))
+        self.assertFalse(run.retry_taken_range(run.RANGE_TAKEN_CODE, run.RANGE_TAKEN_TRIES))
+        # 21 is also a memory failure in the middle of a race
+        for code in (0, 20, 21, 22, 23, 24, run.RESTART_CODE):
+            self.assertFalse(run.retry_taken_range(code, 0))
+
+    def test_a_fault_while_starting_is_tried_again_twice(self):
+        self.assertTrue(run.retry_failed_start(3, 10, 0))
+        self.assertTrue(run.retry_failed_start(3, 10, 1))
+        self.assertFalse(run.retry_failed_start(3, 10, 2))
+
+    def test_not_later_and_not_another_code(self):
+        self.assertFalse(run.retry_failed_start(3, run.START_FAULT_SECONDS, 0))
+        for code in (0, 1, 25, 75):
+            self.assertFalse(run.retry_failed_start(code, 10, 0))
+
+
 class VulkanStartTests(unittest.TestCase):
     def setUp(self):
         self.said = []
