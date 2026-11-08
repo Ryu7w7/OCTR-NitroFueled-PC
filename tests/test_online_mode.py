@@ -480,6 +480,31 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                 with self.assertRaisesRegex(ValueError, 'unsupported native public lobby card'):
                     online_mode.public_lobby_card(public + b'unknown edit')
 
+    def test_unknown_private_team_settings_need_a_supported_native_menu(self):
+        with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
+            online_mode.private_team_settings(b'modded settings', b'unknown native')
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_mod_version_of_private_settings_keeps_its_changes_and_gets_teams_row(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.SETTINGS_ENTRY)
+        with pak.open('rb') as f:
+            native = iga.read_entry(f, *entry[1:])
+        # A lap-count mod changes option values and keeps the menu's objects (as GlisinSR's does).
+        g = Igz(native)
+        g.data[0x8c64] ^= 1
+        mod = g.build()
+        merged = Igz(online_mode.private_team_settings(mod, native))
+        expected = Igz(online_mode.private_team_settings(native))
+        expected.data[0x8c64] ^= 1
+        self.assertEqual(merged.data, expected.data)
+        with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
+            online_mode.private_team_settings(mod)
+        g = Igz(native)
+        g.data[0x51e0 + 0x18] ^= 1
+        with self.assertRaisesRegex(ValueError, 'a mod changes its Teams row'):
+            online_mode.private_team_settings(g.build(), native)
+
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
     def test_private_teams_visible_for_races_without_changing_native_selector(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
