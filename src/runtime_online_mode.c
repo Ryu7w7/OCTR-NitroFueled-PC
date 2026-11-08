@@ -2109,15 +2109,9 @@ static void refresh_lobby_card(unsigned char *owner) {
         int type = 0;
         if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);
         if (type != 2) {
-            if (runtime_ranked_active()) {
-                char label[96];
-                snprintf(label, sizeof label, "RANKED - %s%s",
-                         runtime_public_itemless_active() ? "ITEMLESS" : "NORMAL",
-                         runtime_ranked_result_text());
-                update_card(owner, NULL, label, NULL, 0);
-            } else {
-                update_card(owner, NULL, runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL", NULL, 0);
-            }
+            update_card(owner, NULL, runtime_ranked_active()
+                        ? (runtime_public_itemless_active() ? "RANKED - ITEMLESS" : "RANKED - NORMAL")
+                        : (runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL"), NULL, 0);
         }
         return;
     }
