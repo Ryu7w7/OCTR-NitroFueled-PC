@@ -476,6 +476,38 @@ def claim_nick(host, port, name, khash, session=None):
         say(f'Nickname {name}: could not register it on {host} ({error})')
 
 
+def follow_rename(host, port, name, khash, session=None):
+    """The nickname this installation plays as when it was changed on the site (the server answers
+    "renamed" to its own installations only), else None."""
+    import urllib.parse
+    try:
+        status, _ = ryunet_json(host, port, f'/ryunet/nick?{urllib.parse.urlencode({"name": name})}', 4, session=session,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+    except (OSError, ValueError):
+        return None
+    new = status.get('renamed') if isinstance(status, dict) else None
+    return new if isinstance(new, str) and nick_ok(new) else None
+
+
+def set_ini_line(path, key, value):
+    """key=value in an ini file: the line replaced, or added."""
+    try:
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        lines = []
+    out, done = [], False
+    for line in lines:
+        if line.partition('=')[0].strip() == key:
+            if not done:
+                out.append(f'{key}={value}')
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f'{key}={value}')
+    Path(path).write_text('\n'.join(out) + '\n', encoding='utf-8')
+
+
 def server_settings(host, port, session=None):
     """What the server announces for every player (GET /ryunet/theme): the season theme, which
     scripts/patches.py loads in every level (THEME_VALUES), and the seconds an online race goes on
@@ -592,6 +624,17 @@ def setup_online(env, config, data):
         env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
         if key:
             env['BB_ONLINE_KEYHASH'] = key_hash(server_key(key, host))
+            # A nickname changed on the site: this installation plays as the new one from now on.
+            renamed = startup_call('online.follow_rename', follow_rename, host, auth_port, name, env['BB_ONLINE_KEYHASH'], session=session)
+            if renamed and renamed != name:
+                say(f'Nickname: {name} is now {renamed} (changed on the site)')
+                name = renamed
+                env['BB_ONLINE_NAME'] = env['BB_USER_NAME'] = name
+                for key_name in ('online_name', 'user_name'):
+                    try:
+                        set_ini_line(config, key_name, name)
+                    except OSError as error:
+                        say(f'Nickname: could not save the new one in bbport.ini ({error})')
             startup_call('online.claim_nick', claim_nick, host, auth_port, name, env['BB_ONLINE_KEYHASH'], session=session)
     # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
     # instead of the ones bought on the server, which are tied to the nickname.
