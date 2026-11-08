@@ -969,6 +969,7 @@ struct NickCheck {
         std::string ban_kind;         // "player" or "ip"
         long long ban_until = 0;      // unix time; 0: permanent
         bool key_switched = false;    // it was another installation's on this PC: its key is used now
+        bool account_required = false;  // the server plays only accounts (RYUNET_REQUIRE_ACCOUNT)
     };
     std::mutex mutex;
     std::map<std::string, Result> results;  // "server|nick" -> answer
@@ -1179,6 +1180,7 @@ NickCheck::Result AskNickStatus(const std::string& server, const std::string& ni
     r.status = JsonField(body, "status");
     r.linked = JsonBool(body, "linked");
     r.link_available = JsonBool(body, "discord_link");
+    r.account_required = JsonBool(body, "account_required");
     r.discord = JsonField(body, "discord");
     r.banned = JsonText(body, "banned");
     r.ban_kind = JsonField(body, "ban_kind");
@@ -3728,7 +3730,8 @@ void NatTypeSection(const std::string& server) {
 struct AccountLoginState {
     std::mutex mutex;
     bool busy = false, error = false, cancel = false;
-    std::string code, message;
+    bool copy_url = false;  // no browser opened: the UI thread copies url to the clipboard
+    std::string code, message, url;
     std::string nick;  // the account's nickname, for the UI thread to put in place (ApplyAccountNick)
 };
 AccountLoginState g_account;
@@ -3765,11 +3768,14 @@ void StartWebLogin() {
                                                                   "This server has no accounts yet: type the nickname by hand (below)."));
             return;
         }
+        // ShellExecute answers more than 32 when something opened the address.
+        const bool opened = INT_PTR(ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
         {
             std::scoped_lock lock{g_account.mutex};
             g_account.code = code;
+            g_account.url = url;
+            g_account.copy_url = !opened;
         }
-        OpenInShell(fs::path(Widen(url)));
         const std::wstring poll = L"/ryunet/device/poll?code=" + Widen(code);
         for (int i = 0; i < 200; ++i) {  // 10 minutes, as long as the code lives
             for (int t = 0; t < 30; ++t) {
@@ -3893,6 +3899,24 @@ void ApplyAccountNick() {
 }
 
 /// The Player section's top: who this PC plays as, or Log in / Create account.
+/// Logged in: this PC plays a nickname of its own that is an account (linked to Discord, as the
+/// site's accounts are). A nickname only typed here is not one.
+bool SignedIn() {
+    const NickCheck::Result info = NickInfo();
+    return !NickProblem(CurrentNick()) && info.status == "yours" && info.linked;
+}
+
+/// The server plays only accounts: a typed nickname is not enough.
+void AccountRequiredNote(const NickCheck::Result& info) {
+    if (!info.account_required) return;
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kYellow, "%s", T("Este servidor no permite jugar online solo con un apodo: es obligatorio iniciar sesión "
+                                        "o crear tu cuenta (con Discord, o con tu apodo y contraseña).",
+                                        "This server does not allow playing online with just a nickname: you must log in or "
+                                        "create your account (with Discord, or with your nickname and password)."));
+    ImGui::PopTextWrapPos();
+}
+
 void AccountSection() {
     App& a = g_app;
     const NickCheck::Result info = NickInfo();
@@ -3906,7 +3930,7 @@ void AccountSection() {
         code = g_account.code;
     }
     const std::string nick = CurrentNick();
-    const bool signed_in = !NickProblem(nick) && info.status == "yours";
+    const bool signed_in = SignedIn();
     if (signed_in) {
         ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada: %s", "Logged in: %s"), nick).c_str());
         ImGui::SameLine();
@@ -3937,6 +3961,12 @@ void AccountSection() {
             OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
         }
     } else {
+        if (!NickProblem(nick) && info.status == "yours") {
+            // A typed nickname of this PC's, not an account yet: logging in on the site with Discord keeps it.
+            ImGui::TextColored(info.account_required ? kYellow : kGrey, "%s",
+                               Format(T("Juegas como %s sin cuenta.", "You play as %s without an account."), nick).c_str());
+        }
+        AccountRequiredNote(info);
         ImGui::TextWrapped("%s", T("Inicia sesión con tu cuenta, o créala en la web: se vincula a tu Discord y lleva una "
                                    "contraseña por si pierdes Discord. Tu apodo, monedas, amigos, logros y partidas guardadas "
                                    "te siguen a cualquier PC.",
@@ -3952,9 +3982,33 @@ void AccountSection() {
                 std::scoped_lock lock{g_account.mutex};
                 g_account.cancel = true;
             }
-            ImGui::TextColored(kGrey, "%s", Format(T("Se abrió la web: entra y autoriza este PC (código %s)...",
-                                                     "The web opened: log in and authorize this PC (code %s)..."),
+            std::string url;
+            bool copy = false;
+            {
+                std::scoped_lock lock{g_account.mutex};
+                url = g_account.url;
+                copy = g_account.copy_url;
+                g_account.copy_url = false;
+            }
+            static bool copied = false;
+            if (copy && !url.empty()) {
+                ImGui::SetClipboardText(url.c_str());  // no browser: the link is ready to paste
+                copied = true;
+            }
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(kGrey, "%s", Format(copied ? T("No se pudo abrir el navegador: el enlace se copió. Pégalo en tu navegador, "
+                                                              "entra y autoriza este PC (código %s)...",
+                                                              "The browser did not open: the link was copied. Paste it in your browser, "
+                                                              "log in and authorize this PC (code %s)...")
+                                                          : T("Se abrió la web: entra y autoriza este PC (código %s)...",
+                                                              "The web opened: log in and authorize this PC (code %s)..."),
                                                    code).c_str());
+            ImGui::PopTextWrapPos();
+            if (!url.empty()) {
+                ImGui::TextColored(kGrey, "%s", url.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton(T("Copiar enlace", "Copy link"))) ImGui::SetClipboardText(url.c_str());
+            }
         }
         static char login_nick[24] = "", login_password[132] = "";
         if (ImGui::TreeNode(T("Entrar con apodo y contraseña", "Log in with nickname and password"))) {
@@ -4030,10 +4084,10 @@ void OnlineTab() {
         ImGui::BeginDisabled(!a.game.Flag("online", true));
 
         AccountSection();
-        const bool signed_in = !NickProblem(CurrentNick()) && NickInfo().status == "yours";
-        if (signed_in) {
+        if (SignedIn()) {
             if (a.game.Flag("online", true)) DiscordAccountSection();
         } else if (ImGui::TreeNode(T("Escribir el apodo a mano (servidores sin cuentas)", "Type the nickname by hand (servers without accounts)"))) {
+            AccountRequiredNote(NickInfo());
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
             // A nickname linked to this player's Discord account is their identity: it is changed by
             // unlinking it first (DiscordAccountSection), not by typing over it.
@@ -4685,6 +4739,167 @@ void ModsTab() {
     }
 }
 
+// ---- Cloud saves (scripts/cloud_cli.py; the server's cloud_saves.go) ----
+// The account's last saves on the server, listed on request; restoring one keeps this PC's save
+// in user/cloud/backup-<title>.zip first. The game uploads after every session it changed.
+struct CloudVersion {
+    int id = 0, created = 0, size = 0;
+    std::string title, source;
+};
+struct CloudSavesState {
+    std::mutex mutex;
+    bool busy = false, error = false, loaded = false;
+    std::string message;
+    std::vector<CloudVersion> list;
+};
+CloudSavesState g_cloud;
+
+void CloudCli(const std::vector<std::wstring>& args, std::function<void(const std::string&)> done) {
+    App& a = g_app;
+    if (!a.python) {
+        std::scoped_lock lock{g_cloud.mutex};
+        g_cloud.error = true;
+        g_cloud.message = T("Falta Python 3.", "Python 3 is missing.");
+        return;
+    }
+    {
+        std::scoped_lock lock{g_cloud.mutex};
+        if (g_cloud.busy) return;
+        g_cloud.busy = true;
+        g_cloud.message.clear();
+    }
+    std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-I -X utf8 " + Quote((a.root / L"scripts" / L"cloud_cli.py").wstring());
+    for (const auto& arg : args) cmd += L" " + arg;
+    cmd += L" --data " + Quote(a.root.wstring()) + L" --config " + Quote(GameIni().wstring());
+    const std::wstring exe = a.python->exe;
+    const fs::path root = a.root;
+    std::thread([cmd, exe, root, done] {
+        const Captured r = RunCaptured(exe, cmd, root, 180000);
+        // The script prints one JSON object, last.
+        std::string out = r.output;
+        if (const auto line = out.rfind("\n{"); line != std::string::npos) out = out.substr(line + 1);
+        else if (const auto brace = out.find('{'); brace != std::string::npos) out = out.substr(brace);
+        done(r.started ? out : std::string("{\"error\":\"python\"}"));
+        std::scoped_lock lock{g_cloud.mutex};
+        g_cloud.busy = false;
+    }).detach();
+}
+
+void CloudList() {
+    CloudCli({L"list"}, [](const std::string& out) {
+        std::vector<CloudVersion> list;
+        for (size_t at = out.find("{\"id\""); at != std::string::npos; at = out.find("{\"id\"", at + 1)) {
+            const std::string one = out.substr(at, out.find('}', at) - at + 1);
+            CloudVersion v;
+            JsonNumber(one, "id", v.id);
+            JsonNumber(one, "created", v.created);
+            JsonNumber(one, "size", v.size);
+            v.title = JsonField(one, "title");
+            v.source = JsonField(one, "source");
+            list.push_back(v);
+        }
+        const std::string error = JsonField(out, "error");
+        std::scoped_lock lock{g_cloud.mutex};
+        g_cloud.loaded = error.empty();
+        g_cloud.list = std::move(list);
+        g_cloud.error = !error.empty();
+        g_cloud.message = error == "no_account" ? T("Inicia sesión con tu cuenta (pestaña Online) para ver tus partidas en la nube.",
+                                                    "Log in with your account (Online tab) to see your cloud saves.")
+                          : !error.empty()      ? T("No se pudo consultar el servidor.", "Could not ask the server.")
+                          : g_cloud.list.empty() ? T("Todavía no hay partidas en la nube: se suben solas al terminar de jugar online.",
+                                                     "No cloud saves yet: they upload by themselves after you play online.")
+                                                 : std::string();
+    });
+}
+
+void CloudRestore(int id) {
+    CloudCli({L"restore", L"--id", std::to_wstring(id)}, [](const std::string& out) {
+        const std::string error = JsonField(out, "error");
+        std::scoped_lock lock{g_cloud.mutex};
+        g_cloud.error = !error.empty();
+        g_cloud.message = error.empty() ? Format(T("Partida restaurada. La que tenías quedó en %s.", "Save restored. The one you had is in %s."),
+                                                 JsonText(out, "backup"))
+                                        : Format(T("No se pudo restaurar: %s", "Could not restore: %s"), error);
+        g_app.saves_dirty = true;
+    });
+}
+
+void CloudSavesSection() {
+    App& a = g_app;
+    ImGui::SeparatorText(T("Partidas en la nube", "Cloud saves"));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kGrey, "%s", T("Al terminar de jugar online, tu partida se sube a tu cuenta (las 5 últimas versiones). Desde aquí "
+                                      "puedes traer una a este PC: la que tienes ahora se guarda antes como copia.",
+                                      "After you play online, your save goes up to your account (the last 5 versions). From here you "
+                                      "can bring one to this PC: the one you have now is kept first as a backup."));
+    ImGui::PopTextWrapPos();
+    bool busy, error, loaded;
+    std::string message;
+    std::vector<CloudVersion> list;
+    {
+        std::scoped_lock lock{g_cloud.mutex};
+        busy = g_cloud.busy;
+        error = g_cloud.error;
+        loaded = g_cloud.loaded;
+        message = g_cloud.message;
+        list = g_cloud.list;
+    }
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button(loaded ? T("Actualizar lista", "Refresh list") : T("Ver mis partidas en la nube", "See my cloud saves"))) CloudList();
+    ImGui::EndDisabled();
+    if (busy) {
+        ImGui::SameLine();
+        ImGui::TextColored(kGrey, "%s", T("Consultando…", "Working…"));
+    }
+    if (loaded && !list.empty() &&
+        ImGui::BeginTable("cloud", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn(T("Fecha", "Date"), ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn(T("Juego", "Game"), ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn(T("Tamaño", "Size"), ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+        static int armed = 0;
+        static ULONGLONG armed_at = 0;
+        for (const auto& v : list) {
+            ImGui::PushID(v.id);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char when[64] = "-";
+            const time_t t = time_t(v.created);
+            struct tm local {};
+            if (localtime_s(&local, &t) == 0) std::strftime(when, sizeof when, "%d/%m/%Y %H:%M", &local);
+            ImGui::TextUnformatted(when);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(v.title == "CUSA14876" ? "EU" : "USA");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(FormatSize(uint64_t(v.size)).c_str());
+            ImGui::TableNextColumn();
+            const bool is_armed = armed == v.id && GetTickCount64() - armed_at < 5000;
+            ImGui::BeginDisabled(busy || a.game_running);
+            if (ImGui::SmallButton(is_armed ? T("Pulsa otra vez", "Press again") : T("Traer a este PC", "Bring to this PC"))) {
+                if (is_armed) {
+                    armed = 0;
+                    CloudRestore(v.id);
+                } else {
+                    armed = v.id;
+                    armed_at = GetTickCount64();
+                }
+            }
+            ImGui::EndDisabled();
+            if (!is_armed && ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", T("Reemplaza la partida de este PC por esta versión (la actual se guarda como copia).",
+                                          "Replaces this PC's save with this version (the current one is kept as a backup)."));
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (!message.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(error ? kYellow : kGreen, "%s", message.c_str());
+        ImGui::PopTextWrapPos();
+    }
+}
+
 void SavesTab() {
     App& a = g_app;
     if (a.saves_dirty) {
@@ -4802,6 +5017,7 @@ void SavesTab() {
     }
     ImGui::SameLine();
     if (ImGui::Button(T("Actualizar", "Refresh"))) a.saves_dirty = true;
+    CloudSavesSection();
 }
 
 // ---------------------------------------------------------------------------------------------
