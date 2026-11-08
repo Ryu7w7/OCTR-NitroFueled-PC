@@ -1140,6 +1140,38 @@ static int capture_finish_order(unsigned char *event) {
     return 1;
 }
 
+/* runtime_ranked.c: the validated finish order as the server scores it — the
+ * in-game name of every racer, best first, with its finisher state. */
+int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) {
+    if (!out || max < finish_order_count || finish_order_count < 1) return 0;
+    unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x10) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, list + 12, 4);
+    void **items = list ? pointer_at(list, 0x20) : NULL;
+    if (!items || count < 1 || count > 8) return 0;
+    int written = 0;
+    for (int rank = 0; rank < finish_order_count; ++rank) {
+        for (int i = 0; i < count; ++i) {
+            unsigned char *racer = items[i];
+            if (!racer) continue;
+            const struct CupTotal key = racer_identity(racer);
+            if (key.human != finish_order[rank].human || key.id != finish_order[rank].id ||
+                key.online_id != finish_order[rank].online_id) continue;
+            unsigned char *player = handle_object((void **)(racer + 0x10));
+            if (!player) break; /* an AI has no name to report */
+            const char *name = pointer_at(player, 0x68);
+            if (!name || !*name || strlen(name) >= sizeof out[written].name) break;
+            strcpy(out[written].name, name);
+            out[written].finished = team_result_count
+                ? !!(team_finished_mask & (1u << rank))
+                : team_racer_finished(racer);
+            ++written;
+            break;
+        }
+    }
+    return written;
+}
+
 /* Freeze the final snapshot once, after native result handling. Late lap or
  * finish callbacks cannot turn a timed-out racer into a scoreboard finisher. */
 static void apply_team_results(unsigned char *event) {
@@ -1889,6 +1921,7 @@ static void ABI race_results_received(unsigned char *event) {
         if (items[i]) restore_finish_position(items[i]);
     /* Native result handling can complete remote racers; score that final state. */
     apply_team_results(event);
+    runtime_ranked_race_end();
     if (team_race_ui_owner) trace_team_score("results-return", NULL, NULL);
     refresh_team_results();
     if (applied && podium_count) cup_final_results_ready = 1;
@@ -2074,10 +2107,17 @@ static void refresh_lobby_card(unsigned char *owner) {
         /* Party members can retain private scene/selector state in public. */
         int type = 0;
         if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);
-        if (type != 2)
-            update_card(owner, NULL, runtime_ranked_active() ?
-                        (runtime_public_itemless_active() ? "RANKED - ITEMLESS" : "RANKED - NORMAL") :
-                        (runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL"), NULL, 0);
+        if (type != 2) {
+            if (runtime_ranked_active()) {
+                char label[96];
+                snprintf(label, sizeof label, "RANKED - %s%s",
+                         runtime_public_itemless_active() ? "ITEMLESS" : "NORMAL",
+                         runtime_ranked_result_text());
+                update_card(owner, NULL, label, NULL, 0);
+            } else {
+                update_card(owner, NULL, runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL", NULL, 0);
+            }
+        }
         return;
     }
     if (battle_selected() || !runtime_online_mode_in_private()) return;

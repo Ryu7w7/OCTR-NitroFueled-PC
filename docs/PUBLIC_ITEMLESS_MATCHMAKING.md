@@ -34,8 +34,10 @@ extension and a server-owned queue filter, so neither Ranked mode joins a casual
 room. Before sending the search, the client checks the signed
 `/ryunet/ranked-party` endpoint. An older server cannot silently place a Ranked
 search in a casual queue. The client verifies `octr_ranked_v1` in the backend
-lobby document before accepting a room. Ranked currently separates queues; MMR
-and rating changes are not implemented.
+lobby document before accepting a room. At the validated results event every
+client's mod posts the finish order to `/ryunet/ranked-result`
+(docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md): the server scores the race when the
+room's host reports and the lobby card shows the rating it answered with.
 
 ## Verification
 

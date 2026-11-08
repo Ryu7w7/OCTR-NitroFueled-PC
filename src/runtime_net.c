@@ -64,6 +64,7 @@ int32_t runtime_net_init(void) {
     }
     runtime_friends_start();
     runtime_spectate_start(); /* spectator build */
+    runtime_ranked_start(); /* ranked results (docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md) */
     return ORBIS_OK;
 }
 

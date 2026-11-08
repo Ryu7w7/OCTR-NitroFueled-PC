@@ -122,6 +122,20 @@ int runtime_ranked_active(void) {
     return active;
 }
 
+/* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
+int runtime_ranked_session(uint64_t *room, int *mode) {
+    pthread_mutex_lock(&mode_lock);
+    uint64_t native_room = 0;
+    if (room_owner) memcpy(&native_room, room_owner + 0x958, 8);
+    const int active = confirmed_ranked && confirmed_room && native_room == confirmed_room;
+    if (active) {
+        if (room) *room = confirmed_room;
+        if (mode) *mode = selected ? 1 : 0;
+    }
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+
 /* Public Normal also overrides a party's lingering private-scene flag. */
 int runtime_public_match_active(void) {
     pthread_mutex_lock(&mode_lock);

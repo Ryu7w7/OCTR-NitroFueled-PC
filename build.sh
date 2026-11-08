@@ -141,6 +141,8 @@ if [[ ${1:-} == --test ]]; then
     out/name-colors-test
     "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c -o out/private-peer-test
     out/private-peer-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_ranked.c -o out/ranked-test
+    out/ranked-test
     "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_catchup_lan.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/catchup-lan-test
     out/catchup-lan-test
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -Igpu/shim -Igpu/shadps4 tests/test_graphics_tab.cpp -o out/graphics-tab-test

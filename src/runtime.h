@@ -137,6 +137,16 @@ int runtime_public_itemless_selected(void);
 void runtime_public_itemless_select(int enabled);
 int runtime_ranked_active(void);
 int runtime_ranked_selected(void);
+/* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
+int runtime_ranked_session(uint64_t *room, int *mode);
+/* One racer of the validated finish order, best first (runtime_ranked.c). */
+struct runtime_ranked_racer { char name[32]; int finished; };
+/* The finish order of the race just ended, 0 none (runtime_online_mode.c). */
+int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
+/* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */
+void runtime_ranked_start(void);
+void runtime_ranked_race_end(void);
+const char *runtime_ranked_result_text(void);
 void runtime_online_mode_set_text(void *placeable, const char *text);
 void runtime_public_itemless_reset(void);
 void runtime_public_itemless_party_ready(void);

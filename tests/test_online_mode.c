@@ -26,6 +26,8 @@ int runtime_public_match_active(void) { return public_normal_active || public_ac
 int runtime_public_itemless_active(void) { return public_active; }
 int runtime_ranked_active(void) { return 0; }
 int runtime_ranked_selected(void) { return ranked_selected; }
+void runtime_ranked_race_end(void) {}
+const char *runtime_ranked_result_text(void) { return ""; }
 int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_reset(void) {}
