@@ -82,7 +82,7 @@ static struct {
     active_camera_fn *active_camera;
     camera_refresh_fn *camera_refresh;
     make_handle_fn *make_handle;
-    pool_new_fn *ghost_look_end_new;
+    pool_new_fn *ghost_look_end_new, *ghost_look_start_new;
     send_message_fn *send_message;
     player_kart_fn *player_kart;
     void0_fn *despawn_items, *load_next_map;
@@ -129,6 +129,7 @@ static struct {
     int kart_slot[RR_RACERS];   /* each racer's kart slot in the replay's race (0 the player's), -1 none */
     void *ghost[RR_RACERS];
     uint8_t attached[RR_RACERS];
+    void *ghost_look[RR_RACERS];  /* the kart that got the ghost look (Time Trial ghosts), 0 none */
     uint32_t fed[RR_RACERS];
     int32_t accolade_player;
     int rewound;
@@ -454,6 +455,7 @@ static void drop_ghosts(void) {
         if (P.ghost[i]) game.release(P.ghost[i]);
         P.ghost[i] = 0;
         P.attached[i] = 0;
+        P.ghost_look[i] = 0;
     }
 }
 
@@ -811,7 +813,12 @@ static void unghost(void) {
     P.unghost_frames = 0;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = P.attached[i] ? kart_of_racer(i) : 0;
-        void *message = kart ? game.ghost_look_end_new(0) : 0;
+        /* A replay plays as a Single Race, where karts have no ghost look. In a Time Trial the others were
+         * ghosts: they get the look once (a second Start would add its effects twice). */
+        const int ghost = P.header.mode == 2 && i != P.player_slot;
+        if (ghost && P.ghost_look[i] == kart) continue;
+        void *message = kart ? (ghost ? game.ghost_look_start_new : game.ghost_look_end_new)(0) : 0;
+        if (ghost) P.ghost_look[i] = kart;
         if (!message) continue;
         game.send_message(message, kart, kart);
         game.release(message);
@@ -1444,6 +1451,7 @@ void ABI runtime_replay_level_start(void *manager) {
             P.camera = P.target = P.kart = 0;
             P.time = 0.0f;
             memset(P.attached, 0, sizeof P.attached);
+            memset(P.ghost_look, 0, sizeof P.ghost_look);
             memset(P.fed, 0, sizeof P.fed);
             puts("Replay: the race restarted: the replay starts again");
         } else {
@@ -2455,6 +2463,7 @@ int runtime_replay_play_install(int eu) {
     game.camera_refresh = fn(0xc8ade0, 0, eu);
     game.make_handle = fn(0x14bea20, 1, eu);
     game.ghost_look_end_new = fn(0x112da10, 1, eu);
+    game.ghost_look_start_new = fn(0x112d8b0, 1, eu);
     game.send_message = fn(0xd32160, 0, eu);
     game.player_kart = fn(0xe50f70, 0, eu);
     game.despawn_items = fn(0x1056bb0, 1, eu);
@@ -2486,7 +2495,7 @@ int runtime_replay_play_install(int eu) {
     void *const check[] = {game.ghost_new, game.move_key_new, game.input_key_new, game.list_reserve, game.list_set_count,
                            game.ghost_reset, game.ghost_attach, game.ghost_update, game.ai_load, game.ai_count, game.racer_of,
                            game.camera_instance, game.active_camera, game.camera_refresh, game.make_handle,
-                           game.ghost_look_end_new, game.send_message, game.player_kart, game.despawn_items, game.string,
+                           game.ghost_look_end_new, game.ghost_look_start_new, game.send_message, game.player_kart, game.despawn_items, game.string,
                            game.string_release, game.release, game.set_next_race_mode, game.set_next_map, game.load_next_map,
                            game.apply_choice, game.apply_player_count, game.enter_customization, game.zone_by_name,
                            game.decal_find, game.set_text, game.hud_set_lap, game.find_driver, game.spawn_placeable, game.hud_style_next};
