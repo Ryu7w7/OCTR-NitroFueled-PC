@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* Native race replays (spectator build): the recorder.
  *
  * Every frame of a race, every racer (player, online players, AI): where it is, how it moves, its inputs
