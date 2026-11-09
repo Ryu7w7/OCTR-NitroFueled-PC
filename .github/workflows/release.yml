@@ -142,11 +142,11 @@ jobs:
           # elsewhere fetch the latest Windows release from microsoft/DirectXShaderCompiler.
           dxc_dir=../OCTR-vulkan-lab-tools/dxc
           if [[ ! -f $dxc_dir/bin/x64/dxc.exe ]]; then
-            url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            url=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -H "Authorization: Bearer $GH_TOKEN" \
                 https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest |
               python3 -c "import json,sys; print(next(a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].startswith('dxc_') and a['name'].endswith('.zip') and 'linux' not in a['name']))")
             mkdir -p "$dxc_dir"
-            curl -fsSL -o dxc.zip "$url"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o dxc.zip "$url"
             unzip -q -o dxc.zip -d "$dxc_dir"
           fi
           python3 packaging/windows/make_portable.py --version "$version"
