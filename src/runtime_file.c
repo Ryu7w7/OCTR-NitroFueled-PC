@@ -348,7 +348,7 @@ static File *get(int fd) {
 }
 
 /* --- archive patches (see ArchivePatch) ----------------------------------------------------- */
-#define MAX_ARCHIVE_PATCHES 32 /* the widescreen layouts patch 13 archives (scripts/widescreen.py) */
+#define MAX_ARCHIVE_PATCHES 128 /* one per patched archive: widescreen layouts patch 13, a music or track mod can touch dozens */
 static ArchivePatch archive_patches[MAX_ARCHIVE_PATCHES];
 static int archive_patch_count;
 static ArchivePatch private_archive_patches[MAX_ARCHIVE_PATCHES];
