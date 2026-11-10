@@ -11,17 +11,14 @@ reference machine: a race runs at about 47 fps against shadPS4's 50.6 on a Ryzen
 
 ## Running it
 
-From the portable folder:
+In the launcher, **Graphics engine: Native Vulkan (experimental)** (`bbport.ini` `renderer=native`).
+The first start builds its shaders from the player's game (`scripts/native_shaders.py`, a few
+minutes). It then runs in the real mode: shadPS4 skips every draw and the native renderer draws
+the frame alone (`BB_NATIVE_VK=1 BB_VK_SHOW=1 BB_VK_ALONE=1 BB_VK_NATIVE_ONLY=1`). Without
+`BB_VK_NATIVE_ONLY`, shadPS4's rasterizer stays and flips go through its thread (the older
+"alone" mode; `BB_VK_SHOW=0` draws with both and shows shadPS4's picture).
 
-| Launcher | What it does |
-|---|---|
-| `Run original shadPS4 (stock).bat` | The shipped renderer: the reference to compare against |
-| `Run native vulkan.bat` | The native renderer draws beside shadPS4, which still draws the picture |
-| `Run native vulkan - show its picture.bat` | Both draw; you see the native one |
-| `Run native vulkan - alone.bat` | **The real mode**: shadPS4 skips every draw, only the native renderer draws |
-| `Run native vulkan - alone (2 frames ahead).bat` | As alone, with `BB_FRAMES_AHEAD=2` |
-
-Each run writes `logs/<time>.log`, `.frames.csv` (every frame's time) and, with
+Each run writes its log with the renderer's statistics every 5 seconds and, with
 `BB_VK_PASS_TRACE=1`, `.trace.txt` (GPU time of every pass and draw for one submission in 1000).
 
 ### Switches
@@ -40,7 +37,8 @@ Each run writes `logs/<time>.log`, `.frames.csv` (every frame's time) and, with
 | `BB_VK_PREP_WORKERS=N` | Threads that work out each draw's shaders, vertex layout and indices ahead of the capture thread (2; 0: the capture thread does it all) |
 | `BB_VK_SERIALIZE_GS=0/1` | Pipelines with a geometry shader compile one at a time per GS (default on the NVIDIA proprietary driver, whose 610.88 shader compiler crashed with two threads building the same fur ES+GS; 0: off, 1: on for every driver). Other pipelines still compile in parallel |
 | `BB_VK_DECODE_DRAWS=1` | Alone mode: shadPS4 decodes the draw state and draws again (by default it passes over them) |
-| `BB_FRAMES_AHEAD=N` | shadPS4's: how many frames its recording thread may run ahead of the GPU at a flip (1). `Run native vulkan - alone (2 frames ahead).bat` tries 2 |
+| `BB_FRAMES_AHEAD=N` | shadPS4's: how many frames its recording thread may run ahead of the GPU at a flip (1). Only without `BB_VK_NATIVE_ONLY`: in the launcher's mode the flip prepares its frame itself (`Presenter::PrepareNativeFrame`) and the bound is the presenter's frames instead |
+| `BB_VK_PIPELINE_WAIT_MS=N` | A draw whose shaders are still loading or whose pipeline is still compiling waits up to N ms for them, at most 4N ms a second (10 by default; 0: it is left out at once). Fewer missing objects on a first run: on an RTX 5080 the waits took about 1 ms each and caused no hitch |
 | `BB_VK_RECORD_THREAD`, `BB_VK_SYNC_PIPELINES=1`, `BB_VK_DEFER_COPIES=0`, `BB_VK_VERTEX_COPY=0`, `BB_VK_FULL_BARRIERS`, `BB_VK_RESIDENT`, `BB_VK_TEXTURE_MB`, `BB_VK_NATIVE_SHADERS`, `BB_VK_DRAW` | Comparison and debugging switches; see `gpu/shim/bbport_native_vk.cpp` |
 
 ## How it works
@@ -99,27 +97,82 @@ Also:
   - shadow maps and post-processing: the rest.
 - **Bubbles**: the GPU is idle about 10% of the time.
 
+## A fast PC (RTX 5080, 2560x1440, 2026-11-08)
+
+The numbers above are from the 680M, where the GPU is the limit. On a desktop GPU it is not: in
+a race at 327 fps uncapped (Mailbox, 1440p PS4 Pro path), the GPU was busy 279 ms a second and
+the game's thread 62 ms, while the presenter's swap thread (`bb:Present`) took 93% of a core. At
+120 fps the GPU was busy 100 ms a second. Each run now logs where the presenter's time goes:
+
+    Presenter: per second: 326.8 presents (Mailbox, 3 images); acquire .. ms, record .. ms,
+    submit .. ms, driver present .. ms; flips waited .. ms for a free frame (../s)
+
+On that PC the line read `326.0 presents (Mailbox, 4 images); acquire 1 ms, record 4 ms,
+submit 9 ms, driver present 922 ms`: the driver's `vkQueuePresentKHR` blocks about 2.8 ms each
+time, so the frame rate is the display's pacing (a 360 Hz monitor with the NVIDIA driver's
+G-Sync/low latency cap comes to about 326), not the renderer. 3 or 4 swapchain images made no difference.
+The ideas below lower GPU time, which matters on the 680M and the Steam Deck, not for frame rate
+on such a PC.
+
+## DLSS and HDR
+
+**DLSS** (launcher: Upscaling, NVIDIA DLSS; or `BB_VK_DLSS=1`) runs in the native renderer itself
+(`gpu/shim/bbport_native_vk_dlss.cpp`), with the same DLLs as under shadPS4
+(`sacredfire_dlss.dll` and `nvngx_dlss.dll` in `bin\`; without them the log says "not available"
+and nothing is jittered). It takes the finished scene the display pass stretches, before the HUD:
+
+- the G-buffer pass is the draw with exactly four colour targets and a depth (D32S8, velocity in
+  colour 3, viewport z 0-0.8, OpenGL clip depth);
+- the camera's motion comes from the scene draws' vertex constants, voted across the pass:
+  400/464/528 bytes = previous MVP at float 0, projection at 32, model-view at 48
+  (prevMVP * inverse(MV)); the PS4 Pro path's 528 bytes = view at 32, projection at 48, previous
+  view at 64 (projection * previous view * inverse(view));
+- moving objects stay still on the screen (as under shadPS4; `BB_FSR3_MV` tries decodings of
+  CTR's velocity target); `BB_FSR3_NO_JITTER` turns the jitter off;
+- draws into last frame's scene depth (not full-screen quads) are moved by a Halton(2,3) jitter,
+  only when DLSS took the frame before;
+- menus draw their 2D into the scene image over a small 3D scene: a frame whose biggest G-buffer
+  pass has fewer than `BB_VK_DLSS_MENU_DRAWS` (100) draws is shown as drawn (the character
+  select has 42, a race 380-1700). With DLSS on them, the waving flag, pulsing text and the
+  results screen's scrolling background were doubled or smeared, even without history.
+
+The log line `Native Vulkan: DLSS: N frames/s, N upscaled, N without a scene; N as a scene, N menus
+left as drawn` says what happened. On an RTX 5080 at 3840x2160: DLAA ~225 fps; 2560x1440 to
+2160p (Quality) 260-326 fps. Rendering at 2160p for a 1440p display is already supersampled,
+so there DLSS off is faster and looks as good.
+
+**HDR** (launcher: The game's HDR; or `BB_HDR=1`, with Windows HDR on) is the game's own HDR10
+output: the scene before the HUD becomes R16G16B16A16Sfloat (DLSS takes it as linear HDR) and
+the display buffers A2B10G10R10 (PQ). The game asks the system for no HDR calibration, so the
+post-process pass can fit its PQ picture to the display: `BB_HDR_PEAK=nits` rolls off above 75%
+of the peak (launcher: HDR peak brightness), `BB_HDR_GAIN` scales it (launcher: HDR paper white,
+100% = the game).
+
 ## Ideas not done yet
 
-1. **Read-modify-write copies.** The engine copies a G-buffer layer, then redraws that layer
-   with one full-screen draw sampling the copy. If that draw provably writes every pixel
-   without blending, the copy could become a swap. A feedback-loop layout
-   (`VK_EXT_attachment_feedback_loop_layout`) could also remove it where the shader reads only
-   its own pixel.
-2. **GPU bubbles**: about 10–15% idle. In alone mode, shadPS4's recording thread waits at each
-   flip until the GPU finishes the frame before (`BB_FRAMES_AHEAD=1`, `PrepareFrame`): about
-   20% of a race and 80–90% of the title screen (`BB_WAIT_TRACE=1`, which now works on Windows
-   too). Labels queued on that thread wait with it, so the game waits too, then the GPU
-   waits for the game. Try `BB_FRAMES_AHEAD=2`. Also check submission boundaries,
-   pipeline-not-ready skips and waits on texture uploads.
+1. **Read-modify-write copies.** Partly done: the reflection blends' screen passes
+   (`OwnPixelPasses`) read their targets in place with `VK_EXT_attachment_feedback_loop_layout`
+   (`copies ... read in place` in the log), a whole copy whose source is then cleared becomes
+   an image swap (`swapped instead`), and a depth copy sampled as the depth target is not made
+   (`read from the depth target`). Left: the engine copies a G-buffer layer, then redraws that
+   layer with one full-screen draw sampling the copy; if that draw provably writes every pixel
+   without blending, the copy could become a swap too. Find which copies remain with the trace
+   file (`copy 2560x1440 R8G8B8A8Unorm`: two a frame, about 15 µs each on an RTX 5080).
+2. **GPU bubbles**: about 10–15% idle on the 680M. In the launcher's mode the flip handler waits
+   for a free presenter frame and its fence (`Presenter::GetRenderFrame`), now logged as "flips
+   waited"; `BB_FRAMES_AHEAD` does not apply there (see Switches). Also check submission
+   boundaries, pipeline-not-ready skips (`draws left out while compiling`; the known pipelines are
+   preloaded from the last run, and a draw waits a little for new ones, `BB_VK_PIPELINE_WAIT_MS`) and waits on
+   texture uploads (`waited for their upload`).
 3. **Shared power budget**: the 6800U shares power between CPU and GPU, and the renderer's extra
    threads may lower GPU clocks. Compare GPU clocks against stock shadPS4 in a race.
 4. **More PC shaders** for the heaviest translated shaders (`shaders.py`-style per-shader GPU
    time from the trace file). Two hand-written versions of `UberShaderBlended_8c4835d9` were
    slower than the translation, so profile before rewriting.
-5. **Compute dispatches** are still run by shadPS4 in alone mode, into its own images. Anything
-   the engine produces with compute and later samples is only correct where it does not matter
-   today.
+5. **Compute dispatches** would still be run by shadPS4 in alone mode, into its own images. In
+   the launcher's mode (`BB_VK_NATIVE_ONLY`) the log shows `shadPS4 compute dispatches: none`
+   in menus and races: nothing to move today. Anything the engine produces with compute and
+   later samples would only be correct where it does not matter.
 
 ## Lessons from building it
 

@@ -1911,6 +1911,13 @@ void StartGame() {
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
+    if (a.launcher.Flag("hdr", false)) {  // off: BB_HDR as set outside
+        SetEnv(L"BB_HDR", "1");
+        const std::string peak = a.launcher.Get("hdr_peak", "0");
+        if (peak != "0") SetEnv(L"BB_HDR_PEAK", peak);
+        const std::string gain = a.launcher.Get("hdr_gain", "1");
+        if (gain != "1") SetEnv(L"BB_HDR_GAIN", gain);
+    }
     SetEnv(L"BB_DLC", a.launcher.Flag("dlc", true) ? "1" : "0");
     SetEnv(L"BB_DLC_DISABLED", a.launcher.Get("dlc_disabled"));
     SetEnv(L"BB_FULLSCREEN", "");  // bbport.ini's fullscreen= (the menu switch) decides
@@ -3444,12 +3451,16 @@ void SettingsTab() {
                                                    {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
                                                    {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"},
                                                    {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"}};
+        // the native engine has DLSS of its own (gpu/shim/bbport_native_vk_dlss.cpp); FSR 3 and
+        // FSR 4 live in shadPS4's rasterizer only
         static constexpr Choice kTemporalNative[] = {{"Desactivado", "Off", "off"},
-                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"}};
+                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"},
+                                                     {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
         const bool native = a.game.Get("renderer") == "native";
         const bool fsr4 = Fsr4FilesPresent();
         const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
-                                                     temporal == "off" ? "off" : "fsr1", 16.0f)
+                                                     temporal == "off" || temporal == "dlss" ? temporal.c_str() : "fsr1",
+                                                     16.0f)
                                    : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
                                                      temporal.c_str(), 16.0f);
         if (picked) {
@@ -3457,9 +3468,9 @@ void SettingsTab() {
             a.game.Erase("fsr3");
             SaveGameIni();
         }
-        if (native && (temporal == "fsr3" || temporal == "dlss" || temporal == "fsr4")) {
-            ImGui::TextColored(kGrey, "%s", T("FSR 3, FSR 4 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
-                                              "FSR 3, FSR 4 and DLSS do not work with the native engine: FSR 1 is used."));
+        if (native && (temporal == "fsr3" || temporal == "fsr4")) {
+            ImGui::TextColored(kGrey, "%s", T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
+                                              "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
         } else if (temporal == "fsr4" && !fsr4) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
             ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
@@ -3479,6 +3490,34 @@ void SettingsTab() {
                      "rebuild detail over several frames from the game's depth and motion, and smooth edges even at the "
                      "same resolution. DLSS needs an NVIDIA RTX card and FSR 4 a GPU with INT8 support and its files "
                      "(FSR 3 runs otherwise). Experimental: switch to FSR 1 if you see trails or shimmering."));
+    }
+    LauncherFlag("hdr", T("HDR del juego", "The game's HDR"), false,
+                 T("La salida HDR propia del juego (HDR10). Activa también el HDR de Windows y apaga el "
+                   "RTX HDR para este juego. Experimental.",
+                   "The game's own HDR output (HDR10). Also turn on Windows HDR and turn off RTX HDR for "
+                   "this game. Experimental."));
+    if (a.launcher.Flag("hdr", false)) {
+        static constexpr Choice kHdrPeak[] = {{"Como el juego", "As the game", "0"},
+                                              {"400 nits", "400 nits", "400"},
+                                              {"450 nits", "450 nits", "450"},
+                                              {"600 nits", "600 nits", "600"},
+                                              {"800 nits", "800 nits", "800"},
+                                              {"1000 nits", "1000 nits", "1000"}};
+        ChoiceCombo(T("Brillo máximo HDR", "HDR peak brightness"), "hdr_peak", kHdrPeak, "0");
+        HelpMarker(T("El brillo máximo de tu pantalla (el de la calibración HDR de Windows): las partes "
+                     "más brillantes del juego se ajustan a él en vez de quemarse.",
+                     "Your display's peak brightness (from the Windows HDR calibration): the game's "
+                     "brightest parts are fitted to it instead of clipping."));
+        static constexpr Choice kHdrGain[] = {{"60%", "60%", "0.6"},   {"70%", "70%", "0.7"},
+                                              {"80%", "80%", "0.8"},   {"90%", "90%", "0.9"},
+                                              {"100% (el juego)", "100% (the game)", "1"},
+                                              {"115%", "115%", "1.15"}, {"130%", "130%", "1.3"}};
+        ChoiceCombo(T("Blanco de referencia HDR", "HDR paper white"), "hdr_gain", kHdrGain, "1");
+        HelpMarker(T("Cuánto brillan los blancos normales (menús, textos, cielo) frente a lo que el juego "
+                     "pone. Bájalo si los menús se ven quemados; los brillos fuertes siguen limitados al "
+                     "brillo máximo.",
+                     "How bright ordinary whites (menus, text, sky) are against what the game puts out. "
+                     "Lower it if menus look blown out; strong highlights stay within the peak brightness."));
     }
     if (temporal == "dlss") {
         static constexpr Choice kQuality[] = {

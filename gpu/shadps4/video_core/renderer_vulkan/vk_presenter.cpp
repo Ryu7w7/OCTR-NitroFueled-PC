@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -45,6 +46,47 @@
 #endif
 
 namespace Vulkan {
+
+namespace {
+/// bbport: where the presenter's time goes, printed every 5 seconds ("Presenter: per second").
+/// The swap thread (bb:Present) took 93% of a core at 327 FPS on an RTX 5080 with the native
+/// renderer while its GPU was busy 28% of the time: this tells acquire, recording, submission and
+/// the driver's present apart, and how long flips waited for a free presenter frame.
+struct PresentStats {
+    std::atomic<u64> acquire_ns{0}, record_ns{0}, submit_ns{0}, present_ns{0}, frame_wait_ns{0},
+        presents{0}, frame_waits{0};
+};
+PresentStats present_stats;
+
+u64 NsSince(std::chrono::steady_clock::time_point t0) {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                     t0)
+                   .count());
+}
+
+void ReportPresentStats(u32 images, vk::PresentModeKHR mode) {
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last = Clock::now();
+    const auto now = Clock::now();
+    const double s = std::chrono::duration<double>(now - last).count();
+    if (s < 5.0) {
+        return;
+    }
+    last = now;
+    const auto ms = [s](std::atomic<u64>& v) { return double(v.exchange(0)) / 1e6 / s; };
+    const double presents = double(present_stats.presents.exchange(0)) / s;
+    const double acquire = ms(present_stats.acquire_ns), record = ms(present_stats.record_ns),
+                 submit = ms(present_stats.submit_ns), present = ms(present_stats.present_ns),
+                 waited = ms(present_stats.frame_wait_ns);
+    const double waits = double(present_stats.frame_waits.exchange(0)) / s;
+    std::printf("Presenter: per second: %.1f presents (%s, %u images); acquire %.0f ms, record %.0f "
+                "ms, submit %.0f ms, driver present %.0f ms; flips waited %.0f ms for a free frame "
+                "(%.1f/s)\n",
+                presents, vk::to_string(mode).c_str(), images, acquire, record, submit, present,
+                waited, waits);
+    std::fflush(stdout);
+}
+} // namespace
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
     const vk::FormatProperties props{physical_device.getFormatProperties(format)};
@@ -740,7 +782,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
-    if (!swapchain.AcquireNextImage()) {
+    auto section = std::chrono::steady_clock::now(); // bbport: timed sections (PresentStats)
+    const bool acquired_first = swapchain.AcquireNextImage();
+    present_stats.acquire_ns.fetch_add(NsSince(section), std::memory_order_relaxed);
+    if (!acquired_first) {
         bool acquired;
         {
             std::scoped_lock submit_lock{Scheduler::submit_mutex};
@@ -755,6 +800,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+    section = std::chrono::steady_clock::now();
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
@@ -873,6 +919,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         cmdbuf.endDebugUtilsLabelEXT();
     }
 
+    present_stats.record_ns.fetch_add(NsSince(section), std::memory_order_relaxed);
+    section = std::chrono::steady_clock::now();
+
     // Flush vulkan commands.
 
     // bbport: the frame's submission goes out from a recording thread (BB_ASYNC_SUBMIT); this
@@ -886,14 +935,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    present_stats.submit_ns.fetch_add(NsSince(section), std::memory_order_relaxed);
 
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        section = std::chrono::steady_clock::now();
+        const bool presented = swapchain.Present();
+        present_stats.present_ns.fetch_add(NsSince(section), std::memory_order_relaxed);
+        if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
+    present_stats.presents.fetch_add(1, std::memory_order_relaxed);
+    ReportPresentStats(swapchain.GetImageCount(), swapchain.GetPresentMode());
 
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
@@ -904,8 +959,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames
     Frame* frame;
+    const auto wait_start = std::chrono::steady_clock::now(); // bbport: PresentStats
     {
         std::unique_lock lock{free_mutex};
+        if (free_queue.empty()) {
+            present_stats.frame_waits.fetch_add(1, std::memory_order_relaxed);
+        }
         free_cv.wait(lock, [this] { return !free_queue.empty(); });
         LOG_DEBUG(Render_Vulkan, "Got render frame, remaining {}", free_queue.size() - 1);
 
@@ -934,6 +993,8 @@ Frame* Presenter::GetRenderFrame() {
             continue;
         }
     }
+
+    present_stats.frame_wait_ns.fetch_add(NsSince(wait_start), std::memory_order_relaxed);
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {
