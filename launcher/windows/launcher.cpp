@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cwctype>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -989,6 +990,279 @@ void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& po
     port = INTERNET_PORT(std::atoi(digits.c_str()));
 }
 
+// ---- EOS bridge (eosbridge/eosbridge.c: eos\ryunet-bridge.exe) ----
+// Some networks never reach the RyuNET server (an ISP that filters its name or its address, ports
+// closed on the way). For them ryunet-bridge carries the traffic through Epic Online Services to a
+// gateway next to the server: it checks the server directly first and only when that fails logs
+// in to EOS, anonymously (no Epic account), and offers local ports for the server's. This
+// launcher's requests, run.py's and the game's (BB_ONLINE_BRIDGE) then go through them.
+// launcher.ini eos_bridge: auto (the check decides), on (always), off (never). The bridge lives as
+// long as its stdin is open: this launcher's end and run.py's (inherited), so a game still
+// running when the launcher closes keeps it.
+struct EosBridge {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::string wanted;  // "mode|server" it was started for; "" none
+    std::string host;    // the server's, and its HTTP port
+    INTERNET_PORT http_port = 0;
+    // starting, checking, direct, connecting, ready, lost, failed, missing (not installed), off
+    std::string state;
+    std::string detail, map, server_ip;
+    std::string peer_port;  // races through EOS P2P (BRIDGE PEERS): its UDP port, for BB_ONLINE_EOS
+    std::deque<std::string> lines;  // its latest log lines
+    HANDLE process = nullptr, input = nullptr;
+    std::thread reader;
+};
+EosBridge g_eos;
+
+fs::path EosBridgeDir() { return g_app.root / L"eos"; }
+
+bool EosBridgeInstalled() {
+    std::error_code ec;
+    const fs::path dir = EosBridgeDir();
+    // Its settings are built into ryunet-bridge.exe (an eosbridge.ini next to it overrides them).
+    return fs::is_regular_file(dir / L"ryunet-bridge.exe", ec) && fs::is_regular_file(dir / L"EOSSDK-Win64-Shipping.dll", ec);
+}
+
+std::string EosBridgeMode() {
+    const std::string mode = g_app.launcher.Get("eos_bridge", "auto");
+    return mode == "on" || mode == "off" ? mode : "auto";
+}
+
+std::string LowerAscii(std::string s) {
+    for (char& c : s) c = char(std::tolower((unsigned char)c));
+    return s;
+}
+
+void EosBridgeLine(const std::string& line) {
+    std::scoped_lock lock{g_eos.mutex};
+    if (line.rfind("BRIDGE ", 0) != 0) {
+        g_eos.lines.push_back(line);
+        while (g_eos.lines.size() > 40) g_eos.lines.pop_front();
+        return;
+    }
+    std::istringstream in(line.substr(7));
+    std::string word;
+    in >> word;
+    if (word == "CHECKING") g_eos.state = "checking";
+    else if (word == "DIRECT") g_eos.state = "direct";
+    else if (word == "CONNECTING") g_eos.state = "connecting";
+    else if (word == "LOST") g_eos.state = "lost";
+    else if (word == "PEERS") {
+        for (std::string field; in >> field;)
+            if (field.rfind("port=", 0) == 0) g_eos.peer_port = field.substr(5);
+    }
+    else if (word == "FAILED") {
+        g_eos.state = "failed";
+        std::getline(in, g_eos.detail);
+        g_eos.detail = Trim(g_eos.detail);
+    } else if (word == "READY") {
+        g_eos.state = "ready";
+        for (std::string field; in >> field;) {
+            if (field.rfind("ip=", 0) == 0) g_eos.server_ip = field.substr(3);
+            else if (field.rfind("map=", 0) == 0) g_eos.map = field.substr(4);
+        }
+    }
+    g_eos.changed.notify_all();
+}
+
+void EosBridgeStop() {
+    HANDLE process = nullptr, input = nullptr;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        process = std::exchange(g_eos.process, nullptr);
+        input = std::exchange(g_eos.input, nullptr);
+    }
+    if (process) {
+        TerminateProcess(process, 0);
+        CloseHandle(process);
+    }
+    if (input) CloseHandle(input);
+    if (g_eos.reader.joinable()) g_eos.reader.join();
+    std::scoped_lock lock{g_eos.mutex};
+    g_eos.wanted.clear();
+    g_eos.host.clear();
+    g_eos.state.clear();
+    g_eos.detail.clear();
+    g_eos.map.clear();
+    g_eos.server_ip.clear();
+    g_eos.peer_port.clear();
+    g_eos.changed.notify_all();
+}
+
+void EosBridgeStart(const std::string& wanted, const std::string& mode, const std::string& server) {
+    EosBridgeStop();
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(server, host, port);
+    auto set_state = [&](const char* state, const std::string& detail = {}) {
+        std::scoped_lock lock{g_eos.mutex};
+        g_eos.wanted = wanted;
+        g_eos.host = LowerAscii(host);
+        g_eos.http_port = port;
+        g_eos.state = state;
+        g_eos.detail = detail;
+        g_eos.changed.notify_all();
+    };
+    if (mode == "off") return set_state("off");
+    if (!EosBridgeInstalled()) return set_state("missing");
+    if (host.empty() || host.find_first_of(" \"") != std::string::npos) return set_state("failed", "server");
+
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE out_read = nullptr, out_write = nullptr, in_read = nullptr, in_write = nullptr;
+    if (!CreatePipe(&out_read, &out_write, &sa, 0)) return set_state("failed", "pipe");
+    if (!CreatePipe(&in_read, &in_write, &sa, 0)) {
+        CloseHandle(out_read);
+        CloseHandle(out_write);
+        return set_state("failed", "pipe");
+    }
+    SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
+    // The bridge inherits its two pipe ends and nothing else of the launcher's.
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    HANDLE inherit[2] = {in_read, out_write};
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit,
+                                                    nullptr, nullptr);
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in_read;
+    si.StartupInfo.hStdOutput = out_write;
+    si.StartupInfo.hStdError = out_write;
+    si.lpAttributeList = attrs_ok ? attrs : nullptr;
+    const fs::path exe = EosBridgeDir() / L"ryunet-bridge.exe";
+    std::wstring cmd = Quote(exe.wstring()) + L" --client --exit-on-eof --server " + Quote(Widen(host)) +
+                       L" --http-port " + std::to_wstring(port) + (mode == "on" ? L" --mode on" : L"");
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+                                   EosBridgeDir().c_str(), &si.StartupInfo, &pi);
+    const DWORD start_error = ok ? 0 : GetLastError();
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
+    CloseHandle(out_write);
+    CloseHandle(in_read);
+    if (!ok) {
+        CloseHandle(out_read);
+        CloseHandle(in_write);
+        return set_state("failed", "start " + std::to_string(start_error));
+    }
+    CloseHandle(pi.hThread);
+    // From now on run.py inherits the bridge's stdin: a game left running keeps the bridge.
+    SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    set_state("starting");
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        g_eos.process = pi.hProcess;
+        g_eos.input = in_write;
+        g_eos.lines.clear();
+    }
+    g_eos.reader = std::thread([out_read] {
+        std::string pending;
+        char buf[2048];
+        DWORD n = 0;
+        while (ReadFile(out_read, buf, sizeof buf, &n, nullptr) && n) {
+            pending.append(buf, n);
+            for (size_t nl; (nl = pending.find('\n')) != std::string::npos;) {
+                EosBridgeLine(Trim(pending.substr(0, nl)));
+                pending.erase(0, nl + 1);
+            }
+        }
+        CloseHandle(out_read);
+        std::scoped_lock lock{g_eos.mutex};
+        if (g_eos.state != "direct" && g_eos.state != "failed") {
+            g_eos.state = "failed";
+            if (g_eos.detail.empty()) g_eos.detail = "exited";
+        }
+        g_eos.changed.notify_all();
+    });
+}
+
+/// Starts, restarts or stops the bridge when the online settings change (each frame; not while
+/// the game runs, which may be using it).
+void EosBridgePoll() {
+    App& a = g_app;
+    if (a.game_running) return;
+    const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+    const std::string mode = EosBridgeMode();
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(server, host, port);
+    const bool local = host.empty() || host == "127.0.0.1" || LowerAscii(host) == "localhost";
+    const std::string want = a.game.Flag("online", true) && !local ? mode + "|" + server : "";
+    static std::string pending;
+    static ULONGLONG since = 0;
+    static bool first = true;
+    std::string current;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        current = g_eos.wanted;
+    }
+    if (want == current) {
+        pending = want;
+        first = false;
+        return;
+    }
+    if (want != pending) {  // settled for a moment first: the server box changes on every key
+        pending = want;
+        since = GetTickCount64();
+    }
+    if (!first && GetTickCount64() - since < 1500) return;
+    first = false;
+    if (want.empty()) EosBridgeStop();
+    else EosBridgeStart(want, mode, server);
+}
+
+/// Where a connection to this server's port goes: true with local, the bridge's port on
+/// 127.0.0.1, when the bridge carries the server. Waits up to wait_ms while the bridge for it is
+/// still checking or connecting (background threads only).
+bool EosBridgeRoute(const std::string& server, INTERNET_PORT server_port, INTERNET_PORT& local, int wait_ms) {
+    std::string host;
+    INTERNET_PORT http_port = 0;
+    SplitServer(server, host, http_port);
+    host = LowerAscii(host);
+    std::unique_lock lock{g_eos.mutex};
+    const auto deciding = [&] {
+        return g_eos.host == host &&
+               (g_eos.state == "starting" || g_eos.state == "checking" || g_eos.state == "connecting");
+    };
+    if (wait_ms > 0) g_eos.changed.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] { return !deciding(); });
+    if (g_eos.host != host || (g_eos.state != "ready" && g_eos.state != "lost")) return false;
+    std::istringstream in(g_eos.map);
+    std::string part;
+    std::getline(in, part, ',');  // the UDP port
+    while (std::getline(in, part, ',')) {
+        const size_t colon = part.find(':');
+        if (colon == std::string::npos || std::atoi(part.substr(0, colon).c_str()) != server_port) continue;
+        local = INTERNET_PORT(std::atoi(part.substr(colon + 1).c_str()));
+        return local != 0;
+    }
+    return false;
+}
+
+/// What the game needs to go through the bridge (BB_ONLINE_BRIDGE, BB_ONLINE_SERVER_IP), or
+/// empty strings when it goes to the server directly; peers, its port for races through EOS P2P
+/// (BB_ONLINE_EOS), in both cases.
+void EosBridgeGameEnv(const std::string& server, std::string& map, std::string& ip, std::string& peers, int wait_ms) {
+    map.clear();
+    ip.clear();
+    peers.clear();
+    INTERNET_PORT local = 0, port = 0;
+    std::string host;
+    SplitServer(server, host, port);
+    const bool bridged = EosBridgeRoute(server, port, local, wait_ms);
+    std::scoped_lock lock{g_eos.mutex};
+    if (g_eos.host != LowerAscii(host)) return;
+    if (bridged) {
+        map = g_eos.map;
+        ip = g_eos.server_ip;
+    }
+    if (g_eos.state == "direct" || bridged) peers = g_eos.peer_port;
+}
+
 /// What one server sees of the installation's key: HMAC-SHA256(key, host), as run.py sends it.
 /// Every server gets a different value, so none can reuse it on another to take a nickname.
 /// SHA-256 of msg (HMAC-SHA256 with key when there is one), in lower-case hex; "" on failure.
@@ -1083,13 +1357,18 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
-    const std::string key_hash = ServerKeyHash(host, with_key);
+    const std::string key_hash = ServerKeyHash(host, with_key);  // by the server's name, whatever the route
+    // A network that does not reach the server: through the EOS bridge (EosBridgeRoute).
+    std::string connect_host = host;
+    INTERNET_PORT connect_port = port;
+    if (EosBridgeRoute(server, port, connect_port, 15000)) connect_host = "127.0.0.1";
+    else connect_port = port;
     std::string body;
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return body;
     WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), port, 0);
+    HINTERNET conn = WinHttpConnect(session, Widen(connect_host).c_str(), connect_port, 0);
     for (int attempt = 1; conn && attempt <= 2; ++attempt) {
         const long long offset = g_server_clock_offset.load();
         const std::string proof = ProofHeader(key_hash, Narrow(method).c_str(), Narrow(path));
@@ -1612,6 +1891,16 @@ void StartGame() {
         std::scoped_lock lock{a.mutex};
         a.log.clear();
         a.last_status.clear();
+    }
+    {
+        // The EOS bridge, when this network reaches the server only through it.
+        std::string map, ip, peers;
+        if (a.game.Flag("online", true))
+            EosBridgeGameEnv(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), map, ip, peers, 8000);
+        SetEnv(L"BB_ONLINE_BRIDGE", map);
+        SetEnv(L"BB_ONLINE_SERVER_IP", ip);
+        SetEnv(L"BB_ONLINE_EOS", peers);  // races through EOS P2P with peers that have no direct path
+        if (!map.empty()) AddLog("Online through Epic Online Services: this network does not reach the server directly");
     }
     SetEnv(L"BB_GAME_DIR", PathText(a.game_dir));
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
@@ -3651,6 +3940,57 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
+/// The EOS bridge's setting and what it is doing (EosBridge).
+void EosBridgeSection() {
+    App& a = g_app;
+    std::string state, detail;
+    bool peers = false;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        state = g_eos.state;
+        detail = g_eos.detail;
+        peers = !g_eos.peer_port.empty();
+    }
+    const char* labels[] = {T("Automática", "Automatic"), T("Siempre", "Always"), T("Nunca", "Never")};
+    const char* values[] = {"auto", "on", "off"};
+    const std::string mode = EosBridgeMode();
+    int current = mode == "on" ? 1 : mode == "off" ? 2 : 0;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+    if (ImGui::Combo(T("Conexión por Epic Online Services", "Connection through Epic Online Services"), &current, labels, 3)) {
+        a.launcher.Set("eos_bridge", values[current]);
+        SaveLauncher();
+    }
+    HelpMarker(T("Si tu red no llega al servidor (algunos proveedores de internet lo bloquean), el juego se conecta a "
+                 "través de los servidores de Epic Games, sin cuenta de Epic y sin abrir puertos. Automática: solo "
+                 "cuando la conexión directa falla. Siempre: también cuando funciona (para probar).",
+                 "If your network does not reach the server (some internet providers block it), the game connects "
+                 "through Epic Games' servers, with no Epic account and no ports to open. Automatic: only when the "
+                 "direct connection fails. Always: even when it works (for testing)."));
+    if (state == "starting" || state == "checking")
+        ImGui::TextColored(kGrey, "%s", T("Comprobando la conexión con el servidor...", "Checking the connection to the server..."));
+    else if (state == "direct")
+        ImGui::TextColored(kGreen, "%s", peers ? T("Conexión directa con el servidor. Las carreras con quien no tenga camino directo "
+                                                   "(NAT estricta) van por Epic Online Services.",
+                                                   "Direct connection to the server. Races with players there is no direct path to "
+                                                   "(strict NAT) go through Epic Online Services.")
+                                               : T("Conexión directa con el servidor.", "Direct connection to the server."));
+    else if (state == "connecting")
+        ImGui::TextColored(kGrey, "%s", T("Tu red no llega al servidor: conectando por Epic Online Services...",
+                                          "Your network does not reach the server: connecting through Epic Online Services..."));
+    else if (state == "ready")
+        ImGui::TextColored(kGreen, "%s", T("Conectado por Epic Online Services: tu red no llega al servidor directamente.",
+                                           "Connected through Epic Online Services: your network does not reach the server directly."));
+    else if (state == "lost")
+        ImGui::TextColored(kYellow, "%s", T("Se perdió la conexión con Epic Online Services; reconectando...",
+                                            "The connection through Epic Online Services was lost; reconnecting..."));
+    else if (state == "failed")
+        ImGui::TextColored(kRed, T("No se pudo conectar por Epic Online Services (%s).", "Could not connect through Epic Online Services (%s)."),
+                           detail.empty() ? "?" : detail.c_str());
+    else if (state == "missing")
+        ImGui::TextColored(kGrey, "%s", T("La conexión por Epic no está en esta instalación (falta la carpeta eos).",
+                                          "The connection through Epic is not in this installation (the eos folder is missing)."));
+}
+
 void NatTypeSection(const std::string& server) {
     bool running, done;
     NatCheck::Result result;
@@ -3803,16 +4143,20 @@ void StartWebLogin() {
 }
 
 /// POST of a JSON body to the server's HTTPS (443, its nginx), signed with this installation's key.
-std::string HttpsPostJson(const std::string& host, const std::wstring& path, const std::string& json) {
+/// bridge_port: the EOS bridge's local port for the server's HTTP port instead (EosBridgeRoute),
+/// plain HTTP to 127.0.0.1: EOS P2P is encrypted up to the gateway on the server's machine.
+std::string HttpsPostJson(const std::string& host, const std::wstring& path, const std::string& json,
+                          INTERNET_PORT bridge_port = 0) {
     std::string body;
-    const std::string key_hash = ServerKeyHash(host);
+    const std::string key_hash = ServerKeyHash(host);  // by the server's name, whatever the route
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return body;
     WinHttpSetTimeouts(session, 10000, 10000, 10000, 15000);
-    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET conn = bridge_port ? WinHttpConnect(session, L"127.0.0.1", bridge_port, 0)
+                                 : WinHttpConnect(session, Widen(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES, bridge_port ? 0 : WINHTTP_FLAG_SECURE)
                          : nullptr;
     std::wstring headers = L"Content-Type: application/json\r\n";
     const std::string proof = ProofHeader(key_hash, "POST", Narrow(path));
@@ -3848,7 +4192,8 @@ std::string JsonEscape(const std::string& s) {
 void StartPasswordLogin(const std::string& nick, const std::string& password) {
     std::string host;
     INTERNET_PORT port = 0;
-    SplitServer(Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    SplitServer(server, host, port);
     {
         std::scoped_lock lock{g_account.mutex};
         if (g_account.busy) return;
@@ -3856,8 +4201,11 @@ void StartPasswordLogin(const std::string& nick, const std::string& password) {
         g_account.error = false;
         g_account.message.clear();
     }
-    std::thread([host, nick, password] {
-        if (host.find_first_not_of("0123456789.") == std::string::npos) {
+    std::thread([server, host, port, nick, password] {
+        // A network that does not reach the server: the EOS bridge carries the login too.
+        INTERNET_PORT bridge_port = 0;
+        if (!EosBridgeRoute(server, port, bridge_port, 15000)) bridge_port = 0;
+        if (!bridge_port && host.find_first_not_of("0123456789.") == std::string::npos) {
             AccountResult(true, T("La contraseña solo viaja por HTTPS, que necesita el nombre del servidor (no su IP): "
                                   "usa Iniciar sesión / Crear cuenta.",
                                   "The password only travels by HTTPS, which needs the server's name (not its IP): use "
@@ -3865,7 +4213,8 @@ void StartPasswordLogin(const std::string& nick, const std::string& password) {
             return;
         }
         const std::string body = HttpsPostJson(host, L"/ryunet/account/login",
-                                               "{\"nick\":\"" + JsonEscape(nick) + "\",\"password\":\"" + JsonEscape(password) + "\"}");
+                                               "{\"nick\":\"" + JsonEscape(nick) + "\",\"password\":\"" + JsonEscape(password) + "\"}",
+                                               bridge_port);
         const std::string status = JsonField(body, "status"), error = JsonField(body, "error");
         if (status == "ok") {
             const std::string account = JsonField(body, "nick");
@@ -4009,6 +4358,21 @@ void AccountSection() {
                 ImGui::SameLine();
                 if (ImGui::SmallButton(T("Copiar enlace", "Copy link"))) ImGui::SetClipboardText(url.c_str());
             }
+            bool through_epic = false;
+            {
+                std::scoped_lock lock{g_eos.mutex};
+                through_epic = g_eos.state == "ready" || g_eos.state == "lost";
+            }
+            if (through_epic) {  // the site is on the server this network does not reach
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextColored(kYellow, "%s", T("Tu red no llega al servidor, así que la web puede no abrir: abre el enlace en el "
+                                                    "móvil (con datos móviles), o usa Vincular con Discord o el apodo y contraseña de abajo, "
+                                                    "que pasan por Epic Online Services.",
+                                                    "Your network does not reach the server, so the site may not open: open the link on "
+                                                    "your phone (on mobile data), or use Link with Discord or the nickname and password below, "
+                                                    "which go through Epic Online Services."));
+                ImGui::PopTextWrapPos();
+            }
         }
         static char login_nick[24] = "", login_password[132] = "";
         if (ImGui::TreeNode(T("Entrar con apodo y contraseña", "Log in with nickname and password"))) {
@@ -4076,6 +4440,7 @@ void OnlineTab() {
         HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
                      "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
         NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
+        EosBridgeSection();
         ImGui::EndDisabled();
     }
 
@@ -7654,6 +8019,7 @@ void Frame() {
     App& a = g_app;
     PollJobs();
     PollUpdate();
+    EosBridgePoll();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -8256,6 +8622,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         else g_app.worker.join();
     }
     if (g_app.probe.joinable()) g_app.probe.join();
+    if (g_app.game_running) {  // the game may go through the bridge: it ends with run.py
+        std::scoped_lock lock{g_eos.mutex};
+        if (g_eos.input) CloseHandle(std::exchange(g_eos.input, nullptr));
+        if (g_eos.process) CloseHandle(std::exchange(g_eos.process, nullptr));
+    }
+    if (g_eos.reader.joinable()) {
+        if (g_app.game_running) g_eos.reader.detach();
+        else EosBridgeStop();
+    }
     ReleaseTrophies(g_trophies);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

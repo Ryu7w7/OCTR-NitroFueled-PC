@@ -1,6 +1,8 @@
 #include "runtime_net.h"
 #include "runtime_net_overrides.h"
 #include "runtime_net_tunnel.h"
+#include "runtime_net_bridge.h"
+#include "runtime_net_eos.h"
 #include "runtime_net_ping.h"
 #include "runtime_ai_catchup.h"
 #include "runtime_friends.h"
@@ -243,6 +245,13 @@ int32_t runtime_net_connect(int s, const OrbisNetSockaddr *addr, uint32_t addrle
     runtime_net_trace("sceNetConnect(fd=%d, to=%s:%u)", s, ip_str, ntohs(sin.sin_port));
 
     vs->matchmaking = vs->is_stream && ntohs(sin.sin_port) >= 3074 && ntohs(sin.sin_port) <= 3080;
+    uint32_t route_ip = sin.sin_addr.s_addr;
+    uint16_t route_port = ntohs(sin.sin_port);
+    if (net_bridge_route_tcp(&route_ip, &route_port)) {
+        runtime_net_trace("sceNetConnect: through the EOS bridge (127.0.0.1:%u)", route_port);
+        sin.sin_addr.s_addr = route_ip;
+        sin.sin_port = htons(route_port);
+    }
     int ret = connect(vs->s, (struct sockaddr *)&sin, sizeof(sin));
     if (ret != 0) {
         int err = WSAGetLastError();
@@ -267,14 +276,14 @@ static int server_is_this_machine(void) {
     static int cached = -1;
     if (cached >= 0) return cached;
     const char *srv = getenv("BB_ONLINE_SERVER");
+    if (net_bridge_active()) return cached = 0; /* the server is behind the EOS bridge, elsewhere */
     if (!srv || !*srv || strcmp(srv, "127.0.0.1") == 0 || _stricmp(srv, "localhost") == 0) return cached = 1;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    if (getaddrinfo(srv, NULL, &hints, &res) != 0 || !res) return cached = 0;
-    struct sockaddr_in addr = *(const struct sockaddr_in *)res->ai_addr;
-    freeaddrinfo(res);
+    uint32_t server_ip;
+    if (!net_server_ipv4(&server_ip)) return cached = 0;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = server_ip;
     if ((ntohl(addr.sin_addr.s_addr) >> 24) == 127) return cached = 1;
     SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (probe == INVALID_SOCKET) return cached = 0;
@@ -296,13 +305,12 @@ static const char *local_ipv4(void) {
     snprintf(cached, sizeof(cached), "127.0.0.1");
     const char *srv = getenv("BB_ONLINE_SERVER");
     if (!srv || !*srv) return cached;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    if (getaddrinfo(srv, NULL, &hints, &res) != 0 || !res) return cached;
-    struct sockaddr_in to = *(const struct sockaddr_in *)res->ai_addr;
-    freeaddrinfo(res);
+    uint32_t server_ip;
+    if (!net_server_ipv4(&server_ip)) return cached;
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_addr.s_addr = server_ip;
     to.sin_port = htons(3074);
     SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (probe == INVALID_SOCKET) return cached;
@@ -341,18 +349,16 @@ static int tunnel_server(struct sockaddr_in *out) {
         const char *off = getenv("BB_ONLINE_TUNNEL");
         const char *srv = getenv("BB_ONLINE_SERVER");
         if (runtime_net_is_online() && !(off && strcmp(off, "0") == 0) && srv && *srv) {
-            struct addrinfo hints, *res = NULL;
-            memset(&hints, 0, sizeof(hints));
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_DGRAM;
-            if (getaddrinfo(srv, NULL, &hints, &res) == 0 && res) {
-                server = *(const struct sockaddr_in *)res->ai_addr;
-                freeaddrinfo(res);
-                const char *p = getenv("BB_ONLINE_NAT_PORT");
-                server.sin_port = htons((uint16_t)(p && atoi(p) > 0 ? atoi(p) : 3074));
+            uint32_t server_ip;
+            if (net_server_ipv4(&server_ip)) {
+                memset(&server, 0, sizeof(server));
+                server.sin_family = AF_INET;
+                server.sin_addr.s_addr = server_ip;
+                server.sin_port = htons(net_server_nat_port());
                 state = 1;
-                runtime_net_trace("Tunnel: through %s:%u for peers without a direct path",
-                                  inet_ntoa(server.sin_addr), ntohs(server.sin_port));
+                runtime_net_trace("Tunnel: through %s:%u for peers without a direct path%s",
+                                  inet_ntoa(server.sin_addr), ntohs(server.sin_port),
+                                  net_bridge_active() ? " (the server through the EOS bridge: peers through it only)" : "");
             }
         }
     }
@@ -373,24 +379,105 @@ static struct sockaddr_in addr_of(uint32_t ip, uint16_t port) {
     return a;
 }
 
+/* sendto, with the EOS bridge (runtime_net_bridge.h) in the way: what goes to the server's NAT
+ * port goes to the bridge's local port, which carries it there. */
+static int net_sendto(SOCKET s, const void *msg, size_t len, int flags, const struct sockaddr_in *to) {
+    struct sockaddr_in dst = *to;
+    uint32_t ip = dst.sin_addr.s_addr;
+    uint16_t port = ntohs(dst.sin_port);
+    if (net_bridge_route_udp(&ip, &port)) {
+        dst.sin_addr.s_addr = ip;
+        dst.sin_port = htons(port);
+    }
+    return sendto(s, (const char *)msg, (int)len, flags, (const struct sockaddr *)&dst, sizeof(dst));
+}
+
+/* With the EOS bridge, the server knows this PC by the address the gateway gave it, which is
+ * the one its peers have: a packet sent to a peer straight from this PC's real address would
+ * come from a stranger. Peers on the internet get only the tunnelled copy, through the server;
+ * the LAN ones (tun_candidate 0) still get it directly. */
+static int bridge_skips_direct(const VSocket *vs, const struct sockaddr_in *to) {
+    struct sockaddr_in server;
+    return vs->tunnel && net_bridge_active() && tunnel_server(&server) && !from_server(to, &server) &&
+           tun_candidate(to->sin_addr.s_addr, server.sin_addr.s_addr);
+}
+
+/* --- EOS P2P with peers (runtime_net_eos.h): the launcher's ryunet-bridge on BB_ONLINE_EOS --- */
+
+static uint16_t eos_port(void) {
+    static int port = -1;
+    if (port < 0) {
+        const char *v = getenv("BB_ONLINE_EOS");
+        port = v && atoi(v) > 0 && atoi(v) < 65536 ? atoi(v) : 0;
+        if (port) runtime_net_trace("EOS P2P: peers without a direct path through Epic Online Services (bridge on %d)", port);
+    }
+    return (uint16_t)port;
+}
+
+static void eos_to_bridge(VSocket *vs, const uint8_t *msg, size_t len) {
+    const struct sockaddr_in to = addr_of(htonl(INADDR_LOOPBACK), eos_port());
+    sendto(vs->s, (const char *)msg, (int)len, 0, (const struct sockaddr *)&to, sizeof(to));
+}
+
+static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to);
+
+/* A control datagram for a peer (an announce): directly, as the game's go, and through the tunnel. */
+static void eos_control(VSocket *vs, const uint8_t *msg, size_t len, const struct sockaddr_in *to) {
+    if (!bridge_skips_direct(vs, to)) net_sendto(vs->s, msg, len, 0, to);
+    tunnel_copy(vs, msg, len, to);
+}
+
+/* After a datagram to a peer on the internet: this PC's announce when it is due, and the datagram
+ * through EOS once the peer's id is known (not when the direct path works both ways). 1 when the
+ * peer's datagrams come through EOS: no tunnelled copy then. */
+static int eos_after_send(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to) {
+    struct sockaddr_in server;
+    if (!vs->tunnel || !eos_port() || !tunnel_server(&server) || from_server(to, &server) ||
+        !tun_candidate(to->sin_addr.s_addr, server.sin_addr.s_addr) ||
+        tun_relay_index(to->sin_addr.s_addr, ntohs(to->sin_port)) >= 0)
+        return 0;
+    const uint32_t ip = to->sin_addr.s_addr;
+    const uint16_t port = ntohs(to->sin_port);
+    const uint64_t now = now_ms();
+    uint8_t m[2400];
+    const size_t announce = eosp_announce(ip, port, now, m, sizeof(m));
+    if (announce) eos_control(vs, m, announce, to);
+    char id[EOSP_ID_MAX];
+    if (tun_direct_ok(ip, port, now) || !eosp_peer_id(ip, port, id)) return 0;
+    const size_t n = eosp_msg_send(id, msg, len, m, sizeof(m));
+    if (n) eos_to_bridge(vs, m, n);
+    return eosp_reached(ip, port, now);
+}
+
+/* The copies of a datagram to a peer besides the direct one: through EOS, or the tunnel. */
+static void peer_copies(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to) {
+    if (!eos_after_send(vs, msg, len, to)) tunnel_copy(vs, msg, len, to);
+}
+
 /* Keeps this socket's paths open: to the server (asking for a pass for the regional relays
  * unless BB_ONLINE_RELAYS=0) and, registered with that pass, to every relay. */
 static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
     static int relays_wanted = -1;
     if (relays_wanted < 0) {
         const char *v = getenv("BB_ONLINE_RELAYS");
-        relays_wanted = !(v && strcmp(v, "0") == 0);
+        /* Through the EOS bridge there is no address of this PC that a relay would recognize. */
+        relays_wanted = !(v && strcmp(v, "0") == 0) && !net_bridge_active();
         if (relays_wanted && v && *v && strcmp(v, "1") != 0) {
             tun_force_relay(v);
             runtime_net_trace("Tunnel: relay %s chosen (BB_ONLINE_RELAYS)", v);
         }
     }
     const uint64_t now = now_ms();
+    if (eos_port() && eosp_query_due(now)) {
+        uint8_t query[16];
+        const size_t n = eosp_msg_query(query, sizeof(query));
+        if (n) eos_to_bridge(vs, query, n);
+    }
     if (tun_keepalive_due(now)) {
         uint8_t request[TUN_REQUEST_LEN];
         const size_t n = relays_wanted ? tun_pass_request(request, sizeof(request), now) : 0;
-        if (n) sendto(vs->s, (const char *)request, (int)n, 0, (const struct sockaddr *)server, sizeof(*server));
-        else sendto(vs->s, TUN_KEEPALIVE, TUN_KEEPALIVE_LEN, 0, (const struct sockaddr *)server, sizeof(*server));
+        if (n) net_sendto(vs->s, request, n, 0, server);
+        else net_sendto(vs->s, TUN_KEEPALIVE, TUN_KEEPALIVE_LEN, 0, server);
     }
     const int relays = tun_relay_count();
     for (int i = 0; i < relays; i++) {
@@ -421,13 +508,11 @@ int runtime_net_ping_view(PingPeer *out, int max) {
     return ping_view(now_ms(), out, max);
 }
 
-static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to);
-
 /* A ping packet the way the game's packets to that peer go: direct, and through the tunnel
  * while the direct path is not proven. */
 static void ping_send(VSocket *vs, const uint8_t *packet, size_t n, const struct sockaddr_in *to) {
-    sendto(vs->s, (const char *)packet, (int)n, 0, (const struct sockaddr *)to, sizeof(*to));
-    tunnel_copy(vs, packet, n, to);
+    if (!bridge_skips_direct(vs, to)) net_sendto(vs->s, packet, n, 0, to);
+    peer_copies(vs, packet, n, to);
 }
 
 static int catchup_direct_peer(uint32_t ip) {
@@ -494,11 +579,11 @@ static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct s
     const int route = tun_on_send(to->sin_addr.s_addr, ntohs(to->sin_port), now_ms(), &flags, &relay);
     if (!route) return;
     if (ping_enabled()) flags |= TUN_FLAG_PING;
+    if (eos_port() && eosp_self(NULL)) flags |= TUN_FLAG_EOS;
     uint8_t wrapped[2048 + TUN_HEADER_LEN];
     size_t n = tun_wrap(wrapped, sizeof(wrapped), flags, to->sin_addr.s_addr, ntohs(to->sin_port), msg, len);
     if (!n) return;
-    if (route & TUN_VIA_SERVER)
-        sendto(vs->s, (const char *)wrapped, (int)n, 0, (const struct sockaddr *)&server, sizeof(server));
+    if (route & TUN_VIA_SERVER) net_sendto(vs->s, wrapped, n, 0, &server);
     uint32_t ip;
     uint16_t port;
     if ((route & TUN_VIA_RELAY) && tun_relay_addr(relay, &ip, &port)) {
@@ -695,8 +780,10 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
         runtime_net_trace("sceNetSendto(fd=%d, len=%zu)", s, len);
     }
 
-    int ret = sendto(vs->s, (const char *)msg, (int)len, win_flags,
-                     to ? (struct sockaddr *)&sin : NULL, to ? sizeof(sin) : 0);
+    int ret;
+    if (to && bridge_skips_direct(vs, &sin)) ret = (int)len; /* its copy goes through the tunnel below */
+    else if (to) ret = net_sendto(vs->s, msg, len, win_flags, &sin);
+    else ret = sendto(vs->s, (const char *)msg, (int)len, win_flags, NULL, 0);
     if (ret < 0) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
@@ -709,7 +796,7 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
     }
     note_game_peer(vs, to ? &sin : NULL);
     if (to && vs->tunnel) {
-        tunnel_copy(vs, msg, len, &sin);
+        peer_copies(vs, msg, len, &sin);
         ping_after_send(vs, &sin);
     }
     return ret;
@@ -794,6 +881,37 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
         g_net_errno = err;
         return -1;
     }
+    int from_eos = 0;
+    if (tunnel && eos_port() && sin.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && ntohs(sin.sin_port) == eos_port() &&
+        ret >= EOSP_MAGIC_LEN && memcmp(into, EOSP_MAGIC, EOSP_MAGIC_LEN) == 0) {
+        /* The bridge's own: this PC's EOS id, or a peer's datagram through EOS. */
+        char id[EOSP_ID_MAX];
+        size_t at = 0;
+        uint32_t peer_ip;
+        uint16_t peer_port;
+        const int kind = eosp_parse_bridge((const uint8_t *)into, (size_t)ret, id, &at);
+        if (kind == 'I') {
+            if (!eosp_self(NULL)) runtime_net_trace("EOS P2P: this PC is %s", id);
+            eosp_set_self(id);
+            goto next_datagram;
+        }
+        if (kind != 'R' || !eosp_peer_addr(id, &peer_ip, &peer_port)) goto next_datagram;
+        eosp_on_rx(peer_ip, peer_port, now_ms());
+        ret -= (int)at;
+        memmove(into, into + at, (size_t)ret);
+        sin.sin_addr.s_addr = peer_ip;
+        sin.sin_port = htons(peer_port);
+        from_eos = 1;
+    }
+    if (!from_eos) {
+        /* The EOS bridge's datagrams are the server's (runtime_net_bridge.h). */
+        uint32_t from_ip = sin.sin_addr.s_addr;
+        uint16_t from_port = ntohs(sin.sin_port);
+        if (net_bridge_from(&from_ip, &from_port)) {
+            sin.sin_addr.s_addr = from_ip;
+            sin.sin_port = htons(from_port);
+        }
+    }
     if (tunnel) {
         tunnel_keepalive(vs, &server);
         const uint8_t *payload = wrapped;
@@ -801,13 +919,16 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
         uint32_t ip;
         uint16_t port;
         int relay = -1;
-        if (from_server(&sin, &server)) {
+        if (from_eos) {
+            /* a peer's datagram through EOS (above): neither direct nor tunnelled */
+        } else if (from_server(&sin, &server)) {
             /* The server's pass and relay list. */
             if (tun_on_offer(wrapped, (size_t)ret, now_ms())) goto next_datagram;
             /* The server's own NAT replies (0x15, 0x1F, 0x0B...) go to the game unchanged. */
             if (tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
                 tun_on_tunnelled(ip, port, tflags, 0, now_ms());
                 if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
+                if (tflags & TUN_FLAG_EOS) eosp_on_capable(ip, port, now_ms());
                 sin.sin_addr.s_addr = ip;
                 sin.sin_port = htons(port);
                 payload = wrapped + TUN_HEADER_LEN;
@@ -822,6 +943,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             }
             tun_on_tunnelled(ip, port, tflags, 1, now_ms());
             if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
+            if (tflags & TUN_FLAG_EOS) eosp_on_capable(ip, port, now_ms());
             sin.sin_addr.s_addr = ip;
             sin.sin_port = htons(port);
             payload = wrapped + TUN_HEADER_LEN;
@@ -837,6 +959,23 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             }
             if (direct_off && tun_candidate(sin.sin_addr.s_addr, server.sin_addr.s_addr)) goto next_datagram;
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
+        }
+        {
+            /* A peer's announce (runtime_net_eos.h): never the game's. */
+            char id[EOSP_ID_MAX];
+            int learned = 0;
+            if (eosp_take_announce(payload, (size_t)ret, sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms(), id, &learned)) {
+                if (learned && eos_port()) {
+                    uint8_t known[64];
+                    const size_t n = eosp_msg_known(id, known, sizeof(known));
+                    if (n) eos_to_bridge(vs, known, n);
+                    runtime_net_trace("EOS P2P: %s:%u is %s", inet_ntoa(sin.sin_addr), ntohs(sin.sin_port), id);
+                }
+                uint8_t answer[64];
+                const size_t n = eosp_announce(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms(), answer, sizeof(answer));
+                if (n) eos_control(vs, answer, n, &sin);
+                goto next_datagram;
+            }
         }
         if (ping_take(vs, payload, ret, &sin)) goto next_datagram;
         if ((win_flags & MSG_PEEK) && ret <= (int)sizeof(peeked.data)) {
@@ -1155,13 +1294,10 @@ int32_t runtime_net_resolver_start_ntoa(int rid, const char *hostname, struct in
 
     if (target) {
         runtime_net_trace("sceNetResolverStartNtoa('%s') -> '%s' (OVERRIDDEN)", hostname, target);
-        addr->s_addr = inet_addr(target);
-        if (addr->s_addr == INADDR_NONE) {
-            struct hostent *he = gethostbyname(target);
-            if (he && he->h_addr_list[0]) {
-                memcpy(addr, he->h_addr_list[0], sizeof(struct in_addr));
-            }
-        }
+        /* The server's name gives its address even where it does not resolve (EOS bridge). */
+        uint32_t ip;
+        if (net_resolve_ipv4(target, &ip)) addr->s_addr = ip;
+        else addr->s_addr = inet_addr(target);
         return ORBIS_OK;
     }
 

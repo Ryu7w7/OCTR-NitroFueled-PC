@@ -392,6 +392,20 @@ def machine_header():
 MACHINE = None
 
 
+def bridge_port(port):
+    """With the EOS bridge (eosbridge/: the launcher runs it when this network does not reach the
+    server, and sets BB_ONLINE_BRIDGE="<udp>,<server port>:<local port>,..."): the port on
+    127.0.0.1 that carries this server port there. None without it."""
+    mapping = os.environ.get('BB_ONLINE_BRIDGE', '')
+    if not mapping or not os.environ.get('BB_ONLINE_SERVER_IP'):
+        return None
+    for part in mapping.split(',')[1:]:
+        server_port, _, local = part.partition(':')
+        if server_port.strip() == str(port) and local.strip().isdigit():
+            return int(local)
+    return None
+
+
 def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=None, session=None):
     """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
     By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
@@ -411,6 +425,10 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=No
 
     opener = urllib.request.build_opener(NoRedirect)
     def urls():
+        local = bridge_port(port)
+        if local:  # this network does not reach the server: the EOS bridge carries it
+            yield f'http://127.0.0.1:{local}{target}', False
+            return
         try:
             ipaddress.ip_address(host)
         except ValueError:  # a certificate can vouch for a name, never a bare address

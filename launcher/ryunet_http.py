@@ -56,7 +56,9 @@ def request(data_dir, server, path, form=None, timeout=3.0, register=False, key=
         if form is not None:
             body = urllib.parse.urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        req = urllib.request.Request(f"http://{host}:{port}{path}", data=body, headers=headers,
+        local = run.bridge_port(port)  # the EOS bridge, when this network does not reach the server
+        url = f"http://127.0.0.1:{local}{path}" if local else f"http://{host}:{port}{path}"
+        req = urllib.request.Request(url, data=body, headers=headers,
                                      method="POST" if form is not None else "GET")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as reply:

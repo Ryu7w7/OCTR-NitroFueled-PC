@@ -3,6 +3,7 @@
 #include "runtime_net.h"
 #include "runtime_http.h"
 #include "runtime_net_overrides.h"
+#include "runtime_net_bridge.h"
 #include "bb_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -449,6 +450,23 @@ static void ryunet_keep_form(int form) {
         runtime_net_trace("RyuNET requests now go as %s, which this network lets through", ryunet_form_names[form]);
 }
 
+/* The RyuNET server's HTTP port (port: BB_ONLINE_HTTP_PORT, 8080 when unset): *sin is where to
+ * connect, the EOS bridge's local port for it when the bridge is on (runtime_net_bridge.h), and
+ * address the server's own address, for a Host header. 0 when its name does not resolve. */
+static int ryunet_http_addr(const char *host, const char *port, struct sockaddr_in *sin, char *address,
+                            size_t address_size) {
+    uint32_t ip;
+    if (!net_resolve_ipv4(host, &ip)) return 0;
+    uint16_t number = (uint16_t)(port && atoi(port) > 0 && atoi(port) < 65536 ? atoi(port) : 8080);
+    inet_ntop(AF_INET, &ip, address, (socklen_t)address_size);
+    net_bridge_route_tcp(&ip, &number);
+    memset(sin, 0, sizeof *sin);
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = ip;
+    sin->sin_port = htons(number);
+    return 1;
+}
+
 /* A signed request of the port's own (not the game's) to the RyuNET server's HTTP port
  * (BB_ONLINE_SERVER, BB_ONLINE_HTTP_PORT): the body goes to body (NUL-terminated, cut to
  * body_size). The HTTP status, or 0 when the server could not be reached. Blocking, with
@@ -458,16 +476,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
     if (!host || !*host) return 0;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
     struct sockaddr_in sin;
-    memcpy(&sin, res->ai_addr, sizeof sin);
-    freeaddrinfo(res);
     char address[INET_ADDRSTRLEN] = "";
-    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    if (!ryunet_http_addr(host, port, &sin, address, sizeof address)) return 0;
     char reply[32768];
     const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
     for (int tried = 0; tried < RYUNET_FORMS; tried++) {
@@ -550,16 +561,9 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
     if (!host || !*host) return 0;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
     struct sockaddr_in sin;
-    memcpy(&sin, res->ai_addr, sizeof sin);
-    freeaddrinfo(res);
     char address[INET_ADDRSTRLEN] = "";
-    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    if (!ryunet_http_addr(host, port, &sin, address, sizeof address)) return 0;
     const size_t cap = max_reply + 4096; /* the answer's headers too */
     char *buffer = malloc(cap + 1);
     if (!buffer) return 0;
@@ -646,7 +650,14 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
                          const char *address, const void *post_data, size_t size, char *resp, int resp_size) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return -1;
-    if (connect(s, (const struct sockaddr *)sin, sizeof(*sin)) != 0) {
+    struct sockaddr_in to = *sin;
+    uint32_t to_ip = to.sin_addr.s_addr;
+    uint16_t to_port = ntohs(to.sin_port);
+    if (net_bridge_route_tcp(&to_ip, &to_port)) { /* the server, through the EOS bridge */
+        to.sin_addr.s_addr = to_ip;
+        to.sin_port = htons(to_port);
+    }
+    if (connect(s, (const struct sockaddr *)&to, sizeof(to)) != 0) {
         runtime_net_trace("sceHttpSendRequest connect to %s:%u failed: %d", c->target_ip, c->port, WSAGetLastError());
         closesocket(s);
         return -1;
@@ -773,16 +784,9 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_port = htons(c->port);
-    sin.sin_addr.s_addr = inet_addr(c->target_ip);
-
-    if (sin.sin_addr.s_addr == INADDR_NONE) {
-        struct hostent *he = gethostbyname(c->target_ip);
-        if (he && he->h_addr_list[0]) {
-            memcpy(&sin.sin_addr, he->h_addr_list[0], sizeof(sin.sin_addr));
-        } else {
-            return HTTP_NETWORK;
-        }
-    }
+    uint32_t target_ip;
+    if (!net_resolve_ipv4(c->target_ip, &target_ip)) return HTTP_NETWORK;
+    sin.sin_addr.s_addr = target_ip;
     char address[INET_ADDRSTRLEN] = "";
     inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
 

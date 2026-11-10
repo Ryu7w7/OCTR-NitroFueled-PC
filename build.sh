@@ -139,10 +139,14 @@ if [[ ${1:-} == --test ]]; then
     out/chat-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_name_colors.c -o out/name-colors-test
     out/name-colors-test
-    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c -o out/private-peer-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c src/runtime_net_bridge.c src/runtime_net_eos.c -o out/private-peer-test
     out/private-peer-test
-    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_catchup_lan.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/catchup-lan-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_catchup_lan.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c src/runtime_net_bridge.c src/runtime_net_eos.c -lm -o out/catchup-lan-test
     out/catchup-lan-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_net_bridge.c src/runtime_net_bridge.c src/runtime_net_eos.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/net-bridge-test
+    out/net-bridge-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_net_eos.c src/runtime_net_eos.c src/runtime_net_bridge.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/net-eos-test
+    out/net-eos-test
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -Igpu/shim -Igpu/shadps4 tests/test_graphics_tab.cpp -o out/graphics-tab-test
     out/graphics-tab-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_lzma.c $(pkg-config --cflags --libs liblzma) -o out/lzma-test
@@ -166,6 +170,6 @@ if [[ ${1:-} == --test ]]; then
     out/net-ping-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc "${includes[@]}" tests/test_savedata_guest.c -o out/savedata-guest-test
     out/savedata-guest-test > /dev/null
-    "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_http_ryunet.c src/runtime_http.c -o out/http-ryunet-test
+    "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_http_ryunet.c src/runtime_http.c src/runtime_net_bridge.c -o out/http-ryunet-test
     out/http-ryunet-test > /dev/null
 fi
