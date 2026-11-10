@@ -168,8 +168,9 @@ def environment(folder, temporal):
         # pipelines compile on several threads again
         'BB_VK_SHADERS': str(folder),
     }
-    if temporal in ('fsr3', 'dlss', 'fsr4'):
-        env['BB_TEMPORAL'] = 'fsr1'  # FSR 3, DLSS and FSR 4 live in shadPS4's rasterizer
+    if temporal in ('fsr3', 'fsr4'):
+        env['BB_TEMPORAL'] = 'fsr1'  # FSR 3 and FSR 4 live in shadPS4's rasterizer
+    # DLSS has the native renderer's own path (gpu/shim/bbport_native_vk_dlss.cpp)
     return env
 
 
