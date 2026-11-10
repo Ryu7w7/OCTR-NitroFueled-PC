@@ -339,18 +339,32 @@ def team_ranking_navigation(blob):
     return g.build()
 
 
-def private_team_settings(blob):
-    if hashlib.sha256(blob).hexdigest() not in {
-        'a2259e5840343814fa5901ce16de69a3c7295760a5ceb8ed51baf2176608fbc4',  # USA 1.21
-        'e8667f50355f3b0cfa35df6b25f159715c068e53bba86cc1ebecb948d4a97cb4',  # EU 1.21
-        '759c89e2d1d9f19e312cc25b009df3a0375497672c40507434c475c886892df9',  # USA widescreen
-        '841c6f4ee3727b95ad6c3c9438020dda3e0fb401d4ca3e143549e4e7290db161',  # EU widescreen
-    }:
-        raise ValueError('unsupported native private team settings')
+PRIVATE_TEAM_SETTINGS_SHA256 = {
+    'a2259e5840343814fa5901ce16de69a3c7295760a5ceb8ed51baf2176608fbc4',  # USA 1.21
+    'e8667f50355f3b0cfa35df6b25f159715c068e53bba86cc1ebecb948d4a97cb4',  # EU 1.21
+    '759c89e2d1d9f19e312cc25b009df3a0375497672c40507434c475c886892df9',  # USA widescreen
+    '841c6f4ee3727b95ad6c3c9438020dda3e0fb401d4ca3e143549e4e7290db161',  # EU widescreen
+}
+# Single/CUP use the SingleRace settings animation. Give the existing Teams
+# row its visible battle state and row spacing; keep native selector/sync logic.
+PRIVATE_TEAM_ROWS = ((0x51e0, 0x4e80, 4), (0xe058, 0xdcd8, 12))
+
+
+def private_team_settings(blob, native=None):
+    """The private lobby settings with the Teams row shown for races. blob is a supported game
+    version, or a mod's version of the menu (more lap counts, say) when native, the game's own
+    menu it was made from, is: then the mod must keep native's objects, fixups and strings and
+    leave both Teams rows as they are there, so the same change still lands on the same fields."""
+    if hashlib.sha256(blob).hexdigest() not in PRIVATE_TEAM_SETTINGS_SHA256:
+        if native is None or hashlib.sha256(native).hexdigest() not in PRIVATE_TEAM_SETTINGS_SHA256:
+            raise ValueError('unsupported native private team settings')
+        g, n = Igz(blob), Igz(native)
+        fields = [(at + 0x18, size) for target, source, size in PRIVATE_TEAM_ROWS for at in (target, source)]
+        if (g.objects() != n.objects() or g.fixups != n.fixups or g.strings != n.strings
+                or any(g.data[at:at + size] != n.data[at:at + size] for at, size in fields)):
+            raise ValueError('unsupported native private team settings: a mod changes its Teams row')
     g = Igz(blob)
-    # Single/CUP use the SingleRace settings animation. Give the existing Teams
-    # row its visible battle state and row spacing; keep native selector/sync logic.
-    for target, source, size in ((0x51e0, 0x4e80, 4), (0xe058, 0xdcd8, 12)):
+    for target, source, size in PRIVATE_TEAM_ROWS:
         g.data[target + 0x18:target + 0x18 + size] = g.data[source + 0x18:source + 0x18 + size]
     return g.build()
 
@@ -748,7 +762,9 @@ def prepare(game, out, elf, bases):
         ranking_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_ROOT)
         ranking = team_ranking_navigation(iga.read_entry(f, *entries[ranking_index][1:]))
         settings_index = next(i for i, e in enumerate(entries) if e[0].lower() == SETTINGS_ENTRY)
-        settings = private_team_settings(current_entry(pak, entries, settings_index, base))
+        # A mod's version of the menu is checked against the game's own (private_team_settings).
+        settings = private_team_settings(current_entry(pak, entries, settings_index, base),
+                                         iga.read_entry(f, *entries[settings_index][1:]))
         lobby_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_ENTRY)
         # Preserve the widescreen lobby layout before adding Online's tags/order.
         lobby = lobby_card(current_entry(pak, entries, lobby_index, base))
