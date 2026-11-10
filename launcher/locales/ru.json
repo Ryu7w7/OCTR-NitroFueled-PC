@@ -356,5 +356,11 @@
  "Could not restore: {}": "Не удалось восстановить: {}",
  "Save restored. The one you had is in {}.": "Сохранение восстановлено. Прежнее лежит в {}.",
  "This server does not allow playing online with just a nickname: you must log in or create your account (with Discord, or with your nickname and password).": "Этот сервер не позволяет играть онлайн только с ником: нужно войти или создать аккаунт (через Discord или по нику и паролю).",
- "You play as {} without an account.": "Ты играешь как {} без аккаунта."
+ "You play as {} without an account.": "Ты играешь как {} без аккаунта.",
+ "Configure mod": "Настроить мод",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "Закройте игру перед сохранением настроек. Изменения будут применены при следующем запуске игры.",
+ "Advanced settings": "Дополнительные настройки",
+ "Reset to defaults": "Восстановить значения по умолчанию",
+ "Saving...": "Сохранение...",
+ "Mod options saved. Applied when you start the game.": "Настройки мода сохранены. Они будут применены при запуске игры."
 }

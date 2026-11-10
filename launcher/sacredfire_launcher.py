@@ -2189,6 +2189,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         switch.set_tooltip_text(tr("Disable mod") if on else tr("Enable mod"))
         switch.connect("notify::active", lambda s, *_a: self.on_mod_toggled(key, s))
         (row.add_suffix if hasattr(row, "add_suffix") else row.add_action)(switch)
+        item = (self.mods_scan or {}).get("entries", {}).get(ident, {})
+        if item.get("configuration"):
+            configure = flat_button("applications-engineering-symbolic", tr("Configure mod"),
+                                    lambda _b: self.configure_mod(ident, item))
+            configure.set_sensitive(not locked and not self.mods_busy)
+            (row.add_suffix if hasattr(row, "add_suffix") else row.add_action)(configure)
         description = Adw.ActionRow(title=GLib.markup_escape_text(meta.get("ModDescription") or
                                                                   tr("The creator has not provided a description.")))
         description.set_title_lines(0)
@@ -2203,6 +2209,124 @@ class LauncherWindow(Adw.ApplicationWindow):
         source.add_suffix(remove)
         row.add_row(source)
         return row
+
+    def configure_mod(self, ident, item):
+        """Edit the catalog's declarative choices; package code is never executed."""
+        if self.process is not None or self.mods_busy:
+            return
+        window = Adw.Dialog(title=item["name"], content_width=620, content_height=600)
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar())
+        window.set_child(toolbar)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                      margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        toolbar.set_content(box)
+        page = Adw.PreferencesPage(vexpand=True)
+        box.append(page)
+        normal = Adw.PreferencesGroup(description=tr("Close the game before saving configuration. Changes apply the next time you start the game."))
+        page.add(normal)
+        advanced = Adw.ExpanderRow(title=tr("Advanced settings"))
+        advanced_group = Adw.PreferencesGroup()
+        controls = {}
+        rules = item["configuration"]
+        values = item["option_values"]
+        grid_rules = {k: r for k, r in rules.items() if "row" in r}
+        if grid_rules:
+            grid = Gtk.Grid(column_spacing=12, row_spacing=12,
+                            margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+            rows = list(dict.fromkeys(r["row"] for r in grid_rules.values()))
+            columns = list(dict.fromkeys(r["column"] for r in grid_rules.values()))
+            for c, label in enumerate(columns, 1):
+                grid.attach(Gtk.Label(label=label, wrap=True), c, 0, 1, 1)
+            for r, label in enumerate(rows, 1):
+                grid.attach(Gtk.Label(label=label, xalign=0, wrap=True), 0, r, 1, 1)
+            for key, rule in grid_rules.items():
+                control = Gtk.CheckButton(active=values[key], halign=Gtk.Align.CENTER,
+                                          tooltip_text=rule.get("description", rule["label"]))
+                control.update_property([Gtk.AccessibleProperty.LABEL], [rule["label"]])
+                grid.attach(control, columns.index(rule["column"]) + 1,
+                            rows.index(rule["row"]) + 1, 1, 1)
+                controls[key] = control
+            normal.add(grid)
+        for key, rule in rules.items():
+            if key in grid_rules:
+                continue
+            properties = {"title": GLib.markup_escape_text(rule["label"])}
+            if rule.get("description"):
+                properties["subtitle"] = GLib.markup_escape_text(rule["description"])
+            if rule["type"] == "boolean":
+                control = Adw.SwitchRow(active=values[key], **properties)
+            else:
+                choices = list(rule["choices"])
+                control = Adw.ComboRow(model=Gtk.StringList.new(list(rule["choices"].values())),
+                                       selected=choices.index(values[key]), **properties)
+            controls[key] = control
+            if rule.get("advanced"):
+                advanced.add_row(control)
+            else:
+                normal.add(control)
+        if any(r.get("advanced") for r in rules.values()):
+            advanced_group.add(advanced)
+            page.add(advanced_group)
+        status = Gtk.Label(wrap=True, xalign=0)
+        box.append(status)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        box.append(buttons)
+        reset = Gtk.Button(label=tr("Reset to defaults"))
+        cancel = Gtk.Button(label=tr("Cancel"))
+        save = Gtk.Button(label=tr("Save"))
+        save.add_css_class("suggested-action")
+        for button in (reset, cancel, save):
+            buttons.append(button)
+
+        def reset_values(_button):
+            for key, rule in rules.items():
+                if rule["type"] == "boolean":
+                    controls[key].set_active(rule["default"])
+                else:
+                    controls[key].set_selected(list(rule["choices"]).index(rule["default"]))
+
+        def save_values(_button):
+            if self.process is not None or self.mods_busy:
+                status.set_text(tr("Close the game to change mods."))
+                return
+            selected = {key: ("true" if controls[key].get_active() else "false")
+                        if rule["type"] == "boolean" else
+                        list(rule["choices"])[controls[key].get_selected()]
+                        for key, rule in rules.items()}
+            self.mods_busy = True
+            self.fill_mods()
+            box.set_sensitive(False)
+            window.set_can_close(False)
+            status.set_text(tr("Saving..."))
+
+            def work():
+                import mod_library
+                try:
+                    return mod_library.configure(mods_dir(), user_patches_dir(), ident,
+                                                 item["sha256"], selected), None
+                except Exception as error:
+                    return None, str(error)
+
+            def done(result):
+                catalog, error = result
+                self.mods_busy = False
+                box.set_sensitive(True)
+                window.set_can_close(True)
+                if error:
+                    status.set_text(error)
+                else:
+                    self.mods_scan = catalog
+                    window.close()
+                    self.toasts.add_toast(Adw.Toast(
+                        title=tr("Mod options saved. Applied when you start the game.")))
+                self.fill_mods()
+            self.in_thread(work, done)
+
+        reset.connect("clicked", reset_values)
+        cancel.connect("clicked", lambda _b: window.close())
+        save.connect("clicked", save_values)
+        window.present(self)
 
     def on_mod_toggled(self, key, switch):
         on = switch.get_active()
