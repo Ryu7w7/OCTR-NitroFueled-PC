@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdlib>
 #include <deque>
 
 #include <condition_variable>
@@ -85,6 +87,18 @@ public:
         }
         swapchain.SetHDR(enable);
         pp_settings.hdr = enable ? 1 : 0;
+        // bbport: BB_HDR_PEAK=nits fits the game's PQ picture to the display, BB_HDR_GAIN scales it
+        static const float peak = [] {
+            const char* v = std::getenv("BB_HDR_PEAK");
+            return v ? std::max(0.0f, float(std::atof(v))) : 0.0f;
+        }();
+        static const float gain = [] {
+            const char* v = std::getenv("BB_HDR_GAIN");
+            const float g = v ? float(std::atof(v)) : 1.0f;
+            return g > 0.0f ? g : 1.0f;
+        }();
+        pp_settings.hdr_peak = peak;
+        pp_settings.hdr_gain = gain;
     }
 
     void RegisterVideoOutSurface(const Libraries::VideoOut::BufferAttributeGroup& attribute,

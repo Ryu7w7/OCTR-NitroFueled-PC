@@ -114,6 +114,40 @@ G-Sync/low latency cap comes to about 326), not the renderer. 3 or 4 swapchain i
 The ideas below lower GPU time, which matters on the 680M and the Steam Deck, not for frame rate
 on such a PC.
 
+## DLSS and HDR
+
+**DLSS** (launcher: Upscaling, NVIDIA DLSS; or `BB_VK_DLSS=1`) runs in the native renderer itself
+(`gpu/shim/bbport_native_vk_dlss.cpp`), with the same DLLs as under shadPS4
+(`sacredfire_dlss.dll` and `nvngx_dlss.dll` in `bin\`; without them the log says "not available"
+and nothing is jittered). It takes the finished scene the display pass stretches, before the HUD:
+
+- the G-buffer pass is the draw with exactly four colour targets and a depth (D32S8, velocity in
+  colour 3, viewport z 0-0.8, OpenGL clip depth);
+- the camera's motion comes from the scene draws' vertex constants, voted across the pass:
+  400/464/528 bytes = previous MVP at float 0, projection at 32, model-view at 48
+  (prevMVP * inverse(MV)); the PS4 Pro path's 528 bytes = view at 32, projection at 48, previous
+  view at 64 (projection * previous view * inverse(view));
+- moving objects stay still on the screen (as under shadPS4; `BB_FSR3_MV` tries decodings of
+  CTR's velocity target); `BB_FSR3_NO_JITTER` turns the jitter off;
+- draws into last frame's scene depth (not full-screen quads) are moved by a Halton(2,3) jitter,
+  only when DLSS took the frame before;
+- menus draw their 2D into the scene image over a small 3D scene: a frame whose biggest G-buffer
+  pass has fewer than `BB_VK_DLSS_MENU_DRAWS` (100) draws is shown as drawn (the character
+  select has 42, a race 380-1700). With DLSS on them, the waving flag, pulsing text and the
+  results screen's scrolling background were doubled or smeared, even without history.
+
+The log line `Native Vulkan: DLSS: N frames/s, N upscaled, N without a scene; N as a scene, N menus
+left as drawn` says what happened. On an RTX 5080 at 3840x2160: DLAA ~225 fps; 2560x1440 to
+2160p (Quality) 260-326 fps. Rendering at 2160p for a 1440p display is already supersampled,
+so there DLSS off is faster and looks as good.
+
+**HDR** (launcher: The game's HDR; or `BB_HDR=1`, with Windows HDR on) is the game's own HDR10
+output: the scene before the HUD becomes R16G16B16A16Sfloat (DLSS takes it as linear HDR) and
+the display buffers A2B10G10R10 (PQ). The game asks the system for no HDR calibration, so the
+post-process pass can fit its PQ picture to the display: `BB_HDR_PEAK=nits` rolls off above 75%
+of the peak (launcher: HDR peak brightness), `BB_HDR_GAIN` scales it (launcher: HDR paper white,
+100% = the game).
+
 ## Ideas not done yet
 
 1. **Read-modify-write copies.** Partly done: the reflection blends' screen passes
