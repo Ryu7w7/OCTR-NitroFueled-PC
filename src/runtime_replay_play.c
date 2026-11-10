@@ -2525,8 +2525,9 @@ int runtime_replay_play_install(int eu) {
  * players are ready" (the followed race loads once the online menus are left). That is the session, not the level:
  * octane_onlinelobby is also where a race or a replay left outside the online mode comes back to.
  * What stops it goes to the log when it changes. */
+static const char *start_blocked;              /* runtime_replay_can_start's last "why" */
+const char *runtime_replay_blocked_reason(void) { return __atomic_load_n(&start_blocked, __ATOMIC_RELAXED); }
 int runtime_replay_can_start(void) {
-    static const char *told;
     PingPeer peers[PING_MAX_PEERS];
     const char *why = P.pending || P.step != STEP_NONE ? "a replay is on"
                       : !rr_game(0) ? "the game is not up"
@@ -2537,7 +2538,7 @@ int runtime_replay_can_start(void) {
                       : runtime_private_match_active() || runtime_online_mode_room_on() ? "a private room"
                       : runtime_net_ping_view(peers, PING_MAX_PEERS) > 0 ? "players in the room"
                                                                          : 0;
-    if (__atomic_exchange_n(&told, why, __ATOMIC_RELAXED) != why) {
+    if (__atomic_exchange_n(&start_blocked, why, __ATOMIC_RELAXED) != why) {
         const char *level = rr_current_level();
         printf("Replay: %s%s (level %s)\n", why ? "cannot start now: " : "can start", why ? why : "", level ? level : "-");
         fflush(stdout);

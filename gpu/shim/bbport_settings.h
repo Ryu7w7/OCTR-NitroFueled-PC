@@ -154,6 +154,9 @@ struct Values {
     /// SacredFire: the game's volume in percent, 0..200 (bbport.ini volume, the launcher's and
     /// the menu's slider). Applies at once (runtime_audio.c, bbgpu_audio_volume).
     std::atomic<int> volume{100};
+    /// SacredFire: the game's sound off, the volume kept (the menu's Mute, Ctrl+M anywhere). For
+    /// this session only: never saved, so the game never starts silent without saying why.
+    std::atomic<bool> muted{false};
     /// The settings menu's position (fraction of the screen), -1 until it is moved.
     std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.

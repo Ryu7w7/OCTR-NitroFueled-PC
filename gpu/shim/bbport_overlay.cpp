@@ -836,8 +836,22 @@ void ReplaysTab() {
     if (runtime_replay_playing()) {
         ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("A replay is on.", "Идёт повтор."));
     } else if (!can_start) {
-        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("Replays start from the menus, not during a race.",
-                                                                   "Повторы запускаются из меню, не во время гонки."));
+        // What holds the button, in the player's words (runtime_replay_can_start logs the same).
+        const char* why = runtime_replay_blocked_reason();
+        const bool online = why && (!std::strcmp(why, "an online lobby is on screen") || !std::strcmp(why, "a public match") ||
+                                     !std::strcmp(why, "a private room") || !std::strcmp(why, "players in the room"));
+        const bool loading = why && !std::strcmp(why, "the game is not up");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kMenuYellow, "%s",
+                           online    ? BbSettings::MenuText("Replays start outside the online mode: leave the room or lobby "
+                                                            "(back to the main menu) and try again.",
+                                                            "Повторы запускаются вне онлайна: выйдите из комнаты в главное меню.")
+                           : loading ? BbSettings::MenuText("The game is still loading: try again in a moment.",
+                                                            "Игра ещё загружается.")
+                                     : BbSettings::MenuText("Replays start from the menus, not during a race.",
+                                                            "Повторы запускаются из меню, не во время гонки."));
+        if (why) ImGui::TextDisabled("(%s)", why);
+        ImGui::PopTextWrapPos();
     }
     // managing them: the shared "replays" folder next to bbport.ini (export copies a race there, import takes the
     // races put there), and deleting one (asked twice)
@@ -1518,6 +1532,12 @@ void Menu() {
                                   "rounded off. Applies at once.",
                                   "100% — уровень, на котором сведена игра; выше самые громкие пики "
                                   "сглаживаются. Сразу."));
+        bool muted = s.muted;
+        if (ImGui::Checkbox(BbSettings::MenuText("Mute (Ctrl+M)", "Без звука (Ctrl+M)"), &muted)) s.muted = muted;
+        Hint(BbSettings::MenuText("The game's sound off, the volume above kept. Ctrl+M switches it from anywhere, "
+                                  "the menu closed too. Back on when the game starts again.",
+                                  "Звук игры выключен, громкость сохраняется. Ctrl+M переключает в любой момент, "
+                                  "и при закрытом меню. Включается снова при следующем запуске."));
     }
 
     MenuSection(BbSettings::MenuText("Other", "Прочее"));
@@ -1972,6 +1992,19 @@ void FpsCounter() {
                 : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
                                                            : "");
     corner_fps_height = ImGui::GetWindowHeight();
+    ImGui::End();
+}
+
+/// While the sound is muted: a small reminder in the top left corner (Ctrl+M brings it back).
+void MutedBadge() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad, viewport->WorkPos.y + pad), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##muted", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(BbSettings::MenuText("Sound muted (Ctrl+M)", "Звук выключен (Ctrl+M)"));
     ImGui::End();
 }
 
@@ -2487,6 +2520,14 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
+        if (down && !event.key.repeat && !typing && event.key.key == SDLK_M && (event.key.mod & SDL_KMOD_CTRL)) {
+            auto& s = BbSettings::Get();
+            const bool muted = !s.muted.load();
+            s.muted = muted;
+            std::printf("Sound: %s (Ctrl+M)\n", muted ? "muted" : "on");
+            std::fflush(stdout);
+            return true;
+        }
         if (down && !event.key.repeat && !is_open && !typing && event.key.key == SDLK_T && ChatShowing()) {
             chat_typing = true;
             chat_focus = true;
@@ -2587,6 +2628,7 @@ bool Visible() {
         notice = !notices.empty();
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+                           BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
                            runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
 }
@@ -2688,6 +2730,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (BbSettings::Get().muted && !menu_open) {
+        MutedBadge();
     }
     corner_ping_height = 0.0f;
     if (BbSettings::Get().show_ping && !menu_open && InOnlineRoom()) {
