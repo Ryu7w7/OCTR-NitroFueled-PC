@@ -71,6 +71,11 @@ public:
         return image_count;
     }
 
+    // bbport: for the presenter's log line
+    vk::PresentModeKHR GetPresentMode() const {
+        return present_mode;
+    }
+
     u32 GetFrameIndex() const {
         return frame_index;
     }
