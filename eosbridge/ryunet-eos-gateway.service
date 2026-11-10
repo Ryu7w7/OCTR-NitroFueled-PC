@@ -1,0 +1,21 @@
+# The EOS gateway next to a RyuNET server (docs/eos-bridge.md). Install:
+#   sudo cp ryunet-eos-gateway.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now ryunet-eos-gateway
+# The folder holds ryunet-bridge, libEOSSDK-Linux-Shipping.so and eosbridge.ini; data/ keeps the
+# gateway's EOS identity (its gateway_id) and the players' virtual addresses: keep it.
+[Unit]
+Description=RyuNET EOS gateway (ryunet-bridge --gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ctr-eos-gateway
+# --server-ip: the server's public address, the one players' games know it by (put yours).
+ExecStart=/home/ubuntu/ctr-eos-gateway/ryunet-bridge --gateway --server-ip SERVER_PUBLIC_IP --data /home/ubuntu/ctr-eos-gateway/data
+Restart=on-failure
+RestartSec=5
+MemoryMax=250M
+
+[Install]
+WantedBy=multi-user.target

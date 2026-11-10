@@ -261,6 +261,17 @@ def main():
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
     shutil.copy2(launcher, folder / PACKAGED_LAUNCHER)
+    # The EOS bridge (eosbridge/: bash eosbridge/build.sh), for networks that do not reach the
+    # server. Its settings (eosbridge/eosbridge.ini, the Epic product's ids, not in git) are built
+    # into ryunet-bridge.exe: no settings file ships.
+    bridge = [ROOT / 'out' / 'eosbridge' / f for f in ('ryunet-bridge.exe', 'EOSSDK-Win64-Shipping.dll')]
+    if all(f.is_file() for f in bridge):
+        (folder / 'eos').mkdir()
+        for f in bridge:
+            shutil.copy2(f, folder / 'eos')
+        print('EOS bridge included (eos/)')
+    else:
+        print('EOS bridge not included: build it with eosbridge/build.sh (with eosbridge/eosbridge.ini)')
     python = bundle_python(folder, a.dist / 'pycache')
     bundle_iced_x86(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
