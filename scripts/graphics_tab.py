@@ -22,6 +22,7 @@ usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
 """
 import argparse
 from contextlib import ExitStack
+import hashlib
 import lzma
 import struct
 import sys
@@ -39,7 +40,6 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 37  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -512,7 +512,8 @@ def main():
     stamp = '-'.join(f'{(args.game / "archives" / a).stat().st_size}'
                      for a in ARCHIVES if (args.game / 'archives' / a).is_file())
     folder = args.out / 'graphics-tab'
-    dest = folder / f'update3-v{VERSION}-{stamp}.pak'
+    version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    dest = folder / f'update3-{version}-{stamp}.pak'
     try:
         if not dest.is_file():
             for old in folder.glob('*.pak'):

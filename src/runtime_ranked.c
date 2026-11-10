@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* Ranked race results (docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md): the ladder.
  *
  * The host's game builds the finish order and every client's mod holds the same
@@ -33,16 +34,50 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define RANKED_RETRIES 4
+#define RANKED_TIER_MEMBERS 16
 #ifndef RANKED_RETRY_MS            /* the test runs the sender with 0 */
 #define RANKED_RETRY_MS 4000
 #endif
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
+static uint64_t monotonic_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+#endif
+}
+
 static char result_text[72];         /* " +45 (1045 Gold Mask)" once scored */
 static uint64_t result_room;
+static struct {
+    char name[17];
+    int tier, mode, mmr;
+} tier_members[RANKED_TIER_MEMBERS];
+static unsigned tier_member_count;
+static uint64_t tier_room, tier_changed_ms, tier_fetched_ms, tier_generation;
+static int tier_mode, tier_dirty;
+
+static int json_string(const char *s, const char *key, char *out, size_t size);
+static int json_int(const char *s, const char *key, int *out);
+
+static int ranked_tier_reply(const char *reply, const char *name, char *out, size_t size) {
+    const char *tiers = reply ? strstr(reply, "\"tiers\":{") : NULL;
+    return tiers && json_string(tiers, name, out, size);
+}
+
+static int ranked_mmr_reply(const char *reply, const char *name, int *out) {
+    const char *mmrs = reply ? strstr(reply, "\"mmr\":{") : NULL;
+    return mmrs && json_int(mmrs, name, out);
+}
 
 static const char *valid_chars(const char *s) {
     /* The nickname rule: 3..16 of [A-Za-z0-9_-] (nick_claims.go). */
@@ -50,6 +85,161 @@ static const char *valid_chars(const char *s) {
         if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-') return NULL;
     if (strlen(s) < 3 || strlen(s) > 16) return NULL;
     return s;
+}
+
+static int same_nick(const char *a, const char *b) {
+    while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) ++a, ++b;
+    return !*a && !*b;
+}
+
+static const char *const tier_names[2][7] = {
+    {"Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"},
+    {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Oxide Overlord"},
+};
+
+static int tier_index(const char *name, int mode) {
+    for (int i = 0; i < 7; ++i)
+        if (!strcmp(name, tier_names[mode][i])) return i + 1;
+    return 0;
+}
+
+static void tier_cache_reset(uint64_t room, int mode) {
+    memset(tier_members, 0, sizeof tier_members);
+    tier_member_count = 0;
+    tier_room = room;
+    tier_mode = mode;
+    tier_changed_ms = tier_fetched_ms = 0;
+    tier_dirty = 0;
+    ++tier_generation;
+}
+
+static void ranked_tier_context(uint64_t *room, int *mode) {
+    if (!runtime_ranked_session(room, mode)) {
+        *room = UINT64_MAX; /* Online menu, before a Ranked room exists. */
+        *mode = runtime_public_itemless_selected() ? 1 : 0;
+    }
+}
+
+int runtime_ranked_tier(const char *name, int *badge_mode) {
+    uint64_t room = 0;
+    int mode = 0;
+    if (!valid_chars(name)) return 0;
+    ranked_tier_context(&room, &mode);
+    const uint64_t now = monotonic_ms();
+    pthread_mutex_lock(&lock);
+    if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
+    unsigned i = 0;
+    while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
+    if (i == tier_member_count && tier_member_count < RANKED_TIER_MEMBERS) {
+        snprintf(tier_members[i].name, sizeof tier_members[i].name, "%s", name);
+        ++tier_member_count;
+        tier_dirty = 1;
+        tier_changed_ms = now;
+        ++tier_generation;
+    }
+    const int tier = i < tier_member_count ? tier_members[i].tier : 0;
+    if (badge_mode) *badge_mode = tier ? tier_members[i].mode : 0;
+    pthread_mutex_unlock(&lock);
+    return tier; /* 0 selects the unranked badge. */
+}
+
+int runtime_ranked_mmr(const char *name) {
+    if (!valid_chars(name)) return 0;
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
+    const int mmr = i < tier_member_count ? tier_members[i].mmr : 0;
+    pthread_mutex_unlock(&lock);
+    return mmr;
+}
+
+const char *runtime_ranked_tier_name(int mode, int tier) {
+    return mode >= 0 && mode < 2 && tier >= 1 && tier <= 7 ? tier_names[mode][tier - 1] : "UNRANKED";
+}
+
+static void *ranked_tier_worker(void *unused) {
+    (void)unused;
+    for (;;) {
+        struct timespec pause = {1, 0};
+        nanosleep(&pause, NULL);
+
+        uint64_t room = 0;
+        int mode = 0;
+        ranked_tier_context(&room, &mode);
+
+        char names[RANKED_TIER_MEMBERS][17];
+        unsigned count = 0;
+        uint64_t generation = 0;
+        const uint64_t now = monotonic_ms();
+        pthread_mutex_lock(&lock);
+        if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
+        const int due = tier_member_count &&
+            ((tier_dirty && now - tier_changed_ms >= 250) || now - tier_fetched_ms >= 30000);
+        if (due) {
+            count = tier_member_count;
+            for (unsigned i = 0; i < count; ++i)
+                memcpy(names[i], tier_members[i].name, sizeof names[i]);
+            generation = tier_generation;
+            tier_dirty = 0;
+            tier_fetched_ms = now;
+        }
+        pthread_mutex_unlock(&lock);
+        if (!count) continue;
+
+        int fetched[RANKED_TIER_MEMBERS] = {0};
+        int fetched_mmr[RANKED_TIER_MEMBERS] = {0};
+        int fetched_mode[RANKED_TIER_MEMBERS] = {0};
+        int answered = 0;
+        for (int request_mode = mode; request_mode <= mode; ++request_mode) {
+            char target[384];
+            size_t used = (size_t)snprintf(target, sizeof target, "/ryunet/ranked-tiers?names=");
+            for (unsigned i = 0; i < count && used < sizeof target; ++i)
+                used += (size_t)snprintf(target + used, sizeof target - used,
+                                         "%s%s", i ? "," : "", names[i]);
+            if (used >= sizeof target) break;
+            snprintf(target + used, sizeof target - used, "&mode=%d", request_mode);
+            char *reply = NULL;
+            size_t reply_size = 0;
+            const int status = runtime_ryunet_transfer("GET", target, NULL, 0,
+                                                       &reply, &reply_size, 4096);
+            if (status == 200 && reply) {
+                answered = 1;
+                for (unsigned i = 0; i < count; ++i) {
+                    char lower[17], tier_name[40];
+                    for (size_t j = 0; names[i][j]; ++j)
+                        lower[j] = (char)tolower((unsigned char)names[i][j]);
+                    lower[strlen(names[i])] = 0;
+                    const int tier = ranked_tier_reply(reply, lower, tier_name, sizeof tier_name)
+                                   ? tier_index(tier_name, request_mode) : 0;
+                    int mmr = 0;
+                    ranked_mmr_reply(reply, lower, &mmr);
+                    if (tier > fetched[i]) {
+                        fetched[i] = tier;
+                        fetched_mode[i] = request_mode;
+                        fetched_mmr[i] = mmr;
+                    }
+                }
+            }
+            free(reply);
+        }
+        pthread_mutex_lock(&lock);
+        if (answered && tier_room == room && tier_mode == mode) {
+            for (unsigned i = 0; i < count; ++i) {
+                for (unsigned j = 0; j < tier_member_count; ++j)
+                    if (same_nick(names[i], tier_members[j].name)) {
+                        tier_members[j].tier = fetched[i];
+                        tier_members[j].mode = fetched_mode[i];
+                        tier_members[j].mmr = fetched_mmr[i];
+                    }
+            }
+        }
+        if (tier_generation != generation) {
+            tier_dirty = 1;
+            tier_changed_ms = monotonic_ms();
+        }
+        pthread_mutex_unlock(&lock);
+    }
+    return NULL;
 }
 
 
@@ -174,8 +364,11 @@ void *ranked_sender(void *arg) {
 }
 
 void runtime_ranked_start(void) {
-    /* Nothing to start: each report carries its own sender thread. Kept as a
-     * call site (runtime_net.c) for the day the module needs a shared worker. */
+    static int started;
+    if (__atomic_exchange_n(&started, 1, __ATOMIC_RELAXED)) return;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, ranked_tier_worker, NULL) == 0)
+        pthread_detach(thread);
 }
 
 const char *runtime_ranked_result_text(void) {

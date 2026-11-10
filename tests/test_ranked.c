@@ -19,6 +19,7 @@ int runtime_ranked_session(uint64_t *room, int *mode) {
     if (mode) *mode = session_mode;
     return session_room != 0;
 }
+int runtime_public_itemless_selected(void) { return session_mode; }
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
 const char *rr_current_level(void) { return "Electron Avenue"; }
 
@@ -126,12 +127,45 @@ static void test_rejected_report_drops_out(void) {
     transfer_status = 200;
 }
 
+static void test_tier_batch_response(void) {
+    char tier[40];
+    const char *reply = "{\"mode\":0,\"tiers\":{\"hostracer\":\"Gold Mask\"},\"mmr\":{\"hostracer\":1045}}";
+    assert(ranked_tier_reply(reply, "hostracer", tier, sizeof tier));
+    assert(!strcmp(tier, "Gold Mask"));
+    assert(!ranked_tier_reply(reply, "missing", tier, sizeof tier));
+    assert(!ranked_tier_reply("{\"hostracer\":\"Gold Mask\"}", "hostracer", tier, sizeof tier));
+    int mmr = 0;
+    assert(ranked_mmr_reply(reply, "hostracer", &mmr) && mmr == 1045);
+    assert(!ranked_mmr_reply(reply, "missing", &mmr));
+}
+
+static void test_tier_before_first_race(void) {
+    session_room = 0;
+    int mode = -1;
+    assert(runtime_ranked_tier("HostRacer", &mode) == 0 && mode == 0);
+    session_room = 42;
+    pthread_mutex_lock(&lock);
+    tier_cache_reset(0, 0);
+    pthread_mutex_unlock(&lock);
+    assert(runtime_ranked_tier("HostRacer", &mode) == 0 && mode == 0);
+    pthread_mutex_lock(&lock);
+    tier_members[0].tier = 5;
+    pthread_mutex_unlock(&lock);
+    tier_members[0].mode = 1;
+    tier_members[0].mmr = 2468;
+    assert(runtime_ranked_tier("HostRacer", &mode) == 5 && mode == 1);
+    assert(runtime_ranked_mmr("HostRacer") == 2468);
+    assert(!strcmp(runtime_ranked_tier_name(1, 5), "Ultimate Sacred Fire"));
+}
+
 int main(void) {
     test_resolution();
     test_guest_pending_then_delta();
     test_room_change_clears_the_card();
     test_gives_up_after_retries();
     test_rejected_report_drops_out();
+    test_tier_batch_response();
+    test_tier_before_first_race();
     puts("ranked-test: ok");
     return 0;
 }

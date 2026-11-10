@@ -4,6 +4,13 @@
 static int32_t guest_errno;
 int32_t *runtime_errno(void) { return &guest_errno; }
 int32_t runtime_guest_errno(int e) { return e; }
+void runtime_cinematic_video(int delta) { (void)delta; }
+int runtime_online_mode_in_private(void) { return 0; }
+int runtime_online_mode_private_cup_race(void) { return 0; }
+int runtime_public_itemless_active(void) { return 0; }
+int runtime_private_match_active(void) { return 0; }
+int runtime_private_room_active(void) { return 0; }
+int runtime_replay_no_crates(void) { return 0; }
 /* Reads into guest memory tell the GPU side (runtime_memory.c); nothing to tell here. */
 void runtime_memory_note_write(uintptr_t address, uint64_t size) { (void)address; (void)size; }
 uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {

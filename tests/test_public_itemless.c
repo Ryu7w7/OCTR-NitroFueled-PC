@@ -9,10 +9,11 @@ int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
-static int ranked_labels;
+static int ranked_labels, hall_labels;
 void runtime_online_mode_set_text(void *placeable, const char *text) {
-    assert(placeable && !strcmp(text, "RANKED"));
-    ++ranked_labels;
+    assert(placeable);
+    if (!strcmp(text, "RANKED")) ++ranked_labels;
+    else { assert(!strcmp(text, "HALL OF FAME")); ++hall_labels; }
 }
 static void *test_network=(void *)1;
 static void ABI stop_matchmaking(void *self) { assert(self==test_network); ++stopped; }
@@ -279,6 +280,27 @@ static void test_ranked_button_event(void) {
     p = NULL; memcpy(button + 0x28, &p, 8);
     placeable_event(button, event);
     assert(!ranked_selected);
+}
+static void test_hall_of_fame_button_event(void) {
+    native_placeable_event = forward_event;
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *event_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
+    void *event[4] = {vtable, event_meta, 0, (void *)8};
+    void *nav_meta[3] = {0, 0, "CGuiBehaviorOctaneNavigationItem"};
+    void *(ABI *nav_vtable[])(void *) = {object_type};
+    void *nav[70] = {nav_vtable, nav_meta};
+    void *behaviors[] = {nav};
+    unsigned char button[0xf0] = {0}, list[0x28] = {0}, label[0x50] = {0};
+    int one = 1;
+    void *p = "OCTR_HALL_OF_FAME_BUTTON"; memcpy(button + 0x28, &p, 8);
+    p = list; memcpy(button + 0xe8, &p, 8);
+    p = behaviors; memcpy(list + 0x20, &p, 8); memcpy(list + 12, &one, 4);
+    p = label; memcpy(nav + 30, &p, 8);
+    p = "[LevelListName]"; memcpy(label + 0x28, &p, 8);
+    int before_forwarded = forwarded;
+    placeable_event(button, event);
+    assert(hall_labels == 1);
+    assert(forwarded == before_forwarded);
 }
 static void test_early_gate(void) {
     early=1;
@@ -582,6 +604,7 @@ int main(void) {
     test_full_lobby_confirmation();
     test_ranked();
     test_ranked_button_event();
+    test_hall_of_fame_button_event();
     test_installed_hooks("1277e00");
     test_installed_hooks("1277df0");
     /* The worker can be stuck in HTTP while repeated frame checks return. */

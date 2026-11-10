@@ -147,6 +147,10 @@ int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
 void runtime_ranked_start(void);
 void runtime_ranked_race_end(void);
 const char *runtime_ranked_result_text(void);
+/* The member's current Ranked tier (1..7), or 0 when unavailable. */
+int runtime_ranked_tier(const char *name, int *mode);
+int runtime_ranked_mmr(const char *name);
+const char *runtime_ranked_tier_name(int mode, int tier);
 void runtime_online_mode_set_text(void *placeable, const char *text);
 void runtime_public_itemless_reset(void);
 void runtime_public_itemless_party_ready(void);

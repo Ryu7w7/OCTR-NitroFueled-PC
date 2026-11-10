@@ -504,19 +504,19 @@ static const char *meta_name(void *object) {
 /* The navigation item resolves the shared prefab's label placeable at +0xf0 ('Text_LevelListName',
  * the RNEX reference); the button's own tree has no children (the visuals live in the shared
  * comp instance). Set the label on it and on the focused variant inside the same comp. */
-static void ranked_text_walk(void *node, int depth) {
+static void menu_text_walk(void *node, int depth, const char *label) {
     if (!node || depth > 8) return;
     const char *name = *(const char **)((char *)node + 0x28);
     if (name && (!strcmp(name, "[LevelListName]") ||
                  !strcmp(name, "LevelListName_focused")))
-        runtime_online_mode_set_text(node, "RANKED");
+        runtime_online_mode_set_text(node, label);
     void *list = *(void **)((char *)node + 0x48);
     int count = list ? *(int *)((char *)list + 0xc) : 0;
     void **children = list ? *(void ***)((char *)list + 0x20) : NULL;
     for (int i = 0; children && i < count && i < 40; ++i)
-        ranked_text_walk(children[i], depth + 1);
+        menu_text_walk(children[i], depth + 1, label);
 }
-static void ranked_label(void *button) {
+static void menu_label(void *button, const char *label) {
     void *list = *(void **)((char *)button + 0xe8);
     int count = list ? *(int *)((char *)list + 0xc) : 0;
     void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
@@ -525,8 +525,8 @@ static void ranked_label(void *button) {
         if (!name || strcmp(name, "CGuiBehaviorOctaneNavigationItem")) continue;
         void *text = *(void **)((char *)items[i] + 0xf0);
         if (!text) continue;
-        ranked_text_walk(text, 0);
-        ranked_text_walk(*(void **)((char *)text + 0x40), 0);
+        menu_text_walk(text, 0, label);
+        menu_text_walk(*(void **)((char *)text + 0x40), 0, label);
     }
 }
 
@@ -578,6 +578,7 @@ static void gui_dump(void *button) {
     gui_dump_node(top, 0);
     fprintf(stderr, "==== GUI DUMP end (%d nodes) ====\n", gui_seen_count);
 }
+
 /* The Ranked button shares the matchmaking button's VSC behavior object (one graph instance,
  * refcounted by both behavior lists), so its Confirm runs the graph with the native owner
  * exactly as when Matchmaking itself is pressed; the hook only flags the ranked mode. */
@@ -588,6 +589,7 @@ static void ABI placeable_event(void *self, void *event) {
     int private_gate = private_room && (runtime_speed_mode_enabled() || feature);
     const char *tag = self ? *(const char **)((char *)self + 0x28) : NULL;
     int ranked_button = tag && !strcmp(tag, "OCTR_RANKED_BUTTON");
+    int hall_of_fame_button = tag && !strcmp(tag, "OCTR_HALL_OF_FAME_BUTTON");
     if (self && event) {
         const char *type = meta_name(event);
         int signal = 0;
@@ -607,6 +609,10 @@ static void ABI placeable_event(void *self, void *event) {
         }
         /* Confirm (8) is the input filter in both native button graphs. */
         if (type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8) {
+            if (hall_of_fame_button) {
+                menu_label(self, "HALL OF FAME");
+                return;
+            }
             void *list = *(void **)((char *)self + 0xe8);
             int count = list ? *(int *)((char *)list + 0xc) : 0;
             void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
@@ -636,11 +642,11 @@ static void ABI placeable_event(void *self, void *event) {
     /* The label override touches the shared comp instance through the nav's resolved text
      * reference: safe while the scene is live (focus and input events), but the LoseFocus
      * events also fire while the project is tearing down and the comp may already be gone. */
-    if (ranked_button && event) {
+    if ((ranked_button || hall_of_fame_button) && event) {
         const char *event_type = meta_name(event);
         if (!event_type || (strcmp(event_type, "igGuiEventPlaceableLoseFocus") &&
                             strcmp(event_type, "igGuiEventProjectLoseFocus"))) {
-            ranked_label(self);
+            menu_label(self, ranked_button ? "RANKED" : "HALL OF FAME");
             if (getenv("BB_GUI_DUMP")) gui_dump(self);
         }
     }

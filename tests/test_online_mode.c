@@ -27,6 +27,10 @@ int runtime_public_itemless_active(void) { return public_active; }
 int runtime_ranked_active(void) { return 0; }
 int runtime_ranked_selected(void) { return ranked_selected; }
 void runtime_ranked_race_end(void) {}
+int runtime_ranked_tier(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
+int runtime_ranked_mmr(const char *name) { (void)name; return 0; }
+const char *runtime_ranked_tier_name(int mode, int tier) { (void)mode; (void)tier; return "UNRANKED"; }
+const char *runtime_np_get_online_name(void) { return "LocalHost"; }
 const char *runtime_ranked_result_text(void) { return ""; }
 int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }

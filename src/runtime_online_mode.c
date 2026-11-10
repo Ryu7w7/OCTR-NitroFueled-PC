@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "runtime_name_colors.h"
 #include "runtime_ai_catchup.h"
+#include "runtime_np_online.h"
 #include <stdio.h>
 #include <stdlib.h>
 #ifdef _WIN32
@@ -2058,6 +2059,30 @@ static void update_card(unsigned char *row, const char *cup_name, const char *mo
         update_card(items[i], cup_name, mode, preview, depth + 1);
 }
 
+static void update_rank_card(unsigned char *row, int shown, int mode, int tier,
+                             const char *rank_name, const char *mmr, int depth) {
+    if (!row || depth > 16) return;
+    const char *tag = pointer_at(row, 0x28);
+    if (tag && !strncmp(tag, "OCTR_CARD_ICON_", 15)) {
+        const char *rank = tag + 15;
+        const int icon_mode = rank[0] - '0';
+        const int icon_tier = rank[1] == '_' ? atoi(rank + 2) : 0;
+        hide_placeable(row, !shown || icon_mode != mode || icon_tier != tier);
+    } else if (tag && !strcmp(tag, "OCTR_RANK_NAME")) {
+        hide_placeable(row, !shown);
+        if (shown) set_text(row, rank_name);
+    } else if (tag && !strcmp(tag, "OCTR_RANK_MMR")) {
+        hide_placeable(row, !shown);
+        if (shown) set_text(row, mmr);
+    }
+    unsigned char *children = pointer_at(row, 0x48);
+    int count = 0;
+    if (children) memcpy(&count, children + 12, 4);
+    void **items = children ? pointer_at(children, 0x20) : NULL;
+    for (int i = 0; items && i < count; ++i)
+        update_rank_card(items[i], shown, mode, tier, rank_name, mmr, depth + 1);
+}
+
 static void ABI lobby_event(unsigned char *self, void *event, void *owner) {
     ensure_default_cup();
     original_lobby_event(self, event, owner);
@@ -2113,6 +2138,15 @@ static void refresh_lobby_card(unsigned char *owner) {
                         ? (runtime_public_itemless_active() ? "RANKED - ITEMLESS" : "RANKED - NORMAL")
                         : (runtime_public_itemless_active() ? "SINGLE RACE - ITEMLESS" : "SINGLE RACE - NORMAL"), NULL, 0);
         }
+        const int ranked = runtime_ranked_active();
+        const int mode = runtime_public_itemless_active() ? 1 : 0;
+        const char *me = runtime_np_get_online_name();
+        int ignored_mode = mode;
+        const int tier = ranked && me ? runtime_ranked_tier(me, &ignored_mode) : 1;
+        char mmr[32];
+        snprintf(mmr, sizeof mmr, "MMR %d", ranked && me ? runtime_ranked_mmr(me) : 0);
+        update_rank_card(owner, ranked, mode, tier,
+                         runtime_ranked_tier_name(mode, tier), mmr, 0);
         return;
     }
     if (battle_selected() || !runtime_online_mode_in_private()) return;
@@ -2750,15 +2784,65 @@ static void name_color_project(unsigned char *project) {
  * it; its update (+0xd8) is the base one, called every frame. Both put the nickname's back on. */
 static EventHandler original_member_event;
 static BehaviorUpdate original_member_update;
+static int ranked_icon_logged;
+
+static void ranked_member_icons(unsigned char *self) {
+    unsigned char *name = pointer_at(self, 0x10);
+    const char *nick = name ? pointer_at(name, 0x30) : NULL;
+    if (!nick) return;
+    int mode = 0;
+    const int tier = runtime_ranked_tier(nick, &mode);
+    float name_pos[2], name_size[2], name_pivot[2];
+    memcpy(name_pos, name + 0x60, sizeof name_pos);
+    memcpy(name_size, name + 0x90, sizeof name_size);
+    memcpy(name_pivot, name + 0x70, sizeof name_pivot);
+    unsigned char *icon = pointer_at(name, 0x50);
+    for (int i = 0; icon && i < 28; ++i, icon = pointer_at(icon, 0x50)) {
+        if (!icon) continue;
+        const char *label = pointer_at(icon, 0x28);
+        const int background = label && !strncmp(label, "OCTR_RANK_SHADOW_", 17);
+        const int foreground = label && !strncmp(label, "OCTR_RANK_ICON_", 15);
+        if (!background && !foreground) continue;
+        const char *rank = label + (background ? 17 : 15);
+        const int icon_mode = rank[0] - '0';
+        const int icon_tier = rank[1] == '_' ? atoi(rank + 2) : 0;
+        if (icon_mode < 0 || icon_mode > 1 || icon_tier < 0 || icon_tier > 7) continue;
+
+        float icon_pos[2], icon_size[2], icon_pivot[2];
+        memcpy(icon_pos, icon + 0x60, sizeof icon_pos);
+        memcpy(icon_size, icon + 0x90, sizeof icon_size);
+        memcpy(icon_pivot, icon + 0x70, sizeof icon_pivot);
+        const float x = name_pos[0] - 70.0f + (background ? 2.0f : 0.0f);
+        const float y = name_pos[1] - name_size[1] * name_pivot[1] +
+                        (name_size[1] - icon_size[1]) * 0.5f +
+                        icon_size[1] * icon_pivot[1] + (background ? 18.0f : 16.0f);
+        if (icon_pos[0] != x || icon_pos[1] != y) {
+            icon_pos[0] = x;
+            icon_pos[1] = y;
+            memcpy(icon + 0x60, icon_pos, sizeof icon_pos);
+            unsigned flags;
+            memcpy(&flags, icon + 12, sizeof flags);
+            flags |= 0x1000;
+            memcpy(icon + 12, &flags, sizeof flags);
+        }
+        hide_placeable(icon, mode != icon_mode || tier != icon_tier);
+        if (!background && !ranked_icon_logged && mode == icon_mode && tier == icon_tier) {
+            ranked_icon_logged = 1;
+            fprintf(stderr, "Ranked lobby icon: %s tier=%d x=%.1f y=%.1f\n", nick, tier, x, y);
+        }
+    }
+}
 
 static void ABI member_event(unsigned char *self, void *event, void *owner) {
     original_member_event(self, event, owner);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
+    ranked_member_icons(self);
 }
 
 static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
     original_member_update(self, owner, dt);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
+    ranked_member_icons(self);
 }
 
 static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {

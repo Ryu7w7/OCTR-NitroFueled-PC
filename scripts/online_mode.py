@@ -4,17 +4,26 @@ The runtime keeps Speed disabled in public matchmaking until server queues suppo
 """
 import argparse
 import hashlib
+import json
+import os
 import re
 import struct
 from pathlib import Path
 
 import archive_patch
+from build_ui_asset import build_pak as build_ui_asset_pak, ranked_background_texture
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets, pack_offsets
+from graphics_tab import fnv1a
 from mod_file_paths import resolve, records
 from mod_overlays import file_map
 from mod_components import long_path
 from patches import load_segments
+from ranked_ui_assets import (QUICK_ICON_TEXTURE, RANKED_BACKGROUND_MATERIAL,
+                              RANKED_BACKGROUND_NAMESPACE, RANKED_BACKGROUND_PATH,
+                              RANKED_BACKGROUND_TEXTURE,
+                              SINGLE_RACE_TEXTURE, asset_replacements, clone_animated_material,
+                              menu_asset_replacements, quick_icon_texture)
 
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
 LABEL_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect_en.lng'
@@ -24,6 +33,9 @@ LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategame.igz'
 SETTINGS_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_privategamesettings.igz'
 PUBLIC_LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_matchmaking.igz'
 MAIN_LOBBY_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_main.igz'
+LOBBY_MATERIALS_ENTRY = ('temporary/octane/data/ps4/output/ui/materialInstances/'
+                         'juice_Octane_Lobby_Main_materials.igz')
+LOBBY_MEMBERS_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobbymembers.igz'
 GRAPH_SHA256 = {
     '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47',  # USA 1.21
     'cdb4b366079458a0f1ed32fb8a8ac69d2d841f18bacb9a72430a02e93fcf52a2',  # EU 1.21
@@ -52,6 +64,256 @@ TEAM_RANKING_ROOT = 'temporary/octane/data/ps4/output/vsc/ui/octane_battleteam_r
 
 
 TEAM_RANKING_UI = 'temporary/octane/data/ps4/output/ui/octane_battleteam_ranking.igz'
+
+def driving_style_visible(blob):
+    """Clone the driving-style slot left of nickname; keep original untouched."""
+    g = Igz(blob)
+    objects = dict(g.objects())
+    names = [off for off, kind in objects.items()
+             if kind == 'igGuiPlaceable' and g.string_at(off + 0x28) == '[MemberName]']
+    if len(names) != 1:
+        return blob
+    name = names[0]
+    tables = [off for off, kind in objects.items() if kind == 'igGuiPlaceableTable']
+    table = next((off for off in tables
+                  if any(g.u64(g.u64(off + 0x20) + 8 * i) == name
+                         for i in range(g.u32(off + 0x0c)))), None)
+    if table is None:
+        return blob
+    siblings = [g.u64(g.u64(table + 0x20) + 8 * i) for i in range(g.u32(table + 0x0c))]
+    handles = g.fixup('EXNM')
+    handle_entries = list(struct.iter_unpack('<II', handles[3][:handles[1] * 8]))
+    external_handles = [(g.strings[a], g.strings[b & 0x7fffffff])
+                        for a, b in handle_entries if b & 0x80000000]
+    slots = [off for off in siblings
+             if off != name and objects.get(off) == 'igGuiPlaceable' and
+             (g.u64(off + 0x38) & 0x80000000) and
+             external_handles[g.u64(off + 0x38) & 0x7fffffff][0] == 'octane_ui_ico_singlerace_tga']
+    if not slots:
+        return blob
+    icon = slots[0]
+    for fixup_tag in ('RHND', 'RNEX'):
+        if fixup_tag not in g.sites:
+            g.sites[fixup_tag] = g.read_list(fixup_tag, unpack_offsets)
+    size = g.sizes[g.u64(icon)]
+    clone = g.append(g.data[icon:icon + size])
+    g.add_site('RVTB', clone)
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if icon < site < icon + size:
+                g.add_site(tag, clone + site - icon)
+    g.set_u64(clone + 0x28, g.string_index('HideLobbyMembers'))
+    g.add_site('RSTT', clone + 0x28)
+    g.set_u32(clone + 0x0c, g.u32(clone + 0x0c) & ~0x400)
+    name_x = struct.unpack_from('<f', g.data, name + 0x60)[0]
+    icon_x, icon_y = struct.unpack_from('<2f', g.data, icon + 0x60)
+    icon_w = struct.unpack_from('<f', g.data, icon + 0x90)[0]
+    # left of nickname, name untouched — adjust X here (bigger = more right)
+    struct.pack_into('<2f', g.data, clone + 0x60, 18.0, icon_y)
+    struct.pack_into('<2f', g.data, clone + 0x90, icon_w * 1.5, icon_w * 1.5)
+    def pointer(at, value):
+        g.set_u64(at, value)
+        if value:
+            g.add_site('ROFS', at)
+        elif at in g.sites['ROFS']:
+            g.sites['ROFS'].remove(at)
+    name_list = next(off for off, kind in objects.items() if kind == 'igNameList')
+    named_count = g.u32(name_list + 0x0c)
+    if named_count != g.u32(0x0c):
+        return g.build()
+    named_objects = [g.u64(g.u64(0x20) + i * 8) for i in range(named_count)]
+    named_entries = bytearray(g.data[g.u64(name_list + 0x20):g.u64(name_list + 0x20) + named_count * 16])
+    export = 'OCTR_DRIVESTYLE_CLONE'
+    named_entries += struct.pack('<QII', g.string_index(export), fnv1a(export), 0)
+    named_objects.append(clone)
+    def replace_list(off, values, stride=8):
+        data = g.append(struct.pack('<' + 'Q' * len(values), *values))
+        for i in range(len(values)):
+            g.add_site('ROFS', data + i * stride)
+        g.set_u32(off + 0x0c, len(values))
+        g.set_u32(off + 0x10, len(values))
+        g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(values) * stride)
+        pointer(off + 0x20, data)
+    replace_list(0, named_objects)
+    name_data = g.append(named_entries)
+    for i in range(len(named_objects)):
+        g.add_site('RSTT', name_data + i * 16)
+    g.set_u32(name_list + 0x0c, len(named_objects))
+    g.set_u32(name_list + 0x10, len(named_objects))
+    g.set_u64(name_list + 0x18, (g.u64(name_list + 0x18) & ~0xffffffff) | len(named_objects) * 16)
+    pointer(name_list + 0x20, name_data)
+    ni = siblings.index(name)
+    prev = g.u64(name + 0x58)
+    all_siblings = siblings[:ni] + [clone] + siblings[ni:]
+    row_data = g.append(struct.pack('<' + 'Q' * len(all_siblings), *all_siblings))
+    for i in range(len(all_siblings)):
+        g.add_site('ROFS', row_data + 8 * i)
+    g.set_u32(table + 0x0c, len(all_siblings))
+    g.set_u32(table + 0x10, len(all_siblings))
+    g.set_u64(table + 0x18, (g.u64(table + 0x18) & ~0xffffffff) | (8 * len(all_siblings)))
+    pointer(table + 0x20, row_data)
+    pointer(clone + 0x40, g.u64(name + 0x40))
+    pointer(clone + 0x58, prev)
+    pointer(clone + 0x50, name)
+    if prev:
+        pointer(prev + 0x50, clone)
+    pointer(name + 0x58, clone)
+    for tag in ('RHND', 'RNEX'):
+        fixup = g.fixup(tag)
+        sites = sorted(set(g.sites[tag]))
+        fixup[1], fixup[3] = len(sites), pack_offsets(sites)
+        fixup[4] = (fixup[2] + len(fixup[3]) + 3) & ~3
+    return g.build()
+
+
+def ready_icon_clone(blob):
+    return driving_style_visible(blob)
+
+
+def ranked_lobby_icons(blob):
+    """PNG rank sprites (no decals). Tags OCTR_RANK_ICON_{mode}_{tier} for prebuilt."""
+    from ranked_ui_assets import TIERS, tier_icon, tier_material
+    g = Igz(blob)
+    deps = g.fixup('TDEP')
+    dependencies = [item.decode() for item in deps[3].split(b'\0')[:deps[1] * 2]]
+    for mode, tier in TIERS:
+        namespace, mat_path, _export = tier_material(mode, tier)
+        virtual = mat_path.replace('ui/', 'ui:/', 1)
+        if virtual not in dependencies[1::2]:
+            dependencies.extend((namespace, virtual))
+    if deps[1] != len(dependencies) // 2:
+        deps[1] = len(dependencies) // 2
+        deps[3] = b''.join(item.encode() + b'\0' for item in dependencies)
+        deps[4] = (deps[2] + len(deps[3]) + 3) & ~3
+    objects = dict(g.objects())
+    names = [off for off, kind in objects.items()
+             if kind == 'igGuiPlaceable' and g.string_at(off + 0x28) == '[MemberName]']
+    if len(names) != 1: raise ValueError('unsupported Lobby Members name placeable')
+    name = names[0]
+    tables = [off for off, kind in objects.items() if kind == 'igGuiPlaceableTable']
+    table = next((off for off in tables
+                  if any(g.u64(g.u64(off + 0x20) + 8 * i) == name
+                         for i in range(g.u32(off + 0x0c)))), None)
+    if table is None: raise ValueError('Lobby Members row has no placeable table')
+    siblings = [g.u64(g.u64(table + 0x20) + 8 * i) for i in range(g.u32(table + 0x0c))]
+    handles = g.fixup('EXNM')
+    handle_entries = list(struct.iter_unpack('<II', handles[3][:handles[1] * 8]))
+    external_handles = [(g.strings[a], g.strings[b & 0x7fffffff])
+                        for a, b in handle_entries if b & 0x80000000]
+    templates = {external_handles[g.u64(off + 0x38) & 0x7fffffff][0]: off
+                 for off in siblings if off != name and objects.get(off) == 'igGuiPlaceable' and
+                 g.u64(off + 0x38) & 0x80000000}
+    if 'octane_ui_ico_singlerace_tga' not in templates:
+        raise ValueError('Lobby Members row has no sprite placeable')
+    external = g.read_list('RNEX', unpack_offsets)
+    handle_sites = g.read_list('RHND', unpack_offsets)
+    def handle(asset):
+        index = sum(bool(space & 0x80000000) for _, space in handle_entries)
+        handle_entries.append((g.string_index(asset),
+                               g.string_index('Octane_LobbyMembers') | 0x80000000))
+        return index | 0x80000000
+    def pointer(at, value):
+        g.set_u64(at, value)
+        if value: g.add_site('ROFS', at)
+        elif at in g.sites['ROFS']: g.sites['ROFS'].remove(at)
+    name_list = next(off for off, kind in objects.items() if kind == 'igNameList')
+    named_count = g.u32(name_list + 0x0c)
+    if named_count != g.u32(0x0c): raise ValueError('Lobby Members export/object lists differ')
+    named_objects = [g.u64(g.u64(0x20) + i * 8) for i in range(named_count)]
+    named_entries = bytearray(g.data[g.u64(name_list + 0x20):g.u64(name_list + 0x20) + named_count * 16])
+    assets = next(off for off, kind in objects.items() if kind == 'igGuiAssetList')
+    asset_objects = [g.u64(g.u64(assets + 0x20) + i * 8) for i in range(g.u32(assets + 0x0c))]
+    sprite_template = next(off for off in asset_objects if objects.get(off) == 'igGuiSprite')
+    sprite_size = g.sizes[g.u64(sprite_template)]
+    material_ids = g.fixup('EXID')
+    sprite_exports = {}
+    for mode, tier in TIERS:
+        image_name = tier_icon(mode, tier)[1]
+        namespace, _mat_path, material = tier_material(mode, tier)
+        sprite = g.append(g.data[sprite_template:sprite_template + sprite_size])
+        g.add_site('RVTB', sprite)
+        for tag, sites in g.sites.items():
+            for site in list(sites):
+                if sprite_template < site < sprite_template + sprite_size:
+                    g.add_site(tag, sprite + site - sprite_template)
+        for site in list(handle_sites):
+            if sprite_template < site < sprite_template + sprite_size:
+                handle_sites.append(sprite + site - sprite_template)
+        for site in list(external):
+            if sprite_template < site < sprite_template + sprite_size:
+                external.append(sprite + site - sprite_template)
+        g.set_u64(sprite + 0x10, g.string_index(image_name))
+        g.add_site('RSTT', sprite + 0x10)
+        g.set_u64(sprite + 0x20, material_ids[1])
+        # EXID blocks pad after their counted entries: append after the last entry, not the padding.
+        material_ids[3] = (material_ids[3][:material_ids[1] * 8] +
+                           struct.pack('<II', fnv1a(material), fnv1a(namespace)))
+        material_ids[1] += 1
+        export = f'OCTR_RANK_{mode}_{tier}_ASSET'
+        named_entries += struct.pack('<QII', g.string_index(export), fnv1a(export), 0)
+        named_objects.append(sprite)
+        asset_objects.append(sprite)
+        sprite_exports[mode, tier] = export
+    material_ids[4] = (material_ids[2] + len(material_ids[3]) + 3) & ~3
+    template = templates['octane_ui_ico_singlerace_tga']
+    size = g.sizes[g.u64(template)]
+    tw, th = struct.unpack_from('<2f', g.data, template + 0x90)
+    iw, ih = abs(tw) * 3.0, abs(th) * 3.0
+    new = []
+    for mode, tier in TIERS:
+        icon = g.append(g.data[template:template + size])
+        g.add_site('RVTB', icon)
+        for tag, sites in g.sites.items():
+            for site in list(sites):
+                if template < site < template + size:
+                    g.add_site(tag, icon + site - template)
+        for site in list(handle_sites):
+            if template < site < template + size:
+                handle_sites.append(icon + site - template)
+        for site in list(external):
+            if template < site < template + size:
+                external.append(icon + site - template)
+        g.set_u64(icon + 0x28, g.string_index(f'OCTR_RANK_ICON_{mode}_{tier}'))
+        g.set_u64(icon + 0x38, handle(sprite_exports[mode, tier]))
+        g.set_u32(icon + 0x0c, g.u32(icon + 0x0c) & ~0x400)
+        pointer(icon + 0xf0, 0)
+        g.add_site('RSTT', icon + 0x28)
+        struct.pack_into('<2f', g.data, icon + 0x90, iw, ih)
+        new.append(icon)
+    def replace_list(off, values, stride=8):
+        data = g.append(struct.pack('<' + 'Q' * len(values), *values))
+        for i in range(len(values)): g.add_site('ROFS', data + i * stride)
+        g.set_u32(off + 0x0c, len(values)); g.set_u32(off + 0x10, len(values))
+        g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(values) * stride)
+        pointer(off + 0x20, data)
+    replace_list(0, named_objects)
+    name_data = g.append(named_entries)
+    for i in range(len(named_objects)): g.add_site('RSTT', name_data + i * 16)
+    g.set_u32(name_list + 0x0c, len(named_objects)); g.set_u32(name_list + 0x10, len(named_objects))
+    g.set_u64(name_list + 0x18, (g.u64(name_list + 0x18) & ~0xffffffff) | len(named_objects) * 16)
+    pointer(name_list + 0x20, name_data)
+    replace_list(assets, asset_objects)
+    all_siblings = siblings[:siblings.index(name) + 1] + new + siblings[siblings.index(name) + 1:]
+    row_data = g.append(struct.pack('<' + 'Q' * len(all_siblings), *all_siblings))
+    for i in range(len(all_siblings)): g.add_site('ROFS', row_data + 8 * i)
+    g.set_u32(table + 0x0c, len(all_siblings)); g.set_u32(table + 0x10, len(all_siblings))
+    g.set_u64(table + 0x18, (g.u64(table + 0x18) & ~0xffffffff) | (8 * len(all_siblings)))
+    pointer(table + 0x20, row_data)
+    parent = g.u64(name + 0x40); successor = g.u64(name + 0x50); previous = name
+    for icon in new:
+        pointer(icon + 0x40, parent); pointer(icon + 0x58, previous)
+        pointer(previous + 0x50, icon); previous = icon
+    pointer(previous + 0x50, successor)
+    if successor: pointer(successor + 0x58, previous)
+    handles[1] = len(handle_entries)
+    handles[3] = b''.join(struct.pack('<II', *entry) for entry in handle_entries)
+    handles[4] = (handles[2] + len(handles[3]) + 3) & ~3
+    for tag, sites in (('RHND', handle_sites), ('RNEX', external)):
+        fixup = g.fixup(tag); sites = sorted(set(sites))
+        fixup[1], fixup[3] = len(sites), pack_offsets(sites)
+        fixup[4] = (fixup[2] + len(fixup[3]) + 3) & ~3
+    return g.build()
+
 
 
 def team_ranking_header(blob):
@@ -492,38 +754,72 @@ def cup_package(game, blob, source_blob, assets=None, race_blob=None):
     return g.build()
 
 
+def package_with_rows(blob, additions):
+    g = Igz(blob)
+    chunk, rows = package_rows(g)
+    paths = {path for _, path in rows}
+    rows += [row for row in additions if row[1] not in paths]
+    array = g.append(b''.join(struct.pack('<QQ', g.string_index(kind), g.string_index(path))
+                              for kind, path in rows))
+    for offset in range(array, array + len(rows) * 16, 8):
+        g.add_site('RSTT', offset)
+    g.set_u64(chunk + 0x28, len(rows))
+    g.set_u64(chunk + 0x30, (g.u64(chunk + 0x30) & ~0xffffffff) | len(rows) * 16)
+    g.set_u64(chunk + 0x38, array)
+    return g.build()
+
+
 def ranking_stream_archive(game, dest, package_blob, project, replacements):
     """Provide the native StreamingUI fallback when the online chunk was released."""
     from graphics_tab import Archive, write_archive
     from contextlib import ExitStack
+    source_names = ('juicedomain_race', 'juicedomain_onlinemenus', 'update', 'update2')
+    sources = [resolve(Path(game) / 'archives' / (name + '.pak')) for name in source_names]
+    fingerprint = hashlib.sha256()
+    fingerprint.update(Path(__file__).read_bytes())
+    fingerprint.update(package_blob)
+    for path in sources:
+        stat = path.stat()
+        fingerprint.update(json.dumps((str(path), stat.st_size, stat.st_mtime_ns)).encode())
+    for path, data in sorted(replacements.items()):
+        fingerprint.update(path.encode())
+        fingerprint.update(data)
+    key = dest.with_suffix('.cache-key')
+    digest = fingerprint.hexdigest()
+    if dest.is_file() and key.is_file() and key.read_text() == digest:
+        return
     package = Igz(package_blob)
     chunk, rows = package_rows(package)
     kinds = dict((path, kind) for kind, path in rows)
     with ExitStack() as stack:
         files = {}
         template = None
-        for name in ('juicedomain_race', 'update', 'update2'):
+        for name in source_names:
             archive = Archive(resolve(Path(game) / 'archives' / (name + '.pak')))
             stack.callback(archive.f.close)
             template = archive
             for i in range(len(archive.names)):
                 path = archive.logical(i).lower().removeprefix(PACKAGE_PREFIX)
-                files[path] = (archive, i)
+                files[path] = (archive.f.name, i)
         pending = ['ui/' + project + '.igz']
         needed = {}
         while pending:
             path = pending.pop()
             if path in needed or path not in kinds:
                 continue  # Other dependencies belong to native permanent chunks.
-            if path not in files:
+            data = replacements.get(path)
+            if path not in files and data is None:
                 # As in the Cup assets: a manifest can name languages this regional dump lacks
                 if kinds[path] == 'lang_file' and path.endswith('.lng') and not path.endswith('_en.lng'):
                     continue
                 raise ValueError('missing ranking dependency: ' + path)
-            archive, index = files[path]
-            data = replacements.get(path)
             if data is None:
-                data = archive.read(index)
+                archive_path, index = files[path]
+                archive = Archive(Path(archive_path))
+                try:
+                    data = archive.read(index)
+                finally:
+                    archive.f.close()
             needed[path] = data
             if kinds[path] in ('texture', 'lang_file'):
                 continue
@@ -533,8 +829,13 @@ def ranking_stream_archive(game, dest, package_blob, project, replacements):
             except KeyError:
                 continue
             strings = dependencies[3].split(b'\0')[:dependencies[1] * 2]
-            pending.extend(raw.decode().lower().replace('<build>project:/' + PACKAGE_PREFIX, '')
-                           .replace(':/', '/') for raw in strings[1::2])
+            for raw in strings[1::2]:
+                dependency = raw.decode().lower().replace('<build>project:/' + PACKAGE_PREFIX, '')
+                if dependency.startswith('<build>materials:/'):
+                    dependency = 'materialinstances/' + dependency.removeprefix('<build>materials:/')
+                else:
+                    dependency = dependency.replace(':/', '/')
+                pending.append(dependency)
         selected = [(kind, path) for kind, path in rows if path in needed]
         array = package.append(b''.join(struct.pack('<QQ', package.string_index(kind),
                                                     package.string_index(path)) for kind, path in selected))
@@ -549,6 +850,7 @@ def ranking_stream_archive(game, dest, package_blob, project, replacements):
         needed[package_path] = package.build()
         write_archive(dest, [(PACKAGE_PREFIX + path, path, i << 8, data)
                              for i, (path, data) in enumerate(needed.items())], template)
+    key.write_text(digest)
 
 
 def hook_site(elf):
@@ -687,18 +989,20 @@ def public_lobby_card(blob):
 
 
 def ranked_main_button(blob):
-    """Clone the native Matchmaking action and place Ranked directly below it."""
+    """Place a Ranked button below Matchmaking and bind ranked menu icon material."""
     g = Igz(blob)
     if (g.u64(0x970 + 0xe8) != 0x2110 or g.u64(0x970 + 0x50) != 0xa90 or
             g.u64(0xa90 + 0x58) != 0x970 or g.u64(0x7e0 + 0x48) != 0x900 or
             g.u32(0x900 + 12) != 8 or g.u64(0x2110 + 0x28) != 0x2148):
         raise ValueError('unsupported native main lobby matchmaking button')
     references = {tag: g.read_list(tag, unpack_offsets) for tag in ('RHND', 'RNEX')}
+    # Copy the behavior list and navigation item; timer and animations stay shared.
     copies = [(0x970, 0xa90, g.append(g.data[0x970:0xa90])),
-              (0x2110, 0x2580, g.append(g.data[0x2110:0x2580]))]
+              (0x2110, 0x2368, g.append(g.data[0x2110:0x2368]))]
 
     def moved(value):
-        return next((new + value - lo for lo, hi, new in copies if lo <= value < hi), value)
+        return next((new + value - lo for lo, hi, new in copies
+                     if lo <= value < hi), value)
 
     for tag, sites in (*g.sites.items(), *references.items()):
         for site in list(sites):
@@ -711,44 +1015,37 @@ def ranked_main_button(blob):
                 g.add_site(tag, target)
             if tag == 'ROFS':
                 g.set_u64(target, moved(g.u64(site)))
-    button = moved(0x970)
-    nav = moved(0x2148)
+
+    button, nav = moved(0x970), moved(0x2148)
     g.set_u64(button + 0x28, g.string_index('OCTR_RANKED_BUTTON'))
     g.add_site('RSTT', button + 0x28)
-    g.set_u64(button + 0x50, 0xa90)
-    g.set_u64(button + 0x58, 0x970)
     g.set_u64(0x970 + 0x50, button)
+    g.set_u64(button + 0x58, 0x970)
+    g.set_u64(button + 0x50, 0xa90)
     g.set_u64(0xa90 + 0x58, button)
     struct.pack_into('<f', g.data, 0x970 + 0x64, -315.0)
     struct.pack_into('<f', g.data, button + 0x64, -210.0)
-    # Native navigation fields: up, down. Keep every other button's links intact.
     g.set_u64(0x2148 + 0x118, button)
     g.set_u64(nav + 0x110, 0x970)
     g.set_u64(nav + 0x118, 0xa90)
     g.set_u64(0xd08 + 0x110, button)
-    # A distinct icon, exactly as the native Graphics-tab Restart button (graphics_widgets.py):
-    # the navigation's icon materials (+0x158 with its +0x178/+0x1a8 mirrors) get the grand prix
-    # button's material ('octane_ui_ico_grandprix_tga__material', already in this file's EXID),
-    # and the focused icon sprite gets its name reference at +0x150.
     exid = g.fixup('EXID')
-    grandprix_material = next(i for i in range(exid[1]) if
-                              struct.unpack_from('<I', exid[3], i * 8)[0] == 0x7c593110)
-    exnm = g.fixup('EXNM')
-    entries = list(struct.iter_unpack('<II', exnm[3][:exnm[1] * 8]))
+    quick = next(i for i, (name, _) in enumerate(
+        struct.iter_unpack('<II', exid[3][:exid[1] * 8]))
+        if name == fnv1a('octane_ui_ico_quick_tga__material'))
+    g.set_u64(nav + 0x158, quick)
+    g.set_u64(nav + 0x1a8, quick)
+    native_background = next(space for name, space in struct.iter_unpack(
+        '<II', exid[3][:exid[1] * 8])
+        if name == fnv1a('octane_ui_online_bg_pattern_matchmaking_tga__material'))
+    if native_background != fnv1a(RANKED_BACKGROUND_NAMESPACE):
+        raise ValueError('unsupported native main lobby material namespace')
+    g.set_u64(nav + 0x178, exid[1])
+    exid[3] = (exid[3][:exid[1] * 8] +
+               struct.pack('<II', fnv1a(RANKED_BACKGROUND_MATERIAL), native_background))
+    exid[1] += 1
+    exid[4] = (exid[2] + len(exid[3]) + 3) & ~3
 
-    def reference(at, name, namespace):
-        index = sum(not (b & 0x80000000) for _, b in entries)
-        entries.append((g.string_index(name), g.string_index(namespace)))
-        g.set_u64(at, index)
-        references['RNEX'].append(at)
-
-    reference(nav + 0x150, 'Sprite_octane_ui_raceselect_ico_crashcove_tga001',
-              'Menu_ButtonWithIcon')
-    exnm[1], exnm[3] = len(entries), b''.join(struct.pack('<II', *e) for e in entries)
-    exnm[4] = (exnm[2] + len(exnm[3]) + 3) & ~3
-    g.set_u64(nav + 0x158, grandprix_material)
-    g.set_u64(nav + 0x178, grandprix_material)
-    g.set_u64(nav + 0x1a8, grandprix_material)
     children = [g.u64(0x928 + i * 8) for i in range(8)]
     children.insert(children.index(0x970) + 1, button)
     array = g.append(struct.pack('<9Q', *children))
@@ -758,19 +1055,13 @@ def ranked_main_button(blob):
     g.set_u32(0x900 + 16, 9)
     g.set_u64(0x900 + 0x18, (g.u64(0x900 + 0x18) & ~0xffffffff) | 72)
     g.set_u64(0x900 + 0x20, array)
-    # The Ranked button shares the matchmaking button's VSC behavior object instead of carrying
-    # a clone: the graph registers in a per-graph static instance map and a second live instance
-    # corrupts the heap at scene unload (its double destruction). Behaviors are refcounted, so
-    # both lists holding one instance is safe, and the graph runs with its native owner exactly
-    # as when Matchmaking itself is pressed. The clone of the object stays uninstantiated.
-    g.set_u64(moved(0x2140), 0x23b8)  # the cloned list's VSC slot now references the original
-    g.sites['RVTB'].remove(moved(0x23b8))
+
     for tag, sites in references.items():
+        sites = sorted(set(sites))
         fixup = g.fixup(tag)
-        fixup[1], fixup[3] = len(sites), pack_offsets(sorted(sites))
+        fixup[1], fixup[3] = len(sites), pack_offsets(sites)
         fixup[4] = (fixup[2] + len(fixup[3]) + 3) & ~3
     return g.build()
-
 
 def current_entry(pak, entries, index, base):
     """The entry's bytes as the game reads them now: base's own replacement (a widescreen layout's
@@ -843,8 +1134,23 @@ def prepare(game, out, elf, bases):
         lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
         public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
         public_lobby = public_lobby_card(current_entry(pak, entries, public_index, base))
+        lobby_members_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_MEMBERS_ENTRY)
+        lobby_members_native = current_entry(pak, entries, lobby_members_index, base)
+        try:
+            tier_assets = {**asset_replacements(), **menu_asset_replacements()}
+            lobby_members_patched = ready_icon_clone(lobby_members_native)
+        except Exception as e:
+            print(f"Lobby members: ready icon clone skipped ({e}); native panel kept")
+            tier_assets = {}
+            lobby_members_patched = lobby_members_native
+        lobby_members = lobby_members_patched
         main_index = next(i for i, e in enumerate(entries) if e[0].lower() == MAIN_LOBBY_ENTRY)
-        main_lobby = ranked_main_button(current_entry(pak, entries, main_index, base))
+        main_native = current_entry(pak, entries, main_index, base)
+        main_lobby = ranked_main_button(main_native)
+        main_material_index = next(i for i, e in enumerate(entries)
+                                   if e[0].lower() == LOBBY_MATERIALS_ENTRY.lower())
+        main_materials = clone_animated_material(
+            current_entry(pak, entries, main_material_index, base), RANKED_BACKGROUND_MATERIAL)
         package_index = next(i for i, e in enumerate(entries) if e[0].lower() == ONLINE_PACKAGE)
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
@@ -852,6 +1158,7 @@ def prepare(game, out, elf, bases):
         package = cup_package(game, iga.read_entry(f, *entries[package_index][1:]),
                               iga.read_entry(f, *entries[source_index][1:]), assets,
                               race_package)
+    package = package_with_rows(package, [('texture', RANKED_BACKGROUND_TEXTURE.lower())])
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()
@@ -865,9 +1172,52 @@ def prepare(game, out, elf, bases):
         archive = out / (project + '.pak')
         ranking_stream_archive(game, archive, race_package, project, ranking_replacements)
         mapped.setdefault('archives/' + archive.name, archive)
-    for asset in long_path(assets).rglob('*'):
+    # StreamingUI fallbacks: game may open these pak files directly (#0009).
+    lobby_archive = out / 'octane_lobbymembers.pak'
+    ranking_stream_archive(
+        game, lobby_archive, package, 'octane_lobbymembers',
+        {LOBBY_MEMBERS_ENTRY.removeprefix(PACKAGE_PREFIX): lobby_members,
+         SINGLE_RACE_TEXTURE.lower(): tier_assets[SINGLE_RACE_TEXTURE]})
+    mapped.setdefault('archives/' + lobby_archive.name, lobby_archive)
+    menu_assets = {k.lower(): v for k, v in menu_asset_replacements().items()}
+    menu_assets[QUICK_ICON_TEXTURE.lower()] = quick_icon_texture()
+    domain_pak = resolve(Path(game) / 'archives/juicedomain_onlinemenus.pak')
+    ranked_texture = ranked_background_texture(domain_pak)
+    menu_assets[RANKED_BACKGROUND_TEXTURE.lower()] = ranked_texture
+    tier_assets[RANKED_BACKGROUND_TEXTURE] = ranked_texture
+    domain_entries = iga.pak_entries(domain_pak)
+    domain_material_index = next(i for i, e in enumerate(domain_entries)
+                                 if e[0].lower() == LOBBY_MATERIALS_ENTRY.lower())
+    with domain_pak.open('rb') as f:
+        domain_materials = clone_animated_material(
+            iga.read_entry(f, *domain_entries[domain_material_index][1:]),
+            RANKED_BACKGROUND_MATERIAL)
+    menu_assets[RANKED_BACKGROUND_PATH.lower()] = main_materials
+    tier_assets[RANKED_BACKGROUND_PATH] = main_materials
+    main_archive = out / 'octane_lobby_main.pak'
+    ranking_stream_archive(
+        game, main_archive, package, 'octane_lobby_main',
+        {MAIN_LOBBY_ENTRY.removeprefix(PACKAGE_PREFIX): main_lobby, **menu_assets})
+    mapped.setdefault('archives/' + main_archive.name, main_archive)
+    asset_archive = out / 'custom_ui_assets.pak'
+    build_ui_asset_pak(asset_archive, pak)
+    mapped.setdefault('archives/' + asset_archive.name, asset_archive)
+    # PNG tier icon assets (textures + materials) for lobby member rank icons.
+    root = long_path(assets)
+    folded = {rel.casefold() for rel in tier_assets}
+    for asset in root.rglob('*'):
+        # Material instance namespaces are case-sensitive, so a file left under an older
+        # spelling redirects the same guest path a second time.
+        relative = asset.relative_to(root).as_posix()
+        if asset.is_file() and relative not in tier_assets and relative.casefold() in folded:
+            asset.unlink()
+    for rel, data in tier_assets.items():
+        dest = long_path(assets / rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    for asset in root.rglob('*'):
         if asset.is_file():
-            mapped.setdefault(asset.relative_to(long_path(assets)).as_posix(), asset)
+            mapped.setdefault(asset.relative_to(root).as_posix(), asset)
     file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
              [(Path(relative), source) for relative, source in mapped.items()])
     music_index = next(i for i, e in enumerate(entries) if e[0].lower() == RACE_MUSIC_ENTRY)
@@ -875,11 +1225,73 @@ def prepare(game, out, elf, bases):
         music = team_finish_sounds(iga.read_entry(f, *entries[music_index][1:]))
     target = out / 'online-mode.bbpatch'
     archive_patch.write_entries_patch(target, pak, guest,
-                                      {index: payload, lobby_index: lobby, main_index: main_lobby, package_index: package,
+                                      {index: payload, lobby_index: lobby, main_index: main_lobby,
+                                       main_material_index: main_materials, package_index: package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
-                                       lobby_root_index: lobby_root, music_index: music, public_index: public_lobby}, base,
-                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index, main_index})
+                                       lobby_root_index: lobby_root, music_index: music, public_index: public_lobby,
+                                       lobby_members_index: lobby_members}, base,
+                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
+                                                main_material_index,
+                                                lobby_members_index})
     patches[guest] = target
+
+    # Patch the native material file before the Ranked button resolves its new export.
+    domain_guest = '/app0/archives/juicedomain_onlinemenus.pak'
+    patches.pop(domain_guest, None)
+    stale_domain = out / 'online-lobby-members.bbpatch'
+    domain_quick_index = next(i for i, e in enumerate(domain_entries)
+                              if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
+                              QUICK_ICON_TEXTURE.lower())
+    domain_replacements = {domain_quick_index: menu_assets[QUICK_ICON_TEXTURE.lower()],
+                           domain_material_index: domain_materials}
+    try:
+        domain_index = next(i for i, e in enumerate(domain_entries)
+                            if e[0] == 'temporary/octane/data/ps4/output/ui/Octane_LobbyMembers.igz')
+        domain_texture_index = next(i for i, e in enumerate(domain_entries)
+                                    if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
+                                    SINGLE_RACE_TEXTURE.lower())
+        with domain_pak.open('rb') as f:
+            domain_native = iga.read_entry(f, *domain_entries[domain_index][1:])
+        domain_patched = ready_icon_clone(domain_native)
+        domain_replacements[domain_index] = domain_patched
+        domain_replacements[domain_texture_index] = tier_assets[SINGLE_RACE_TEXTURE]
+        print("Online: Octane_LobbyMembers domain patch carries the driving-style clone")
+    except Exception as e:
+        print(f"Online: members panel left fully native ({e})")
+    archive_patch.write_entries_patch(stale_domain, domain_pak, domain_guest,
+                                      domain_replacements, patches.get(domain_guest))
+    patches[domain_guest] = stale_domain
+
+    # update3 loads last and carries a native Single Race copy for the Graphics menu.
+    if graphics_archive := os.environ.get('BB_GRAPHICS_TAB_ARCHIVE'):
+        graphics_pak = Path(graphics_archive)
+        graphics_entries = iga.pak_entries(graphics_pak)
+        graphics_texture_index = next(i for i, e in enumerate(graphics_entries)
+                                      if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
+                                      SINGLE_RACE_TEXTURE.lower())
+        graphics_guest = '/app0/archives/update3.pak'
+        target = out / 'online-graphics-rank-icon.bbpatch'
+        archive_patch.write_entries_patch(
+            target, graphics_pak, graphics_guest,
+            {graphics_texture_index: tier_assets[SINGLE_RACE_TEXTURE]},
+            patches.get(graphics_guest))
+        patches[graphics_guest] = target
+
+    # This texture is duplicated and cached by whichever domain loads first.
+    for archive_name in ('juicedomain_startscreen', 'juicedomain_race',
+                         'juicedomain_race_flareday', 'juicedomain_race_flarenight'):
+        source = resolve(Path(game) / 'archives' / (archive_name + '.pak'))
+        source_entries = iga.pak_entries(source)
+        texture_index = next(i for i, e in enumerate(source_entries)
+                             if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
+                             SINGLE_RACE_TEXTURE.lower())
+        guest = '/app0/archives/' + archive_name + '.pak'
+        target = out / ('online-' + archive_name + '-rank-icon.bbpatch')
+        archive_patch.write_entries_patch(
+            target, source, guest,
+            {texture_index: tier_assets[SINGLE_RACE_TEXTURE]}, patches.get(guest))
+        patches[guest] = target
+
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)
     label_base = patches.get('/app0/archives/update.pak')
@@ -892,6 +1304,11 @@ def prepare(game, out, elf, bases):
     guest = '/app0/archives/update.pak'
     target = out / 'online-mode-label.bbpatch'
     replacements = {label_index: label.build()}
+    update_material_index = next(i for i, e in enumerate(label_entries)
+                                 if e[0].lower() == LOBBY_MATERIALS_ENTRY.lower())
+    replacements[update_material_index] = clone_animated_material(
+        current_entry(label_pak, label_entries, update_material_index, label_base),
+        RANKED_BACKGROUND_MATERIAL)
     with label_pak.open('rb') as f:
         music_index = next(i for i, e in enumerate(label_entries) if e[0].lower() == RACE_MUSIC_ENTRY)
         replacements[music_index] = team_finish_sounds(iga.read_entry(f, *label_entries[music_index][1:]))
@@ -909,7 +1326,8 @@ def prepare(game, out, elf, bases):
             path = 'temporary/octane/data/ps4/output/vsc/ui/' + name + '.igz'
             index = next(i for i, e in enumerate(label_entries) if e[0].lower() == path)
             replacements[index] = cup_route(iga.read_entry(f, *label_entries[index][1:]), specification)
-    archive_patch.write_entries_patch(target, label_pak, guest, replacements, label_base)
+    archive_patch.write_entries_patch(target, label_pak, guest, replacements, label_base,
+                                      override={update_material_index})
     patches[guest] = target
     return list(patches.values()), f'{site:x}'
 
