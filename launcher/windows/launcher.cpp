@@ -3940,8 +3940,8 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
-/// The EOS bridge's setting and what it is doing (EosBridge).
-void EosBridgeSection() {
+/// The EOS bridge's setting (settings) or what it is doing (!settings) (EosBridge).
+void EosBridgeSection(bool settings) {
     App& a = g_app;
     std::string state, detail;
     bool peers = false;
@@ -3951,21 +3951,26 @@ void EosBridgeSection() {
         detail = g_eos.detail;
         peers = !g_eos.peer_port.empty();
     }
-    const char* labels[] = {T("Automática", "Automatic"), T("Siempre", "Always"), T("Nunca", "Never")};
-    const char* values[] = {"auto", "on", "off"};
-    const std::string mode = EosBridgeMode();
-    int current = mode == "on" ? 1 : mode == "off" ? 2 : 0;
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
-    if (ImGui::Combo(T("Conexión por Epic Online Services", "Connection through Epic Online Services"), &current, labels, 3)) {
-        a.launcher.Set("eos_bridge", values[current]);
-        SaveLauncher();
+    if (settings) {
+        const char* labels[] = {T("Automática", "Automatic"), T("Siempre", "Always"), T("Nunca", "Never")};
+        const char* values[] = {"auto", "on", "off"};
+        const std::string mode = EosBridgeMode();
+        int current = mode == "on" ? 1 : mode == "off" ? 2 : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        if (ImGui::Combo(T("Conexión por Epic Online Services", "Connection through Epic Online Services"), &current, labels, 3)) {
+            a.launcher.Set("eos_bridge", values[current]);
+            SaveLauncher();
+        }
+        HelpMarker(T("Si tu red no llega al servidor (algunos proveedores de internet lo bloquean), el juego se conecta a "
+                     "través de los servidores de Epic Games, sin cuenta de Epic y sin abrir puertos. Con NAT estricta, "
+                     "las carreras también van por Epic. Automática: solo cuando hace falta. Siempre: también cuando la "
+                     "conexión directa funciona (para probar).",
+                     "If your network does not reach the server (some internet providers block it), the game connects "
+                     "through Epic Games' servers, with no Epic account and no ports to open. With strict NAT, races go "
+                     "through Epic too. Automatic: only when needed. Always: even when the direct connection works (for "
+                     "testing)."));
+        return;
     }
-    HelpMarker(T("Si tu red no llega al servidor (algunos proveedores de internet lo bloquean), el juego se conecta a "
-                 "través de los servidores de Epic Games, sin cuenta de Epic y sin abrir puertos. Automática: solo "
-                 "cuando la conexión directa falla. Siempre: también cuando funciona (para probar).",
-                 "If your network does not reach the server (some internet providers block it), the game connects "
-                 "through Epic Games' servers, with no Epic account and no ports to open. Automatic: only when the "
-                 "direct connection fails. Always: even when it works (for testing)."));
     if (state == "starting" || state == "checking")
         ImGui::TextColored(kGrey, "%s", T("Comprobando la conexión con el servidor...", "Checking the connection to the server..."));
     else if (state == "direct")
@@ -4255,17 +4260,6 @@ bool SignedIn() {
     return !NickProblem(CurrentNick()) && info.status == "yours" && info.linked;
 }
 
-/// The server plays only accounts: a typed nickname is not enough.
-void AccountRequiredNote(const NickCheck::Result& info) {
-    if (!info.account_required) return;
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(kYellow, "%s", T("Este servidor no permite jugar online solo con un apodo: es obligatorio iniciar sesión "
-                                        "o crear tu cuenta (con Discord, o con tu apodo y contraseña).",
-                                        "This server does not allow playing online with just a nickname: you must log in or "
-                                        "create your account (with Discord, or with your nickname and password)."));
-    ImGui::PopTextWrapPos();
-}
-
 void AccountSection() {
     App& a = g_app;
     const NickCheck::Result info = NickInfo();
@@ -4278,10 +4272,23 @@ void AccountSection() {
         message = g_account.message;
         code = g_account.code;
     }
+    bool discord_busy;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        discord_busy = g_discord_link.busy;
+    }
     const std::string nick = CurrentNick();
-    const bool signed_in = SignedIn();
-    if (signed_in) {
-        ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada: %s", "Logged in: %s"), nick).c_str());
+    if (SignedIn()) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada como %s", "Logged in as %s"), nick).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Mi cuenta en la web", "My account on the web"))) {
+            std::string host;
+            INTERNET_PORT port = 0;
+            SplitServer(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+            // The test servers (an address) serve the site on :8094 over HTTP; a named one by HTTPS.
+            const bool address = host.find_first_not_of("0123456789.") == std::string::npos;
+            OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
+        }
         ImGui::SameLine();
         static ULONGLONG out_armed = 0;
         const bool armed = out_armed && GetTickCount64() - out_armed < 5000;
@@ -4300,31 +4307,40 @@ void AccountSection() {
                                       "monedas y logros siguen en el servidor.",
                                       "This PC stops playing with your account until you log in again. Your account, "
                                       "coins and trophies stay on the server."));
-        ImGui::SameLine();
-        if (ImGui::SmallButton(T("Mi cuenta en la web", "My account on the web"))) {
-            std::string host;
-            INTERNET_PORT port = 0;
-            SplitServer(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
-            // The test servers (an address) serve the site on :8094 over HTTP; a named one by HTTPS.
-            const bool address = host.find_first_not_of("0123456789.") == std::string::npos;
-            OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
-        }
     } else {
-        if (!NickProblem(nick) && info.status == "yours") {
-            // A typed nickname of this PC's, not an account yet: logging in on the site with Discord keeps it.
-            ImGui::TextColored(info.account_required ? kYellow : kGrey, "%s",
-                               Format(T("Juegas como %s sin cuenta.", "You play as %s without an account."), nick).c_str());
-        }
-        AccountRequiredNote(info);
-        ImGui::TextWrapped("%s", T("Inicia sesión con tu cuenta, o créala en la web: se vincula a tu Discord y lleva una "
-                                   "contraseña por si pierdes Discord. Tu apodo, monedas, amigos, logros y partidas guardadas "
-                                   "te siguen a cualquier PC.",
-                                   "Log in with your account, or create it on the web: it is linked to your Discord and has a "
-                                   "password in case you lose Discord. Your nickname, coins, friends, trophies and saves "
-                                   "follow you to any PC."));
+        // Where the player stands, in one line.
+        ImGui::PushTextWrapPos(0.0f);
+        if (info.account_required)
+            ImGui::TextColored(kYellow, "%s", T("Para jugar online en este servidor tienes que iniciar sesión.",
+                                                "You need to log in to play online on this server."));
+        else if (!NickProblem(nick) && info.status == "yours")
+            ImGui::TextColored(kGrey, "%s", Format(T("Juegas como %s sin cuenta: inicia sesión para no perder tu apodo.",
+                                                     "You play as %s without an account: log in to keep your nickname."),
+                                                   nick).c_str());
+        else
+            ImGui::TextColored(kGrey, "%s", T("Inicia sesión para jugar online con tu cuenta.", "Log in to play online with your account."));
+        ImGui::PopTextWrapPos();
+
+        // The ways in, side by side.
         ImGui::BeginDisabled(busy);
         if (ImGui::Button(T("Iniciar sesión / Crear cuenta", "Log in / Create account"))) StartWebLogin();
         ImGui::EndDisabled();
+        HelpMarker(T("Abre la web del servidor: entras con Discord (o creas tu cuenta) y autorizas este PC. Tu apodo, "
+                     "monedas, amigos, logros y partidas guardadas te siguen a cualquier PC.",
+                     "Opens the server's site: you log in with Discord (or create your account) and authorize this PC. "
+                     "Your nickname, coins, friends, trophies and saves follow you to any PC."));
+        if (DiscordLinkAvailable()) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(discord_busy);
+            if (ImGui::Button(T("Entrar con Discord", "Log in with Discord"))) StartDiscordLink(DiscordLinkMode::Recover);
+            ImGui::EndDisabled();
+            HelpMarker(T("Si tu cuenta ya está vinculada a Discord: lo autorizas en el navegador y este PC juega con ella, "
+                         "sin escribir nada (también tras reinstalar o en otro PC).",
+                         "If your account is already linked to Discord: authorize it in the browser and this PC plays "
+                         "with it, nothing to type (also after reinstalling or on another PC)."));
+        }
+        DiscordLinkStatusLines();
+
         if (busy && !code.empty()) {
             ImGui::SameLine();
             if (ImGui::SmallButton(T("Cancelar", "Cancel"))) {
@@ -4366,14 +4382,15 @@ void AccountSection() {
             if (through_epic) {  // the site is on the server this network does not reach
                 ImGui::PushTextWrapPos(0.0f);
                 ImGui::TextColored(kYellow, "%s", T("Tu red no llega al servidor, así que la web puede no abrir: abre el enlace en el "
-                                                    "móvil (con datos móviles), o usa Vincular con Discord o el apodo y contraseña de abajo, "
+                                                    "móvil (con datos móviles), o usa Entrar con Discord o el apodo y contraseña, "
                                                     "que pasan por Epic Online Services.",
                                                     "Your network does not reach the server, so the site may not open: open the link on "
-                                                    "your phone (on mobile data), or use Link with Discord or the nickname and password below, "
-                                                    "which go through Epic Online Services."));
+                                                    "your phone (on mobile data), or use Log in with Discord or the nickname and "
+                                                    "password, which go through Epic Online Services."));
                 ImGui::PopTextWrapPos();
             }
         }
+
         static char login_nick[24] = "", login_password[132] = "";
         if (ImGui::TreeNode(T("Entrar con apodo y contraseña", "Log in with nickname and password"))) {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
@@ -4387,6 +4404,8 @@ void AccountSection() {
                 std::memset(login_password, 0, sizeof login_password);
             }
             ImGui::EndDisabled();
+            HelpMarker(T("La contraseña de tu cuenta (la pones en la web, en Mi cuenta).",
+                         "Your account's password (you set it on the site, in My account)."));
             ImGui::TreePop();
         }
     }
@@ -4439,20 +4458,29 @@ void OnlineTab() {
         }
         HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
                      "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
-        NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
-        EosBridgeSection();
+        EosBridgeSection(false);  // its state, one line
+        if (ImGui::TreeNode(T("Conexión: tipo de NAT y Epic Online Services", "Connection: NAT type and Epic Online Services"))) {
+            NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
+            EosBridgeSection(true);
+            ImGui::TreePop();
+        }
         ImGui::EndDisabled();
     }
 
-    ImGui::SeparatorText(T("Jugador", "Player"));
+    ImGui::SeparatorText(T("Cuenta", "Account"));
     {
         ImGui::BeginDisabled(!a.game.Flag("online", true));
 
         AccountSection();
+        // Without an account: a nickname typed here, which Link with Discord turns into one (the
+        // way in when the site does not open on this network).
+        const bool required = NickInfo().account_required;
         if (SignedIn()) {
             if (a.game.Flag("online", true)) DiscordAccountSection();
-        } else if (ImGui::TreeNode(T("Escribir el apodo a mano (servidores sin cuentas)", "Type the nickname by hand (servers without accounts)"))) {
-            AccountRequiredNote(NickInfo());
+        } else if (ImGui::TreeNode(required ? T("Crear la cuenta desde aquí: elige un apodo y vincúlalo con Discord",
+                                                "Create the account from here: pick a nickname and link it with Discord")
+                                            : T("Jugar sin cuenta: escribir el apodo a mano",
+                                                "Play without an account: type the nickname by hand"))) {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
             // A nickname linked to this player's Discord account is their identity: it is changed by
             // unlinking it first (DiscordAccountSection), not by typing over it.
@@ -4473,7 +4501,6 @@ void OnlineTab() {
                                "on the server (coins, Pit Stop items), so do not use someone else's."));
             if (const char* problem = NickProblem(CurrentNick())) {
                 ImGui::TextColored(kYellow, "%s", problem);
-                if (a.game.Flag("online", true)) DiscordRecoverOffer();
             } else if (a.game.Flag("online", true)) {
                 NickAvailabilityLine();
                 DiscordAccountSection();
@@ -4482,6 +4509,12 @@ void OnlineTab() {
             ImGui::TreePop();
         }
 
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SeparatorText(T("Progreso online", "Online progress"));
+    {
+        ImGui::BeginDisabled(!a.game.Flag("online", true));
         // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
         // the names of the old Friends field (online_friends) get friend requests once.
         ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
