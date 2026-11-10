@@ -9,13 +9,15 @@ import subprocess
 import gcn_shaders as iga
 from button_prompts import IMG_DATA, IMG_W, _morton, _objects, read_png
 from graphics_tab import Archive, write_archive
-from ranked_ui_assets import (RANKED_BACKGROUND_TEXTURE, asset_replacements,
+from ranked_ui_assets import (HOF_BACKGROUND_TEXTURE, RANKED_BACKGROUND_TEXTURE, asset_replacements,
                               compiled_asset, menu_asset_replacements)
 from ui_texture import ASSETS, _replace_texture_name
 
 
-def ranked_background_texture(domain_pak):
-    """Compile the Ranked PNG using Matchmaking's native BC3 texture layout."""
+def lobby_background_texture(domain_pak, kind):
+    """Compile a button pattern using Matchmaking's native BC3 texture layout."""
+    if kind not in ('ranked', 'hof'):
+        raise ValueError('unsupported lobby background')
     entry = next(e for e in iga.pak_entries(domain_pak)
                  if 'octane_ui_online_bg_pattern_matchmaking`tga,101.igz' in e[0].lower())
     with Path(domain_pak).open('rb') as f:
@@ -27,14 +29,14 @@ def ranked_background_texture(domain_pak):
     packed, address = struct.unpack_from('<QQ', template, image_at + IMG_DATA)
     if packed & 0xffffffff != 65536:
         raise ValueError('unsupported native Matchmaking texture format')
-    png = ASSETS / 'ranked_background.png'
+    png = ASSETS / f'{kind}_background.png'
     if read_png(png)[:2] != (256, 256):
-        raise ValueError('Ranked background must be 256x256')
+        raise ValueError(f'{kind} background must be 256x256')
     encoded = subprocess.run(
-        ['magick', str(png), '-define', 'dds:compression=dxt5', 'DDS:-'],
+        ['magick', str(png), '-flip', '-define', 'dds:compression=dxt5', 'DDS:-'],
         capture_output=True, check=True).stdout
     if encoded[84:88] != b'DXT5' or len(encoded) < 128 + 65536:
-        raise ValueError('Ranked background BC3 encoding failed')
+        raise ValueError(f'{kind} background BC3 encoding failed')
     linear = encoded[128:128 + 65536]
     tiled = bytearray(65536)
     for y in range(64):
@@ -45,13 +47,14 @@ def ranked_background_texture(domain_pak):
     start = file_offset(address)
     return _replace_texture_name(
         template[:start] + tiled + template[start + 65536:],
-        'data/Octane/textures/ui/Octane/Background/octane_ui_online_bg_pattern_ranked.tga')
+        f'data/Octane/textures/ui/Octane/Background/octane_ui_online_bg_pattern_{kind}.tga')
 
 
 def build_pak(dest, template_path):
     assets = {**asset_replacements(), **menu_asset_replacements()}
-    assets[RANKED_BACKGROUND_TEXTURE] = ranked_background_texture(
-        Path(template_path).parent / 'juicedomain_onlinemenus.pak')
+    domain_pak = Path(template_path).parent / 'juicedomain_onlinemenus.pak'
+    assets[RANKED_BACKGROUND_TEXTURE] = lobby_background_texture(domain_pak, 'ranked')
+    assets[HOF_BACKGROUND_TEXTURE] = lobby_background_texture(domain_pak, 'hof')
     template = Archive(template_path)
     try:
         write_archive(dest, [(path, path, 0, data) for path, data in assets.items()], template)

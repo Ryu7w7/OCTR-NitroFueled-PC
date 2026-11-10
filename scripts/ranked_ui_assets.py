@@ -18,6 +18,11 @@ RANKED_BACKGROUND_PATH = ('ui/materialInstances/' +
 RANKED_BACKGROUND_IMAGE = ('GuiStandard_diffuse,textures@!ui!Octane!Background!'
                            'octane_ui_online_bg_pattern_ranked`tga,101')
 RANKED_BACKGROUND_TEXTURE = 'textures/' + RANKED_BACKGROUND_IMAGE + '.igz'
+HOF_BACKGROUND_MATERIAL = 'octane_ui_online_bg_pattern_hof_tga__material'
+HOF_BACKGROUND_IMAGE = ('GuiStandard_diffuse,textures@!ui!Octane!Background!'
+                        'octane_ui_online_bg_pattern_hof`tga,101')
+HOF_BACKGROUND_TEXTURE = 'textures/' + HOF_BACKGROUND_IMAGE + '.igz'
+HOF_ICON_MATERIAL = 'octane_ui_ico_hof_tga__material'
 def _template(name):
     for base in (ASSETS, ART):
         p = base / name
@@ -120,12 +125,12 @@ def material_igz(template, mode, tier):
 
 
 def menu_icon(kind):
-    if kind not in ('ranked', 'leaderboard'):
-        raise ValueError('ranked menu icon must be ranked or leaderboard')
+    if kind not in ('ranked', 'hof'):
+        raise ValueError('ranked menu icon must be ranked or hof')
     image = f'octane_ranked_menu_{kind}'.ljust(34, '_')
     namespace = f'juice_OCTR_RankedMenu_{kind.title()}_materials'
     texture = f'textures/guistandard_diffuse,textures@!ui!octane!gprix!{image}`tga,001.igz'
-    filename = 'ranked_leaderboard_icon.png' if kind == 'leaderboard' else 'ranked_icon.png'
+    filename = 'hof_icon.png' if kind == 'hof' else 'ranked_icon.png'
     png = ASSETS / filename
     if not png.exists():
         png = Path(__file__).resolve().parent / 'custom_icon' / filename
@@ -139,7 +144,7 @@ def menu_asset_replacements():
     texture = _template('texture_template.igz').read_bytes()
     material = _template('material_template.igz').read_bytes()
     result = {}
-    for kind in ('ranked', 'leaderboard'):
+    for kind in ('ranked', 'hof'):
         png, image_name, texture_path, _namespace, material_path, export = menu_icon(kind)
         result[texture_path] = _texture_igz(texture, png, image_name)
         result[material_path] = _material_igz(material, texture_path, export)
@@ -153,7 +158,7 @@ def quick_icon_texture(template=None):
         texture_name='data/Octane/textures/ui/Octane/Icons/octane_ui_ico_quick.tga')
 
 
-def clone_animated_material(blob, new_name):
+def clone_animated_material(blob, new_name, image_name=RANKED_BACKGROUND_IMAGE):
     """Clone Matchmaking's complete animated material inside its native material file."""
     g = Igz(blob)
     name_list = next(off for off, kind in g.objects() if kind == 'igNameList')
@@ -184,14 +189,14 @@ def clone_animated_material(blob, new_name):
                         g.set_u64(target, clone + value - background)
     deps = g.fixup('TDEP')
     dependencies = deps[3].split(b'\0')[:deps[1] * 2]
-    deps[3] = b'\0'.join((*dependencies, RANKED_BACKGROUND_IMAGE.encode(),
-                          ('textures:/' + RANKED_BACKGROUND_IMAGE + '.igz').encode())) + b'\0'
+    deps[3] = b'\0'.join((*dependencies, image_name.encode(),
+                          ('textures:/' + image_name + '.igz').encode())) + b'\0'
     deps[1] += 1
     deps[4] = (deps[2] + len(deps[3]) + 3) & ~3
     handles = g.fixup('EXNM')
     g.set_u32(clone + background_texture - background + 0x28, 0x80000000 | handles[1])
     handles[3] += struct.pack('<II', g.string_index('image'),
-                              g.string_index(RANKED_BACKGROUND_IMAGE) | 0x80000000)
+                              g.string_index(image_name) | 0x80000000)
     handles[1] += 1
     handles[4] = (handles[2] + len(handles[3]) + 3) & ~3
     animated = [off for off, kind in g.objects()
@@ -222,6 +227,67 @@ def clone_animated_material(blob, new_name):
         g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(objects) * stride)
         g.set_u64(off + 0x20, array)
     return g.build()
+
+
+def clone_hof_icon_material(blob):
+    """Clone native Quick material for the HOF icon in the same material namespace."""
+    g = Igz(blob)
+    name_list = next(off for off, kind in g.objects() if kind == 'igNameList')
+    obj_list = next(off for off, kind in g.objects() if kind == 'igObjectList')
+    nptr, ncnt = g.u64(name_list + 0x20), g.u32(name_list + 0x0c)
+    optr = g.u64(obj_list + 0x20)
+    names = {g.strings[g.u32(nptr + i * 16)]: g.u64(optr + i * 8) for i in range(ncnt)}
+    source = names['octane_ui_ico_quick_tga__material']
+    end = min(off for off in names.values() if off > source)
+    texture = g.u64(g.u64(g.u64(source + 0x58) + 0x20))
+    g.sites['RHND'] = g.read_list('RHND', unpack_offsets)
+    if texture + 0x28 not in g.sites['RHND']:
+        raise ValueError('unsupported native Quick texture binding')
+    clone = g.append(g.data[source:end])
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            if source <= site < end:
+                target = clone + site - source
+                g.add_site(tag, target)
+                if tag == 'ROFS':
+                    value = g.u64(site)
+                    if source <= value < end:
+                        g.set_u64(target, clone + value - source)
+    image_name = menu_icon('hof')[2].removeprefix('textures/').removesuffix('.igz')
+    deps = g.fixup('TDEP')
+    dependencies = deps[3].split(b'\0')[:deps[1] * 2]
+    deps[3] = b'\0'.join((*dependencies, image_name.encode(),
+                          ('textures:/' + image_name + '.igz').encode())) + b'\0'
+    deps[1] += 1
+    deps[4] = (deps[2] + len(deps[3]) + 3) & ~3
+    handles = g.fixup('EXNM')
+    g.set_u32(clone + texture - source + 0x28, 0x80000000 | handles[1])
+    handles[3] += struct.pack('<II', g.string_index('image'),
+                              g.string_index(image_name) | 0x80000000)
+    handles[1] += 1
+    handles[4] = (handles[2] + len(handles[3]) + 3) & ~3
+    objects = [g.u64(optr + i * 8) for i in range(ncnt)] + [clone]
+    object_array = g.append(struct.pack(f'<{len(objects)}Q', *objects))
+    for i in range(len(objects)):
+        g.add_site('ROFS', object_array + i * 8)
+    name_entries = (g.data[nptr:nptr + ncnt * 16] +
+                    struct.pack('<QII', g.string_index(HOF_ICON_MATERIAL),
+                                fnv1a(HOF_ICON_MATERIAL), 0))
+    name_array = g.append(name_entries)
+    for i in range(len(objects)):
+        g.add_site('RSTT', name_array + i * 16)
+    for off, array, stride in ((obj_list, object_array, 8), (name_list, name_array, 16)):
+        g.set_u32(off + 0x0c, len(objects))
+        g.set_u32(off + 0x10, len(objects))
+        g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(objects) * stride)
+        g.set_u64(off + 0x20, array)
+    return g.build()
+
+
+def clone_lobby_materials(blob):
+    blob = clone_animated_material(blob, RANKED_BACKGROUND_MATERIAL)
+    blob = clone_animated_material(blob, HOF_BACKGROUND_MATERIAL, HOF_BACKGROUND_IMAGE)
+    return clone_hof_icon_material(blob)
 
 
 def asset_replacements(single_race_template=None):
