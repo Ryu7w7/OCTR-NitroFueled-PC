@@ -6,6 +6,7 @@ import json, struct
 import archive_patch
 import mod_strings
 from archive_reader import Archive
+from archive_patch import MAX_ARCHIVE_OVERLAYS
 from mod_components import payload_bytes, under, sha_bytes, plain_path, long_path
 
 
@@ -104,8 +105,9 @@ def compose(game, out, records, base_patches):
         if len(ranges) > 65536:
             raise ValueError('Mod archive overlay exceeds engine limits: ' + name)
         made[guest] = target
-    if len(made) > 32:
-        raise ValueError('Too many archive overlays for the engine')
+    # src/runtime_file.c: MAX_ARCHIVE_PATCHES
+    if len(made) > MAX_ARCHIVE_OVERLAYS:
+        raise ValueError('Too many archive overlays for the engine: %d of %d' % (len(made), MAX_ARCHIVE_OVERLAYS))
     return made
 
 

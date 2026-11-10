@@ -110,7 +110,7 @@ jobs:
           msystem: CLANG64
           update: true
           install: >-
-            git patch
+            git patch unzip
             mingw-w64-clang-x86_64-toolchain
             mingw-w64-clang-x86_64-cmake
             mingw-w64-clang-x86_64-ninja
@@ -133,10 +133,22 @@ jobs:
       - name: Build and package Windows ZIP
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version=$(git describe --tags --match 'v*' --always)
           bash build.sh
+          # DXC for the native renderer: the maintainer's runner has it next to the checkout;
+          # elsewhere fetch the latest Windows release from microsoft/DirectXShaderCompiler.
+          dxc_dir=../OCTR-vulkan-lab-tools/dxc
+          if [[ ! -f $dxc_dir/bin/x64/dxc.exe ]]; then
+            url=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -H "Authorization: Bearer $GH_TOKEN" \
+                https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest |
+              python3 -c "import json,sys; print(next(a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].startswith('dxc_') and a['name'].endswith('.zip') and 'linux' not in a['name']))")
+            mkdir -p "$dxc_dir"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o dxc.zip "$url"
+            unzip -q -o dxc.zip -d "$dxc_dir"
+          fi
           python3 packaging/windows/make_portable.py --version "$version"
           asset="CTR-NitroFueled-PC-portable-${version}-windows.zip"
           mv dist/CTR-NitroFueled-PC-portable-windows.zip "dist/$asset"
