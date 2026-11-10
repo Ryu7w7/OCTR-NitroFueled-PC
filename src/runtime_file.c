@@ -843,9 +843,25 @@ static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t si
     }
     return (int64_t)total;
 }
+/* Windows: a descriptor's sequential I/O and seeks take its I/O lock, the one positioned I/O takes
+ * (compat_win.c): the game's read() and pread() on one archive from different threads. */
+#ifdef _WIN32
+#define FD_IO_LOCK(h) compat_fd_lock(h)
+#define FD_IO_UNLOCK(h) compat_fd_unlock(h)
+#else
+#define FD_IO_LOCK(h) ((void)0)
+#define FD_IO_UNLOCK(h) ((void)0)
+#endif
+static int64_t do_read_locked(int fd,int h,void *buffer,uint64_t size);
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    FD_IO_LOCK(h);
+    const int64_t r=do_read_locked(fd,h,buffer,size);
+    FD_IO_UNLOCK(h);
+    return r;
+}
+static int64_t do_read_locked(int fd,int h,void *buffer,uint64_t size) {
     runtime_memory_note_write((uintptr_t)buffer,size);
     touch_for_write(buffer,size);
     File *pf=get(fd);
@@ -894,8 +910,11 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
+    FD_IO_LOCK(h);
     ssize_t n=host_write(h,buffer,size);
-    if (n<0) return -errno;
+    const int write_errno=errno;
+    FD_IO_UNLOCK(h);
+    if (n<0) return -write_errno;
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);
     return n;
 }
@@ -917,9 +936,12 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
         return -EINVAL;
     }
     /* A patched archive ends where the game sees it end. */
+    FD_IO_LOCK(f->host);
     int64_t r=f->patch && whence==2 ? host_lseek(f->host,(int64_t)f->patch->virtual_size+offset,SEEK_SET)
                                     : host_lseek(f->host,offset,whence);
-    return r<0 ? -errno : r;
+    const int seek_errno=errno;
+    FD_IO_UNLOCK(f->host);
+    return r<0 ? -seek_errno : r;
 }
 static int64_t do_fstat(int fd,GuestStat *out) {
     if (save_trace()) { File *t=get(fd); if (t && save_path(t->path)) printf("Save trace: fstat(fd %d)\n",fd); }

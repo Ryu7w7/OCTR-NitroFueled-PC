@@ -431,7 +431,8 @@ extern "C" void bbgpu_pad_status(int port, const char* name, int pressing) {
 }
 
 extern "C" int bbgpu_audio_volume(void) {
-    return BbSettings::Get().volume.load(std::memory_order_relaxed);
+    const auto& s = BbSettings::Get();
+    return s.muted.load(std::memory_order_relaxed) ? 0 : s.volume.load(std::memory_order_relaxed);
 }
 
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
