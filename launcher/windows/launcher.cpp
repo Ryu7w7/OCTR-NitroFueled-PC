@@ -36,6 +36,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <map>
 #include <mutex>
@@ -778,6 +779,9 @@ std::wstring GameTitle() {
 }
 
 std::string EffectiveRenderRes();
+
+/// --game <folder>: the merged game folder to use in this run, in place of the saved one.
+fs::path g_game_override;
 
 fs::path LauncherIni() { return g_app.root / L"launcher.ini"; }
 fs::path GameIni() { return g_app.root / L"bbport.ini"; }
@@ -1832,6 +1836,78 @@ fs::path MergeTarget(const fs::path& near_dir) {
     return target;
 }
 
+/// Hard-links the files into the target folder (copies them across drives). Returns the error
+/// text, empty when all went well; `progress` gets the number of files done so far.
+std::string MergeFiles(const std::vector<std::pair<fs::path, fs::path>>& files, const fs::path& target,
+                       size_t& copied, const std::function<void(size_t)>& progress) {
+    for (size_t i = 0; i < files.size(); ++i) {
+        const fs::path dest = target / files[i].second;
+        std::error_code ec;
+        fs::create_directories(dest.parent_path(), ec);
+        if (fs::exists(dest, ec)) fs::remove(dest, ec);
+        if (!CreateHardLinkW(dest.c_str(), files[i].first.c_str(), nullptr)) {
+            if (!CopyFileW(files[i].first.c_str(), dest.c_str(), FALSE))
+                return "Cannot create " + PathText(dest) + " (error " + std::to_string(GetLastError()) + ")";
+            ++copied;
+        }
+        progress(i + 1);
+    }
+    return {};
+}
+
+/// Writes a line to the standard output this process was started with. The launcher has no
+/// console of its own, so a program that starts it with a pipe reads its answer from here.
+void WriteStdout(const std::string& line) {
+    const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) return;
+    const std::string text = line + "\n";
+    DWORD written = 0;
+    WriteFile(out, text.data(), DWORD(text.size()), &written, nullptr);
+}
+
+/// --prepare --base <folder> --update <folder> --out <folder>: the Play tab's merge without a
+/// window, for a program that sets the game up (RecompLauncher). It prints "progress 0.4 text"
+/// lines and exits with 0 when the merged folder is ready.
+int PrepareMerge(const fs::path& base, const fs::path& update, const fs::path& out) {
+    if (base.empty() || update.empty() || out.empty()) {
+        WriteStdout("Usage: --prepare --base <base game folder> --update <update folder> --out <new folder>");
+        return 2;
+    }
+    if (Analyze(base).kind != Kind::Base) {
+        WriteStdout(PathText(base) + " is not the base game (CUSA13795 or CUSA14876).");
+        return 2;
+    }
+    if (Analyze(update).kind != Kind::Update) {
+        WriteStdout(PathText(update) + " is not the 1.21 update.");
+        return 2;
+    }
+    std::error_code ec;
+    std::vector<std::pair<fs::path, fs::path>> files;
+    for (const fs::path& from : {base, update}) {
+        auto more = LayoutFiles(from, ec);
+        if (ec) {
+            WriteStdout("Cannot read " + PathText(from) + ": " + ec.message());
+            return 1;
+        }
+        files.insert(files.end(), std::make_move_iterator(more.begin()), std::make_move_iterator(more.end()));
+    }
+    size_t copied = 0;
+    int shown = -1;
+    const size_t total = files.size();
+    const std::string error = MergeFiles(files, out, copied, [&](size_t done) {
+        const int percent = total ? int(done * 100 / total) : 100;
+        if (percent == shown) return;
+        shown = percent;
+        WriteStdout("progress " + std::to_string(percent / 100.0) + " Merging the game and its update");
+    });
+    if (!error.empty()) {
+        WriteStdout(error);
+        return 1;
+    }
+    WriteStdout("Merged " + std::to_string(total) + " files into " + PathText(out));
+    return 0;
+}
+
 /// Base game + 1.21 update (or one already merged dump in the Image0 + Sc0 layout) -> a new
 /// folder of hard links in the PS4 layout (copies across drives).
 void StartMerge(std::vector<fs::path> sources) {
@@ -1860,20 +1936,7 @@ void StartMerge(std::vector<fs::path> sources) {
         if (ec) error = "Cannot read the game folders: " + ec.message();
         app.merge_total = files.size();
         size_t copied = 0;
-        for (size_t i = 0; error.empty() && i < files.size(); ++i) {
-            const fs::path dest = target / files[i].second;
-            std::error_code e2;
-            fs::create_directories(dest.parent_path(), e2);
-            if (fs::exists(dest, e2)) fs::remove(dest, e2);
-            if (!CreateHardLinkW(dest.c_str(), files[i].first.c_str(), nullptr)) {
-                if (!CopyFileW(files[i].first.c_str(), dest.c_str(), FALSE)) {
-                    error = "Cannot create " + PathText(dest) + " (error " + std::to_string(GetLastError()) + ")";
-                    break;
-                }
-                ++copied;
-            }
-            app.merge_done = i + 1;
-        }
+        if (error.empty()) error = MergeFiles(files, target, copied, [&](size_t done) { app.merge_done = done; });
         {
             std::scoped_lock lock{app.mutex};
             app.job_error = error;
@@ -8289,6 +8352,7 @@ void LoadState() {
     g_language = lang.empty() ? "auto" : lang;
     ApplyLauncherLanguage();
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
+    if (!g_game_override.empty()) a.game_dir = g_game_override;
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
     // First start of a portable package: a merged folder next to the launcher is picked up.
@@ -8541,19 +8605,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
-    bool direct_launch = false, updated = false;
+    bool direct_launch = false, updated = false, prepare = false;
+    fs::path prepare_base, prepare_update, prepare_out;
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsicmp(cmd_argv[i], L"--prepare") == 0) prepare = true;
+            // "--name value" or "--name=value"
+            const std::pair<std::wstring, fs::path*> options[] = {
+                {L"--base", &prepare_base}, {L"--update", &prepare_update}, {L"--out", &prepare_out}, {L"--game", &g_game_override}};
+            for (const auto& [flag, target] : options) {
+                const std::wstring arg = cmd_argv[i];
+                if (arg == flag && i + 1 < cmd_argc) *target = cmd_argv[++i];
+                else if (arg.rfind(flag + L"=", 0) == 0) *target = arg.substr(flag.size() + 1);
+            }
             if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"--direct") == 0) {
                 direct_launch = true;
-                break;
             }
         }
         LocalFree(cmd_argv);
     }
+
+    if (prepare) return PrepareMerge(prepare_base, prepare_update, prepare_out);
 
     LoadState();
     MigrateOldLauncher();

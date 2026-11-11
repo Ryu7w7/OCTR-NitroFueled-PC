@@ -12,8 +12,8 @@ def write(path, text='x'):
 
 
 class MergeUpdateTests(unittest.TestCase):
-    def merge(self, base, update, out):
-        return subprocess.run([sys.executable, str(ROOT / 'tools/merge_update.py'), str(base), str(update), str(out)],
+    def merge(self, base, update, out, *flags):
+        return subprocess.run([sys.executable, str(ROOT / 'tools/merge_update.py'), *flags, str(base), str(update), str(out)],
                               capture_output=True, text=True)
 
     def test_ps4_layout(self):
@@ -50,6 +50,28 @@ class MergeUpdateTests(unittest.TestCase):
             self.assertTrue((out / 'memoryconfiguration.igz').is_file())
             self.assertFalse((out / 'Image0').exists())
             self.assertFalse((out / 'Sc0').exists())
+
+    def test_progress_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write(tmp / 'base/eboot.bin', 'old')
+            write(tmp / 'base/sce_sys/param.sfo', 'base')
+            write(tmp / 'patch/eboot.bin', 'new')
+            write(tmp / 'patch/sce_sys/param.sfo', 'patch')
+            result = self.merge(tmp / 'base', tmp / 'patch', tmp / 'out', '--progress')
+            self.assertEqual(result.returncode, 0)
+            lines = [l for l in result.stdout.splitlines() if l.startswith('progress ')]
+            self.assertEqual(lines[-1], 'progress 1.00 Merging the game and its update')
+
+    def test_no_progress_lines_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write(tmp / 'base/eboot.bin')
+            write(tmp / 'base/sce_sys/param.sfo')
+            write(tmp / 'patch/eboot.bin')
+            write(tmp / 'patch/sce_sys/param.sfo')
+            result = self.merge(tmp / 'base', tmp / 'patch', tmp / 'out')
+            self.assertNotIn('progress ', result.stdout)
 
     def test_not_a_game(self):
         with tempfile.TemporaryDirectory() as tmp:
