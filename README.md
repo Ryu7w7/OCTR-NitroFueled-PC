@@ -4,6 +4,8 @@
 
 # OCTR: CTR Nitro-Fueled PC, online
 
+<a href="https://recomplauncher.com/game/octr-nitrofueled-pc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 > **EU mod packages:** [CUSA14876 01.21 loader support and update instructions](docs/eu-mod-packages.md).
 > [CNK Drift Gauge + Reserves Meter — EU](https://github.com/Majed-allababedi/CTR-CNK-Drift-Gauge-EU): original mod by tomtotom, EU adaptation by Majed-allababedi. Select **Speedometer HUD** in-game.
 
