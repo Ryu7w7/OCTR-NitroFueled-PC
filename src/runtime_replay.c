@@ -12,6 +12,7 @@
  * code_extension). Battle modes and the adventure hub are not recorded. */
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
+#include "runtime_replay_list.h"
 #include "runtime.h"
 
 #include <dirent.h>
@@ -653,6 +654,7 @@ static void save(void) {
     }
     printf("Replay: saved %s (%u frames, %u KB, %s)\n", name, rr.header.frames, (rr.header.packed + (unsigned)sizeof rr.header) / 1024,
            rr.header.track);
+    if (best > 0.0f) runtime_ttrun_saved(path);   /* a Time Trial personal best: for the leaderboards (runtime_ttrun.c) */
     for (int n = oldest, left = total + 1 - RR_KEEP_AUTO; best <= 0.0f && n >= 0 && n <= newest && left > 0; n++) {
         snprintf(path, sizeof path, "%s/A%05d.crr", dir, n);
         if (!remove(path)) left--;
@@ -1074,6 +1076,7 @@ int runtime_replay_start(unsigned char *base, size_t size) {
 #endif
     printf("Native Replay: races are recorded (%d of 4 item sites)%s (%s)\n", sites,
            player && ai_t ? ", replays play from the menu's Replays tab" : ", the player could not be installed", eu ? "EU" : "USA");
+    runtime_ttrun_backfill();   /* the Time Trials recorded before: to the leaderboards (runtime_ttrun.c) */
     return 1;
 }
 

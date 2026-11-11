@@ -66,6 +66,11 @@ typedef struct {
 /* 1 and the view while a replay's race is on. */
 int runtime_replay_view(RrView *out);
 
+/* Time Trial runs for the leaderboards (runtime_ttrun.c): a personal best saved at path goes to the server
+ * when it places on its board; at startup, the Time Trials recorded before (each file once). */
+void runtime_ttrun_saved(const char *path);
+void runtime_ttrun_backfill(void);
+
 #ifdef __cplusplus
 }
 #endif
