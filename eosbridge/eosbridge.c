@@ -444,9 +444,14 @@ static int eos_load(void) {
     if (!lib) { LOG("EOS SDK not found (%s)", path); return 0; }
 #define SYM(name) ((void *)GetProcAddress(lib, name))
 #else
-    snprintf(path, sizeof path, "%s/libEOSSDK-Linux-Shipping.so", dir);
+#if defined(__aarch64__)
+#define EOS_LIB "libEOSSDK-LinuxArm64-Shipping.so"   /* an ARM server (the production one) */
+#else
+#define EOS_LIB "libEOSSDK-Linux-Shipping.so"
+#endif
+    snprintf(path, sizeof path, "%s/" EOS_LIB, dir);
     void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!lib) lib = dlopen("libEOSSDK-Linux-Shipping.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) lib = dlopen(EOS_LIB, RTLD_NOW | RTLD_LOCAL);
     if (!lib) { LOG("EOS SDK not found (%s): %s", path, dlerror()); return 0; }
 #define SYM(name) dlsym(lib, name)
 #endif

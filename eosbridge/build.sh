@@ -55,7 +55,9 @@ MINGW*|MSYS*)
 *)
     embed
     "${CC:-cc}" "${flags[@]}" eosbridge/eosbridge.c -ldl -o out/eosbridge/ryunet-bridge
-    cp "$sdk/SDK/Bin/libEOSSDK-Linux-Shipping.so" out/eosbridge/
+    lib=libEOSSDK-Linux-Shipping.so
+    [[ $(uname -m) == aarch64 ]] && lib=libEOSSDK-LinuxArm64-Shipping.so   # an ARM server
+    cp "$sdk/SDK/Bin/$lib" out/eosbridge/
     echo 'Built out/eosbridge/ryunet-bridge'
     ;;
 esac
