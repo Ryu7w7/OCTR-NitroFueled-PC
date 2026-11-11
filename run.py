@@ -348,17 +348,42 @@ def key_hash(skey):
 # server takes them only within 5 minutes of its own clock: with the PC's clock off, every signed
 # request was refused ("nickname signature out of time") and the nickname read as taken.
 SERVER_CLOCK_OFFSET = 0
+# Something on the way (an ISP's cache, an antivirus web shield) kept the server's answers and gave
+# them back hours later: their Date made a right clock look hours off, and every signed request then
+# went with the wrong time. Each request sends a fresh token (X-RyuNET-Clock) and the server answers
+# with its time and that token (X-RyuNET-Time, its clock_stamp.go): a kept answer has an old one.
+CLOCK = threading.local()  # .token: the last one this thread sent
+SERVER_STAMPS = False      # the server sends X-RyuNET-Time: an answer without it is not its own
+
+
+def clock_headers():
+    """Headers for a request whose answer may set SERVER_CLOCK_OFFSET (note_server_clock)."""
+    CLOCK.token = secrets.token_hex(8)
+    return {'X-RyuNET-Clock': CLOCK.token, 'Cache-Control': 'no-cache'}
 
 
 def note_server_clock(reply):
-    """An answer of the RyuNET server (a urllib response or HTTPError): its Date header sets
-    SERVER_CLOCK_OFFSET."""
-    global SERVER_CLOCK_OFFSET
+    """An answer of the RyuNET server (a urllib response or HTTPError) sets SERVER_CLOCK_OFFSET:
+    its X-RyuNET-Time when it carries the token this thread just sent, else (a server older than
+    that) its Date, unless a cache says it kept the answer (Age)."""
+    global SERVER_CLOCK_OFFSET, SERVER_STAMPS
     import email.utils
-    try:
-        server = email.utils.parsedate_to_datetime(reply.headers.get('Date', '')).timestamp()
-    except (AttributeError, TypeError, ValueError, IndexError):
+    headers = getattr(reply, 'headers', None)
+    if headers is None:
         return
+    stamp = (headers.get('X-RyuNET-Time') or '').split()
+    if stamp:
+        SERVER_STAMPS = True
+        if len(stamp) != 2 or not stamp[0].isdigit() or stamp[1] != getattr(CLOCK, 'token', None):
+            return  # an answer kept on the way
+        server = int(stamp[0])
+    else:
+        if SERVER_STAMPS or headers.get('Age'):
+            return
+        try:
+            server = email.utils.parsedate_to_datetime(headers.get('Date', '')).timestamp()
+        except (AttributeError, TypeError, ValueError, IndexError):
+            return
     offset = round(server - time.time())
     # The header has whole seconds: a few seconds either way change nothing.
     SERVER_CLOCK_OFFSET = offset if abs(offset) > 5 else 0
@@ -448,6 +473,7 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=No
         request = urllib.request.Request(url, method=method,
                                          data=body if body is not None else (b'' if method == 'POST' else None),
                                          headers={**(headers(method, target) if headers else {}),
+                                                  **clock_headers(),
                                                   **({'X-RyuNET-Machine': machine_header()} if machine_header() else {}),
                                                   **({'Content-Type': 'application/json'} if body is not None else {})})
         try:

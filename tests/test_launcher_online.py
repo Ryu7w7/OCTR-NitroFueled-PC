@@ -173,6 +173,32 @@ class ClockTests(unittest.TestCase):
         self.run.note_server_clock(Reply)
         self.assertEqual(self.run.SERVER_CLOCK_OFFSET, 0)
 
+    def test_answers_kept_on_the_way_are_ignored(self):
+        """Something on the way (an ISP's cache, an antivirus web shield) gave back an answer kept
+        11 hours: the server's stamp (clock_stamp.go) carries the token of another request, and the
+        clock stays; once the server stamped, an answer without the stamp is not its own; before,
+        a Date a cache says it kept (Age) is not taken either."""
+        import email.utils
+        run = self.run
+        run.SERVER_STAMPS = False
+        self.addCleanup(setattr, run, 'SERVER_STAMPS', False)
+        old = email.utils.formatdate(time.time() - 39000, usegmt=True)
+
+        class Reply:
+            headers = {'Date': old, 'Age': '39000'}
+        run.note_server_clock(Reply)
+        self.assertEqual(run.SERVER_CLOCK_OFFSET, 0)
+        token = run.clock_headers()['X-RyuNET-Clock']
+        Reply.headers = {'X-RyuNET-Time': f'{int(time.time()) + 3600} {token}'}
+        run.note_server_clock(Reply)
+        self.assertAlmostEqual(run.SERVER_CLOCK_OFFSET, 3600, delta=2)
+        Reply.headers = {'X-RyuNET-Time': f'{int(time.time()) - 39000} 0123456789abcdef', 'Date': old}
+        run.note_server_clock(Reply)
+        self.assertAlmostEqual(run.SERVER_CLOCK_OFFSET, 3600, delta=2)
+        Reply.headers = {'Date': old}
+        run.note_server_clock(Reply)
+        self.assertAlmostEqual(run.SERVER_CLOCK_OFFSET, 3600, delta=2)
+
 
 class OAuthTests(unittest.TestCase):
     def browser(self, query_for):

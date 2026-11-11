@@ -357,25 +357,66 @@ static long long http_date_seconds(const char *text) {
     return days * 86400 + hour * 3600 + minute * 60 + second;
 }
 
-/* An answer of the RyuNET server: its Date header sets the clock offset. */
+/* X-RyuNET-Clock: a fresh token for each request; the server answers with its time and that
+ * token (X-RyuNET-Time, its clock_stamp.go). Something on the way (an ISP's cache, an antivirus
+ * web shield) kept answers and gave them back hours later, and their Date made a right clock look
+ * hours off: every signed request then went with the wrong time. A kept answer carries an old
+ * token, so its time is not taken. A request and its answer go on one thread: the token is per
+ * thread. */
+static _Thread_local char g_clock_token[17];
+static int g_server_stamps; /* the server sends X-RyuNET-Time: an answer without it is not its own */
+
+static const char *ryunet_clock_token(void) {
+    static unsigned long long counter;
+    struct timespec now;
+    timespec_get(&now, TIME_UTC);
+    unsigned long long x = (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec;
+    x ^= __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) * 0x9E3779B97F4A7C15ull;
+    x ^= (unsigned long long)(uintptr_t)&now << 17;
+    snprintf(g_clock_token, sizeof g_clock_token, "%016llx", x);
+    return g_clock_token;
+}
+
+/* An answer of the RyuNET server sets the clock offset: its X-RyuNET-Time when it carries the
+ * token just sent, else (a server older than that) its Date, unless a cache says it kept the
+ * answer (Age). */
 static void ryunet_note_server_clock(const char *headers) {
+    long long server = -1, date = -1;
+    int stamped = 0, aged = 0;
     for (const char *line = headers; line && *line && *line != '\r' && *line != '\n';) {
-        if (!_strnicmp(line, "Date:", 5)) {
-            const long long server = http_date_seconds(line + 5);
-            if (server < 0) return;
-            ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
-            const long long offset = server - (long long)time(NULL);
-            /* The header has whole seconds: a few seconds either way change nothing. */
-            const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
-            if (llabs(offset - old) > 30) {
-                runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
-                                  offset > 0 ? "behind" : "ahead of",
-                                  llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
-            }
-            return;
+        if (!_strnicmp(line, "X-RyuNET-Time:", 14)) {
+            long long at;
+            char token[65] = "";
+            stamped = 1;
+            if (sscanf(line + 14, " %lld %64[0-9a-fA-F]", &at, token) == 2 && g_clock_token[0] &&
+                !strcmp(token, g_clock_token))
+                server = at;
+        } else if (!_strnicmp(line, "Age:", 4)) {
+            aged = 1;
+        } else if (!_strnicmp(line, "Date:", 5)) {
+            date = http_date_seconds(line + 5);
         }
         line = strchr(line, '\n');
         if (line) line++;
+    }
+    if (stamped) {
+        __atomic_store_n(&g_server_stamps, 1, __ATOMIC_RELAXED);
+        if (server < 0) {
+            runtime_net_trace("RyuNET server clock: an answer kept on the way (an old token): its time is not taken");
+            return;
+        }
+    } else {
+        if (date < 0 || aged || __atomic_load_n(&g_server_stamps, __ATOMIC_RELAXED)) return;
+        server = date;
+    }
+    ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
+    const long long offset = server - (long long)time(NULL);
+    /* The time has whole seconds: a few seconds either way change nothing. */
+    const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
+    if (llabs(offset - old) > 30) {
+        runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
+                          offset > 0 ? "behind" : "ahead of",
+                          llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
     }
 }
 
@@ -503,8 +544,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
         char proof[160], request[4096]; /* a report's comment rides in the target */
         const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
         const int n = snprintf(request, sizeof request,
-                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n%s%s%s\r\n",
-                               method, target, host_header, signed_ok ? "X-RyuNET-Proof: " : "",
+                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n"
+                               "Cache-Control: no-cache\r\nX-RyuNET-Clock: %s\r\n%s%s%s\r\n",
+                               method, target, host_header, ryunet_clock_token(), signed_ok ? "X-RyuNET-Proof: " : "",
                                signed_ok ? proof : "", signed_ok ? "\r\n" : "");
         if (n <= 0 || n >= (int)sizeof request || send(s, request, n, 0) != n) {
             closesocket(s);
@@ -592,8 +634,9 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
         const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
         const int n = snprintf(request, sizeof request,
                                "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n"
-                               "Content-Type: application/octet-stream\r\n%s%s%s\r\n",
-                               method, target, host_header, size, signed_ok ? "X-RyuNET-Proof: " : "",
+                               "Content-Type: application/octet-stream\r\nCache-Control: no-cache\r\n"
+                               "X-RyuNET-Clock: %s\r\n%s%s%s\r\n",
+                               method, target, host_header, size, ryunet_clock_token(), signed_ok ? "X-RyuNET-Proof: " : "",
                                signed_ok ? proof : "", signed_ok ? "\r\n" : "");
         int sent_ok = n > 0 && n < (int)sizeof request && send(s, request, n, 0) == n;
         for (size_t done = 0; sent_ok && done < size;) {
@@ -718,6 +761,11 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
     if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
         runtime_ryunet_proof(method_str, target, proof, sizeof proof)) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
+    }
+    /* The server's time with this request's token (ryunet_note_server_clock). */
+    if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 80) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
+                         "Cache-Control: no-cache\r\nX-RyuNET-Clock: %s\r\n", ryunet_clock_token());
     }
     /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
      * launcher's Online tab): the server then leaves the game its save's inventory. */
