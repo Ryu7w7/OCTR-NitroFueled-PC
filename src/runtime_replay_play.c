@@ -2525,13 +2525,27 @@ int runtime_replay_play_install(int eu) {
  * players are ready" (the followed race loads once the online menus are left). That is the session, not the level:
  * octane_onlinelobby is also where a race or a replay left outside the online mode comes back to.
  * What stops it goes to the log when it changes. */
+/* The title screen and the lobby: menus, never a race. Giving the player's own character back after a
+ * replay (give_back) has the game load that character's kart there, in the player's kart slot: it is
+ * the menu's, not a race's (the second replay was refused "the player has a kart" until a restart). */
+static int has_word(const char *text, const char *word) {
+    const size_t n = strlen(word);
+    for (; *text; text++)
+        if (!strncasecmp(text, word, n)) return 1;
+    return 0;
+}
+static int menu_level(void) {
+    const char *level = rr_current_level();
+    return level && (has_word(level, "octane_startscreen") || has_word(level, "octane_onlinelobby"));
+}
+
 static const char *start_blocked;              /* runtime_replay_can_start's last "why" */
 const char *runtime_replay_blocked_reason(void) { return __atomic_load_n(&start_blocked, __ATOMIC_RELAXED); }
 int runtime_replay_can_start(void) {
     PingPeer peers[PING_MAX_PEERS];
     const char *why = P.pending || P.step != STEP_NONE ? "a replay is on"
                       : !rr_game(0) ? "the game is not up"
-                      : rr_kart_of(0, 0) ? "the player has a kart"
+                      : rr_kart_of(0, 0) && !menu_level() ? "the player has a kart"
                       : race_timer() ? "a race clock is on"
                       : runtime_online_mode_lobby_open() ? "an online lobby is on screen"
                       : runtime_public_match_active() ? "a public match"
