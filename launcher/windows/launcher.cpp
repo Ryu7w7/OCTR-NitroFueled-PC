@@ -1313,17 +1313,64 @@ std::string ServerKeyHash(const std::string& host, const std::string& key = {}) 
 /// player's own nickname read as taken.
 std::atomic<long long> g_server_clock_offset{0};
 
-/// An answer of the RyuNET server: its Date header sets g_server_clock_offset.
-void NoteServerClock(HINTERNET req) {
-    SYSTEMTIME date{};
-    DWORD size = sizeof date;
-    FILETIME file{};
-    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
-                             &date, &size, WINHTTP_NO_HEADER_INDEX) ||
-        !SystemTimeToFileTime(&date, &file))
-        return;
-    const long long ticks = (static_cast<long long>(file.dwHighDateTime) << 32) | file.dwLowDateTime;
-    const long long server = (ticks - 116444736000000000LL) / 10000000LL;  // 100 ns since 1601 -> Unix
+/// Something on the way (an ISP's cache, an antivirus web shield) kept the server's answers and gave
+/// them back hours later: their Date made a right clock look hours off ("This PC's clock is 650 min
+/// off" with Windows' automatic time on), and every signed request then went with the wrong time.
+/// Each request sends a fresh token (X-RyuNET-Clock) and the server answers with its time and that
+/// token (X-RyuNET-Time, its clock_stamp.go): a kept answer has an old one. True once the server
+/// sent X-RyuNET-Time: an answer without it is not its own.
+std::atomic<bool> g_server_stamps{false};
+
+/// A fresh X-RyuNET-Clock token: 16 hex digits.
+std::string ClockToken() {
+    unsigned char raw[8];
+    if (BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};
+    static const char kHex[] = "0123456789abcdef";
+    std::string token;
+    for (const unsigned char b : raw) {
+        token += kHex[b >> 4];
+        token += kHex[b & 15];
+    }
+    return token;
+}
+
+/// The request headers for the server's time: the token, and no answer kept on the way.
+std::wstring ClockHeaders(const std::string& token) {
+    std::wstring headers = L"Cache-Control: no-cache\r\n";
+    if (!token.empty()) headers += L"X-RyuNET-Clock: " + Widen(token) + L"\r\n";
+    return headers;
+}
+
+/// An answer of the RyuNET server sets g_server_clock_offset: its X-RyuNET-Time when it carries
+/// the token sent with the request, else (a server older than that) its Date, unless a cache says
+/// it kept the answer (Age).
+void NoteServerClock(HINTERNET req, const std::string& token) {
+    long long server = 0;
+    wchar_t stamp[128] = L"";
+    DWORD stamp_size = sizeof stamp;
+    if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-RyuNET-Time", stamp, &stamp_size, WINHTTP_NO_HEADER_INDEX)) {
+        g_server_stamps = true;
+        long long at = 0;
+        wchar_t echoed[70] = L"";
+        if (token.empty() || swscanf(stamp, L"%lld %69ls", &at, echoed) != 2 || Widen(token) != echoed) return;
+        server = at;
+    } else {
+        DWORD age_size = 0;
+        if (g_server_stamps ||
+            WinHttpQueryHeaders(req, WINHTTP_QUERY_AGE, WINHTTP_HEADER_NAME_BY_INDEX, WINHTTP_NO_OUTPUT_BUFFER, &age_size,
+                                WINHTTP_NO_HEADER_INDEX) ||
+            GetLastError() != ERROR_WINHTTP_HEADER_NOT_FOUND)
+            return;
+        SYSTEMTIME date{};
+        DWORD size = sizeof date;
+        FILETIME file{};
+        if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
+                                 &date, &size, WINHTTP_NO_HEADER_INDEX) ||
+            !SystemTimeToFileTime(&date, &file))
+            return;
+        const long long ticks = (static_cast<long long>(file.dwHighDateTime) << 32) | file.dwLowDateTime;
+        server = (ticks - 116444736000000000LL) / 10000000LL;  // 100 ns since 1601 -> Unix
+    }
     const long long offset = server - static_cast<long long>(std::time(nullptr));
     // The header has whole seconds: a few seconds either way change nothing.
     g_server_clock_offset = offset > 5 || offset < -5 ? offset : 0;
@@ -1374,7 +1421,8 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
         const std::string proof = ProofHeader(key_hash, Narrow(method).c_str(), Narrow(path));
         HINTERNET req = WinHttpOpenRequest(conn, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                            WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        std::wstring headers;
+        const std::string token = ClockToken();
+        std::wstring headers = ClockHeaders(token);
         if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\n";
         if (register_key && !key_hash.empty()) headers += L"X-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
         if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
@@ -1386,7 +1434,7 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
                                       DWORD(form.size()), DWORD(form.size()), 0) &&
             WinHttpReceiveResponse(req, nullptr)) {
             answered = true;
-            NoteServerClock(req);
+            NoteServerClock(req, token);
             DWORD avail = 0;
             while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
                 std::string chunk(avail, '\0');
@@ -4202,13 +4250,14 @@ std::string HttpsPostJson(const std::string& host, const std::wstring& path, con
     HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                               WINHTTP_DEFAULT_ACCEPT_TYPES, bridge_port ? 0 : WINHTTP_FLAG_SECURE)
                          : nullptr;
-    std::wstring headers = L"Content-Type: application/json\r\n";
+    const std::string token = ClockToken();
+    std::wstring headers = L"Content-Type: application/json\r\n" + ClockHeaders(token);
     const std::string proof = ProofHeader(key_hash, "POST", Narrow(path));
     if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\nX-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
     if (req && WinHttpSendRequest(req, headers.c_str(), DWORD(-1), const_cast<char*>(json.data()), DWORD(json.size()),
                                   DWORD(json.size()), 0) &&
         WinHttpReceiveResponse(req, nullptr)) {
-        NoteServerClock(req);
+        NoteServerClock(req, token);
         DWORD avail = 0;
         while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
             std::string chunk(avail, '\0');

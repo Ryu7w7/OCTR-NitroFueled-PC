@@ -46,7 +46,7 @@ def request(data_dir, server, path, form=None, timeout=3.0, register=False, key=
     key = key or run.online_key(Path(data_dir))
     for attempt in (1, 2):
         offset = run.SERVER_CLOCK_OFFSET
-        headers = {"User-Agent": "SacredFire launcher"}
+        headers = {"User-Agent": "SacredFire launcher", **run.clock_headers()}
         if key:
             khash = run.key_hash(run.server_key(key, host))
             headers["X-RyuNET-Proof"] = run.proof_header(khash, "POST" if form is not None else "GET", path)

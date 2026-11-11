@@ -36,6 +36,11 @@ static char last_line[256], last_host[128];
 static long long last_ts;
 static int intercept; /* 1: requests for the server's name; 2: also for its address; 3: all */
 static int requests;
+/* 1: X-RyuNET-Time with the request's token (clock_stamp.go); 2: an answer kept on the way and
+ * given back 11 hours later (an old token, an old Date); 3: an old Date and no stamp. */
+static int stamp;
+static char last_token[65];
+static int last_no_cache;
 
 /* What src/runtime_net.c and runtime_net_overrides.c give runtime_http.c. */
 int runtime_net_is_online(void) { return 1; }
@@ -74,10 +79,16 @@ static void serve_one(void) {
     if (host) sscanf(host + 8, "%127[^\r]", last_host);
     const char *proof = strstr(request, "X-RyuNET-Proof: 1.");
     last_ts = proof ? atoll(proof + 18) : 0;
+    const char *clock = strstr(request, "\r\nX-RyuNET-Clock: ");
+    last_token[0] = '\0';
+    if (clock) sscanf(clock + 18, "%64[0-9a-f]", last_token);
+    last_no_cache = strstr(request, "\r\nCache-Control: no-cache\r\n") != NULL;
 
-    const time_t now = time(NULL) + SKEW;
-    char date[64];
-    strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&now));
+    const time_t now = time(NULL) + SKEW, shown = stamp >= 2 ? now - 39000 : now;
+    char date[64], stamp_line[128] = "";
+    strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&shown));
+    if (stamp == 1) snprintf(stamp_line, sizeof stamp_line, "X-RyuNET-Time: %lld %s\r\n", (long long)now, last_token);
+    if (stamp == 2) snprintf(stamp_line, sizeof stamp_line, "X-RyuNET-Time: %lld 0123456789abcdef\r\n", (long long)shown);
     const int ok = llabs(last_ts - (long long)now) <= 300;
     char reply[512];
     requests++;
@@ -90,8 +101,8 @@ static void serve_one(void) {
         return;
     }
     const int n = snprintf(reply, sizeof reply,
-                           "HTTP/1.1 %s\r\nDate: %s\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                           ok ? "200 OK" : "403 Forbidden", date);
+                           "HTTP/1.1 %s\r\nDate: %s\r\n%sContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                           ok ? "200 OK" : "403 Forbidden", date, stamp_line);
     send(s, reply, n, 0);
     closesocket(s);
 }
@@ -201,6 +212,30 @@ int main(void) {
     requests = 0;
     CHECK(runtime_ryunet_request("POST", "/ryunet/friends/privacy?name=a&hidden=0&format=text", body, sizeof body) == 302);
     CHECK(requests == 3);
+
+    /* The server stamps its time with each request's token (clock_stamp.go). */
+    intercept = 0;
+    stamp = 1;
+    CHECK(login() == 200);
+    CHECK(strlen(last_token) == 16 && last_no_cache);
+    CHECK(llabs(last_ts - ((long long)time(NULL) + SKEW)) <= 3);
+    /* A copy kept on the way, 11 hours old: its time is not taken, the next login stays on the
+     * server's time. */
+    stamp = 2;
+    CHECK(login() == 200);
+    stamp = 1;
+    CHECK(login() == 200);
+    CHECK(llabs(last_ts - ((long long)time(NULL) + SKEW)) <= 3);
+    /* Once the server stamped its answers, one without the stamp is not its own. */
+    stamp = 3;
+    CHECK(login() == 200);
+    stamp = 1;
+    CHECK(login() == 200);
+    CHECK(llabs(last_ts - ((long long)time(NULL) + SKEW)) <= 3);
+    /* The port's own requests carry the token too. */
+    requests = 0;
+    CHECK(runtime_ryunet_request("POST", "/ryunet/friends/privacy?name=a&hidden=0&format=text", body, sizeof body) == 200);
+    CHECK(strlen(last_token) == 16 && last_no_cache);
 
     if (failures) {
         fprintf(stderr, "FAIL: %d checks\n", failures);
