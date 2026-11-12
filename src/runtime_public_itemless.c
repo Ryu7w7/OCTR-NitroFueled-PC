@@ -8,6 +8,7 @@
 #include "runtime_json.h"
 #include "runtime_hall_of_fame.h"
 #include "runtime_np_online.h"
+#include "bb_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -22,6 +23,45 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
+
+static pthread_once_t device_once = PTHREAD_ONCE_INIT;
+static char device_id[65];
+
+static void init_ranked_device(void) {
+    char machine[160] = "", input[224];
+#ifdef _WIN32
+    HMODULE library = LoadLibraryA("advapi32.dll");
+    if (!library) return;
+    typedef LSTATUS (WINAPI *ReadRegistry)(HKEY,LPCSTR,LPCSTR,DWORD,LPDWORD,PVOID,LPDWORD);
+    ReadRegistry read = (ReadRegistry)GetProcAddress(library,"RegGetValueA");
+    DWORD size = sizeof machine;
+    LSTATUS status = read ? read(HKEY_LOCAL_MACHINE,"SOFTWARE\\Microsoft\\Cryptography","MachineGuid",
+        RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,NULL,machine,&size) : ERROR_INVALID_FUNCTION;
+    FreeLibrary(library);
+    if (status != ERROR_SUCCESS) return;
+#else
+    FILE *file = fopen("/etc/machine-id","r");
+    if (!file) file = fopen("/var/lib/dbus/machine-id","r");
+    if (!file) return;
+    char *read = fgets(machine,sizeof machine,file);
+    fclose(file);
+    if (!read) return;
+#endif
+    size_t length = strcspn(machine,"\r\n");
+    if (length < 16 || length >= sizeof machine - 1) return;
+    machine[length] = 0;
+    for (size_t i=0;i<length;++i) machine[i]=(char)tolower((unsigned char)machine[i]);
+    int count = snprintf(input,sizeof input,"SacredFire Ranked device v1:%s",machine);
+    if (count < 0 || (size_t)count >= sizeof input) return;
+    uint8_t digest[32];
+    bb_sha256((const unsigned char *)input,(uint64_t)count,digest);
+    for (int i=0;i<32;++i) snprintf(device_id+i*2,3,"%02x",digest[i]);
+}
+
+static const char *ranked_device(void) {
+    pthread_once(&device_once,init_ranked_device);
+    return device_id;
+}
 
 static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
 static int installed, selected, ranked_selected, searching, allow_party;
@@ -190,6 +230,24 @@ static void notice(const char *message) {
     if (native_notice) native_notice(message, NULL);
 }
 
+static int ranked_party_size(void) {
+    unsigned char *party=party_manager ? *party_manager : NULL;
+    void *roster=party ? *(void **)(party+0x30) : NULL;
+    int count=roster ? *(int *)((char *)roster+12) : 0;
+    void **items=roster ? *(void ***)((char *)roster+0x20) : NULL;
+    if (count<0 || count>8 || (count && !items)) return 0;
+    int total=1;
+    for (int i=0;i<count;++i)
+        if (items[i] && !*((unsigned char *)items[i]+0x2c)) ++total;
+    return total;
+}
+
+static int ranked_entry_allowed(void) {
+    if (!*ranked_device()) { notice("Cannot verify this device for Ranked. Check access to the OS device identifier."); return 0; }
+    if (ranked_party_size()>4) { notice("Ranked parties support at most 4 players. Reduce your party before entering Ranked."); return 0; }
+    return 1;
+}
+
 static void reject_search(const char *message) {
     pthread_mutex_lock(&mode_lock);
     reset_locked();
@@ -232,7 +290,7 @@ int runtime_public_itemless_announce(void) {
     pthread_mutex_unlock(&mode_lock);
     if (!token) return 0;
     char target[512], body[128];
-    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&ranked=1&release=%s", name, token, SACREDFIRE_RELEASE);
+    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&ranked=1&release=%s&device=%s", name, token, SACREDFIRE_RELEASE, ranked_device());
     int status = runtime_ryunet_request("POST", target, body, sizeof body);
     int accepted = status == 200 && !strcmp(body, "ok");
     pthread_mutex_lock(&mode_lock);
@@ -796,6 +854,7 @@ static void ABI placeable_event(void *self, void *event) {
         }
         /* Confirm (8) is the input filter in both native button graphs. */
         const int confirm = type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8;
+        if (confirm && ranked_button && !ranked_entry_allowed()) return;
         if (type && (((!strcmp(type, "igGuiEventFocusInputPressed") ||
                       !strcmp(type, "igGuiEventFocusInputRepeated")) && signal != 10) ||
                      (!strcmp(type, "igGuiEventProjectInputPressed") && signal == 10 &&
@@ -832,6 +891,7 @@ static void ABI placeable_event(void *self, void *event) {
                 }
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
+                    if (!ranked_entry_allowed()) return;
                     const int state = runtime_ranked_status(1);
                     if (state == -1) {
                         snprintf(checked_party, sizeof checked_party, "ranked-status");
@@ -880,8 +940,8 @@ static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, i
             mode, token);
         else { out[0] = '{'; out[1] = 0; used = 1; }
         if (mode || !ranked) used += (size_t)snprintf(out + used, n + 480 - used,
-            "\"octr_itemless\":{\"version\":1,\"mode\":%d,\"ranked\":1,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},",
-            mode, SACREDFIRE_RELEASE, token);
+            "\"octr_itemless\":{\"version\":1,\"mode\":%d,\"ranked\":1,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\",\"device\":\"%s\"},",
+            mode, SACREDFIRE_RELEASE, token, ranked_device());
         snprintf(out + used, n + 480 - used, "%s", raw + 1);
     }
     return out;
