@@ -48,7 +48,15 @@ MINGW*|MSYS*)
     # shellcheck source=../msys2-env.sh
     source ./msys2-env.sh
     embed
-    clang "${flags[@]}" -D_WIN32_WINNT=0x0601 eosbridge/eosbridge.c -lws2_32 -o out/eosbridge/ryunet-bridge.exe
+    # Version information and manifest (ryunet-bridge.rc), from BB_VERSION (v0.8.5 -> 0,8,5,0).
+    version=${BB_VERSION:-v0.0.0}
+    IFS=. read -r v1 v2 v3 _ <<<"$(sed -E 's/^v//; s/[^0-9.].*//' <<<"$version")"
+    windres -I eosbridge "-DBRIDGE_VERSION=${v1:-0},${v2:-0},${v3:-0},0" \
+        "-DBRIDGE_VERSION_TEXT=\\\"${version#v}\\\"" eosbridge/ryunet-bridge.rc -O coff \
+        -o out/eosbridge/ryunet-bridge.res.o
+    # The SDK through its import library (EOS_LINKED), not LoadLibrary: see eos_load in eosbridge.c.
+    clang "${flags[@]}" -D_WIN32_WINNT=0x0601 -DEOS_LINKED eosbridge/eosbridge.c out/eosbridge/ryunet-bridge.res.o \
+        "$sdk/SDK/Lib/EOSSDK-Win64-Shipping.lib" -lws2_32 -o out/eosbridge/ryunet-bridge.exe
     cp "$sdk/SDK/Bin/EOSSDK-Win64-Shipping.dll" out/eosbridge/
     echo 'Built out/eosbridge/ryunet-bridge.exe'
     ;;

@@ -10,7 +10,9 @@ times. run.py feeds every line the game prints to a Collector, which groups thos
 - per track: seconds played, average FPS, 1% low, share of slow frames, loading frames;
 - how the game ended (its exit code: 23 is a lost GPU device), where (the track or the menus), and
   for a crash its signature: the kind of fault and the function it happened in (the runtime's
-  "Fault:" line, without addresses, paths or thread numbers);
+  "Fault:" line, without addresses, paths or thread numbers); for a lost GPU device what the
+  driver said of it (VK_EXT_device_fault) and the GPU command it stopped in (the breadcrumbs:
+  draw/dispatch kind and shader hashes), without addresses;
 - the names of the mods in use (their folders), to tell crashes of mods from the game's.
 
 Nothing personal goes into it: no nickname, key, IP, paths, friends or room. The report is always
@@ -42,6 +44,14 @@ _FAULT_ABORT = re.compile(r'^Fault: abort\(\) called \((.*)\) at (.+?) \(thread 
 _FAULT_OTHER = re.compile(r'^Fault: exception (0x[0-9a-fA-F]+) at (.+?) \(thread \d+\)')
 _GUEST_STOP = re.compile(r'^STOP: guest raised debug exception code=(0x[0-9a-fA-F]+)')
 _CORRUPT_FREE = re.compile(r'^Runtime: bailing corrupt free at guest offset (0x[0-9a-fA-F]+)')
+# vk_breadcrumbs.cpp: a lost GPU device's report
+_DEVICE_LOST = re.compile(r'^GPU breadcrumbs at device lost \(([^)]*)\)')
+_DEVICE_FAULT = re.compile(r'^GPU fault info: (.+?) \(\d+ addresses, \d+ vendor records\)')
+_DEVICE_ADDRESS = re.compile(r'^  (invalid read|invalid write|invalid execute|instruction pointer \w+|none|unknown) at GPU address')
+_DEVICE_FREED = re.compile(r'^    inside (\S+) ')
+_DEVICE_STUCK = re.compile(r'^    #\d+ STUCK: (.+)$')
+_DEVICE_BETWEEN = re.compile(r'the GPU finished #\d+ but did not start #\d+')
+_HEX_ADDRESS = re.compile(r'(?:0x[0-9a-fA-F]{6,}|\(guest memory now[^)]*\))')
 _PATH = re.compile(r'([A-Za-z]:)?[\\/][^\s:;,()]+')
 _IP = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b')
 
@@ -143,6 +153,42 @@ class Collector:
         self.corrupt_free = False  # probe.c kept the game going past a corrupt free
         self.started = time.time()
 
+    def device_lost(self, line):
+        """A lost GPU device's report into the fault: where it was noticed, the driver's
+        description, the kind of bad access, a buffer freed while the GPU used it, and the command
+        the GPU stopped in. True when the line was one of these."""
+        m = _DEVICE_LOST.match(line)
+        if m:
+            if self.fault is None or self.fault.get('kind') == 'corrupt free':
+                self.fault = {'kind': 'gpu device lost', 'where': scrub(m[1], 40)}
+            return True
+        lost = self.fault is not None and self.fault.get('kind') == 'gpu device lost'
+        m = _DEVICE_FAULT.match(line)
+        if m:
+            if self.fault is None:
+                self.fault = {'kind': 'gpu device lost', 'where': 'unknown'}
+            if self.fault.get('kind') == 'gpu device lost':
+                self.fault.setdefault('cause', scrub(m[1], 100))
+            return True
+        if not lost:
+            return False
+        m = _DEVICE_ADDRESS.match(line)
+        if m:
+            self.fault.setdefault('gpu_access', m[1])
+            return True
+        m = _DEVICE_FREED.match(line)
+        if m:
+            self.fault.setdefault('freed', scrub(m[1], 40))
+            return True
+        m = _DEVICE_STUCK.match(line)
+        if m:
+            self.fault.setdefault('stuck', scrub(_HEX_ADDRESS.sub('', m[1]), 120))
+            return True
+        if _DEVICE_BETWEEN.search(line):
+            self.fault.setdefault('stuck', 'between commands (barriers or a render pass start)')
+            return True
+        return False
+
     def feed(self, text):
         for line in text.splitlines():
             m = _PERF.match(line)
@@ -166,6 +212,8 @@ class Collector:
                 continue
             if (self.fault is None or self.fault['kind'] == 'corrupt free') and line.startswith(('Fault: ', 'STOP: ')):
                 self.fault = fault_of(line) or self.fault  # a crash says more than what it survived
+                continue
+            if self.device_lost(line):
                 continue
             if not self.gpu:
                 m = _GPU.match(line)

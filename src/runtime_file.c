@@ -181,6 +181,36 @@ static void graphics_tab_archive(const char *guest,char *out,size_t size) {
     static int logged;
     if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) printf("Runtime: Graphics tab menus from %s\n",archive);
 }
+#ifdef _WIN32
+/* A host path of MAX_PATH or more is not found by the CRT's open/stat (ENOENT), unless it is in
+ * extended-length form: \\?\C:\... with backslashes only (v0.8.5). The files the Online menus
+ * need from the arcade archive (out/online-mode/cup-assets) and mod files pass the limit when
+ * the game folder is deep (C:\Users\<name>\Desktop\<unzipped>\<unzipped again>\...): the lobby
+ * waited forever for a texture it could not open. */
+static int long_host_path(char *path,size_t size) {
+    size_t n=strlen(path);
+    if (n<MAX_PATH-12 || !strncmp(path,"\\\\?\\",4) || !strncmp(path,"//?/",4)) return 0;
+    int unc=(path[0]=='\\' || path[0]=='/') && (path[1]=='\\' || path[1]=='/');
+    int drive=((path[0]|32)>='a' && (path[0]|32)<='z') && path[1]==':' && (path[2]=='\\' || path[2]=='/');
+    if (!unc && !drive) return 0;
+    const char *prefix=unc ? "\\\\?\\UNC" : "\\\\?\\";
+    char *copy=malloc(n+16);
+    if (!copy) return ENOMEM;
+    size_t k=strlen(prefix); memcpy(copy,prefix,k);
+    /* Extended-length paths are not normalized: one backslash between components, and the
+     * UNC form keeps a single one before the server name. */
+    for (const char *p=unc ? path+1 : path; *p; ++p) {
+        char c=*p=='/' ? '\\' : *p;
+        if (c=='\\' && k && copy[k-1]=='\\') continue;
+        copy[k++]=c;
+    }
+    copy[k]=0;
+    int e=k<size ? 0 : ENAMETOOLONG;
+    if (!e) memcpy(path,copy,k+1);
+    free(copy);
+    return e;
+}
+#endif
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
@@ -203,6 +233,9 @@ static int translate(const char *guest,char *out,size_t size) {
         if (redirected<0) result=-redirected;
     }
     if (!result) graphics_tab_archive(buffer,out,size);
+#ifdef _WIN32
+    if (!result) result=long_host_path(out,size);
+#endif
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;
@@ -910,6 +943,7 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
+    if (fd==1 || fd==2) runtime_load_guard_note(buffer,(size_t)size);
     FD_IO_LOCK(h);
     ssize_t n=host_write(h,buffer,size);
     const int write_errno=errno;

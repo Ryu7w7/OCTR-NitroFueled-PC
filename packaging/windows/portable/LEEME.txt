@@ -52,8 +52,8 @@ parches del juego; en Guardados, copias de seguridad e importar partidas;
 en DLC, tus paquetes DLC de PS4 (.pkg), opcionales: el juego funciona
 igual sin ellos.
 
-Sin launcher: "Jugar sin launcher.bat" arranca .\CUSA13795-1.21
-(o la ruta de BB_GAME_DIR).
+Sin launcher (avanzado): python\python.exe run.py en esta carpeta arranca
+.\CUSA13795-1.21 (o la ruta de BB_GAME_DIR).
 
 CONTROLES
 ---------
@@ -93,10 +93,9 @@ PROBLEMAS COMUNES
 - "sacredfire.exe not found": no muevas el launcher fuera de esta carpeta.
 - Tirones la primera vez en cada pista: normal, son shaders nuevos.
 - Pantalla negra con sonido: actualiza drivers Vulkan de tu GPU.
-- El launcher no abre: necesita Direct3D 11 (cualquier GPU actual);
-  usa "Jugar sin launcher.bat".
+- El launcher no abre: necesita Direct3D 11 (cualquier GPU actual).
 
-Fallos y dudas: https://github.com/GetLostIn/CTR-NitroFueled-PC/issues
+Fallos y dudas: https://github.com/Ryu7w7/OCTR-NitroFueled-PC/issues
 (adjunta last_run.log).
 
 NVIDIA DLSS: bin\nvngx_dlss.dll es del SDK de NVIDIA DLSS, redistribuido
@@ -107,4 +106,4 @@ NVIDIA Corporation. Sin afiliacion con NVIDIA ni AMD.
 Proyecto: https://github.com/GetLostIn/CTR-NitroFueled-PC
 Sin afiliacion con Sony, Activision o Beenox. Necesitas tu propia copia
 del juego. Licencia GPL v2 o posterior: ver LICENSE. Las librerias de bin\
-(SDL3, FFmpeg, x264, x265...) y sus licencias estan en THIRD-PARTY.txt.
+(SDL3, FFmpeg, x264, x265...) y sus licencias estan en licenses\THIRD-PARTY.txt.

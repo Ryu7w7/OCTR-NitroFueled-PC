@@ -1,7 +1,8 @@
 """Turns eosbridge/eosbridge.ini (the Epic product's ids, not in git) into a C header that
 eosbridge.c builds in: official builds carry their settings inside ryunet-bridge, with no text file
-next to it. The bytes are XOR'ed with a key made for each build. That hides them from a casual
-look, nothing more: a client's EOS credentials are meant to ship with the game (docs/eos-bridge.md).
+next to it. They are stored as they are (the header keeps its XOR key, all zeros): a client's EOS
+credentials are meant to ship with the game (docs/eos-bridge.md), and bytes hidden in a program are
+what antivirus heuristics take for malware (v0.8.4's bridge, XOR'ed, was flagged).
 
     python3 eosbridge/embed_settings.py eosbridge/eosbridge.ini out/eosbridge/eos_embedded.h
 """
@@ -20,7 +21,7 @@ def main():
             if sep and key.strip() in KEYS and value.strip():
                 lines.append(f'{key.strip()}={value.strip()}')
     text = ('\n'.join(lines) + '\n').encode('utf-8')
-    key = os.urandom(16)
+    key = bytes(16)  # no hiding: see above
     data = bytes(b ^ key[i % len(key)] for i, b in enumerate(text))
     hexes = lambda bs: ', '.join(f'0x{b:02x}' for b in bs)
     os.makedirs(os.path.dirname(target) or '.', exist_ok=True)
