@@ -12,6 +12,15 @@ its cache. Incompatible parties are rejected through the native matchmaking task
 rejection does not fall back to Normal. The client still verifies the server's
 Itemless lobby confirmation before enabling Itemless gameplay.
 
+## Party lifetime during menu navigation
+
+Back between Private, Ranked, Matchmaking, and Online keeps the party. The menu graphs
+still leave the current race lobby, close their UI, and clear the native mode flags, but
+skip the extra `quitParty` action. Mode Select shares the Online root return path.
+Native Leave Party commands, network kick/disconnect code, and the resets used to leave
+Online for the offline main menu are unchanged. The latest party-navigation changes require
+live host/guest retesting; asset regressions verify the patched paths and offline resets.
+
 ## Mode lifetime
 
 Itemless assets and gameplay follow the confirmed lobby identity. Leaving,
@@ -42,7 +51,9 @@ room's host reports and the lobby card shows the rating it answered with.
 ## Elapsed matchmaking
 
 Public and Ranked show a native-style elapsed search timer, capped at 180 seconds.
-At the cap the client cancels matchmaking and returns through the native lobby path.
+At the cap a dedicated native UI route cancels the search without quitting the party or
+reloading the scene. It returns the leader to the previous Ranked/Matchmaking selector,
+retaining the selected mode; guests retain their party and the native party waiting route.
 Ranked also shows server-owned range expansion; Public has no rank-range message.
 A confirmed match hides elapsed time and retains the native pre-race countdown.
 The timer artwork is prepared once through the existing archive cache.

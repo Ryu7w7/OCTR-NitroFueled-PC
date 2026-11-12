@@ -72,19 +72,34 @@ Only members in a validated server search receive Ranked confirmation.
 Public Matchmaking and Ranked show elapsed search time up to 03:00, then cancel through
 the native matchmaking path. A background worker polls signed `/ryunet/matchmaking-status`
 once per second while the Public lobby is visible, so followers share the leader's elapsed
-time without HTTP on the game thread. Ranked shows the server's available range: 400 MMR,
+time without HTTP on the game thread. Timeout dispatches a private native GUI input signal
+to a dedicated search-cancel graph. It skips `quitParty` and lobby disband/reload, preserves
+the Ranked/Public context and selected mode, and uses the native Back animation/destination.
+Party guests retain the native party waiting route and registration needed to follow a new search.
+The generic rejection path remains separate. Ranked shows the server's available range: 400 MMR,
 700 after 20 seconds, 1000 after 45 seconds, and no hard cap after 90 seconds. Both sides
 still need the threshold to match. Stale range data displays a checking message. Public
 shows elapsed time only. A matched room hides this panel and uses the native countdown.
 
 The passive panel reuses the native countdown artwork and anchor without copying its
-behavior graph. Text uses the artwork's anchors and tilt, centered fitted boxes, and a
+behavior graph. Text uses the artwork's anchors, the original native text rotation, larger closely spaced
+centered fitted boxes, and a
 complete native traversal chain. These layout/traversal corrections follow a live report
 of overflow and flicker; their live retest remains pending. Its generated archive patch uses the existing preparation cache, including
 source invalidation and stale-file removal; warm boots reuse prepared output.
 
 The OS identifier is client-reported, not hardware attestation. Modified clients can spoof
 it, so this limit reduces ordinary multi-client boosting without proving distinct humans.
+
+### Party-preserving menu navigation
+
+Private and Public lobby roots and the Online root skip their additional `quitParty`
+step during menu navigation. Race-lobby leave, UI transitions, native private/async flags,
+and explicit offline network/party resets remain intact. Ranked and Matchmaking share
+the Mode Select return path, so Back to Online retains party members in both modes.
+Both update2 and the Online domain copies are prepared through the existing cache.
+Explicit Leave Party and network kick/disconnect behavior are outside this menu patch.
+Live host/guest checks remain pending.
 
 ### Online session isolation
 

@@ -13,7 +13,7 @@ import archive_patch
 import hall_of_fame
 from ranked_results import score_card, manual_navigation
 from ranked_name_badges import add_badges
-from matchmaking_timer import add_timer
+from matchmaking_timer import add_timer, timeout_return, preserve_menu_party
 from build_ui_asset import build_pak as build_ui_asset_pak, lobby_background_texture
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets, pack_offsets
@@ -1464,11 +1464,17 @@ def _prepare(game, out, elf, bases):
         # Preserve the widescreen lobby layout before adding Online's tags/order.
         lobby = lobby_card(current_entry(pak, entries, lobby_index, base))
         lobby_root_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_privategame_root.igz'))
-        lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
+        lobby_root = preserve_menu_party(team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:])))
         public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
         public_lobby = public_lobby_card(current_entry(pak, entries, public_index, base))
         timer_index = next(i for i,e in enumerate(entries) if e[0].lower().endswith('/ui/octane_lobby_timer.igz'))
         public_lobby = add_timer(public_lobby, current_entry(pak,entries,timer_index,base))
+        public_root_index = next(i for i,e in enumerate(entries)
+                                 if e[0].lower().endswith('/octane_lobby_matchmaking_root.igz'))
+        public_root = preserve_menu_party(timeout_return(current_entry(pak,entries,public_root_index,base)))
+        main_root_index = next(i for i,e in enumerate(entries)
+                               if e[0].lower().endswith('/octane_lobby_main_root.igz'))
+        main_root = preserve_menu_party(current_entry(pak,entries,main_root_index,base))
         mode_select = payload
         lobby_members_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_MEMBERS_ENTRY)
         lobby_members_native = current_entry(pak, entries, lobby_members_index, base)
@@ -1635,7 +1641,7 @@ def _prepare(game, out, elf, bases):
                                        main_material_index: main_materials, package_index: package,
                                        race_package_index: race_package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
-                                       lobby_root_index: lobby_root, music_index: music, public_index: public_lobby,
+                                       lobby_root_index: lobby_root, music_index: music, public_index: public_lobby, public_root_index: public_root, main_root_index: main_root,
                                        lobby_members_index: lobby_members}, base,
                                       override={index, race_ui_index, cup_ui_index, score_graph_index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
                                                 main_material_index,
@@ -1651,6 +1657,11 @@ def _prepare(game, out, elf, bases):
                               QUICK_ICON_TEXTURE.lower())
     domain_replacements = {domain_quick_index: menu_assets[QUICK_ICON_TEXTURE.lower()],
                            domain_material_index: domain_materials}
+    for domain_graph_index,entry in enumerate(domain_entries):
+        if any(entry[0].lower().endswith('/octane_lobby_'+name+'_root.igz')
+               for name in ('main','privategame','matchmaking')):
+            domain_replacements[domain_graph_index]=preserve_menu_party(
+                current_entry(domain_pak,domain_entries,domain_graph_index,None))
     domain_member_material_index = next(i for i, e in enumerate(domain_entries)
                                         if e[0].lower() == LOBBY_MEMBERS_MATERIALS_ENTRY)
     with domain_pak.open('rb') as f:

@@ -328,12 +328,15 @@ static void *ABI get_sprite(void *row) {
     memcpy(&asset, (char *)row + 0x38, sizeof asset);
     return asset;
 }
-static unsigned char hof_animation_tag[0x18];
+static unsigned char hof_animation_tag[0x18], timeout_input[0x28];
+static void *timeout_project;
+static int timeout_events,timeout_releases;
 static int hof_animation_calls, hof_animation_releases;
 static void *score_animation_owner;
 static const char *score_animation_name;
 static int score_animation_calls;
 static void *ABI hof_animation_factory(void *type, void *allocator, int zero) {
+    if(type==(void *)44) { memset(timeout_input,0,sizeof timeout_input);return timeout_input; }
     assert(type == (void *)77 && !allocator && !zero);
     memset(hof_animation_tag, 0, sizeof hof_animation_tag);
     return hof_animation_tag;
@@ -353,6 +356,7 @@ static void ABI hof_animation_play(void *owner, void *tag, void *parameters) {
                    hof_animation_calls++ ? "CyclePrevious" : "CycleNext"));
 }
 static void ABI hof_animation_release(void *tag) {
+    if(tag==timeout_input) { ++timeout_releases;return; }
     if (tag==&ranked_sound_token) { ++ranked_sound_releases; return; }
     assert(tag == hof_animation_tag);
     free_string(NULL, *(char **)(hof_animation_tag + 0x10) - 16);
@@ -449,6 +453,10 @@ static void *ready_target, *ready_behavior, *ready_owner;
 static void (ABI *ready_handler)(void *, void *, void *);
 static int broadcast_routes, ready_project_events;
 static void ABI project_event_mock(void *self, void *event) {
+    if(event==timeout_input) {
+        assert(self==timeout_project && *(int *)(timeout_input+0x18)==0x10000);
+        assert(*(int *)(timeout_input+0x1c)==1);++timeout_events;return;
+    }
     if (self == ready_target && ready_handler) {
         ++ready_project_events; ready_handler(ready_behavior, event, ready_owner); return;
     }
@@ -3427,10 +3435,12 @@ static void test_region(size_t shift) {
     following_host=0;
     runtime_online_mode_new_session();
     assert(!runtime_online_mode_private_cup() && speed==0);
-    unsigned char search_root[0x100]={0}, search_panel[0x100]={0}, search_table[0x40]={0};
+    unsigned char search_root[0x100]={0}, search_project[0x100]={0}, search_panel[0x100]={0}, search_table[0x40]={0};
     unsigned char labels[4][0x100]={{0}};
     void *search_items[]={search_panel,labels[0],labels[1],labels[2],labels[3]};
     put_pointer(search_root,0x48,search_table);
+    put_pointer(search_root,0x20,search_project);
+    timeout_project=search_project;
     put_pointer(search_table,0x20,search_items);
     *(int *)(search_table+12)=5;
     put_pointer(search_panel,0x28,"OCTR_SEARCH_PANEL");
@@ -3458,6 +3468,11 @@ static void test_region(size_t shift) {
     search_test_active=0;runtime_online_mode_matchmaking_update(search_root);
     assert(*(unsigned *)(search_panel+12)&0x400);
     assert(!memcmp(countdown_before,labels[3],sizeof countdown_before));
+    direct_stub(image + 0x149d260,hof_animation_release);
+    const int timeout_before=timeout_events,release_before=timeout_releases;
+    assert(runtime_online_mode_matchmaking_timeout());
+    assert(timeout_events==timeout_before+1 && timeout_releases==release_before+1);
+    assert(!runtime_online_mode_matchmaking_timeout());
     for(int i=0;i<3;++i) free_string(NULL,*(char **)(labels[i]+0x30)-16);
     free_string(NULL, *(char **)(private_settings + 0x10) - 16);
     munmap(image, size);

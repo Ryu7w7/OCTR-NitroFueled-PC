@@ -35,6 +35,7 @@ static unsigned char **network;
 static _Thread_local int customized_selector;
 static int private_speed_selected;
 static int selector_mode_index;
+static int matchmaking_return_mode = -1;
 static uint64_t mode_select_updated_ms;
 static int mode_select_active;
 
@@ -110,7 +111,7 @@ static SetSeason hide_placeable;
 static void **gui_manager, **race_finished_type, **local_racers_finished_type;
 static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
-static void *lobby_members_project, *hof_project, *ranked_score_project;
+static void *lobby_members_project, *hof_project, *ranked_score_project, *matchmaking_project;
 static uint64_t ranked_score_started;
 static int ranked_score_phase, ranked_score_finished;
 static void refresh_ranked_score(void);
@@ -595,6 +596,7 @@ void runtime_online_mode_new_session(void) {
     runtime_online_mode_leave_cup();
     runtime_online_mode_selector_left();
     private_speed_selected = private_cup_selected = selector_mode_index = 0;
+    matchmaking_return_mode = -1;
     remote_cup_selected = -1;
     private_settings_rejected = 0;
     private_cup_race_active = cup_reset_pending = cup_transition_pending = 0;
@@ -605,6 +607,7 @@ void runtime_online_mode_new_session(void) {
     assign_handle((unsigned char *)&team_ranking_project, NULL);
     assign_handle((unsigned char *)&team_leaders_project, NULL);
     assign_handle((unsigned char *)&ranked_score_project, NULL);
+    assign_handle((unsigned char *)&matchmaking_project, NULL);
     team_race_ui_owner = NULL;
     team_result_count = team_results_pending = team_score_opened = team_score_finished = team_effects_played = 0;
     finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0;
@@ -1015,10 +1018,12 @@ static void ABI cup_project_event(void *self, void *event) {
         event_type(event) == *race_finished_type)
         ranked_score_finished = 1;
     if (self == handle_object(&lobby_members_project) || self == handle_object(&hof_project) ||
-        self == handle_object(&ranked_score_project)) {
+        self == handle_object(&ranked_score_project) || self == handle_object(&matchmaking_project)) {
         void *kind = event_type(event);
         const char *name = kind ? pointer_at(kind, 0x10) : NULL;
         if (name && !strcmp(name, "igGuiEventProjectUnload")) {
+            if (self == handle_object(&matchmaking_project))
+                assign_handle((unsigned char *)&matchmaking_project,NULL);
             if (self == handle_object(&ranked_score_project)) {
                 assign_handle((unsigned char *)&ranked_score_project, NULL);
                 ranked_score_phase = ranked_score_finished = 0;
@@ -2558,7 +2563,26 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
         matchmaking_labels(items[i],active,elapsed,timeout,range,ranked,depth+1);
 }
 
+int runtime_online_mode_matchmaking_timeout(void) {
+    void *project=handle_object(&matchmaking_project);
+    if (!project || !gui_input_type || !*gui_input_type) return 0;
+    unsigned char *event=create_gui_object(*gui_input_type,NULL,0);
+    if (!event) return 0;
+    const int signal=0x10000,controller=1;
+    memcpy(event+0x18,&signal,4);memcpy(event+0x1c,&controller,4);
+    matchmaking_return_mode=selector_mode_index;
+    original_project_event(project,event);
+    release_gui_animation_tag(event);
+    assign_handle((unsigned char *)&matchmaking_project,NULL);
+    return 1;
+}
+
 void runtime_online_mode_matchmaking_update(unsigned char *root) {
+    void *project=root ? pointer_at(root,0x20) : NULL;
+    if (project && handle_object(&matchmaking_project)!=project) {
+        assign_handle((unsigned char *)&matchmaking_project,NULL);
+        make_handle(&matchmaking_project,project);
+    }
     int elapsed=0,timeout=180,range=0,ranked=0;
     int active=runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
     matchmaking_labels(root,active,elapsed,timeout,range,ranked,0);
@@ -2997,8 +3021,12 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
         const int private_speed = runtime_room_mode_following() ? runtime_speed_mode_enabled() : private_speed_selected;
-        const int index = type == 2 && items[2] ? 2 :
-                          (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
+        int index = type == 2 && items[2] ? 2 :
+                    (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
+        if (!private && matchmaking_return_mode>=0) {
+            if (matchmaking_return_mode<3 && items[matchmaking_return_mode]) index=matchmaking_return_mode;
+            matchmaking_return_mode=-1;
+        }
         if (!private || index == 2) {
             clear_team_selector();
             reset_team_count();

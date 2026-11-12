@@ -51,6 +51,8 @@ mean deployed to the production server or verified in every live multiplayer sce
   on a background worker, 180-second native cancellation, and Ranked range messages.
   Public shows elapsed time only. A confirmed match restores the native pre-race countdown.
   Generated assets reuse the existing preparation cache on warm boots.
+- Party-preserving Back between Private, Ranked, Matchmaking, and Online menus. Native
+  race-lobby/UI cleanup remains separate from explicit Leave Party and offline resets.
 - GTK launcher Ranked profile row, including placement progress and placed ratings.
 
 ## Implemented, live QA still pending
@@ -61,8 +63,11 @@ mean deployed to the production server or verified in every live multiplayer sce
 - Four-account device admission and party growth before/after Ranked entry in real multi-client
   sessions, including cancel, reconnect, room changes, and host migration.
 - Live retest of the search timer after the reported overflow/flicker fix: matching artwork/text
-  anchors and tilt, centered fitted text, and an intact native traversal chain. Also verify
-  timeout cancellation, follower synchronization, range messages, and countdown handoff.
+  anchors, native text rotation, larger closely spaced fitted text, and an intact traversal chain. Also verify
+  party-preserving timeout cancellation, return to the previous selector with the same options,
+  follower synchronization, range messages, and countdown handoff.
+- Party-preserving Back from Private/Ranked/Matchmaking to Online, including host/guest
+  synchronization and explicit Leave Party/offline exit afterward.
 - Latest HOF selected-row contrast, row centering, and fitted columns across display sizes.
 
 Automated evidence includes client C regressions, USA/EU native asset checks, widescreen

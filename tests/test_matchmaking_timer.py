@@ -9,11 +9,74 @@ from pathlib import Path
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets
 import online_mode
-from matchmaking_timer import add_timer
+from matchmaking_timer import add_timer, timeout_return, preserve_menu_party
 
 
 @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
 class MatchmakingTimerTests(unittest.TestCase):
+    def test_menu_back_preserves_party_and_explicit_offline_exit(self):
+        game=Path(os.environ['BB_TEST_GAME'])
+        tested=set()
+        for archive in ('update2','juicedomain_onlinemenus'):
+            pak=game/'archives'/(archive+'.pak')
+            entries=iga.pak_entries(pak)
+            for index,entry in enumerate(entries):
+                if not any(entry[0].lower().endswith('/octane_lobby_'+name+'_root.igz')
+                           for name in ('main','privategame','matchmaking','modeselect')):continue
+                source=online_mode.current_entry(pak,entries,index,None)
+                before=Igz(source);after=Igz(preserve_menu_party(source))
+                methods=before.fixup('EXNM')
+                native=[before.strings[a] for a,b in struct.iter_unpack('<II',methods[3][:methods[1]*8])
+                        if not b&0x80000000]
+                quits={o:before.u64(o+0x28) for o,k in before.objects()
+                       if k=='igVscCppActionNode' and native[before.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC'}
+                allowed=set()
+                for obj,kind in before.objects():
+                    allowed.update(range(obj+8,obj+12))
+                    field=0x28 if kind=='igVscCppActionNode' else 0x30 if kind=='igVscEntryPointNode' else None
+                    if field is not None and before.u64(obj+field) in quits:
+                        self.assertEqual(after.u64(obj+field),quits[before.u64(obj+field)])
+                        allowed.update(range(obj+field,obj+field+8))
+                    if kind=='igVscCppActionNode' and native[before.u64(obj+0x38)] in (
+                            'CNetworkNodes::resetPartyManager_VSC','CNetworkNodes::resetNetworkSessionManager_VSC',
+                            'CLoadMapNodes::quitToMainMenu2_VSC'):
+                        size=before.sizes[before.u64(obj)]
+                        self.assertEqual(after.data[obj+12:obj+size],before.data[obj+12:obj+size])
+                self.assertEqual(len(before.data),len(after.data))
+                self.assertTrue(all(a==b or i in allowed for i,(a,b) in enumerate(zip(before.data,after.data))))
+                tested.add(entry[0].lower().rsplit('/',1)[1])
+        self.assertEqual(len(tested),4)
+
+    def test_timeout_cancels_search_without_quitting_party(self):
+        pak=Path(os.environ['BB_TEST_GAME'])/'archives/update2.pak'
+        entries=iga.pak_entries(pak)
+        index=next(i for i,e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_matchmaking_root.igz'))
+        native=Igz(online_mode.current_entry(pak,entries,index,None))
+        image=Igz(timeout_return(native.build()))
+        self.assertEqual(image.u32(0x7c08+12),2)
+        array=image.u64(0x7c08+32)
+        self.assertEqual(image.u64(array),0x7c38)
+        event=image.u64(array+8)
+        filters=image.u64(event+0x18)
+        signal=image.u64(image.u64(filters+32))
+        self.assertEqual(image.u32(signal+16),0x10000)
+        self.assertEqual(native.u32(0x7140+16),9)
+        assign=image.u64(event+0x30)
+        self.assertEqual(image.u64(assign+0x10),native.u64(0x3c30+0x10))
+        self.assertEqual(image.u64(assign+0x18),native.u64(0x3c30+0x18))
+        stop=image.u64(assign+0x20)
+        self.assertEqual(image.u64(stop+0x38),native.u64(0x3d50+0x38))
+        asynchronous=image.u64(stop+0x28)
+        self.assertEqual(image.u64(asynchronous+0x38),native.u64(0x3dd0+0x38))
+        self.assertEqual(image.u64(asynchronous+0x28),0x3ea0)
+        # Existing manual Back and explicit close retain their native party-leave behavior.
+        for obj in (0x7c38,0x3c30,0x3d50,0x3d90,0x3dd0,0x3e60,0x8510):
+            size=native.sizes[native.u64(obj)]
+            self.assertEqual(image.data[obj+12:obj+size],native.data[obj+12:obj+size])
+        counts=Counter(image.u64(at) for at in image.sites['ROFS'])
+        for obj,kind in image.objects():
+            if obj>=len(native.data):self.assertEqual(image.u32(obj+8)&0x7ffff,counts[obj])
+
     def test_passive_native_countdown_clone(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
         entries = iga.pak_entries(pak)

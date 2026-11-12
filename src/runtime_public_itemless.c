@@ -73,7 +73,7 @@ static unsigned char *matchmaking_owner;
 static int matchmaking_search;
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
 static int search_elapsed_base, search_timeout = 180, search_range, search_is_ranked;
-static int search_server_active, search_poll_running;
+static int search_server_active, search_poll_running, search_timeout_pending;
 
 typedef void *(ABI *Search)(void **, void *, const char *, unsigned, void *);
 typedef void *(ABI *Register)(void **, void *, const char *, unsigned);
@@ -155,6 +155,7 @@ static void reset_locked(void) {
     search_mark = search_ui_at = search_poll_after = search_policy_at = 0;
     search_elapsed_base = search_range = search_is_ranked = search_server_active = search_poll_running = 0;
     search_timeout = 180;
+    search_timeout_pending = 0;
     ++search_poll_serial;
 }
 void runtime_public_itemless_reset(void) {
@@ -293,7 +294,7 @@ static void *search_poll(void *arg) {
                 search_server_active=1;search_mark=now;search_elapsed_base=elapsed;
                 search_is_ranked=ranked && !strncmp(ranked,"true",4);
             } else if (!strncmp(state,"\"matched\"",9)) {
-                search_server_active=0;search_mark=0;
+                search_server_active=0;search_mark=0;search_timeout_pending=0;
             } else if (!matchmaking_search) {
                 search_server_active=0;search_mark=0;
             }
@@ -324,7 +325,7 @@ static void update_search_clock(void) {
     int expired=search_mark && !matchmaking_room && (matchmaking_search || search_server_active) &&
         search_elapsed_base+(int)((now>=search_mark ? now-search_mark : 0)/1000)>=search_timeout;
     struct SearchPoll *job=NULL;
-    if (!expired && search_ui_at && now-search_ui_at<500 && !matchmaking_room && !search_poll_running && now>=search_poll_after) {
+    if (!expired && !search_timeout_pending && search_ui_at && now-search_ui_at<500 && !matchmaking_room && !search_poll_running && now>=search_poll_after) {
         const char *name=runtime_np_get_online_name();
         if (name && *name && (job=calloc(1,sizeof *job))) {
             job->generation=session_generation;job->serial=++search_poll_serial;
@@ -332,8 +333,9 @@ static void update_search_clock(void) {
             search_poll_running=1;search_poll_after=now+1000;
         }
     }
+    if (expired) search_timeout_pending=1;
     pthread_mutex_unlock(&mode_lock);
-    if (expired) { reject_search("No players found within the search limit. Matchmaking cancelled. Please try again."); return; }
+    if (expired) return;
     if (job) {
         pthread_t worker;
         if (!pthread_create(&worker,NULL,search_poll,job)) pthread_detach(worker);
@@ -348,6 +350,16 @@ static void update_search_clock(void) {
 
 void runtime_public_itemless_update(void) {
     update_search_clock();
+    pthread_mutex_lock(&mode_lock);
+    const int timed_out=search_timeout_pending;
+    pthread_mutex_unlock(&mode_lock);
+    if (timed_out) {
+        if (runtime_online_mode_matchmaking_timeout()) {
+            runtime_public_itemless_reset();
+            runtime_public_itemless_party_ready();
+        }
+        return;
+    }
     pthread_mutex_lock(&mode_lock);
     int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
     pthread_mutex_unlock(&mode_lock);

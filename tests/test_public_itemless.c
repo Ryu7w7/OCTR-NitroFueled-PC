@@ -27,6 +27,8 @@ static void ABI hof_focus_mock(void *project, void *list, int controller) {
 static int hof_legends;
 void runtime_online_mode_hof_legend(void *project) { assert(project); ++hof_legends; }
 void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
+static int timeout_attempts, timeout_ready=1;
+int runtime_online_mode_matchmaking_timeout(void) { ++timeout_attempts; return timeout_ready; }
 static int new_sessions, hosted_sessions;
 void runtime_online_mode_new_session(void) { ++new_sessions; runtime_public_itemless_new_session(); }
 void runtime_room_mode_hosting(void) { ++hosted_sessions; }
@@ -760,6 +762,23 @@ static void ABI release_input_event(void *object) {
     --allocated_input_events; free(event);
 }
 
+static void test_timeout_preserves_party_and_mode(void) {
+    const int before_stops=stopped,before_returns=returned,before_dialogs=dialogs;
+    unsigned char party[0x80]={0};void *party_value=party;void **previous_party=party_manager;
+    party_manager=&party_value;party[0x6c]=1;
+    for (int ranked=0;ranked<2;++ranked) for(int mode=0;mode<2;++mode) {
+        runtime_public_itemless_reset();selected=mode;ranked_selected=ranked;
+        matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
+        timeout_ready=0;runtime_public_itemless_update();
+        assert(search_timeout_pending && selected==mode && ranked_selected==ranked);
+        timeout_ready=1;runtime_public_itemless_update();
+        assert(!matchmaking_search && !search_timeout_pending);
+        assert(selected==mode && ranked_selected==ranked && *party_manager==party && party[0x6c]);
+        assert(stopped==before_stops && returned==before_returns && dialogs==before_dialogs);
+    }
+    selected=ranked_selected=0;party_manager=previous_party;
+}
+
 static void test_ranked_device_and_search_clock(void) {
     const char *device=ranked_device();
     assert(strlen(device)==64 && !strspn(device,"-"));
@@ -803,7 +822,7 @@ static void test_ranked_device_and_search_clock(void) {
     assert(!runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
     runtime_public_itemless_reset();
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;search_poll_after=UINT64_MAX;
-    update_search_clock();assert(rejection[0] && !matchmaking_search && !search_mark);
+    update_search_clock();assert(search_timeout_pending && !rejection[0]);
     runtime_public_itemless_reset();rejection[0]=0;snprintf(reply,sizeof reply,"ok");
 }
 
@@ -926,6 +945,7 @@ int main(void) {
     test_ranked();
     test_ranked_button_event();
     test_native_return_focus();
+    test_timeout_preserves_party_and_mode();
     test_hof_native_ready();
     test_ranked_season_gate();
     test_hall_of_fame_button_event();

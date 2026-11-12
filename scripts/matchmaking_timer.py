@@ -112,3 +112,75 @@ def add_timer(blob, timer_blob):
     dependencies(g,{'juice_Octane_Lobby_Timer_materials':'ui:/materialInstances/juice_Octane_Lobby_Timer_materials.igz'})
     return g.build()
 
+
+def timeout_return(blob):
+    """A private input signal cancels search through native UI without quitting the party."""
+    g=Igz(blob)
+    g.sites['RNEX']=g.read_list('RNEX',unpack_offsets)
+    kinds=dict(g.objects())
+    expected={0x7c38:'igGuiVscMessageEntryPointNode',0x7cd8:'igVscAccessorList',
+              0x7140:'igVscConstEnumAccessor',0x3c30:'igVscAssignNode',
+              0x3d50:'igVscCppActionNode',0x3dd0:'igVscCppActionNode',
+              0x3ea0:'igVscCppActionNode',0x7c08:'igVscEntryPointNodeList'}
+    if any(kinds.get(o)!=kind for o,kind in expected.items()) or g.u64(0x3d50+0x28)!=0x3d90 or g.u32(0x7140+16)!=9:
+        raise ValueError('unsupported native matchmaking timeout route')
+    first_new=len(g.data)
+    old_counts=Counter(g.u64(at) for at in g.sites['ROFS'])
+    def clone(source):
+        size=g.sizes[g.u64(source)]
+        dest=g.append(g.data[source:source+size])
+        for tag,sites in g.sites.items():
+            for at in list(sites):
+                if source<=at<source+size:g.add_site(tag,dest+at-source)
+        return dest
+    def pointer(at,value):
+        g.set_u64(at,value)
+        if value:g.add_site('ROFS',at)
+        elif at in g.sites['ROFS']:g.sites['ROFS'].remove(at)
+    def values(table,items):
+        array=g.append(struct.pack('<'+'Q'*len(items),*items))
+        for i,value in enumerate(items):
+            if value:g.add_site('ROFS',array+i*8)
+        g.set_u32(table+12,len(items));g.set_u32(table+16,len(items))
+        g.set_u64(table+24,(g.u64(table+24)&~0xffffffff)|len(items)*8)
+        pointer(table+32,array)
+    signal=clone(0x7140);g.set_u32(signal+16,0x10000)
+    filters=clone(0x7cd8);values(filters,[signal,0,0,0])
+    event=clone(0x7c38);pointer(event+0x18,filters)
+    assign=clone(0x3c30)
+    stop=clone(0x3d50)
+    asynchronous=clone(0x3dd0)
+    pointer(event+0x30,assign);pointer(assign+0x20,stop)
+    # Preserve the native Back destination and animation, skipping quitParty/disbandLobby.
+    pointer(stop+0x28,asynchronous);pointer(asynchronous+0x28,0x3ea0)
+    values(0x7c08,[0x7c38,event])
+    counts=Counter(g.u64(at) for at in g.sites['ROFS'])
+    for obj,kind in g.objects():
+        count=counts[obj] if obj>=first_new else (g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
+        g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|count)
+    return g.build()
+
+
+def preserve_menu_party(blob):
+    """Menu Back leaves its race lobby; explicit party/offline actions remain native."""
+    g=Igz(blob)
+    table=g.fixup('EXNM')
+    methods=[g.strings[a] for a,b in struct.iter_unpack('<II',table[3][:table[1]*8]) if not b&0x80000000]
+    objects=dict(g.objects())
+    quits={o:g.u64(o+0x28) for o,kind in objects.items()
+           if kind=='igVscCppActionNode' and methods[g.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC'}
+    if not quits:return blob
+    old_counts=Counter(g.u64(at) for at in g.sites['ROFS'])
+    changed=0
+    for obj,kind in objects.items():
+        field=0x28 if kind=='igVscCppActionNode' else 0x30 if kind=='igVscEntryPointNode' else None
+        if field is None or g.u64(obj+field) not in quits:continue
+        target=quits[g.u64(obj+field)]
+        if not target:raise ValueError('unsupported terminal menu party action')
+        g.set_u64(obj+field,target);changed+=1
+    if changed!=len(quits):raise ValueError('unsupported menu party navigation')
+    counts=Counter(g.u64(at) for at in g.sites['ROFS'])
+    for obj,kind in objects.items():
+        count=(g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
+        g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|count)
+    return g.build()
