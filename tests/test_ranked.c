@@ -11,7 +11,7 @@ void runtime_hof_season_changed(int season) { (void)season; }
 static char sent_target[256], sent_body[1024];
 static int sent;
 static int transfer_status = 200;
-static char transfer_reply[512] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Gold Mask\"}";
+static char transfer_reply[16384] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Gold Mask\"}";
 static int tier_fetch_enabled, tier_revision, tier_gets;
 static const char *status_reply = "{\"season\":2,\"enabled\":false,\"retry_after\":895}";
 static int status_http = 200, status_gets;
@@ -74,6 +74,7 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
         return 200;
     }
     assert(!strcmp(method, "POST"));
+    assert(max_reply == 16384);
     snprintf(sent_target, sizeof sent_target, "%s", target);
     snprintf(sent_body, sizeof sent_body, "%s", (const char *)data);
     ++sent;
@@ -311,6 +312,33 @@ static void test_tier_worker_refresh(void) {
     pthread_join(thread, NULL);
 }
 
+static void test_result_snapshot(void) {
+    reset();
+    session_room = 42;
+    session_mode = 0;
+    runtime_ranked_race_begin();
+    strcpy(transfer_reply, "{\"participants\":[{\"mmr\":9999,\"delta\":999}],\"status\":\"resolved\",\"delta\":-35,\"delta_applied\":-5,\"mmr_before\":5,\"mmr\":0,\"ranked\":true,\"ranked_before\":true,\"tier_before\":\"Bronze Wumpa\",\"tier\":\"Bronze Wumpa\",\"placements\":0}");
+    struct ranked_outbox *box = make_outbox();
+    box->generation = result_generation;
+    ranked_sender(box);
+    struct runtime_ranked_result result;
+    assert(runtime_ranked_result_copy(&result));
+    assert(result.delta == -5 && result.mmr == 0 && result.before == 5);
+    box = make_outbox();
+    box->generation = result_generation;
+    runtime_ranked_race_begin();
+    ranked_sender(box);
+    assert(!runtime_ranked_result_copy(&result)); /* Late reply cannot overwrite next race. */
+    strcpy(transfer_reply, "{\"participants\":[{\"mmr\":9999}],\"status\":\"resolved\",\"delta\":45,\"ranked\":false,\"ranked_before\":false,\"placements\":4}");
+    box = make_outbox();
+    box->generation = result_generation;
+    ranked_sender(box);
+    assert(runtime_ranked_result_copy(&result));
+    assert(!result.ranked && result.placements == 4 && result.mmr == 0);
+    assert(sent == 3); /* Placement responses are complete, not retried. */
+    runtime_ranked_race_begin();
+}
+
 int main(void) {
     test_status_contract();
     test_status_refresh();
@@ -319,6 +347,7 @@ int main(void) {
     test_room_change_clears_the_card();
     test_gives_up_after_retries();
     test_rejected_report_drops_out();
+    test_result_snapshot();
     test_tier_batch_response();
     test_tier_before_first_race();
     test_best_badge();

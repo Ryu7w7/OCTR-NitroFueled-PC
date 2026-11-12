@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_ranked.h"
 #include "runtime_name_colors.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -39,10 +40,14 @@ static int hof_pending_open, hof_named_opens, asset_opens;
 static unsigned char hof_open_options[0x28], hof_open_manager[0x1b0], hof_result_handle[0x30];
 int runtime_hof_take_open(void) { int pending = hof_pending_open; hof_pending_open = 0; return pending; }
 const char *runtime_hof_project(const char *name) { return name; }
-int runtime_ranked_active(void) { return 0; }
+static int ranked_score_active, ranked_score_ready;
+static struct runtime_ranked_result score_result;
+int runtime_ranked_active(void) { return ranked_score_active; }
 void runtime_ranked_gate_update(void *root, int ranked) { (void)root; (void)ranked; }
 int runtime_ranked_selected(void) { return ranked_selected; }
 void runtime_ranked_race_end(void) {}
+void runtime_ranked_race_begin(void) {}
+int runtime_ranked_result_copy(struct runtime_ranked_result *result) { *result = score_result; return ranked_score_ready; }
 int runtime_ranked_tier(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
 static int ranked_profile_mode;
 int runtime_ranked_badge(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
@@ -183,8 +188,18 @@ static void *ABI lookup_hero_mock(void *catalog, const char *hero) {
     return hero_record;
 }
 static int room_active, lobby_updates;
+static void *checked_mode_selector;
+static unsigned char expected_mode_options[3];
+static void check_mode_options(void *self) {
+    if (!checked_mode_selector || self != checked_mode_selector) return;
+    unsigned char *available = *(void **)((char *)self + 0x1b0);
+    unsigned char *items = *(void **)(available + 0x20);
+    assert(!memcmp(items, expected_mode_options, 3));
+    assert(((unsigned char *)self)[0x194] == !!(items[1] || items[2]));
+}
 static void ABI base_update(void *self, void *owner, float dt) {
-    (void)self;
+    check_mode_options(self);
+    if (checked_mode_selector && self == checked_mode_selector) return;
     assert(owner && dt == 0.25f);
     ++lobby_updates;
 }
@@ -242,6 +257,7 @@ static void ABI refresh_selector_mock(unsigned char *self) {
     choice(NULL, 0); /* Must not dispatch a game-mode change while resetting Race Type. */
 }
 static void ABI original_handler(void *self, void *event, void *owner) {
+    check_mode_options(self);
     int index; memcpy(&index, (unsigned char *)event + 8, 4);
     /* Selection event precedes the native stored-index update. */
     choice(owner, index);
@@ -377,7 +393,7 @@ static void ABI disable_node_mock(void *context, unsigned char *pins) {
     (void)context; assert(pins); ++disable_node_calls;
 }
 static int expected_grid, grid_calls;
-static unsigned char ranking_handle[0x30], panel_handle[0x30];
+static unsigned char ranking_handle[0x30], panel_handle[0x30], score_handle[0x30], score_project[0x80];
 static unsigned char members_handle[0x30], members_project[0x20], members_root[0x120];
 static unsigned char leaders_handle[0x30], leaders_project[0x20];
 static unsigned char ranking_project[0x20], panel_project[0x20], panel_root[0x20];
@@ -426,6 +442,7 @@ static void ABI open_panel_mock(void **result, void *manager, const char *name,
         assert(options[0x21] == 1);
         ++hof_named_opens; *result = hof_result_handle; return;
     }
+    if (!strcmp(name, "Octane_EndRaceMenu")) { *result = score_handle; return; }
     if (!strcmp(name, "Octane_LobbyMembers")) {
         *result = members_handle;
         return;
@@ -604,7 +621,7 @@ static void ABI unload_directory_mock(void *manager, unsigned char *directory, i
     assert(manager == (void *)0x42 && types == 1 && flags == 0);
     int references;
     memcpy(&references, directory + 0x84, sizeof references);
-    assert(references > 0); --references;
+    assert(references >= 0); if (references) --references;
     memcpy(directory + 0x84, &references, sizeof references);
     ++directory_unloads;
 }
@@ -911,32 +928,15 @@ static void test_region(size_t shift) {
     put_pointer(image, 0x2774d98, image + 0x273fc0);
     assert(runtime_online_mode_start(image, size));
     void (ABI *unload)(void *, unsigned char *, int, int) = (void *)(image + (0x14fb600 - shift));
-    const char *directory_names[] = {
-        "vsc:/UI/Octane_Lobby_Main_Root.igz",
-        "temporary/octane/data/ps4/output/vsc/ui/Octane_Lobby_PrivateGame_Root.igz",
-        "ui/Octane_HallOfFame.igz", "UI:/Octane_Lobby_ModeSelect.igz",
-        "Octane_Lobby_Main", "Scripts.Graph.Octane_Leaderboards_Root",
-        "textures/menu.igz", "levels/ngin_labs.igz"
-    };
-    static unsigned char directories[2][8][0xc0];
-    for (int i = 0; i < 8; ++i) {
-        unsigned char *directory = directories[shift != 0][i];
-        put_pointer(directory, 0x10, directory_names[i]);
-        int *references = (int *)(directory + 0x84);
-        *references = i == 0 ? 0 : 1;
-        int before = directory_unloads;
-        unload((void *)0x42, directory, 1, 0);
-        if (i < 6) {
-            assert(directory_unloads == before && *references == 1);
-            unload((void *)0x42, directory, 1, 0);
-            assert(directory_unloads == before && *references == 1);
-            ++*references; /* Re-entering any domain takes another native load reference. */
-            unload((void *)0x42, directory, 1, 0);
-            assert(directory_unloads == before + 1 && *references == 1);
-        } else {
-            assert(directory_unloads == before + 1 && !*references);
-        }
-    }
+    const unsigned char unload_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
+    assert(!memcmp((void *)unload, unload_prefix, sizeof unload_prefix));
+    unsigned char directory[0xc0] = {0};
+    put_pointer(directory, 0x10, "octanecustomization_readycountdown");
+    *(int *)(directory + 0x84) = 1;
+    int before_unload = directory_unloads;
+    unload((void *)0x42, directory, 1, 0);
+    assert(directory_unloads == before_unload + 1 && !*(int *)(directory + 0x84));
     void (ABI *open_asset)(void **, void *, void *, void *, int, void *, float) =
         (void *)(image + 0x986170);
     {
@@ -1059,6 +1059,26 @@ static void test_region(size_t shift) {
     result[0] = 99;
     event.index = 2; handle(self, &event, result);
     assert(result[0] == 99);
+    checked_mode_selector = self;
+    void (ABI *update_mode)(void *, void *, float);
+    memcpy(&update_mode, image + 0x2773b50, sizeof update_mode);
+    for (int context = 0; context < 3; ++context) {
+        private = context == 1;
+        public_available = context == 0;
+        expected_mode_options[0] = 1;
+        expected_mode_options[1] = context != 2;
+        expected_mode_options[2] = private;
+        items[0] = 1; items[1] = items[2] = 0;
+        self[0x194] = 1; /* Captured live hang: only Normal enabled, wrapping on. */
+        event.index = 0;
+        handle(self, &event, result);
+        items[1] = items[2] = 0;
+        self[0x194] = 1;
+        update_mode(self, NULL, 0.25f);
+        check_mode_options(self);
+    }
+    checked_mode_selector = NULL;
+    private = 0;
     ranked_selected = 0;
     public_available = 0;
     event.index = 1;
@@ -2096,6 +2116,33 @@ static void test_region(size_t shift) {
     *(unsigned *)(members_root + 12) &= ~0x400u;
     open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
     assert(*(unsigned *)members_handle == members_references); /* A new Online entry takes a fresh reference. */
+    unsigned char ranked_score_root[0x120] = {0}, score_composition[0x30] = {0};
+    unsigned char ranked_score_asset[0x30] = {0}, score_icon[0x120] = {0};
+    put_pointer(score_handle, 0x28, score_project);
+    put_pointer(score_project, 0x10, ranked_score_root);
+    put_pointer(ranked_score_root, 0x38, ranked_score_asset);
+    put_pointer(ranked_score_asset, 0x28, score_composition);
+    put_pointer(score_composition, 0, image + 0x2431b18);
+    put_pointer(score_composition, 0x20, score_icon);
+    put_pointer(score_icon, 0x28, "OCTR_RESULT_ICON_0_3");
+    score_result = (struct runtime_ranked_result){.mode=0,.ranked=1,.tier=3,.tier_before=3};
+    ranked_score_ready = 1;
+    void *score = NULL;
+    open_race_ui_project(&score, NULL, "Octane_EndRaceMenu", NULL, -1, NULL, 0);
+    assert(*(unsigned *)(score_icon+12) & 0x400); /* Non-Ranked stays hidden. */
+    ranked_score_active = 1;
+    runtime_online_mode_note_frame();
+    assert(!(*(unsigned *)(score_icon+12) & 0x400));
+    assert(*(float *)(score_icon+0xe0) == 1);
+    score_result.mode = 1;
+    runtime_online_mode_note_frame();
+    assert(*(unsigned *)(score_icon+12) & 0x400); /* Never show the other mode's badge. */
+    unsigned score_references = *(unsigned *)score_handle;
+    project_event(score_project, unload_event);
+    assert(*(unsigned *)score_handle == score_references-1);
+    project_event(score_project, unload_event);
+    assert(*(unsigned *)score_handle == score_references-1);
+    ranked_score_active = ranked_score_ready = 0;
     hof_active = 0;
     runtime_online_mode_note_frame(); /* Retire the HOF handle after native unload. */
     hof_expected_root = hof_expected_project = NULL;

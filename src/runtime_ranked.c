@@ -60,7 +60,8 @@ static uint64_t monotonic_ms(void) {
 }
 
 static char result_text[72];         /* " +45 (1045 Gold Mask)" once scored */
-static uint64_t result_room;
+static uint64_t result_room, result_generation;
+static struct runtime_ranked_result race_result;
 static struct {
     char name[17];
     int tier, mode, mmr;
@@ -425,6 +426,9 @@ void runtime_ranked_race_end(void) {
     struct ranked_outbox *out = calloc(1, sizeof *out);
     if (!out) return;
     out->room = room;
+    pthread_mutex_lock(&lock);
+    out->generation = result_generation;
+    pthread_mutex_unlock(&lock);
     out->mode = mode;
     out->count = count;
     memcpy(out->order, order, (size_t)count * sizeof order[0]);
@@ -467,6 +471,60 @@ static int json_string(const char *s, const char *key, char *out, size_t size) {
     return 1;
 }
 
+/* Result fields must belong to the local player, never a nested participant. */
+static int result_integer(const char *reply, const char *key, int *value) {
+    const char *p = runtime_json_field(reply, key);
+    if (!p || (*p != '-' && !isdigit((unsigned char)*p))) return 0;
+    char *end;
+    errno = 0;
+    long n = strtol(p, &end, 10);
+    while (isspace((unsigned char)*end)) ++end;
+    if (errno || n < INT_MIN || n > INT_MAX || (*end != ',' && *end != '}')) return 0;
+    *value = (int)n;
+    return 1;
+}
+
+static int result_boolean(const char *reply, const char *key, int *value) {
+    const char *p = runtime_json_field(reply, key);
+    if (!p) return 0;
+    size_t length = !strncmp(p, "true", 4) ? 4 : !strncmp(p, "false", 5) ? 5 : 0;
+    if (!length) return 0;
+    *value = length == 4;
+    p += length;
+    while (isspace((unsigned char)*p)) ++p;
+    return *p == ',' || *p == '}';
+}
+
+static int result_string(const char *reply, const char *key, char *value, size_t size) {
+    const char *p = runtime_json_field(reply, key);
+    if (!p || *p++ != '"') return 0;
+    size_t n = 0;
+    while (*p && *p != '"' && *p != '\\' && n + 1 < size) value[n++] = *p++;
+    value[n] = 0;
+    return *p == '"';
+}
+
+void runtime_ranked_race_begin(void) {
+    pthread_mutex_lock(&lock);
+    ++result_generation;
+    memset(&race_result, 0, sizeof race_result);
+    result_text[0] = 0;
+    result_room = 0;
+    pthread_mutex_unlock(&lock);
+}
+
+int runtime_ranked_result_copy(struct runtime_ranked_result *out) {
+    uint64_t room = 0;
+    int mode = 0;
+    if (!runtime_ranked_session(&room, &mode)) return 0;
+    pthread_mutex_lock(&lock);
+    *out = race_result;
+    if (!out->ready) out->mode = mode;
+    const int ready = out->ready && out->room == room && out->mode == mode;
+    pthread_mutex_unlock(&lock);
+    return ready;
+}
+
 /* The sender: owns the outbox, posts it with its retry budget, reads the
  * answers, and leaves the last scored delta for the lobby card. */
 void *ranked_sender(void *arg) {
@@ -494,18 +552,50 @@ void *ranked_sender(void *arg) {
 
         char *reply = NULL;
         size_t reply_size = 0;
-        const int status = runtime_ryunet_transfer("POST", target, body, strlen(body), &reply, &reply_size, 512);
+        const int status = runtime_ryunet_transfer("POST", target, body, strlen(body), &reply, &reply_size, 16384);
         fprintf(stderr, "Ranked: POST -> %d %.160s\n", status, reply ? reply : "(no reply)");
-        char state[16] = "", tier[32] = "";
-        int delta = 0, mmr = 0;
+        char state[16] = "", tier[40] = "", previous[40] = "";
+        struct runtime_ranked_result result = {.room = out->room,
+            .generation = out->generation, .mode = out->mode};
         int resolved = status == 200 && reply &&
-            json_string(reply, "status", state, sizeof state) && !strcmp(state, "resolved") &&
-            json_int(reply, "delta", &delta) && json_int(reply, "mmr", &mmr);
+            result_string(reply, "status", state, sizeof state) && !strcmp(state, "resolved") &&
+            result_integer(reply, "delta", &result.delta);
         if (resolved) {
-            json_string(reply, "tier", tier, sizeof tier);
+            if (runtime_json_field(reply, "ranked"))
+                resolved = result_boolean(reply, "ranked", &result.ranked);
+            else result.ranked = runtime_json_field(reply, "mmr") != NULL;
+            if (runtime_json_field(reply, "ranked_before"))
+                resolved = resolved && result_boolean(reply, "ranked_before", &result.ranked_before);
+            if (runtime_json_field(reply, "delta_applied"))
+                resolved = resolved && result_integer(reply, "delta_applied", &result.delta);
+            int response_mode = out->mode;
+            if (runtime_json_field(reply, "mode"))
+                resolved = resolved && result_integer(reply, "mode", &response_mode) && response_mode == out->mode;
+            result_integer(reply, "placements", &result.placements);
+            if (result.ranked) {
+                resolved = resolved && result_integer(reply, "mmr", &result.mmr) && result.mmr >= 0 &&
+                    result_string(reply, "tier", tier, sizeof tier);
+                result.tier = tier_index(tier, out->mode);
+                resolved = resolved && result.tier > 0;
+            }
+            if (result.ranked_before) {
+                resolved = resolved && result_integer(reply, "mmr_before", &result.before) &&
+                    result_string(reply, "tier_before", previous, sizeof previous);
+                result.tier_before = tier_index(previous, out->mode);
+                resolved = resolved && result.tier_before > 0;
+            }
+        }
+        if (resolved) {
+            result.ready = 1;
             pthread_mutex_lock(&lock);
-            snprintf(result_text, sizeof result_text, " %+d (%d %s)", delta, mmr, tier);
-            result_room = out->room;
+            if (out->generation == result_generation) {
+                race_result = result;
+                if (result.ranked)
+                    snprintf(result_text, sizeof result_text, " %+d (%d %s)", result.delta, result.mmr, tier);
+                else
+                    snprintf(result_text, sizeof result_text, " (%d placements remaining)", result.placements);
+                result_room = out->room;
+            }
             pthread_mutex_unlock(&lock);
         }
         free(reply);

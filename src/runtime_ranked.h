@@ -10,7 +10,7 @@ extern "C" {
 
 /* One race's report, owned by its sender thread (runtime_ranked.c). */
 struct ranked_outbox {
-    uint64_t room;
+    uint64_t room, generation;
     int mode;                    /* 0 Normal, 1 Itemless */
     int count;                   /* racers in the order, 2..8 */
     char track[48];
@@ -27,6 +27,14 @@ void runtime_ranked_start(void);
 /* Game thread, at the validated host results event: hands the finish order to
  * a sender thread. 0 when this race is not a ranked race. */
 void runtime_ranked_race_end(void);
+
+struct runtime_ranked_result {
+    uint64_t room, generation;
+    int mode, ready, ranked, ranked_before;
+    int mmr, before, delta, tier, tier_before, placements;
+};
+void runtime_ranked_race_begin(void);
+int runtime_ranked_result_copy(struct runtime_ranked_result *out);
 
 /* The lobby card's suffix for the last scored race in this room ("" none). */
 const char *runtime_ranked_result_text(void);

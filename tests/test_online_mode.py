@@ -53,6 +53,46 @@ class OnlineModeTests(unittest.TestCase):
                          'data/Octane/textures/ui/Octane/Icons/octane_ui_ico_quick.tga')
         self.assertIn('octane_ui_ico_quick', QUICK_ICON_TEXTURE)
 
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game dump')
+    def test_permanent_ui_owns_dependency_closure(self):
+        game = Path(os.environ['BB_TEST_GAME'])
+        pak = game / 'archives/update2.pak'
+        entries = iga.pak_entries(pak)
+        permanent = online_mode.PACKAGE_PREFIX + 'packages/generated/ui/domains/juicedomain_permanent_pkg.igz'
+        index = next(i for i, e in enumerate(entries) if e[0].lower() == permanent)
+        original = online_mode.package_rows(Igz(online_mode.current_entry(pak, entries, index, None)))[1]
+        ready = 'vsc/common/ui/octane_customization/octanecustomization_readycountdown.igz'
+        self.assertNotIn(('vsc', ready), original)
+        with tempfile.TemporaryDirectory() as temp:
+            patched_path = 'vsc/ui/octane_lobby_privategame/octane_lobby_privategame_root.igz'
+            ready_index = next(i for i, e in enumerate(entries) if e[0].lower() == online_mode.PACKAGE_PREFIX + patched_path)
+            graph = Igz(online_mode.current_entry(pak, entries, ready_index, None))
+            graph.string_index('preserved-ui-patch')
+            graph_bytes = graph.build()
+            base = Path(temp) / 'base.bbpatch'
+            import archive_patch
+            archive_patch.write_entries_patch(base, pak, '/app0/archives/update2.pak',
+                                              {ready_index: graph_bytes})
+            patches, mapped = {'/app0/archives/update2.pak': base}, {}
+            online_mode.permanent_ui_package(game, Path(temp), patches, mapped)
+            rows = online_mode.package_rows(Igz(online_mode.current_entry(
+                pak, entries, index, patches['/app0/archives/update2.pak'])))[1]
+            self.assertEqual(rows[:len(original)], original)
+            self.assertIn(('vsc', ready), rows)
+            self.assertEqual(len(rows), len({path for _, path in rows}))
+            self.assertFalse(any(path.startswith('models/') for path in mapped))
+            self.assertTrue(any(path.startswith('sound_samples/') for path in mapped))
+            self.assertTrue(any(kind == 'material_instances' and path in mapped for kind, path in rows))
+            self.assertEqual(mapped[patched_path].read_bytes(), graph_bytes)
+            for path, source in mapped.items():
+                self.assertTrue(source.is_file(), path)
+            graph = Igz(mapped[ready].read_bytes())
+            dependency = graph.fixup('TDEP')
+            for raw in dependency[3].split(b'\0')[1:dependency[1] * 2:2]:
+                path = raw.decode().lower().replace(':/', '/')
+                if path.startswith('<build>data/'):
+                    self.assertIn(path.removeprefix('<build>data/'), mapped)
+
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_native_return_focus_fields(self):
         pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import archive_patch
 import hall_of_fame
+from ranked_results import score_card
 from build_ui_asset import build_pak as build_ui_asset_pak, lobby_background_texture
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets, pack_offsets
@@ -1286,8 +1287,84 @@ def known_heroes(game):
     return ''
 
 
+def permanent_ui_package(game, out, patches, mapped):
+    """Let the native permanent chunk own UI definitions and their dependencies."""
+    from contextlib import ExitStack
+    from graphics_tab import Archive
+    names = ('permanent', 'juicedomain_permanent', 'juicedomain_startscreen',
+             'juicedomain_race', 'juicedomain_onlinemenus', 'update', 'update2')
+    permanent_path = 'packages/generated/ui/domains/juicedomain_permanent_pkg.igz'
+    with ExitStack() as stack:
+        files, overrides = {}, {}
+        for name in names:
+            archive = Archive(resolve(Path(game) / 'archives' / (name + '.pak')))
+            stack.callback(archive.f.close)
+            guest = '/app0/archives/' + name + '.pak'
+            if base := patches.get(guest):
+                entries = iga.pak_entries(Path(archive.f.name))
+                ranges = archive_patch.read(base)[2]
+                records = {offset for offset, _ in ranges}
+                for index in range(len(entries)):
+                    if 0x38 + 4 * len(entries) + 16 * index in records:
+                        overrides[archive, index] = current_entry(Path(archive.f.name), entries, index, base)
+            for index in range(len(archive.names)):
+                path = archive.logical(index).lower().removeprefix(PACKAGE_PREFIX)
+                files[path] = (archive, index)
+
+        def read(path):
+            archive, index = files[path]
+            if (archive, index) in overrides:
+                return overrides[archive, index]
+            return archive.read(index)
+
+        kinds, roots = {}, set()
+        for domain in ('permanent', 'startscreen', 'race', 'onlinemenus'):
+            path = f'packages/generated/ui/domains/juicedomain_{domain}_pkg.igz'
+            _, rows = package_rows(Igz(read(path)))
+            kinds.update((path, kind) for kind, path in rows)
+            roots.update(path for kind, path in rows if kind == 'vsc' and
+                         path.startswith(('vsc/ui/', 'vsc/common/ui/')))
+        pending, needed = sorted(roots), {}
+        while pending:
+            path = pending.pop()
+            if path in needed or path not in kinds:
+                continue  # Dependencies outside these chunks already have native owners.
+            data = read(path)
+            needed[path] = data
+            if kinds[path] in ('texture', 'lang_file', 'sound_stream'):
+                continue
+            try:
+                fixup = Igz(data).fixup('TDEP')
+            except KeyError:
+                continue
+            for raw in fixup[3].split(b'\0')[1:fixup[1] * 2:2]:
+                dependency = raw.decode().lower().removeprefix('<build>project:/' + PACKAGE_PREFIX)
+                dependency = dependency.replace(':/', '/')
+                if dependency.startswith('<build>data/'):
+                    dependency = dependency.removeprefix('<build>data/')
+                if dependency.startswith('<build>materials/'):
+                    dependency = 'materialinstances/' + dependency.removeprefix('<build>materials/')
+                pending.append(dependency)
+        permanent = package_with_rows(read(permanent_path),
+                                      [(kinds[path], path) for path in sorted(needed)])
+        archive, index = files[permanent_path]
+        guest = '/app0/archives/' + Path(archive.f.name).name
+        target = out / 'permanent-ui.bbpatch'
+        archive_patch.write_entries_patch(target, Path(archive.f.name), guest,
+                                          {index: permanent}, patches.get(guest), override={index})
+        patches[guest] = target
+        for path, data in needed.items():
+            if path in mapped:
+                continue
+            dest = long_path(out / 'permanent-ui-assets' / path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            mapped[path] = dest
+
+
 def prepare(game, out, elf, bases):
     out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
     assets = out / 'cup-assets'
     (assets / 'vsc/ui/octane_lobby_main/octr_halloffamebutton.igz').unlink(missing_ok=True)
     (assets / 'vsc/ui/octane_lobby_privategame/octane_lobby_privategame_teambutton.igz').unlink(missing_ok=True)
@@ -1313,6 +1390,8 @@ def prepare(game, out, elf, bases):
         race_ui_index = next(i for i, e in enumerate(entries) if e[0].lower() ==
                              PACKAGE_PREFIX + 'ui/octane_race_ranking.igz')
         ranking_ui = team_ranking_header(current_entry(pak, entries, ranking_ui_index, base))
+        reward_index = next(i for i,e in enumerate(entries) if e[0].lower().endswith('/ui/octane_aar_wumpaonly.igz'))
+        score_ui = score_card(current_entry(pak, entries, race_ui_index, base), iga.read_entry(f, *entries[reward_index][1:]))
         ranking_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_ROOT)
         ranking = team_ranking_navigation(iga.read_entry(f, *entries[ranking_index][1:]))
         settings_index = next(i for i, e in enumerate(entries) if e[0].lower() == SETTINGS_ENTRY)
@@ -1375,10 +1454,15 @@ def prepare(game, out, elf, bases):
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()
     mapped = dict(mapped)
+    race_package = package_with_rows(race_package, [
+        ('material_instances', LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(PACKAGE_PREFIX)),
+        *[('texture', path.lower()) for path in tier_assets if path.startswith('textures/')]])
     ranking_replacements = {
         TEAM_RANKING_UI.removeprefix(PACKAGE_PREFIX): ranking_ui,
         TEAM_RANKING_ROOT.removeprefix(PACKAGE_PREFIX): ranking,
-        'ui/octane_race_ranking.igz': current_entry(pak, entries, race_ui_index, base),
+        LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(PACKAGE_PREFIX): member_materials,
+        **{path.lower(): data for path, data in tier_assets.items() if path.startswith('textures/')},
+        'ui/octane_race_ranking.igz': score_ui,
     }
     for project in ('octane_battleteam_ranking', 'octane_race_ranking', 'octane_race_leaders'):
         archive = out / (project + '.pak')
@@ -1468,19 +1552,18 @@ def prepare(game, out, elf, bases):
     for asset in root.rglob('*'):
         if asset.is_file():
             mapped.setdefault(asset.relative_to(root).as_posix(), asset)
-    file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
-             [(Path(relative), source) for relative, source in mapped.items()])
     music_index = next(i for i, e in enumerate(entries) if e[0].lower() == RACE_MUSIC_ENTRY)
     with pak.open('rb') as f:
         music = team_finish_sounds(iga.read_entry(f, *entries[music_index][1:]))
     target = out / 'online-mode.bbpatch'
     archive_patch.write_entries_patch(target, pak, guest,
-                                      {index: payload, lobby_index: lobby, main_index: main_lobby,
+                                      {index: payload, race_ui_index: score_ui, lobby_index: lobby, main_index: main_lobby,
                                        main_material_index: main_materials, package_index: package,
+                                       race_package_index: race_package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
                                        lobby_root_index: lobby_root, music_index: music, public_index: public_lobby,
                                        lobby_members_index: lobby_members}, base,
-                                      override={index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
+                                      override={index, race_ui_index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
                                                 main_material_index,
                                                  lobby_members_index})
     patches[guest] = target
@@ -1584,6 +1667,9 @@ def prepare(game, out, elf, bases):
     archive_patch.write_entries_patch(target, label_pak, guest, replacements, label_base,
                                       override={update_material_index})
     patches[guest] = target
+    permanent_ui_package(game, out, patches, mapped)
+    file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
+             [(Path(relative), source) for relative, source in mapped.items()])
     return list(patches.values()), f'{site:x}'
 
 
