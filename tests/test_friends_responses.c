@@ -2,6 +2,11 @@
 #include <assert.h>
 
 static char friends_csv[NP_FRIENDS_CSV_CAPACITY];
+static char current_host[24];
+static int frozen_race, left_room;
+int runtime_room_mode_race_frozen(void) { return frozen_race; }
+void runtime_room_mode_left(void) { ++left_room; }
+void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", current_host); }
 const char *runtime_np_get_friends_csv(void) { return friends_csv; }
 const char *runtime_np_get_online_name(void) { return "LocalPlayer"; }
 uint64_t runtime_np_calculate_account_id(const char *name) {
@@ -12,6 +17,28 @@ uint64_t runtime_np_calculate_account_id(const char *name) {
 void runtime_net_trace(const char *format, ...) { (void)format; }
 
 int main(void) {
+    char sessions[] = "/tmp/ctr-session-test-XXXXXX";
+    assert(mkdtemp(sessions));
+    assert(!setenv("BB_SESSIONS_DIR", sessions, 1));
+    private_room_active(1); frozen_race = 1;
+    remove_active_session();
+    assert(s_private_room && !left_room);
+    frozen_race = 0;
+    remove_active_session();
+    assert(!s_private_room && left_room == 1);
+    assert(!rmdir(sessions));
+    assert(!unsetenv("BB_SESSIONS_DIR"));
+    assert(queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1000));
+    s_invite.taken = 1;
+    s_invite.next_offer = 1010;
+    assert(!queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1001));
+    assert(s_invite.taken && s_invite.next_offer == 1010 && s_invite.expires == 1240);
+    s_invite.active = 0;
+    strcpy(current_host, "HostPlayer");
+    assert(!queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1002));
+    assert(!s_invite.active);
+    current_host[0] = 0;
+    assert(queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1003));
     const int counts[] = {0, 1, 32, RF_MAX_FRIENDS};
     for (unsigned c = 0; c < sizeof counts / sizeof counts[0]; ++c) {
         size_t pos = 0;

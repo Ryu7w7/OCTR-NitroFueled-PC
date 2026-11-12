@@ -5,6 +5,8 @@
 #endif
 #include "runtime.h"
 #include "runtime_http.h"
+#include "runtime_json.h"
+#include "runtime_hall_of_fame.h"
 #include "runtime_np_online.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +59,9 @@ static void (ABI *native_return_to_lobby)(void);
 static uint64_t session_generation;
 static void (ABI *native_make_handle)(void **, void *);
 static void (ABI *native_resolve_handle)(void **);
+static void *(ABI *native_meta_field)(void *, const char *);
+static void *(ABI *native_leaderboard_ready)(void *);
+static void (ABI *native_release_object)(void *);
 static void (ABI *native_destroy_handle)(void **);
 
 static int itemless_client_available(void) {
@@ -113,6 +118,15 @@ int runtime_public_itemless_active(void) {
     return active;
 }
 
+int runtime_public_itemless_lobby_mode(void) {
+    pthread_mutex_lock(&mode_lock);
+    uint64_t native_room = 0;
+    if (room_owner) memcpy(&native_room, room_owner + 0x958, 8);
+    int mode = confirmed_room && native_room == confirmed_room ? confirmed_itemless : selected;
+    pthread_mutex_unlock(&mode_lock);
+    return !!mode;
+}
+
 int runtime_ranked_active(void) {
     pthread_mutex_lock(&mode_lock);
     uint64_t native_room = 0;
@@ -130,7 +144,7 @@ int runtime_ranked_session(uint64_t *room, int *mode) {
     const int active = confirmed_ranked && confirmed_room && native_room == confirmed_room;
     if (active) {
         if (room) *room = confirmed_room;
-        if (mode) *mode = selected ? 1 : 0;
+        if (mode) *mode = confirmed_itemless ? 1 : 0;
     }
     pthread_mutex_unlock(&mode_lock);
     return active;
@@ -203,34 +217,6 @@ int runtime_public_itemless_announce(void) {
     return accepted;
 }
 
-/* Find an unescaped top-level JSON field. Skip nested and escaped strings; reject duplicates. */
-static const char *field(const char *json, const char *key) {
-    if (!json || *json != '{') return NULL;
-    int depth = 0;
-    const char *found = NULL;
-    for (const char *p = json; *p; ++p) {
-        if (*p == '"') {
-            const char *start = ++p;
-            int escaped = 0;
-            while (*p && *p != '"') {
-                if (*p == '\\') { escaped = 1; if (!*++p) return NULL; }
-                ++p;
-            }
-            if (!*p) return NULL;
-            const char *after = p + 1;
-            while (isspace((unsigned char)*after)) ++after;
-            if (depth == 1 && !escaped && *after == ':' &&
-                (size_t)(p - start) == strlen(key) && !memcmp(start, key, strlen(key))) {
-                if (found) return NULL;
-                found = after + 1;
-                while (isspace((unsigned char)*found)) ++found;
-            }
-        } else if (*p == '{' || *p == '[') ++depth;
-        else if (*p == '}' || *p == ']') { if (--depth < 0) return NULL; }
-    }
-    return depth ? NULL : found;
-}
-
 /* Only immutable request text crosses to the HTTP worker. Native roster/UI
  * access stays on the game thread; exact roster+feature keys prevent reuse. */
 static pthread_mutex_t check_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -280,7 +266,7 @@ static int compatibility_check(const char *target,char *body,size_t size) {
 }
 
 static int ranked_party_check(const char *doc) {
-    const char *members = field(doc, "members");
+    const char *members = runtime_json_field(doc, "members");
     char ids[192], target[512], body[512];
     size_t n = 0;
     if (!members || *members++ != '[') return 0;
@@ -398,17 +384,21 @@ int runtime_private_party_check(void) {
 
 /* Native handles track object lifetime; never retain a raw UI pointer across frames.
  * FocusInputPressed is 0x28 bytes: sender handle at +0x10, signal at +0x18. */
+struct GuiFocusInputEvent {
+    void *vtable;
+    uint64_t flags;
+    void *sender;
+    unsigned signal;
+    unsigned char tail[12];
+};
+static void *(ABI *native_deferred_event_create)(void *, void *, int);
+static void (ABI *native_deferred_event_release)(void *);
 static struct PendingPrivate {
     void *target;
-    struct {
-        void *vtable;
-        uint64_t flags;
-        void *sender;
-        unsigned signal;
-        unsigned char tail[12];
-    } event;
+    struct GuiFocusInputEvent *event;
     void (ABI *resume)(void *);
     uint64_t generation, deadline;
+    int ranked;
     char party[512];
 } pending_private;
 
@@ -435,7 +425,7 @@ static void clear_private_pending(void) {
     struct PendingPrivate cancelled=pending_private;
     memset(&pending_private,0,sizeof pending_private);
     release_handle(&cancelled.target);
-    release_handle(&cancelled.event.sender);
+    if (cancelled.event) native_deferred_event_release(cancelled.event);
 }
 void runtime_private_party_cancel(void) { clear_private_pending(); }
 
@@ -448,17 +438,25 @@ static void defer_private(void *self, void *event, void (ABI *resume)(void *)) {
         return;
     }
     if (event) {
-        memcpy(&pending_private.event,event,sizeof pending_private.event);
-        /* The copied event has no registered object identity of its own. */
-        pending_private.event.flags &= ~UINT64_C(0x7ffff);
-        void *sender=pending_private.event.sender;
+        typedef void *(ABI *EventType)(void *);
+        EventType type = (*(EventType **)event)[0];
+        pending_private.event = native_deferred_event_create(type(event), NULL, 0);
+        if (!pending_private.event) {
+            clear_private_pending();
+            notice("Cannot prepare the compatibility check. Please try again.");
+            return;
+        }
+        /* Keep the factory-owned identity; only copy the input payload. */
+        memcpy(&pending_private.event->sender, (char *)event + 0x10,
+               sizeof *pending_private.event - 0x10);
+        void *sender=pending_private.event->sender;
         if (sender) __atomic_fetch_add((unsigned *)sender,1,__ATOMIC_SEQ_CST);
     }
     pending_private.resume=resume;
     pending_private.generation=__atomic_load_n(&session_generation,__ATOMIC_SEQ_CST);
     pending_private.deadline=check_clock()+15000;
     snprintf(pending_private.party,sizeof pending_private.party,"%s",checked_party);
-    fputs("Private compatibility: waiting before Ready/Start\n",stderr);
+    fputs("Lobby entry: waiting for server check\n",stderr);
 }
 void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *)) {
     defer_private(self,NULL,resume);
@@ -467,30 +465,35 @@ void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *)) {
 /* Returns 1 after dispatch: callers must not touch the old scene afterward. */
 int runtime_private_party_update(void) {
     const char *feature=runtime_online_mode_in_private() ? private_feature() : NULL;
-    if (!feature) { clear_private_pending(); return 0; }
+    if (!pending_private.ranked && !feature) { clear_private_pending(); return 0; }
     if (!pending_private.target) { (void)early_party_check(feature,0); return 0; }
     void *target=resolve_private_target(&pending_private.target);
     if (!target || pending_private.generation != __atomic_load_n(&session_generation,__ATOMIC_SEQ_CST)) {
         clear_private_pending(); return 0;
     }
-    int status=early_party_check(feature,0);
-    if (strcmp(pending_private.party,checked_party)) { clear_private_pending(); return 0; }
+    if (pending_private.ranked && (!ranked_selected || runtime_online_mode_in_private())) {
+        clear_private_pending(); return 0;
+    }
+    int status=pending_private.ranked ? runtime_ranked_status(0) : early_party_check(feature,0);
+    if (!pending_private.ranked && strcmp(pending_private.party,checked_party)) { clear_private_pending(); return 0; }
     if (status == -1 && check_clock()<pending_private.deadline) return 0;
     if (status != 1) {
+        const int ranked = pending_private.ranked;
         clear_private_pending();
-        if (status == -1) notice("Player compatibility check timed out. Please try again.");
-        else (void)early_party_check(feature,1);
+        if (status == -1) notice(ranked ? "Ranked status check timed out. Please try again." :
+            "Player compatibility check timed out. Please try again.");
+        else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
     struct PendingPrivate ready=pending_private;
     memset(&pending_private,0,sizeof pending_private);
     const char *previous=dispatch_approved_party;
-    dispatch_approved_party=ready.party;
+    dispatch_approved_party=ready.ranked ? previous : ready.party;
     if (ready.resume) ready.resume(target);
-    else native_placeable_event(target,&ready.event);
+    else native_placeable_event(target,ready.event);
     dispatch_approved_party=previous;
     release_handle(&ready.target);
-    release_handle(&ready.event.sender);
+    if (ready.event) native_deferred_event_release(ready.event);
     return 1;
 }
 
@@ -500,6 +503,14 @@ static const char *meta_name(void *object) {
     GetType type = (*(GetType **)object)[0];
     void *meta = type(object);
     return meta ? *(const char **)((char *)meta + 0x10) : NULL;
+}
+static const char *vsc_graph_name(void *item) {
+    const char *name = meta_name(item);
+    if (name && !strcmp(name, "igGuiVscBehavior")) {
+        void *graph = *(void **)((char *)item + 0x20);
+        name = graph ? *(const char **)((char *)graph + 0x10) : NULL;
+    }
+    return name;
 }
 /* The navigation item resolves the shared prefab's label placeable at +0xf0 ('Text_LevelListName',
  * the RNEX reference); the button's own tree has no children (the visuals live in the shared
@@ -528,6 +539,31 @@ static void menu_label(void *button, const char *label) {
         menu_text_walk(text, 0, label);
         menu_text_walk(*(void **)((char *)text + 0x40), 0, label);
     }
+}
+
+static void ranked_gate_walk(void *node, int ranked, int state, int depth) {
+    if (!node || depth > 12) return;
+    void *list = *(void **)((char *)node + 0xe8);
+    int count = list ? *(int *)((char *)list + 0xc) : 0;
+    void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; items && i < count && i < 32; ++i) {
+        const char *name = vsc_graph_name(items[i]);
+        if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) continue;
+        /* Keep focus/navigation available; only Confirm is gated. */
+        const float alpha = ranked && state != 1 ? 0.45f : 1.0f;
+        memcpy((char *)node + 0xe0, &alpha, sizeof alpha);
+        if (ranked)
+            menu_label(node, "GO TO LOBBY");
+    }
+    list = *(void **)((char *)node + 0x48);
+    count = list ? *(int *)((char *)list + 0xc) : 0;
+    items = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; items && i < count && i < 64; ++i)
+        ranked_gate_walk(items[i], ranked, state, depth + 1);
+}
+
+void runtime_ranked_gate_update(void *root, int ranked) {
+    ranked_gate_walk(root, ranked, ranked ? runtime_ranked_status(0) : 1, 0);
 }
 
 /* BB_GUI_DUMP=1: print the whole placeable tree above the ranked button: children tables and
@@ -579,9 +615,125 @@ static void gui_dump(void *button) {
     fprintf(stderr, "==== GUI DUMP end (%d nodes) ====\n", gui_seen_count);
 }
 
-/* The Ranked button shares the matchmaking button's VSC behavior object (one graph instance,
- * refcounted by both behavior lists), so its Confirm runs the graph with the native owner
- * exactly as when Matchmaking itself is pressed; the hook only flags the ranked mode. */
+static void *return_button_in(void *node, const char *name, int depth);
+
+static void (ABI *native_hof_focus)(void *, void *, int);
+void runtime_hof_focus_list(void *placeable) {
+    void *project = placeable ? *(void **)((char *)placeable + 0x20) : NULL;
+    if (!project) return;
+    void *root = runtime_online_mode_content(*(void **)((char *)project + 0x10));
+    void *focused = *(void **)((char *)project + 0x50);
+    const char *tag = focused ? *(const char **)((char *)focused + 0x28) : NULL;
+    int in_list = tag && !strncmp(tag, "OCTR_HOF_ROW_", 13);
+    void *target = return_button_in(root, in_list ? "OCTR_HOF_MODE" : "OCTR_HOF_ROW_0", 0);
+    if (target) {
+        native_hof_focus(project, target, 1);
+        runtime_online_mode_hof_legend(project);
+    }
+}
+
+void runtime_hof_native_ready(void *project) {
+    if (!project) return;
+    void *root = runtime_online_mode_content(*(void **)((char *)project + 0x10));
+    const char *tags[] = {"OCTR_HOF_MODE", "OCTR_HOF_POPULATION", "OCTR_HOF_SEASON", "OCTR_HOF_LIST"};
+    void *controls[4];
+    for (unsigned i = 0; i < 4; ++i) controls[i] = return_button_in(root, tags[i], 0);
+    for (unsigned i = 0; i < 4; ++i) {
+        void *list = controls[i] ? *(void **)((char *)controls[i] + 0xe8) : NULL;
+        void **items = list && *(int *)((char *)list + 12) > 0 ?
+            *(void ***)((char *)list + 0x20) : NULL;
+        if (!items || !items[0]) continue;
+        /* Native selectors normally populate these links from Time Trial data. */
+        *(void **)((char *)items[0] + 0x110) = i ? controls[i - 1] : NULL;
+        *(void **)((char *)items[0] + 0x118) = i + 1 < 3 ? controls[i + 1] : NULL;
+    }
+    void *rows[8];
+    for (unsigned i = 0; i < 8; ++i) {
+        char tag[32]; snprintf(tag, sizeof tag, "OCTR_HOF_ROW_%u", i);
+        rows[i] = return_button_in(root, tag, 0);
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        void *list = rows[i] ? *(void **)((char *)rows[i] + 0xe8) : NULL;
+        void **items = list && *(int *)((char *)list + 12) > 0 ?
+            *(void ***)((char *)list + 0x20) : NULL;
+        if (!items || !items[0]) continue;
+        *(void **)((char *)items[0] + 0x110) = i ? rows[i - 1] : NULL;
+        *(void **)((char *)items[0] + 0x118) = i + 1 < 8 ? rows[i + 1] : NULL;
+    }
+    unsigned char *event = native_leaderboard_ready(NULL);
+    if (!event) return;
+    /* HOF owns loading/empty labels; native HasData reveals the selectors and list. */
+    event[0x18] = 0;
+    typedef void (ABI *Dispatch)(void *, void *);
+    Dispatch dispatch = *(Dispatch *)((char *)*(void **)project + 0xb0);
+    dispatch(project, event);
+    native_release_object(event);
+    runtime_online_mode_hof_legend(project);
+    puts("HOF: dispatched native LeaderboardReady");
+}
+
+/* MainMenu_Base_ButtonIndex remains 0 for clones; preserve their native focus target. */
+static int online_return_button;
+static void *return_button_in(void *node, const char *name, int depth) {
+    if (!node || depth > 8) return NULL;
+    const char *tag = *(const char **)((char *)node + 0x28);
+    if (tag && !strcmp(tag, name)) return node;
+    void *list = *(void **)((char *)node + 0x48);
+    int count = list ? *(int *)((char *)list + 12) : 0;
+    void **children = list ? *(void ***)((char *)list + 0x20) : NULL;
+    for (int i = 0; children && i < count; ++i) {
+        void *found = return_button_in(children[i], name, depth + 1);
+        if (found) return found;
+    }
+    return return_button_in(runtime_online_mode_content(node), name, depth + 1);
+}
+static void native_return_focus(void *node, int ancestors) {
+    for (int depth = 0; node && depth < 16; ++depth) {
+        void *list = *(void **)((char *)node + 0xe8);
+        int count = list ? *(int *)((char *)list + 12) : 0;
+        void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
+        for (int i = 0; items && i < count; ++i) {
+            const char *name = vsc_graph_name(items[i]);
+            if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_Main_Root")) continue;
+            typedef void *(ABI *GetType)(void *);
+            void *meta = (*(GetType **)items[i])[0](items[i]);
+            const char *names[] = {"Gui_Placeable_id_gto91nsu",
+                "Gui_Placeable_id_rcxu6uoi", "Gui_Placeable_id_bdnprt14"};
+            void **slots[3];
+            for (unsigned j = 0; j < 3; ++j) {
+                unsigned char *field = native_meta_field(meta, names[j]);
+                if (!field) {
+                    printf("Online focus: missing reflected field %s\n", names[j]);
+                    return;
+                }
+                unsigned short offset;
+                memcpy(&offset, field + 0x14, sizeof offset);
+                slots[j] = (void **)((char *)items[i] + offset);
+            }
+            void *target = online_return_button ? return_button_in(node,
+                online_return_button == 1 ? "OCTR_RANKED_BUTTON" : "OCTR_HALL_OF_FAME_BUTTON", 0) :
+                resolve_private_target(slots[0]);
+            if (!target) {
+                printf("Online focus: selection=%d target absent under root=%p\n", online_return_button, node);
+                return;
+            }
+            /* Use reflected native fields: loaded VSC instances do not use the IGZ layout. */
+            for (unsigned j = 1; j < 3; ++j) {
+                if (resolve_private_target(slots[j]) == target) continue;
+                release_handle(slots[j]);
+                native_make_handle(slots[j], target);
+            }
+            printf("Online focus: selection=%d root=%p native target=%p\n",
+                   online_return_button, node, target);
+            return;
+        }
+        if (!ancestors) return;
+        node = *(void **)((char *)node + 0x40);
+    }
+    if (ancestors) printf("Online focus: selection=%d no Main_Root ancestor\n", online_return_button);
+}
+
+/* Ranked uses a cloned Matchmaking button and VSC state. */
 static void ABI placeable_event(void *self, void *event) {
     char approval[sizeof checked_party] = "";
     int private_room = runtime_online_mode_in_private();
@@ -592,6 +744,10 @@ static void ABI placeable_event(void *self, void *event) {
     int hall_of_fame_button = tag && !strcmp(tag, "OCTR_HALL_OF_FAME_BUTTON");
     if (self && event) {
         const char *type = meta_name(event);
+        const int gain = type && (!strcmp(type, "igGuiEventProjectGainFocus") ||
+                                  !strcmp(type, "igGuiEventPlaceableGainFocus"));
+        if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
+        if (gain) native_return_focus(self, 0);
         int signal = 0;
         if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
             memcpy(&signal, (char *)event + 0x18, sizeof signal);
@@ -608,24 +764,44 @@ static void ABI placeable_event(void *self, void *event) {
             if (signal != 8) clear_private_pending();
         }
         /* Confirm (8) is the input filter in both native button graphs. */
-        if (type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8) {
+        const int confirm = type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8;
+        if (type && (((!strcmp(type, "igGuiEventFocusInputPressed") ||
+                      !strcmp(type, "igGuiEventFocusInputRepeated")) && signal != 10) ||
+                     (!strcmp(type, "igGuiEventProjectInputPressed") && signal == 10 &&
+                      tag && !strcmp(tag, "OCTR_HOF_ROOT"))) &&
+            runtime_hof_input(self, (unsigned)signal)) return;
+        if (tag && !strcmp(tag, "OCTR_HOF_ROOT") && type && !strcmp(type, "igGuiEventProjectUnload")) runtime_hof_close();
+        const int direction = type && (!strcmp(type, "igGuiEventFocusInputPressed") ||
+                                       !strcmp(type, "igGuiEventFocusInputRepeated")) && signal < 8;
+        if (confirm || gain || direction) {
             if (hall_of_fame_button) {
-                menu_label(self, "HALL OF FAME");
-                return;
+                if (confirm) { ranked_selected = 0; runtime_hof_open(); }
             }
             void *list = *(void **)((char *)self + 0xe8);
             int count = list ? *(int *)((char *)list + 0xc) : 0;
             void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
             for (int i = 0; items && i < count; ++i) {
-                /* VSC instances can report their dynamic graph type directly. */
-                const char *name = meta_name(items[i]);
-                if (name && !strcmp(name, "igGuiVscBehavior")) {
-                    void *graph = *(void **)((char *)items[i] + 0x20);
-                    name = graph ? *(const char **)((char *)graph + 0x10) : NULL;
-                }
-                if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"))
+                const char *name = vsc_graph_name(items[i]);
+                if (confirm && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton")) {
                     ranked_selected = ranked_button;
-                if (private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
+                    online_return_button = hall_of_fame_button ? 2 : ranked_button;
+                    native_return_focus(self, 1);
+                }
+                if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
+                    if (confirm) ranked_selected = 0;
+                    if (gain) runtime_online_mode_selector_left();
+                }
+                if (confirm && ranked_selected && !private_room && name &&
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
+                    const int state = runtime_ranked_status(1);
+                    if (state == -1) {
+                        snprintf(checked_party, sizeof checked_party, "ranked-status");
+                        defer_private(self, event, NULL);
+                        pending_private.ranked = pending_private.target != NULL;
+                    }
+                    if (state != 1) return;
+                }
+                if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
                     int status=early_party_check(feature,1);
                     if (status == -1) { defer_private(self,event,NULL); return; }
@@ -656,7 +832,7 @@ static void ABI placeable_event(void *self, void *event) {
 static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, int ranked) {
     if (!raw || *raw != '{' || !limit || limit > 65536 || !token) return NULL;
     size_t n = strnlen(raw, limit);
-    if (n == limit || field(raw, "octr_itemless") || field(raw, "octr_ranked")) return NULL;
+    if (n == limit || runtime_json_field(raw, "octr_itemless") || runtime_json_field(raw, "octr_ranked")) return NULL;
     char *out = malloc(n + 480);
     if (out) {
         size_t used = 0;
@@ -688,6 +864,7 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
     if (rejection[0]) { *result = NULL; return result; }
     if (ranked_selected) {
+        if (runtime_ranked_status(0) != 1) { *result = NULL; return result; }
         int ready = ranked_party_check(raw);
         if (ready != 1) {
             *result = NULL;
@@ -737,7 +914,7 @@ static void *ABI leave_lobby(void **result, void *self, uint64_t id) {
 
 /* Validate tokens against the authoritative confirmation document, never the host document. */
 static int confirmation_mode(const char *confirmation_doc, const char *key, uint64_t room, uint64_t token, int mode) {
-    const char *value = field(confirmation_doc, key);
+    const char *value = runtime_json_field(confirmation_doc, key);
     char prefix[80], wanted[17];
     snprintf(prefix, sizeof prefix, "\"1/%" PRIu64 "/%d/", room, mode);
     snprintf(wanted, sizeof wanted, "%016" PRIx64, token);
@@ -767,8 +944,8 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
     uint64_t token = searching ? request_nonce : allow_party ? registration_nonce : 0;
     int wants_itemless = searching && selected;
     int wants_ranked = searching && ranked_selected;
-    int itemless_advertised = field(confirmation_doc, "octr_itemless_v1") != NULL;
-    int ranked_advertised = field(confirmation_doc, "octr_ranked_v1") != NULL;
+    int itemless_advertised = runtime_json_field(confirmation_doc, "octr_itemless_v1") != NULL;
+    int ranked_advertised = runtime_json_field(confirmation_doc, "octr_ranked_v1") != NULL;
     int itemless_valid = runtime_public_itemless_available() && confirmation(confirmation_doc, room, token);
     int ranked_valid = itemless_client_available() &&
         (confirmation_mode(confirmation_doc, "octr_ranked_v1", room, token, 0) ||
@@ -907,6 +1084,12 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     size_t shift=!strcmp(hook,"1277df0") ? 0x10 : 0;
     native_make_handle=(void (ABI *)(void **,void *))(image+0x14bea20-shift);
     native_resolve_handle=(void (ABI *)(void **))(image+0x149fca0-shift);
+    native_hof_focus=(void (ABI *)(void *,void *,int))(image+0x24db60);
+    native_meta_field=(void *(ABI *)(void *,const char *))(image+0x14a7250-shift);
+    native_leaderboard_ready=(void *(ABI *)(void *))(image+0x1104d80-shift);
+    native_release_object=(void (ABI *)(void *))(image+0x149d260-shift);
+    native_deferred_event_create=(void *(ABI *)(void *,void *,int))(image+0x14a0e30-shift);
+    native_deferred_event_release=native_release_object;
     native_destroy_handle=(void (ABI *)(void **))(image+0x149f280-shift);
     installed=1;
     puts("Public ITEMLESS: isolated matchmaking hooks installed (full-party gate, native OK notice)");

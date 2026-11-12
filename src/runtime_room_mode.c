@@ -195,6 +195,13 @@ int runtime_room_mode_begin_race(void) {
     return result;
 }
 
+int runtime_room_mode_race_frozen(void) {
+    pthread_mutex_lock(&follow_lock);
+    int frozen = race_frozen;
+    pthread_mutex_unlock(&follow_lock);
+    return frozen;
+}
+
 void runtime_room_mode_end_race(void) {
     pthread_mutex_lock(&follow_lock);
     race_frozen = 0; verify_done=0; ++verify_epoch;

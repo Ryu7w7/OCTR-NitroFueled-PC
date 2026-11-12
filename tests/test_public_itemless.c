@@ -3,12 +3,30 @@
 #include <assert.h>
 #include <unistd.h>
 static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room;
-static int private_speed, private_cup, private_teams, modified_difficulty;
+static int private_speed, private_cup, private_teams, modified_difficulty, selector_left_calls;
+static void *focus_test_button;
+static unsigned synthetic_signal;
+static int hof_opens;
+void runtime_hof_open(void) { ++hof_opens; }
+void runtime_hof_close(void) {}
+static int hof_input_handled, hof_input_signal;
+int runtime_hof_input(void *placeable, unsigned signal) { (void)placeable; hof_input_signal = signal; return hof_input_handled; }
+static int ranked_status_state = 1;
+int runtime_ranked_status(int fresh) { (void)fresh; return ranked_status_state; }
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
 int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
+static void *hof_test_wrapper, *hof_test_content;
+void *runtime_online_mode_content(void *placeable) { return placeable == hof_test_wrapper ? hof_test_content : NULL; }
+static void *hof_focused_project, *hof_focused_list;
+static void ABI hof_focus_mock(void *project, void *list, int controller) {
+    assert(controller == 1); hof_focused_project = project; hof_focused_list = list;
+}
+static int hof_legends;
+void runtime_online_mode_hof_legend(void *project) { assert(project); ++hof_legends; }
+void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
 static int ranked_labels, hall_labels;
 void runtime_online_mode_set_text(void *placeable, const char *text) {
     assert(placeable);
@@ -139,6 +157,8 @@ static void test_installed_hooks(const char *region) {
 static void await_check(void);
 static void ABI forward_event(void *self, void *event) {
     (void)self; (void)event; ++forwarded;
+    if (self == focus_test_button && event && *(void **)((char *)event + 0x10))
+        synthetic_signal = *(unsigned *)((char *)event + 0x18);
     if (dispatch_approved_party) {
         int before=requests;
         assert(runtime_private_party_check());
@@ -231,6 +251,11 @@ static void test_ranked(void) {
              request_nonce, request_nonce);
     assert(accept(owner, room, confirmation_doc, (unsigned)strlen(confirmation_doc)));
     assert(runtime_ranked_active() && runtime_public_itemless_active());
+int mode_before_ui_reset = -1;
+selected = 0;
+assert(runtime_public_itemless_lobby_mode() == 1);
+assert(runtime_ranked_session(NULL, &mode_before_ui_reset) && mode_before_ui_reset == 1);
+selected = 1;
     runtime_public_itemless_reset();
     status = 404;
     expire_check();
@@ -247,12 +272,11 @@ static void test_ranked_button_event(void) {
     void *(ABI *vtable[])(void *) = {object_type};
     void *event_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
     void *graph_meta[3] = {0, 0, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"};
-    void *event[4] = {vtable, event_meta, 0, (void *)8};
+    void *event[5] = {vtable, event_meta, 0, (void *)8};
     void *behavior_meta[3] = {0, 0, "igGuiVscBehavior"};
     void *(ABI *graph_vtable[])(void *) = {graph_type};
     void *graph[5] = {graph_vtable, behavior_meta, 0, 0, graph_meta};
-    /* The Ranked button shares the matchmaking VSC behavior object (one graph instance in both
-     * behavior lists), so its Confirm runs the graph: the hook flags the ranked mode. */
+    /* Ranked uses the Matchmaking graph with cloned VSC state. */
     void *behavior_meta2[3] = {0, 0, "CGuiBehaviorOctaneNavigationItem"};
     void *(ABI *nav_vtable[])(void *) = {object_type};
     void *nav[70] = {nav_vtable, behavior_meta2};
@@ -267,20 +291,212 @@ static void test_ranked_button_event(void) {
     p = comp; memcpy(label + 0x40, &p, 8);
     p = "[LevelListName]"; memcpy(label + 0x28, &p, 8);
     ranked_selected = 0;
+    native_make_handle = make_test_handle;
+    native_destroy_handle = destroy_test_handle;
+    focus_test_button = button;
+    p = NULL; memcpy(button + 0x28, &p, 8);
+    /* Regression: returning after repeated Down (signal 5) must not replay a copied event. */
+    event_meta[2] = (char *)"igGuiEventFocusInputRepeated";
+    event[3] = (void *)5;
+    placeable_event(button, event);
+    p = "OCTR_RANKED_BUTTON"; memcpy(button + 0x28, &p, 8);
+    event_meta[2] = (char *)"igGuiEventPlaceableGainFocus";
+    placeable_event(button, event);
+    event_meta[2] = (char *)"igGuiEventFocusInputPressed";
+    event[3] = (void *)8;
     int before_forwarded = forwarded;
     placeable_event(button, event);
-    assert(ranked_selected && ranked_labels == 1);
-    assert(forwarded == before_forwarded + 1); /* only its own dispatch: the shared graph ran natively */
+    assert(ranked_selected && ranked_labels == 2);
+    assert(forwarded == before_forwarded + 1);
+    p = NULL; memcpy(button + 0x28, &p, 8);
+    event_meta[2] = (char *)"igGuiEventPlaceableGainFocus";
+    before_forwarded = forwarded;
+    placeable_event(button, event);
+    assert(forwarded == before_forwarded + 1 && synthetic_signal == 0 && handles == 0);
+    p = "OCTR_RANKED_BUTTON"; memcpy(button + 0x28, &p, 8);
+    event_meta[2] = (char *)"igGuiEventProjectGainFocus";
+    placeable_event(button, event);
+    assert(selector_left_calls == 2);
     /* LoseFocus fires during scene teardown, when the shared comp may already be gone. */
     ranked_selected = 0;
     event_meta[2] = (char *)"igGuiEventPlaceableLoseFocus";
     placeable_event(button, event);
-    assert(ranked_labels == 1 && !ranked_selected);
+    assert(ranked_labels == 3 && !ranked_selected);
     event_meta[2] = (char *)"igGuiEventFocusInputPressed";
     p = NULL; memcpy(button + 0x28, &p, 8);
     placeable_event(button, event);
     assert(!ranked_selected);
+    graph_meta[2] = (char *)"Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton";
+    event_meta[2] = (char *)"igGuiEventFocusInputPressed";
+    ranked_selected = 1;
+    placeable_event(button, event);
+    assert(!ranked_selected);
+    event_meta[2] = (char *)"igGuiEventPlaceableGainFocus";
+    placeable_event(button, event);
+    assert(selector_left_calls == 3);
+    focus_test_button = NULL;
 }
+static void *ABI focus_field(void *meta, const char *name) {
+    assert(!strcmp(((const char **)meta)[2], "Scripts.Graph.Octane_Lobby_Main_Root"));
+    static unsigned char field[0x18];
+    unsigned short offset = !strcmp(name, "Gui_Placeable_id_gto91nsu") ? 0xd0 :
+        !strcmp(name, "Gui_Placeable_id_rcxu6uoi") ? 0xe0 : 0xf8;
+    memcpy(field + 0x14, &offset, sizeof offset);
+    return field;
+}
+static int ready_events, released_events;
+static void *ready_event;
+static void *ABI make_ready_event(void *pool) {
+    assert(!pool); ready_event = calloc(1, 0x20); assert(ready_event);
+    return ready_event;
+}
+static void ABI deliver_ready_event(void *root, void *event) {
+    assert(root && event == ready_event && !((unsigned char *)event)[0x18]);
+    ++ready_events;
+}
+static void ABI release_ready_event(void *event) {
+    assert(event == ready_event); free(event); ready_event = NULL; ++released_events;
+}
+static void test_hof_native_ready(void) {
+    native_leaderboard_ready = make_ready_event;
+    native_release_object = release_ready_event;
+    void (ABI *project_vtable[23])(void *, void *) = {0};
+    project_vtable[0xb0 / 8] = deliver_ready_event;
+    unsigned char project[0x60] = {0}, root[0x100] = {0}, wrapper[0x100] = {0};
+    unsigned char controls[4][0x100] = {{0}}, navigation[4][0x120] = {{0}}, lists[4][0x28] = {{0}};
+    const char *tags[] = {"OCTR_HOF_MODE", "OCTR_HOF_POPULATION", "OCTR_HOF_SEASON", "OCTR_HOF_ROW_0"};
+    void *children[4], *behaviors[4];
+    unsigned char children_list[0x28] = {0};
+    *(void ***)project = (void **)project_vtable;
+    *(void **)(project + 0x10) = wrapper;
+    hof_test_wrapper = wrapper; hof_test_content = root;
+    *(void **)(root + 0x48) = children_list;
+    *(int *)(children_list + 12) = 4;
+    *(void **)(children_list + 0x20) = children;
+    for (unsigned i = 0; i < 4; ++i) {
+        children[i] = controls[i]; behaviors[i] = navigation[i];
+        *(const char **)(controls[i] + 0x28) = tags[i];
+        *(void **)(controls[i] + 0xe8) = lists[i];
+        *(int *)(lists[i] + 12) = 1;
+        *(void **)(lists[i] + 0x20) = behaviors + i;
+    }
+    runtime_hof_native_ready(project);
+    assert(ready_events == 1 && released_events == 1 && !ready_event && hof_legends == 1);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(*(void **)(navigation[i] + 0x110) == (i < 3 && i ? children[i - 1] : NULL));
+        assert(*(void **)(navigation[i] + 0x118) == (i + 1 < 3 ? children[i + 1] : NULL));
+    }
+    native_hof_focus = hof_focus_mock;
+    *(void **)(controls[2] + 0x20) = project;
+    runtime_hof_focus_list(controls[2]);
+    assert(hof_focused_project == project && hof_focused_list == controls[3]);
+    *(void **)(controls[3] + 0x20) = project;
+    *(void **)(project + 0x50) = controls[3];
+    runtime_hof_focus_list(controls[3]);
+    assert(hof_focused_list == controls[0]);
+    hof_test_wrapper = hof_test_content = NULL;
+    native_placeable_event = forward_event;
+}
+static void test_native_return_focus(void) {
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *(ABI *graph_vtable[])(void *) = {graph_type};
+    void *behavior_meta[3] = {0, 0, "igGuiVscBehavior"};
+    void *root_meta[3] = {0, 0, "Scripts.Graph.Octane_Lobby_Main_Root"};
+    unsigned char graph[0x140] = {0}, root[0xf0] = {0};
+    unsigned char *fields = graph + 0x40;
+    unsigned char ranked[0xf0] = {0}, hall[0xf0] = {0}, normal[0xf0] = {0};
+    *(void ***)graph = (void **)graph_vtable;
+    *(void **)(graph + 8) = behavior_meta;
+    *(void **)(graph + 0x20) = root_meta;
+    native_meta_field = focus_field; /* Runtime fields are inline, +0x18 stays NULL. */
+    void *items[] = {graph};
+    void *children[] = {normal, ranked, hall};
+    unsigned char behaviors[0x28] = {0}, child_list[0x28] = {0};
+    *(int *)(behaviors + 12) = 1; *(void ***)(behaviors + 0x20) = items;
+    *(int *)(child_list + 12) = 3; *(void ***)(child_list + 0x20) = children;
+    *(void **)(root + 0xe8) = behaviors; *(void **)(root + 0x48) = child_list;
+    *(const char **)(ranked + 0x28) = "OCTR_RANKED_BUTTON";
+    *(const char **)(hall + 0x28) = "OCTR_HALL_OF_FAME_BUTTON";
+    *(void **)(ranked + 0x40) = root;
+    native_make_handle = make_test_handle; native_destroy_handle = destroy_test_handle;
+    native_placeable_event = forward_event;
+    make_test_handle((void **)(fields + 0x90), normal);
+    make_test_handle((void **)(fields + 0xa0), normal);
+    make_test_handle((void **)(fields + 0xa8), hall); /* Private destination sentinel. */
+    make_test_handle((void **)(fields + 0xb8), normal);
+    void *event_meta[3] = {0, 0, "igGuiEventProjectGainFocus"};
+    void *event[5] = {vtable, event_meta};
+    for (int selection = 0; selection < 3; ++selection) {
+        online_return_button = selection;
+        int before = forwarded;
+        placeable_event(root, event);
+        assert(forwarded == before + 1 && synthetic_signal == 0);
+        assert(resolve_private_target((void **)(fields + 0xa0)) == children[selection]);
+        assert(resolve_private_target((void **)(fields + 0xb8)) == children[selection]);
+        assert(resolve_private_target((void **)(fields + 0xa8)) == hall);
+        assert(handles == 4);
+    }
+    online_return_button = 1;
+    native_return_focus(ranked, 1);
+    assert(resolve_private_target((void **)(fields + 0xa0)) == ranked);
+    online_return_button = 0;
+    native_return_focus(root, 0);
+    assert(resolve_private_target((void **)(fields + 0xa0)) == normal);
+    for (unsigned off = 0x90; off <= 0xb8; off += 8) release_handle((void **)(fields + off));
+    assert(handles == 0);
+}
+static void test_ranked_season_gate(void) {
+    native_placeable_event = forward_event;
+    native_make_handle = make_test_handle;
+    native_resolve_handle = resolve_test_handle;
+    native_destroy_handle = destroy_test_handle;
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *(ABI *graph_vtable[])(void *) = {graph_type};
+    void *event_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
+    void *graph_meta[3] = {0, 0, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton"};
+    void *behavior_meta[3] = {0, 0, "igGuiVscBehavior"};
+    void *graph[5] = {graph_vtable, behavior_meta, 0, 0, graph_meta};
+    void *event[5] = {vtable, event_meta, 0, (void *)8, 0};
+    void *behaviors[] = {graph};
+    unsigned char button[0xf0] = {0}, list[0x28] = {0};
+    void *p = list; memcpy(button + 0xe8, &p, 8);
+    p = behaviors; memcpy(list + 0x20, &p, 8);
+    int one = 1; memcpy(list + 12, &one, 4);
+    private_room = 0;
+    ranked_selected = 1;
+    for (selected = 0; selected < 2; ++selected) {
+        ranked_status_state = 0;
+        int before = forwarded;
+        placeable_event(button, event);
+        assert(forwarded == before && !pending_private.target);
+        runtime_ranked_gate_update(button, 1);
+        float alpha; memcpy(&alpha, button + 0xe0, 4);
+        assert(alpha == 0.45f);
+        ranked_status_state = -1;
+        placeable_event(button, event);
+        assert(forwarded == before && pending_private.ranked && handles == 1);
+    assert(pending_private.event && (void *)pending_private.event != (void *)event);
+        assert(!runtime_private_party_update());
+        ranked_status_state = 1;
+        assert(runtime_private_party_update());
+        assert(forwarded == before + 1 && !pending_private.target && handles == 0);
+        runtime_ranked_gate_update(button, 1);
+        memcpy(&alpha, button + 0xe0, 4);
+        assert(alpha == 1.0f);
+    }
+    /* Back cancels the deferred entry even when status later opens. */
+    ranked_status_state = -1;
+    placeable_event(button, event);
+    event[3] = (void *)9;
+    placeable_event(button, event);
+    int before = forwarded;
+    ranked_status_state = 1;
+    assert(!runtime_private_party_update());
+    assert(forwarded == before && handles == 0);
+    ranked_selected = 0;
+    selected = 0;
+}
+
 static void test_hall_of_fame_button_event(void) {
     native_placeable_event = forward_event;
     void *(ABI *vtable[])(void *) = {object_type};
@@ -300,7 +516,7 @@ static void test_hall_of_fame_button_event(void) {
     int before_forwarded = forwarded;
     placeable_event(button, event);
     assert(hall_labels == 1);
-    assert(forwarded == before_forwarded);
+    assert(forwarded == before_forwarded + 1 && hof_opens == 1);
 }
 static void test_early_gate(void) {
     early=1;
@@ -505,7 +721,38 @@ static void test_early_gate(void) {
     participants=NULL;party_manager=NULL;early=0;
 }
 
+static void test_hof_project_shortcut(void) {
+    unsigned char root[0xf0] = {0};
+    *(const char **)(root + 0x28) = "OCTR_HOF_ROOT";
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *meta[3] = {0, 0, "igGuiEventProjectInputPressed"};
+    void *event[5] = {vtable, meta, 0, (void *)10};
+    private_room = 0; hof_input_handled = 1; hof_input_signal = 0;
+    placeable_event(root, event);
+    assert(hof_input_signal == 10);
+    hof_input_handled = 0;
+}
+
+static int allocated_input_events;
+static void *ABI allocate_input_event(void *meta, void *allocator, int zero) {
+    assert(meta && !allocator && !zero);
+    struct GuiFocusInputEvent *event = calloc(1, sizeof *event);
+    static void *(ABI *vtable[])(void *) = {object_type};
+    event->vtable = vtable; event->flags = (uintptr_t)meta;
+    ++allocated_input_events;
+    return event;
+}
+static void ABI release_input_event(void *object) {
+    struct GuiFocusInputEvent *event = object;
+    assert(event && allocated_input_events > 0);
+    release_handle(&event->sender);
+    --allocated_input_events; free(event);
+}
+
 int main(void) {
+    native_deferred_event_create = allocate_input_event;
+    native_deferred_event_release = release_input_event;
+    test_hof_project_shortcut();
     installed=1;
     unsetenv("BB_PUBLIC_ITEMLESS"); assert(!runtime_public_itemless_available());
     setenv("BB_PUBLIC_ITEMLESS","1",1); unsetenv("BB_PRIVATE_ARCHIVE_PATCHES");
@@ -604,7 +851,11 @@ int main(void) {
     test_full_lobby_confirmation();
     test_ranked();
     test_ranked_button_event();
+    test_native_return_focus();
+    test_hof_native_ready();
+    test_ranked_season_gate();
     test_hall_of_fame_button_event();
+    assert(allocated_input_events == 0);
     test_installed_hooks("1277e00");
     test_installed_hooks("1277df0");
     /* The worker can be stuck in HTTP while repeated frame checks return. */

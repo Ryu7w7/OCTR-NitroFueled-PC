@@ -23,6 +23,9 @@
  */
 #include "runtime.h"
 #include "runtime_http.h"
+#include "runtime_json.h"
+#include "runtime_hall_of_fame.h"
+#include <limits.h>
 #include "runtime_np_online.h"
 #include "runtime_ranked.h"
 #include "runtime_replay.h"
@@ -61,6 +64,8 @@ static uint64_t result_room;
 static struct {
     char name[17];
     int tier, mode, mmr;
+    int best_tier, best_mode;
+    int mode_tier[2], mode_mmr[2], placements[2], positions[2], mode_ready[2];
 } tier_members[RANKED_TIER_MEMBERS];
 static unsigned tier_member_count;
 static uint64_t tier_room, tier_changed_ms, tier_fetched_ms, tier_generation;
@@ -68,6 +73,78 @@ static int tier_mode, tier_dirty;
 
 static int json_string(const char *s, const char *key, char *out, size_t size);
 static int json_int(const char *s, const char *key, int *out);
+
+/* Status requests never touch guest objects or block the game thread. */
+static int status_state = -1, status_pending, status_season;
+static uint64_t status_until;
+
+int runtime_ranked_status(int fresh) {
+    const uint64_t now = monotonic_ms();
+    pthread_mutex_lock(&lock);
+    if ((!status_until || now >= status_until || (fresh && status_state == 1)) && !status_pending) {
+        status_pending = 1;
+        status_state = -1;
+    }
+    const int state = status_state;
+    pthread_mutex_unlock(&lock);
+    return state;
+}
+
+static int status_integer(const char *reply, const char *key, int *out) {
+    const char *p = runtime_json_field(reply, key);
+    if (!p || !isdigit((unsigned char)*p)) return 0;
+    char *end;
+    errno = 0;
+    long value = strtol(p, &end, 10);
+    while (isspace((unsigned char)*end)) ++end;
+    if (errno || value > INT_MAX || (*end != ',' && *end != '}')) return 0;
+    *out = (int)value;
+    return 1;
+}
+
+static int ranked_status_reply(const char *reply, int *season, int *enabled, int *retry) {
+    if (!reply || !status_integer(reply, "season", season) || *season < 1 ||
+        !status_integer(reply, "retry_after", retry)) return 0;
+    const char *p = runtime_json_field(reply, "enabled");
+    if (!p) return 0;
+    size_t n = !strncmp(p, "true", 4) ? 4 : !strncmp(p, "false", 5) ? 5 : 0;
+    if (!n) return 0;
+    *enabled = n == 4;
+    p += n;
+    while (isspace((unsigned char)*p)) ++p;
+    return *p == ',' || *p == '}';
+}
+
+static void ranked_status_fetch(void) {
+    pthread_mutex_lock(&lock);
+    const int pending = status_pending;
+    pthread_mutex_unlock(&lock);
+    if (!pending) return;
+    char *reply = NULL;
+    size_t size = 0;
+    int season = 0, enabled = 0, retry = 5;
+    const int valid = runtime_ryunet_transfer("GET", "/ryunet/ranked-status", NULL, 0,
+        &reply, &size, 1024) == 200 && ranked_status_reply(reply, &season, &enabled, &retry);
+    free(reply);
+    pthread_mutex_lock(&lock);
+    if (valid && season != status_season) {
+        status_season = season;
+        runtime_hof_season_changed(season);
+        /* Keep registered names; discard ratings from the previous season. */
+        for (unsigned i = 0; i < tier_member_count; ++i) {
+            tier_members[i].best_tier = -1;
+            tier_members[i].tier = tier_members[i].mmr = 0;
+            memset(tier_members[i].mode_ready, 0, sizeof tier_members[i].mode_ready);
+        }
+        tier_dirty = 1;
+        tier_fetched_ms = tier_changed_ms = 0;
+        ++tier_generation;
+    }
+    status_state = valid ? enabled : 0;
+    status_until = monotonic_ms() + (uint64_t)(valid && !enabled ? (retry ? retry : 1) : 5) * 1000;
+    status_pending = 0;
+    pthread_mutex_unlock(&lock);
+}
 
 static int ranked_tier_reply(const char *reply, const char *name, char *out, size_t size) {
     const char *tiers = reply ? strstr(reply, "\"tiers\":{") : NULL;
@@ -77,6 +154,19 @@ static int ranked_tier_reply(const char *reply, const char *name, char *out, siz
 static int ranked_mmr_reply(const char *reply, const char *name, int *out) {
     const char *mmrs = reply ? strstr(reply, "\"mmr\":{") : NULL;
     return mmrs && json_int(mmrs, name, out);
+}
+
+static int ranked_profile_detail(const char *reply, const char *section, int *placements, int *position) {
+    char key[24];
+    snprintf(key, sizeof key, "\"%s\":{", section);
+    const char *start = reply ? strstr(reply, key) : NULL;
+    const char *end = start ? strchr(start, '}') : NULL;
+    if (!end) return 0;
+    const char *field = strstr(start, "\"placements\":");
+    *placements = field && field < end ? (int)strtol(field + 13, NULL, 10) : 5;
+    field = strstr(start, "\"rank\":");
+    *position = field && field < end ? (int)strtol(field + 7, NULL, 10) : 0;
+    return 1;
 }
 
 static const char *valid_chars(const char *s) {
@@ -103,6 +193,11 @@ static int tier_index(const char *name, int mode) {
     return 0;
 }
 
+static int ranked_best_mode(int normal_tier, int normal_mmr, int itemless_tier, int itemless_mmr) {
+    return itemless_tier > normal_tier ||
+        (itemless_tier == normal_tier && itemless_mmr > normal_mmr);
+}
+
 static void tier_cache_reset(uint64_t room, int mode) {
     memset(tier_members, 0, sizeof tier_members);
     tier_member_count = 0;
@@ -116,7 +211,7 @@ static void tier_cache_reset(uint64_t room, int mode) {
 static void ranked_tier_context(uint64_t *room, int *mode) {
     if (!runtime_ranked_session(room, mode)) {
         *room = UINT64_MAX; /* Online menu, before a Ranked room exists. */
-        *mode = runtime_public_itemless_selected() ? 1 : 0;
+        *mode = 0; /* Badge uses the best of both modes; selector must not reset its cache. */
     }
 }
 
@@ -132,15 +227,50 @@ int runtime_ranked_tier(const char *name, int *badge_mode) {
     while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
     if (i == tier_member_count && tier_member_count < RANKED_TIER_MEMBERS) {
         snprintf(tier_members[i].name, sizeof tier_members[i].name, "%s", name);
+        tier_members[i].best_tier = -1;
+        tier_members[i].placements[0] = tier_members[i].placements[1] = -1;
         ++tier_member_count;
         tier_dirty = 1;
         tier_changed_ms = now;
         ++tier_generation;
+        static unsigned queued_logs;
+        if (queued_logs++ < 16)
+            fprintf(stderr, "Ranked tier queued: %s room=%llu mode=%d\n",
+                    name, (unsigned long long)room, mode);
     }
     const int tier = i < tier_member_count ? tier_members[i].tier : 0;
     if (badge_mode) *badge_mode = tier ? tier_members[i].mode : 0;
     pthread_mutex_unlock(&lock);
     return tier; /* 0 selects the unranked badge. */
+}
+
+int runtime_ranked_badge(const char *name, int *badge_mode) {
+    if (!name || !valid_chars(name)) return -1;
+    runtime_ranked_tier(name, NULL); /* Register the player for the batch fetch. */
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
+    const int tier = i < tier_member_count ? tier_members[i].best_tier : 0;
+    if (badge_mode) *badge_mode = i < tier_member_count ? tier_members[i].best_mode : 0;
+    pthread_mutex_unlock(&lock);
+    return tier;
+}
+
+int runtime_ranked_profile(const char *name, int mode, int *tier, int *mmr, int *placements, int *position) {
+    if (mode < 0 || mode > 1 || !valid_chars(name)) return 0;
+    runtime_ranked_tier(name, NULL);
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
+    const int ready = i < tier_member_count && tier_members[i].mode_ready[mode];
+    if (ready) {
+        if (tier) *tier = tier_members[i].mode_tier[mode];
+        if (mmr) *mmr = tier_members[i].mode_mmr[mode];
+        if (placements) *placements = tier_members[i].placements[mode];
+        if (position) *position = tier_members[i].positions[mode];
+    }
+    pthread_mutex_unlock(&lock);
+    return ready;
 }
 
 int runtime_ranked_mmr(const char *name) {
@@ -160,9 +290,10 @@ const char *runtime_ranked_tier_name(int mode, int tier) {
 static void *ranked_tier_worker(void *unused) {
     (void)unused;
     for (;;) {
-        struct timespec pause = {1, 0};
+        struct timespec pause = {0, 100000000};
         nanosleep(&pause, NULL);
 
+        ranked_status_fetch();
         uint64_t room = 0;
         int mode = 0;
         ranked_tier_context(&room, &mode);
@@ -174,7 +305,7 @@ static void *ranked_tier_worker(void *unused) {
         pthread_mutex_lock(&lock);
         if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
         const int due = tier_member_count &&
-            ((tier_dirty && now - tier_changed_ms >= 250) || now - tier_fetched_ms >= 30000);
+            ((tier_dirty && now - tier_changed_ms >= 250) || now - tier_fetched_ms >= 1000);
         if (due) {
             count = tier_member_count;
             for (unsigned i = 0; i < count; ++i)
@@ -186,11 +317,13 @@ static void *ranked_tier_worker(void *unused) {
         pthread_mutex_unlock(&lock);
         if (!count) continue;
 
-        int fetched[RANKED_TIER_MEMBERS] = {0};
-        int fetched_mmr[RANKED_TIER_MEMBERS] = {0};
-        int fetched_mode[RANKED_TIER_MEMBERS] = {0};
+        int fetched[2][RANKED_TIER_MEMBERS] = {{0}};
+        int fetched_mmr[2][RANKED_TIER_MEMBERS] = {{0}};
+        int fetched_placements[2] = {-1, -1};
+        int fetched_positions[2] = {0, 0};
+        char profile_name[17] = "";
         int answered = 0;
-        for (int request_mode = mode; request_mode <= mode; ++request_mode) {
+        for (int request_mode = 0; request_mode < 2; ++request_mode) {
             char target[384];
             size_t used = (size_t)snprintf(target, sizeof target, "/ryunet/ranked-tiers?names=");
             for (unsigned i = 0; i < count && used < sizeof target; ++i)
@@ -202,8 +335,12 @@ static void *ranked_tier_worker(void *unused) {
             size_t reply_size = 0;
             const int status = runtime_ryunet_transfer("GET", target, NULL, 0,
                                                        &reply, &reply_size, 4096);
+            static unsigned fetch_logs;
+            if (fetch_logs++ < 8)
+                fprintf(stderr, "Ranked tiers: mode=%d status=%d reply=%.160s\n",
+                        request_mode, status, reply ? reply : "(none)");
             if (status == 200 && reply) {
-                answered = 1;
+                ++answered;
                 for (unsigned i = 0; i < count; ++i) {
                     char lower[17], tier_name[40];
                     for (size_t j = 0; names[i][j]; ++j)
@@ -213,27 +350,55 @@ static void *ranked_tier_worker(void *unused) {
                                    ? tier_index(tier_name, request_mode) : 0;
                     int mmr = 0;
                     ranked_mmr_reply(reply, lower, &mmr);
-                    if (tier > fetched[i]) {
-                        fetched[i] = tier;
-                        fetched_mode[i] = request_mode;
-                        fetched_mmr[i] = mmr;
-                    }
+                    fetched[request_mode][i] = tier;
+                    fetched_mmr[request_mode][i] = mmr;
                 }
             }
             free(reply);
         }
+        const char *local = runtime_np_get_online_name();
+        if (local && valid_chars(local))
+            for (unsigned i = 0; i < count; ++i)
+                if (same_nick(names[i], local)) {
+                    memcpy(profile_name, names[i], sizeof profile_name);
+                    break;
+                }
+        if (profile_name[0]) {
+            char target[96];
+            snprintf(target, sizeof target, "/ryunet/ranked-profile?name=%s&mode=all", profile_name);
+            char *reply = NULL;
+            size_t reply_size = 0;
+            if (runtime_ryunet_transfer("GET", target, NULL, 0, &reply, &reply_size, 4096) == 200 && reply) {
+                ranked_profile_detail(reply, "normal", &fetched_placements[0], &fetched_positions[0]);
+                ranked_profile_detail(reply, "itemless", &fetched_placements[1], &fetched_positions[1]);
+            }
+            free(reply);
+        }
         pthread_mutex_lock(&lock);
-        if (answered && tier_room == room && tier_mode == mode) {
+        if (answered == 2 && tier_room == room && tier_mode == mode) {
             for (unsigned i = 0; i < count; ++i) {
                 for (unsigned j = 0; j < tier_member_count; ++j)
                     if (same_nick(names[i], tier_members[j].name)) {
-                        tier_members[j].tier = fetched[i];
-                        tier_members[j].mode = fetched_mode[i];
-                        tier_members[j].mmr = fetched_mmr[i];
+                        const int best = ranked_best_mode(fetched[0][i], fetched_mmr[0][i],
+                                                          fetched[1][i], fetched_mmr[1][i]);
+                        tier_members[j].tier = fetched[mode][i];
+                        tier_members[j].mode = mode;
+                        tier_members[j].mmr = fetched_mmr[mode][i];
+                        tier_members[j].best_tier = fetched[best][i];
+                        tier_members[j].best_mode = best;
+                        for (int k = 0; k < 2; ++k) {
+                            tier_members[j].mode_tier[k] = fetched[k][i];
+                            tier_members[j].mode_mmr[k] = fetched_mmr[k][i];
+                            tier_members[j].mode_ready[k] = 1;
+                            if (same_nick(names[i], profile_name) && fetched_placements[k] >= 0) {
+                                tier_members[j].placements[k] = fetched_placements[k];
+                                tier_members[j].positions[k] = fetched_positions[k];
+                            }
+                        }
                     }
             }
         }
-        if (tier_generation != generation) {
+        if (tier_generation != generation || answered != 2) {
             tier_dirty = 1;
             tier_changed_ms = monotonic_ms();
         }

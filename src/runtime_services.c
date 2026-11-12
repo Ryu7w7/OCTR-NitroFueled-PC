@@ -158,6 +158,25 @@ static int invite_text_ok(const char *s, size_t max) {
     return 1;
 }
 
+static int queue_invite(const char *session, const char *host, time_t now) {
+    char current_host[24];
+    runtime_room_mode_host_name(current_host);
+    if (!strcmp(current_host, host)) return 0;
+    pthread_mutex_lock(&s_invite_lock);
+    if (s_invite.active && now < s_invite.expires && !strcmp(s_invite.session, session)) {
+        pthread_mutex_unlock(&s_invite_lock);
+        return 0;
+    }
+    snprintf(s_invite.session, sizeof s_invite.session, "%s", session);
+    snprintf(s_invite.host, sizeof s_invite.host, "%s", host);
+    s_invite.expires = now + 240;
+    s_invite.next_offer = now;
+    s_invite.active = 1;
+    s_invite.taken = 0;
+    pthread_mutex_unlock(&s_invite_lock);
+    return 1;
+}
+
 /* Picks up ryunet_join.txt (at most once a second) and removes it. */
 static void poll_invite_file(void) {
     static time_t last_check;
@@ -190,31 +209,18 @@ static void poll_invite_file(void) {
         printf("Runtime: ignored an invitation file (session='%s' host='%s' age=%llds)\n",session,host,(long long)now-written);
         return;
     }
-    pthread_mutex_lock(&s_invite_lock);
-    snprintf(s_invite.session,sizeof s_invite.session,"%s",session);
-    snprintf(s_invite.host,sizeof s_invite.host,"%s",host);
-    s_invite.expires=now+240;  /* time for a game started by the invite to reach the menus */
-    s_invite.next_offer=now;
-    s_invite.active=1;
-    s_invite.taken=0;
-    pthread_mutex_unlock(&s_invite_lock);
-    printf("Runtime: invitation from %s accepted in Discord: joining session %s\n",host,session);
+    if (queue_invite(session, host, now))
+        printf("Runtime: invitation from %s accepted in Discord: joining session %s\n",host,session);
 }
 
 /* An invitation accepted in the menu's Friends tab (runtime_friends.c): offered to the game
  * like one accepted in Discord. */
 void runtime_invite_join(const char *host) {
     if (!invite_text_ok(host,16)) return;
-    const time_t now=time(NULL);
-    pthread_mutex_lock(&s_invite_lock);
-    snprintf(s_invite.session,sizeof s_invite.session,"cusa13795-session-%s",host);
-    snprintf(s_invite.host,sizeof s_invite.host,"%s",host);
-    s_invite.expires=now+240;
-    s_invite.next_offer=now;
-    s_invite.active=1;
-    s_invite.taken=0;
-    pthread_mutex_unlock(&s_invite_lock);
-    printf("Runtime: invitation from %s accepted in the Friends tab: joining their session\n",host);
+    char session[64];
+    snprintf(session, sizeof session, "cusa13795-session-%s", host);
+    if (queue_invite(session, host, time(NULL)))
+        printf("Runtime: invitation from %s accepted in the Friends tab: joining their session\n",host);
 }
 
 static int invite_due(void) {
@@ -587,8 +593,11 @@ static void write_active_session(const char *session_id) {
 }
 
 static void remove_active_session(void) {
-    private_room_active(0);
-    runtime_room_mode_left(); /* stop following the host's room mode */
+    /* PSN session cleanup during loading does not leave the verified race's room. */
+    if (!runtime_room_mode_race_frozen()) {
+        private_room_active(0);
+        runtime_room_mode_left();
+    }
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
     const char *my_name = runtime_np_get_online_name();

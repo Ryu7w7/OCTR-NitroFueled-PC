@@ -4,7 +4,7 @@ from pathlib import Path
 
 from graphics_tab import fnv1a
 from igz_file import Igz, unpack_offsets
-from ui_texture import ASSETS, SINGLE_RACE_TEXTURE, single_race_texture, texture_igz as _texture_igz
+from ui_texture import ASSETS, IMG_DATA, IMG_W, SINGLE_RACE_TEXTURE, _objects, single_race_texture, texture_igz as _texture_igz
 
 
 ART = Path(__file__).resolve().parent / 'tier_icon'
@@ -66,6 +66,23 @@ def tier_shadow(mode, tier):
 
 def texture_igz(template, mode, tier):
     png, image_name, _path = tier_icon(mode, tier)
+    objects, _, file_offset = _objects(template)
+    image = next(off for off, kind in objects if kind == 'igImage2')
+    width, height = struct.unpack_from('<HH', template, image + IMG_W)
+    if (width, height) == (100, 100):
+        packed, data = struct.unpack_from('<QQ', template, image + IMG_DATA)
+        old_length = packed & 0xffffffff
+        new_length = 256 * 256 * 4
+        if file_offset(data) + old_length != len(template):
+            raise ValueError('tier texture payload is not final section')
+        enlarged = bytearray(template)
+        struct.pack_into('<HH', enlarged, image + IMG_W, 256, 256)
+        struct.pack_into('<Q', enlarged, image + IMG_DATA, (packed & ~0xffffffff) | new_length)
+        struct.pack_into('<I', enlarged, 0x14 + 2 * 16 + 8, new_length)
+        enlarged.extend(bytes(new_length - old_length))
+        template = bytes(enlarged)
+    elif (width, height) != (256, 256):
+        raise ValueError('unsupported tier texture template size')
     return _texture_igz(template, png, image_name)
 
 
@@ -225,6 +242,65 @@ def clone_animated_material(blob, new_name, image_name=RANKED_BACKGROUND_IMAGE):
         g.set_u32(off + 0x0c, len(objects))
         g.set_u32(off + 0x10, len(objects))
         g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(objects) * stride)
+        g.set_u64(off + 0x20, array)
+    return g.build()
+
+
+def clone_lobby_rank_materials(blob):
+    """Keep all rank materials in Lobby Members' native material namespace."""
+    g = Igz(blob)
+    objects = dict(g.objects())
+    end = next(off for off, kind in objects.items() if kind == 'igNameList')
+    source = next(g.u64(g.u64(0x20) + i * 8) for i in range(g.u32(end + 0x0c))
+                  if g.string_at(g.u64(end + 0x20) + i * 16) ==
+                  'octane_ui_ico_singlerace_tga__material')
+    texture = g.u64(g.u64(g.u64(source + 0x58) + 0x20))
+    if objects.get(texture) != 'igGraphicsTexture':
+        raise ValueError('unsupported Lobby Members material layout')
+    g.sites['RHND'] = g.read_list('RHND', unpack_offsets)
+    deps = g.fixup('TDEP')
+    dependencies = deps[3].split(b'\0')[:deps[1] * 2]
+    handles = g.fixup('EXNM')
+    handle_entries = handles[3][:handles[1] * 8]
+    name_list = end
+    obj_list = next(off for off, kind in objects.items() if kind == 'igObjectList')
+    count = g.u32(name_list + 0x0c)
+    named = [g.u64(g.u64(obj_list + 0x20) + i * 8) for i in range(count)]
+    names = bytearray(g.data[g.u64(name_list + 0x20):g.u64(name_list + 0x20) + count * 16])
+    for mode, tier in TIERS:
+        clone = g.append(g.data[source:end])
+        for tag, sites in g.sites.items():
+            for site in list(sites):
+                if source <= site < end:
+                    target = clone + site - source
+                    g.add_site(tag, target)
+                    if tag == 'ROFS':
+                        value = g.u64(site)
+                        if source <= value < end:
+                            g.set_u64(target, clone + value - source)
+        image = tier_icon(mode, tier)[2].removeprefix('textures/').removesuffix('.igz')
+        dependencies.extend((image.encode(), ('textures:/' + image + '.igz').encode()))
+        g.set_u32(clone + texture - source + 0x28, 0x80000000 | handles[1])
+        handle_entries += struct.pack('<II', g.string_index('image'),
+                                      g.string_index(image) | 0x80000000)
+        handles[1] += 1
+        export = tier_material(mode, tier)[2]
+        named.append(clone)
+        names += struct.pack('<QII', g.string_index(export), fnv1a(export), 0)
+    deps[1] = len(dependencies) // 2
+    deps[3] = b'\0'.join(dependencies) + b'\0'
+    deps[4] = (deps[2] + len(deps[3]) + 3) & ~3
+    handles[3] = handle_entries
+    handles[4] = (handles[2] + len(handle_entries) + 3) & ~3
+    object_array = g.append(struct.pack(f'<{len(named)}Q', *named))
+    name_array = g.append(names)
+    for i in range(len(named)):
+        g.add_site('ROFS', object_array + i * 8)
+        g.add_site('RSTT', name_array + i * 16)
+    for off, array, stride in ((obj_list, object_array, 8), (name_list, name_array, 16)):
+        g.set_u32(off + 0x0c, len(named))
+        g.set_u32(off + 0x10, len(named))
+        g.set_u64(off + 0x18, (g.u64(off + 0x18) & ~0xffffffff) | len(named) * stride)
         g.set_u64(off + 0x20, array)
     return g.build()
 

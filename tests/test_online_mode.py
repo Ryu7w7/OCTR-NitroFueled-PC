@@ -10,7 +10,7 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import gcn_shaders as iga
-from button_prompts import _objects
+from button_prompts import IMG_W, _objects
 from igz_file import Igz, unpack_offsets
 from graphics_tab import fnv1a
 import online_mode
@@ -19,6 +19,7 @@ from ranked_ui_assets import (HOF_BACKGROUND_IMAGE, HOF_BACKGROUND_MATERIAL,
                               QUICK_ICON_TEXTURE, RANKED_BACKGROUND_MATERIAL,
                               RANKED_BACKGROUND_IMAGE, RANKED_BACKGROUND_TEXTURE,
                               SINGLE_RACE_TEXTURE, TIERS, clone_animated_material,
+                              clone_lobby_rank_materials,
                               clone_lobby_materials, asset_replacements, compiled_asset,
                               menu_asset_replacements,
                               menu_icon, quick_icon_texture, texture_replacements,
@@ -51,6 +52,28 @@ class OnlineModeTests(unittest.TestCase):
         self.assertEqual(_objects(quick_icon_texture())[1][0],
                          'data/Octane/textures/ui/Octane/Icons/octane_ui_ico_quick.tga')
         self.assertIn('octane_ui_ico_quick', QUICK_ICON_TEXTURE)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_native_return_focus_fields(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        def native(suffix):
+            entry = next(e for e in iga.pak_entries(pak) if e[0].endswith(suffix))
+            with pak.open('rb') as stream:
+                return Igz(iga.read_entry(stream, *entry[1:]))
+        main = native('/ui/octane_lobby_main.igz')
+        graph = native('/vsc/ui/octane_lobby_main/octane_lobby_main_root.igz')
+        self.assertEqual(main.u64(0x3208 + 0x18), 0x3208 + 0x28)
+        # Native switch case 0/default read these two dynamic handle fields.
+        self.assertEqual(graph.u64(0x2010 + 0x18), 0x2058)
+        self.assertEqual(graph.u64(0x2010 + 0x40), 0x2458)
+        for node, accessor, field, index, offset in (
+                (0x2058, 0x20a8, 0x20c0, 24, 0xa0),
+                (0x2458, 0x24a8, 0x24c0, 27, 0xb8)):
+            self.assertEqual(graph.u64(node + 0x40), accessor)
+            self.assertEqual(graph.u64(accessor + 0x10), field)
+            self.assertEqual(graph.u64(0x3e38 + index * 8), field)
+            self.assertEqual(main.u64(0x3230 + offset), main.u64(0x3230 + 0x90))
+        self.assertNotEqual(main.u64(0x3230 + 0xa8), main.u64(0x3230 + 0x90))
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_ranked_background_keeps_native_animation_and_binds_pattern(self):
@@ -137,6 +160,9 @@ class OnlineModeTests(unittest.TestCase):
         self.assertEqual(len(textures), 16)
         self.assertEqual(len({len(blob) for blob in textures.values()}), 1)
         self.assertEqual(sum(b'octane_ranked_tier_' in blob for blob in textures.values()), 16)
+        for blob in textures.values():
+            image = next(off for off, kind in _objects(blob)[0] if kind == 'igImage2')
+            self.assertEqual(struct.unpack_from('<HH', blob, image + IMG_W), (256, 256))
         assets = asset_replacements()
         for mode, tier in TIERS:
             namespace, path, export = tier_material(mode, tier)
@@ -168,29 +194,50 @@ class OnlineModeTests(unittest.TestCase):
                              patched.fixup(tag)[1])
         icons = [off for off, kind in patched.objects()
                  if off >= len(original.data) and kind == 'igGuiPlaceable']
-        self.assertEqual(len(icons), 16)
-        self.assertTrue(all(not patched.u32(off + 0x0c) & 0x400 for off in icons))
+        self.assertEqual(len(icons), 32)
+        name = next(off for off, kind in original.objects()
+                    if kind == 'igGuiPlaceable' and original.string_at(off + 0x28) == '[MemberName]')
+        self.assertEqual(patched.u64(name + 0x50), original.u64(name + 0x50))
+        tail = name
+        while original.u64(tail + 0x50):
+            tail = original.u64(tail + 0x50)
+        self.assertEqual(patched.u64(tail + 0x50), icons[0])
+        self.assertEqual(patched.u64(icons[0] + 0x58), tail)
+        self.assertTrue(all(patched.u32(off + 0x0c) & 0x400 for off in icons))
         self.assertTrue(all(patched.u64(off + 0xf0) == 0 for off in icons))
+        self.assertTrue(all(struct.unpack_from('<4f', patched.data, off + 0xc0) ==
+                            (1.0, 1.0, 1.0, 1.0) for off in icons[1::2]))
+        self.assertTrue(all(struct.unpack_from('<4f', patched.data, off + 0xc0) ==
+                            (0.0, 0.0, 0.0, 1.0) for off in icons[::2]))
+        self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x90) ==
+                            (32.0, 32.0) for off in icons))
+        self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x60) ==
+                            (64.0, 20.0) for off in icons[::2]))
+        self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x60) ==
+                            (62.0, 18.0) for off in icons[1::2]))
+        for off in (0x1090, 0x11b0):
+            self.assertEqual(struct.unpack_from('<f', patched.data, off + 0xe0)[0], 0.0)
         handles = patched.fixup('EXNM')
         external = [patched.strings[a] for a, b in
                     struct.iter_unpack('<II', handles[3][:handles[1] * 8]) if b & 0x80000000]
         assets = [external[patched.u64(off + 0x38) & 0x7fffffff] for off in icons]
         expected = [f'OCTR_RANK_{mode}_{tier}_ASSET'
-                    for mode in range(2) for tier in range(0, 8)]
+                    for mode in range(2) for tier in range(0, 8) for _ in range(2)]
         self.assertEqual(assets, expected)
         labels = [patched.string_at(off + 0x28) for off in icons]
         self.assertEqual(labels,
-                         [f'OCTR_RANK_ICON_{mode}_{tier}'
-                          for mode in range(2) for tier in range(0, 8)])
+                         [f'OCTR_RANK_{kind}_{mode}_{tier}'
+                          for mode in range(2) for tier in range(0, 8)
+                          for kind in ('SHADOW', 'ICON')])
         sprites = [off for off, kind in patched.objects()
                    if off >= len(original.data) and kind == 'igGuiSprite']
         self.assertEqual(len(sprites), 16)
         handle_sites = patched.read_list('RHND', unpack_offsets)
         self.assertTrue(all(off + 0x20 in handle_sites for off in sprites))
         materials = list(struct.iter_unpack('<II', patched.fixup('EXID')[3]))
-        namespace, _path, export = tier_material(1, 7)
+        _namespace, _path, export = tier_material(1, 7)
         self.assertEqual(materials[-1],
-                         (fnv1a(export), fnv1a(namespace)))
+                         (fnv1a(export), fnv1a('juice_Octane_LobbyMembers_materials')))
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_ranked_icons_patch_resident_online_domain(self):
@@ -202,6 +249,23 @@ class OnlineModeTests(unittest.TestCase):
         labels = [patched.string_at(off + 0x28) for off, kind in patched.objects()
                   if kind == 'igGuiPlaceable' and off + 0x28 in patched.sites.get('RSTT', [])]
         self.assertEqual(sum(label.startswith('OCTR_RANK_ICON_') for label in labels), 16)
+        self.assertEqual(sum(label.startswith('OCTR_RANK_SHADOW_') for label in labels), 16)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_lobby_rank_materials_use_native_exports_and_textures(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update.pak'
+        entry = next(e for e in iga.pak_entries(pak)
+                     if e[0].lower() == online_mode.LOBBY_MEMBERS_MATERIALS_ENTRY)
+        with pak.open('rb') as f:
+            patched = Igz(clone_lobby_rank_materials(iga.read_entry(f, *entry[1:])))
+        names = next(off for off, kind in patched.objects() if kind == 'igNameList')
+        exports = {patched.string_at(patched.u64(names + 0x20) + i * 16)
+                   for i in range(patched.u32(names + 0x0c))}
+        dependencies = patched.fixup('TDEP')[3]
+        for mode, tier in TIERS:
+            self.assertIn(tier_material(mode, tier)[2], exports)
+            self.assertIn(tier_icon(mode, tier)[2].removeprefix('textures/').removesuffix('.igz').encode(),
+                          dependencies)
 
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
@@ -226,16 +290,25 @@ class OnlineModeTests(unittest.TestCase):
         self.assertEqual(new.u32(0x900 + 12), 10)
         self.assertEqual(dict(new.objects())[new.u64(ranked + 0xe8)], 'igGuiBehaviorList')
         behaviors = new.u64(ranked + 0xe8)
-        self.assertEqual(new.u64(new.u64(behaviors + 0x20) + 8), 0x23b8)
+        ranked_vsc = new.u64(new.u64(behaviors + 0x20) + 8)
+        self.assertNotEqual(ranked_vsc, 0x23b8)
+        self.assertEqual(dict(new.objects())[ranked_vsc], 'igGuiVscBehavior')
+        self.assertEqual(new.u64(ranked_vsc + 0x18), ranked_vsc + 0x28)
+        for site in (0x28, 0x30, 0x38, 0x48, 0x50):
+            self.assertIn(ranked_vsc + site, new.read_list('RHND', unpack_offsets))
+            self.assertEqual(new.u64(ranked_vsc + site), old.u64(0x23b8 + site))
         hall_behaviors = new.u64(hall + 0xe8)
-        self.assertEqual(new.u32(hall_behaviors + 0x0c), 1)
-        self.assertEqual(new.u64(new.u64(hall_behaviors + 0x20) + 8), 0)
-        # Only the button, its behavior list and its navigation item may be new: the nav item's
-        # timer, animation categories and tables stay the native, shared objects.
+        self.assertEqual(new.u32(hall_behaviors + 0x0c), 2)
+        self.assertNotEqual(new.u64(new.u64(hall_behaviors + 0x20) + 8), 0)
+        # Both buttons own independent native navigation and VSC state.
         added = [o for o, _ in new.objects() if o not in dict(old.objects())]
         self.assertEqual(sorted(dict(new.objects())[o] for o in added),
                          ['CGuiBehaviorOctaneNavigationItem', 'CGuiBehaviorOctaneNavigationItem',
-                          'igGuiBehaviorList', 'igGuiBehaviorList', 'igGuiPlaceable', 'igGuiPlaceable'])
+                          'CTimer', 'CTimer',
+                          'igGuiAnimationCategory', 'igGuiAnimationCategory',
+                          'igGuiAnimationCategory', 'igGuiAnimationCategory',
+                          'igGuiBehaviorList', 'igGuiBehaviorList', 'igGuiPlaceable', 'igGuiPlaceable',
+                          'igGuiVscBehavior', 'igGuiVscBehavior'])
         self.assertEqual(struct.unpack_from('<f', new.data, 0x970 + 0x64)[0], -315.0)
         self.assertEqual(struct.unpack_from('<f', new.data, ranked + 0x64)[0], -210.0)
         self.assertEqual(struct.unpack_from('<f', new.data, hall + 0x64)[0], -105.0)
@@ -245,6 +318,11 @@ class OnlineModeTests(unittest.TestCase):
         hall_nav = next(new.u64(s) for s in new.sites['ROFS']
                         if hall_behaviors <= s < hall_behaviors + 0x40
                         and dict(new.objects()).get(new.u64(s)) == 'CGuiBehaviorOctaneNavigationItem')
+        for item in (nav, hall_nav):
+            self.assertNotEqual(new.u64(item + 0x58), 0x2368)
+            self.assertNotEqual(new.u64(item + 0x128), 0x2388)
+            self.assertEqual(dict(new.objects())[new.u64(item + 0x58)], 'CTimer')
+            self.assertEqual(dict(new.objects())[new.u64(item + 0x128)], 'igGuiAnimationCategory')
         self.assertEqual((new.u64(nav + 0x118), new.u64(hall_nav + 0x110),
                           new.u64(hall_nav + 0x118), new.u64(0xd08 + 0x110)),
                          (hall, ranked, 0xa90, hall))
@@ -263,9 +341,78 @@ class OnlineModeTests(unittest.TestCase):
             self.assertEqual(struct.unpack_from('<II', new.fixup('EXID')[3], (exid[1] + index) * 8),
                              (fnv1a(name), fnv1a(online_mode.RANKED_BACKGROUND_NAMESPACE)))
         self.assertEqual(new.fixup('EXID')[1], exid[1] + 3)
-        for tag in ('EXNM', 'TDEP'):
-            self.assertEqual(new.fixup(tag)[3], old.fixup(tag)[3], tag)
-            self.assertEqual(new.fixup(tag)[1], old.fixup(tag)[1], tag)
+        old_exnm = old.fixup('EXNM')
+        self.assertEqual(new.fixup('EXNM')[3][:old_exnm[1] * 8], old_exnm[3][:old_exnm[1] * 8])
+        self.assertEqual(new.fixup('EXNM')[1], old_exnm[1])
+        self.assertNotIn(b'ui:/octane_halloffame.igz', new.fixup('TDEP')[3])
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_ranked_mode_select_header(self):
+        for archive in ('update2.pak', 'juicedomain_onlinemenus.pak'):
+            pak = Path(os.environ['BB_TEST_GAME']) / 'archives' / archive
+            entry = next(e for e in iga.pak_entries(pak)
+                         if 'octane_lobby_modeselect.igz' in e[0].lower())
+            with pak.open('rb') as f:
+                original = iga.read_entry(f, *entry[1:])
+            old, new = Igz(original), Igz(online_mode.ranked_mode_select(original))
+            root = next(o for o, kind in old.objects()
+                        if kind == 'igGuiPlaceable' and old.u64(o + 0x48)
+                        and old.u32(old.u64(o + 0x48) + 12) == 4)
+            self.assertEqual(new.string_at(root + 0x28), old.string_at(root + 0x28))
+            root_table = new.u64(root + 0x48)
+            self.assertEqual(new.u32(root_table + 12), 4)
+            root_rows = [new.u64(new.u64(root_table + 0x20) + i * 8) for i in range(4)]
+            self.assertEqual(root_rows, [old.u64(old.u64(old.u64(root + 0x48) + 0x20) + i * 8)
+                                         for i in range(4)])
+            button_table = new.u64(root_rows[2] + 0x48)
+            header_parent = new.u64(new.u64(button_table + 0x20))
+            table = new.u64(header_parent + 0x48)
+            self.assertEqual(new.u32(table + 12), 27)
+            rows = [new.u64(new.u64(table + 0x20) + i * 8) for i in range(27)]
+            self.assertEqual(len([r for r in rows if new.string_at(r + 0x28).startswith('OCTR_CARD_ICON_')]), 16)
+            for item in (rows[0], rows[2]):
+                self.assertEqual(struct.unpack_from('<f', new.data, item + 0x64)[0],
+                                 struct.unpack_from('<f', old.data, item + 0x64)[0])
+            self.assertEqual([new.string_at(r + 0x28) for r in rows[-6:]],
+                             ['OCTR_RANK_NAME_SHADOW', 'OCTR_RANK_NAME',
+                              'OCTR_RANK_MMR_SHADOW', 'OCTR_RANK_MMR',
+                              'OCTR_RANK_PLACEMENT_SHADOW', 'OCTR_RANK_PLACEMENT'])
+            self.assertEqual(new.string_at(rows[3] + 0x28), 'OCTR_RANK_GLOW')
+            self.assertEqual(struct.unpack_from('<2f', new.data, rows[3] + 0x90), (100.0, 100.0))
+            for scale in struct.unpack_from('<2f', new.data, rows[3] + 0x84):
+                self.assertAlmostEqual(scale, 1.5, places=6)
+            for badge in rows[4:20]:
+                self.assertEqual(new.u64(badge + 0x40), header_parent)
+                self.assertEqual(struct.unpack_from('<2f', new.data, badge + 0x90), (256.0, 256.0))
+                self.assertEqual(struct.unpack_from('<2f', new.data, badge + 0x60), (-10.0, -360.0))
+                for scale in struct.unpack_from('<2f', new.data, badge + 0x84):
+                    self.assertAlmostEqual(scale, 3.2, places=6)
+            self.assertEqual(new.string_at(rows[20] + 0x28), 'OCTR_RANK_PLACEMENT_BG')
+            self.assertEqual(struct.unpack_from('<2f', new.data, rows[20] + 0x90), (205.0, 50.0))
+            self.assertEqual(struct.unpack_from('<2f', new.data, rows[20] + 0x60), (-10.0, -45.0))
+            self.assertEqual(struct.unpack_from('<f', new.data, rows[20] + 0x80)[0], -7.0)
+            self.assertEqual(struct.unpack_from('<2f', new.data, rows[22] + 0x60), (-10.0, -165.0))
+            self.assertEqual(struct.unpack_from('<2f', new.data, rows[26] + 0x60), (-10.0, -45.0))
+            self.assertEqual(struct.unpack_from('<f', new.data, rows[22] + 0xe0)[0], 1.0)
+            chain = [old.u64(header_parent + 0x58), *rows[3:], header_parent]
+            for previous, following in zip(chain, chain[1:]):
+                self.assertEqual(new.u64(previous + 0x50), following)
+                self.assertEqual(new.u64(following + 0x58), previous)
+            handles = new.fixup('EXNM')
+            pairs = list(struct.iter_unpack('<II', handles[3][:handles[1] * 8]))
+            self.assertTrue(all((new.strings[name].startswith('OCTR_RANK_') and
+                                 new.strings[namespace & 0x7fffffff] == 'Octane_LobbyMembers')
+                                for name, namespace in pairs[-17:-1]))
+            self.assertEqual(new.strings[pairs[-1][0]], 'octane_pit_stop_price_tag_tga')
+            self.assertEqual(new.strings[pairs[-1][1] & 0x7fffffff], 'WumpaCoinsCounter')
+            self.assertEqual(new.strings[pairs[-18][0]], 'ctr_gui_wumpa_juiced_vfx')
+            self.assertEqual(new.strings[pairs[-18][1] & 0x7fffffff], 'GPChallengeGroup')
+            dependencies = new.fixup('TDEP')
+            entries = dependencies[3].split(b'\0')[:dependencies[1] * 2]
+            self.assertIn([b'WumpaCoinsCounter', b'ui:/GuiSharedAssets/WumpaCoinsCounter.igz'],
+                          [entries[i:i + 2] for i in range(0, len(entries), 2)])
+            self.assertIn([b'GPChallengeGroup', b'ui:/GuiSharedAssets/GPChallengeGroup.igz'],
+                          [entries[i:i + 2] for i in range(0, len(entries), 2)])
 
     def test_cup_package_regional_languages(self):
         graph = 'ui/octane_cupselect.igz'
@@ -352,11 +499,86 @@ class OnlineModeTests(unittest.TestCase):
                                      for i in range(len(main_archive.names))}
                         finally:
                             main_archive.f.close()
+                        main_rows = online_mode.package_rows(Igz(files[
+                            'packages/generated/ui/octane_lobby_main_pkg.igz']))[1]
+                        self.assertFalse(any(kind == 'vsc' for kind, _ in main_rows))
+                        self.assertIn('vsc/ui/octane_lobby_main/octane_lobby_main_root.igz', files)
+                        self.assertNotIn('ui/octane_halloffame.igz', files)
                         self.assertIn(QUICK_ICON_TEXTURE.lower(), files)
                         self.assertIn(online_mode.RANKED_BACKGROUND_PATH.lower(), files)
                         self.assertIn(RANKED_BACKGROUND_TEXTURE.lower(), files)
                         self.assertIn(HOF_BACKGROUND_TEXTURE.lower(), files)
                         self.assertIn(menu_icon('hof')[2].lower(), files)
+                        hof_archive = Archive(out / 'online/octane_halloffame.pak')
+                        try:
+                            hof_files = {hof_archive.logical(i).lower(): hof_archive.read(i)
+                                         for i in range(len(hof_archive.names))}
+                        finally:
+                            hof_archive.f.close()
+                        self.assertIn('ui/octane_halloffame_en.lng', hof_files)
+                        hof_manifest = 'packages/generated/ui/octane_halloffame_pkg.igz'
+                        self.assertEqual((out / 'online/cup-assets' / hof_manifest).read_bytes(),
+                                         hof_files[hof_manifest])
+                        self.assertIn(hof_manifest.encode(), (out / 'online/cup-files.map').read_bytes())
+                        self.assertNotIn('ui/octane_lobbymembers.igz', hof_files)
+                        online_patch = next(p for p in patches if archive_patch.read(p)[1] ==
+                                            '/app0/archives/update2.pak')
+                        member_index = next(i for i, entry in enumerate(entries)
+                                            if entry[0].lower() == online_mode.LOBBY_MEMBERS_ENTRY.lower())
+                        hof_members = Igz(online_mode.current_entry(pak, entries, member_index, online_patch))
+                        hof_names = next(o for o, t in hof_members.objects() if t == 'igNameList')
+                        hof_exports = {hof_members.strings[hof_members.u64(hof_members.u64(hof_names + 32) + i * 16)]:
+                                       hof_members.u64(hof_members.u64(32) + i * 8)
+                                       for i in range(hof_members.u32(12))}
+                        material_path = online_mode.LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(
+                            online_mode.PACKAGE_PREFIX).lower()
+                        self.assertNotIn(material_path, hof_files)
+                        for mode in range(2):
+                            for tier in range(1, 8):
+                                sprite = hof_exports[f'OCTR_RANK_{mode}_{tier}_ASSET']
+                                self.assertEqual(dict(hof_members.objects())[sprite], 'igGuiSprite')
+                                self.assertNotIn(tier_icon(mode, tier)[2].lower(), hof_files)
+
+                        hof_rows = online_mode.package_rows(Igz(hof_files[
+                            'packages/generated/ui/octane_halloffame_pkg.igz']))[1]
+                        self.assertEqual({path for kind, path in hof_rows if kind == 'vsc'},
+                                         set())
+                        self.assertIn('vsc/ui/octane_leaderboards/octane_leaderboards_root.igz', hof_files)
+                        package_index = next(i for i, entry in enumerate(entries)
+                                             if entry[0].lower() == online_mode.ONLINE_PACKAGE.lower())
+                        resident_rows = online_mode.package_rows(Igz(online_mode.current_entry(
+                            pak, entries, package_index, online_patch)))[1]
+                        self.assertFalse({path for _, path in hof_rows} &
+                                         {path for _, path in resident_rows})
+                        online_patch = next(p for p in patches if archive_patch.read(p)[1] ==
+                                            '/app0/archives/update2.pak')
+                        online_package_index = next(i for i, entry in enumerate(entries)
+                                                    if entry[0].lower() == online_mode.ONLINE_PACKAGE)
+                        online_rows = online_mode.package_rows(Igz(online_mode.current_entry(
+                            pak, entries, online_package_index, online_patch)))[1]
+                        self.assertNotIn('ui/octane_halloffame.igz', {path for _, path in online_rows})
+                        native_package_index = next(i for i, entry in enumerate(entries)
+                                                    if entry[0].lower() == online_mode.ONLINE_PACKAGE)
+                        native_rows = online_mode.package_rows(Igz(online_mode.current_entry(
+                            pak, entries, native_package_index, None)))[1]
+                        resident = {path for _, path in native_rows}
+                        mapping = (out / 'online/cup-files.map').read_bytes()
+                        for _, path in hof_rows:
+                            if path in resident:
+                                continue
+                            self.assertIn(path.encode(), mapping)
+                            loose = out / 'online/cup-assets' / path
+                            self.assertTrue(loose.is_file(), path)
+                        members_archive = Archive(out / 'online/octane_lobbymembers.pak')
+                        try:
+                            member_paths = {members_archive.logical(i).lower()
+                                            for i in range(len(members_archive.names))}
+                        finally:
+                            members_archive.f.close()
+                        self.assertIn(online_mode.LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(
+                            online_mode.PACKAGE_PREFIX), member_paths)
+                        for mode, tier in TIERS:
+                            self.assertIn(tier_icon(mode, tier)[2].lower(), member_paths)
                         rows = online_mode.package_rows(Igz(files[
                             'packages/generated/ui/octane_lobby_main_pkg.igz']))[1]
                         for path in (RANKED_BACKGROUND_TEXTURE, HOF_BACKGROUND_TEXTURE,
@@ -391,7 +613,31 @@ class OnlineModeTests(unittest.TestCase):
                                 iga.read_entry(f, *domain_entries[material_index][1:]))
                         self.assertEqual(online_mode.current_entry(domain_pak, domain_entries,
                                                                    material_index, domain_patch), domain_material)
+                        domain_mode_index = next(i for i, e in enumerate(domain_entries)
+                                                 if e[0].lower() == online_mode.MODE_SELECT_ENTRY)
+                        self.assertEqual(online_mode.current_entry(domain_pak, domain_entries,
+                                                                    domain_mode_index, domain_patch),
+                                         online_mode.current_entry(domain_pak, domain_entries,
+                                                                    domain_mode_index, None))
                         result = next(p for p in patches if archive_patch.read(p)[1] == '/app0/archives/update2.pak')
+                        mode_index = next(i for i, e in enumerate(entries)
+                                          if e[0].lower() == online_mode.MODE_SELECT_ENTRY)
+                        mode = Igz(online_mode.current_entry(pak, entries, mode_index, result))
+                        self.assertEqual(mode.u32(0x1880 + 12), 3)
+                        mode_archive = Archive(out / 'online/octane_lobby_modeselect.pak')
+                        try:
+                            mode_paths = {mode_archive.logical(i).lower()
+                                          for i in range(len(mode_archive.names))}
+                        finally:
+                            mode_archive.f.close()
+                        for dependency in ('ui/guisharedassets/gpchallengegroup.igz',
+                                           'ui/guisharedassets/wumpacoinscounter.igz',
+                                           'vfx/ctr/gui/ctr_gui_wumpa_juiced.igz'):
+                            self.assertIn(dependency, mode_paths)
+                        self.assertEqual(mode.u32(mode.u64(0x370 + 0x48) + 12), 4)
+                        buttons = mode.u64(mode.u64(mode.u64(0x370 + 0x48) + 0x20) + 2 * 8)
+                        inner = mode.u64(mode.u64(mode.u64(buttons + 0x48) + 0x20))
+                        self.assertEqual(mode.u32(mode.u64(inner + 0x48) + 12), 27)
                         main_material_index = next(i for i, e in enumerate(entries)
                                                    if e[0].lower() == online_mode.LOBBY_MATERIALS_ENTRY.lower())
                         main_material = clone_lobby_materials(
@@ -961,6 +1207,8 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         chunk, before = online_mode.package_rows(old)
         _, after = online_mode.package_rows(new)
         self.assertEqual(after[:len(before)], before)
+        self.assertEqual({path for kind, path in after if kind == 'vsc'},
+                         {path for kind, path in before if kind == 'vsc'})
         self.assertEqual(len(after), len(set(after)))
         added = set(after) - set(before)
         self.assertGreater(len(added), 40)
@@ -975,7 +1223,7 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         self.assertTrue(set(range(array, array + len(after) * 16, 8)) <= set(new.sites['RSTT']))
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
-    def test_team_panels_preloaded_with_dependency_closure(self):
+    def test_race_panels_keep_native_domain_ownership(self):
         game = Path(os.environ['BB_TEST_GAME'])
         pak = game / 'archives/update2.pak'
         entries = {e[0].lower(): e for e in iga.pak_entries(pak)}
@@ -990,11 +1238,23 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
             _, rows = online_mode.package_rows(new)
             self.assertEqual(len(rows), len(set(rows)))
             for name in ('octane_race_ranking', 'octane_battleteam_ranking', 'octane_race_leaders'):
-                self.assertIn(('gui_project', 'ui/' + name + '.igz'), rows)
-            self.assertTrue(any('race' in path.as_posix() for path in assets.rglob('*') if path.is_file()))
-            self.assertTrue(any('race_ranking_materials' in path for _, path in rows))
-            self.assertTrue(any('battleteam_ranking_materials' in path for _, path in rows))
-            self.assertTrue(any('racerportrait_contour' in path for _, path in rows))
+                self.assertNotIn(('gui_project', 'ui/' + name + '.igz'), rows)
+            self.assertFalse(any('race_ranking_materials' in path for _, path in rows))
+            self.assertFalse(any('battleteam_ranking_materials' in path for _, path in rows))
+            self.assertTrue(any('cupselect' in path for _, path in rows))
+            from graphics_tab import Archive
+            for project in ('octane_race_ranking', 'octane_battleteam_ranking', 'octane_race_leaders'):
+                target = assets / (project + '.pak')
+                online_mode.ranking_stream_archive(game, target, race, project, {})
+                archive = Archive(target)
+                try:
+                    files = {archive.logical(i): archive.read(i) for i in range(len(archive.names))}
+                finally:
+                    archive.f.close()
+                self.assertIn('ui/' + project + '.igz', files)
+                manifest = 'packages/generated/ui/' + project + '_pkg.igz'
+                _, fallback_rows = online_mode.package_rows(Igz(files[manifest]))
+                self.assertFalse(any(kind == 'vsc' for kind, _ in fallback_rows))
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_team_selector_marks_only_post_open_disable(self):

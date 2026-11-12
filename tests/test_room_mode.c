@@ -94,7 +94,9 @@ int main(void) {
     pthread_cond_broadcast(&condition);
     pthread_mutex_unlock(&lock);
     assert(await_mode());
+    assert(runtime_room_mode_race_frozen());
     runtime_room_mode_end_race();
+    assert(!runtime_room_mode_race_frozen());
     alarm(0);
     get_body = "mode normal\n";
     assert(!await_mode()); /* Server forgot a host's Itemless publication. */
