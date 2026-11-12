@@ -1923,6 +1923,9 @@ std::string GameLanguage() {
     return DefaultGameLanguage();
 }
 
+/// Where the game writes what the player does (BB_PRESENCE_FILE) and run.py the tracks' names.
+fs::path PresenceFolder() { return g_app.root / L"out" / L"presence"; }
+
 void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
@@ -1959,6 +1962,14 @@ void StartGame() {
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
+    // Discord presence: the game writes what the player does there (src/runtime_presence.c), and
+    // run.py the tracks' own names beside it (scripts/track_names.py).
+    {
+        std::error_code ec;
+        fs::create_directories(PresenceFolder(), ec);
+        fs::remove(PresenceFolder() / L"presence.txt", ec);
+        SetEnv(L"BB_PRESENCE_FILE", PathText(PresenceFolder() / L"presence.txt"));
+    }
     if (a.launcher.Flag("hdr", false)) {  // off: BB_HDR as set outside
         SetEnv(L"BB_HDR", "1");
         const std::string peak = a.launcher.Get("hdr_peak", "0");
@@ -2050,6 +2061,125 @@ std::string DiscordAppId() {
     return id.empty() ? kDiscordAppId : id;
 }
 
+/// What the game says the player does (src/runtime_presence.c, presence.txt), read every two seconds.
+struct GameFacts {
+    bool known = false;
+    int game = 0, race = 0;  // EGameMode (Story 1, Arcade 8, OnlinePlay 16), EOctaneRaceModes
+    std::string level, room;
+    bool lobby = false, itemless = false, speed = false;
+};
+
+GameFacts ReadGameFacts() {
+    static GameFacts facts;
+    static ULONGLONG read_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (read_at && now - read_at < 2000) return facts;
+    read_at = now;
+    GameFacts f;
+    std::istringstream in(ReadText(PresenceFolder() / L"presence.txt"));
+    for (std::string line; std::getline(in, line);) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq), value = Trim(line.substr(eq + 1));
+        f.known = true;
+        if (key == "game") f.game = std::atoi(value.c_str());
+        else if (key == "race") f.race = std::atoi(value.c_str());
+        else if (key == "level") f.level = value;
+        else if (key == "room") f.room = value;
+        else if (key == "lobby") f.lobby = value == "1";
+        else if (key == "itemless") f.itemless = value == "1";
+        else if (key == "speed") f.speed = value == "1";
+    }
+    facts = f;
+    return facts;
+}
+
+/// A level's own name in the launcher's language (track_names.txt from scripts/track_names.py: the
+/// game's zone infos), "" for menus and levels without one.
+std::string ZoneName(const std::string& level) {
+    static std::map<std::string, std::map<std::string, std::string>> names;
+    static ULONGLONG loaded_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!loaded_at || (names.empty() && now - loaded_at > 10000)) {  // run.py writes it at the start
+        loaded_at = now;
+        names.clear();
+        std::istringstream in(ReadText(PresenceFolder() / L"track_names.txt"));
+        for (std::string line; std::getline(in, line);) {
+            const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+            if (b == std::string::npos) continue;
+            names[line.substr(0, a)][line.substr(a + 1, b - a - 1)] = Trim(line.substr(b + 1));
+        }
+    }
+    std::string zone = Lower(level);
+    const size_t slash = zone.find_last_of("/\\");
+    if (slash != std::string::npos) zone = zone.substr(slash + 1);
+    const std::string locale = g_active_locale == "es" || g_active_locale == "fr" || g_active_locale == "pt_BR"
+                                   ? g_active_locale : "en";
+    // the zone, else its leading parts (h100_hub_chunk_... is the Adventure hub, h100_hub)
+    for (std::string key = zone; !key.empty();) {
+        const auto it = names.find(key);
+        if (it != names.end()) {
+            const auto name = it->second.find(locale);
+            if (name != it->second.end()) return name->second;
+            const auto en = it->second.find("en");
+            return en != it->second.end() ? en->second : std::string();
+        }
+        const size_t cut = key.find_last_of('_');
+        if (cut == std::string::npos) break;
+        key = key.substr(0, cut);
+    }
+    return "";
+}
+
+/// The race mode's name (EOctaneRaceModes), "" for none or the Adventure hub.
+std::string RaceModeName(int race) {
+    switch (race) {
+    case 1: return T("Carrera", "Race");
+    case 2: return T("Contrarreloj", "Time Trial");
+    case 3: return T("Carrera por la reliquia", "Relic Race");
+    case 4: return T("Carrera contra el jefe", "Boss Race");
+    case 5: return T("Desafío CTR", "CTR Challenge");
+    case 6: return T("Carrera de copa", "Cup Race");
+    case 8: return T("Desafío de cristales", "Crystal Challenge");
+    case 9: return T("Batalla", "Battle");
+    case 10: return T("Batalla: captura la bandera", "Battle: Capture the Flag");
+    case 11: return T("Batalla: último kart en pie", "Battle: Last Kart Driving");
+    case 12: return T("Batalla: roba el tocino", "Battle: Steal the Bacon");
+    case 13: return T("Batalla: atrapa cristales", "Battle: Crystal Grab");
+    case 15: return T("Carrera de anillos", "Ring Race");
+    default: return "";
+    }
+}
+
+/// From what the game says: what the player does and where (the presence's first line), and the
+/// kind of online match ("" offline); false when the game said nothing yet.
+bool DescribePlay(std::string& doing, std::string& match) {
+    const GameFacts f = ReadGameFacts();
+    if (!f.known) return false;
+    const std::string place = ZoneName(f.level);
+    std::string mode = RaceModeName(f.race);
+    if (f.itemless) mode += T(" sin objetos", " (itemless)");
+    if (f.speed) mode += " (Speed)";
+    const bool online = f.game == 16 || !f.room.empty();
+    match = f.room == "private" ? T("Sala privada", "Private room")
+            : online           ? T("Partida pública", "Public match")
+                               : "";
+    if (place.empty()) {  // menus, an online lobby, a level without a name
+        if (f.lobby && f.room == "private") doing = T("En una sala privada online", "In a private online room");
+        else if (f.lobby || f.room == "public") doing = T("Buscando partida online", "Looking for an online match");
+        else doing = online ? T("En los menús online", "In the online menus") : T("En los menús", "In the menus");
+        if (f.lobby || f.room == "public") match.clear();  // the first line says it
+        return true;
+    }
+    if (f.game == 1) {  // Adventure: the hub, or a race of it
+        doing = std::string(T("Modo aventura", "Adventure Mode")) +
+                (f.race == 7 || mode.empty() ? ": " + place : " · " + mode + ": " + place);
+        return true;
+    }
+    doing = mode.empty() ? place : mode + ": " + place;
+    return true;
+}
+
 /// Shows the game in the player's Discord status while it runs (launcher.ini discord_rpc,
 /// on by default). Called every frame; DiscordPresence only talks to Discord on a change.
 void UpdateDiscord() {
@@ -2067,10 +2197,17 @@ void UpdateDiscord() {
         return;
     }
     DiscordPresence::Activity activity;
+    // what the player does (the mode, the track) when the game told it (src/runtime_presence.c)
+    // first line: what and where; second: the nickname (and the online match's kind)
+    std::string doing, match;
+    const bool described = DescribePlay(doing, match);
+    activity.large_text = "Crash Team Racing Nitro-Fueled";
     if (a.game.Flag("online", true)) {
-        activity.details = T("Jugando online", "Playing online");
+        activity.details = described ? doing : T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
         if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
+        if (described && !match.empty())
+            activity.state += activity.state.empty() ? match : std::string(" · ") + match;
         // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
         // whoever accepts; their launcher adds us as a friend and starts their game.
         const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
@@ -2088,11 +2225,11 @@ void UpdateDiscord() {
             }
         }
     } else {
-        activity.details = T("Jugando sin conexión", "Playing offline");
+        activity.details = described ? doing : T("Jugando sin conexión", "Playing offline");
+        if (described) activity.state = T("Sin conexión", "Offline");
     }
     activity.start = started;
     activity.large_image = "logo";
-    activity.large_text = "Crash Team Racing Nitro-Fueled";
     DiscordPresence::Update(enabled, app_id, &activity);
 }
 
@@ -3228,6 +3365,17 @@ std::string GameTemporal() {
     return game.Flag("fsr1", true) ? "fsr1" : "off";
 }
 
+/// DLSS's files: the bridge and NVIDIA's DLL in bin\ (packaging/windows/make_portable.py --dlss-sdk).
+/// Without them the game renders without DLSS (#219: the launcher said nothing).
+bool DlssFilesPresent() {
+    static const bool present = [] {
+        std::error_code ec;
+        return fs::is_regular_file(g_app.root / L"bin" / L"sacredfire_dlss.dll", ec) &&
+               fs::is_regular_file(g_app.root / L"bin" / L"nvngx_dlss.dll", ec);
+    }();
+    return present;
+}
+
 /// v0.7.4: FSR 4's model files (the fsr4_shaders folder next to the launcher, where sacredfire.exe
 /// looks for them; not included). Without them FSR 4 is still listed, and the game uses FSR 3.
 bool Fsr4FilesPresent() {
@@ -3519,6 +3667,14 @@ void SettingsTab() {
         if (native && (temporal == "fsr3" || temporal == "fsr4")) {
             ImGui::TextColored(kGrey, "%s", T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
                                               "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "dlss" && !DlssFilesPresent()) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
+            ImGui::TextColored(kGrey, "%s", T("DLSS necesita sacredfire_dlss.dll y nvngx_dlss.dll en la carpeta bin, "
+                                              "que no están en esta copia. Mientras falten, el juego no usa DLSS.",
+                                              "DLSS needs sacredfire_dlss.dll and nvngx_dlss.dll in the bin folder, "
+                                              "which this copy does not have. While they are missing, the game does "
+                                              "not use DLSS."));
+            ImGui::PopTextWrapPos();
         } else if (temporal == "fsr4" && !fsr4) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
             ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
@@ -5186,7 +5342,13 @@ void ModsTab() {
     ImGui::Spacing();
     const char* guide=T("Lee la guía de empaquetado","Read the packaging guide");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
-    if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-packaging.html");
+    // v0.8.5 packages carry no docs\ (a folder that has one, from an older version, still opens it)
+    if (ImGui::TextLink(guide)) {
+        std::error_code ec;
+        const fs::path local=a.root/L"docs"/L"mod-packaging.html";
+        OpenInShell(fs::is_regular_file(local,ec) ? local
+                    : fs::path(L"https://github.com/Ryu7w7/OCTR-NitroFueled-PC/tree/main/docs"));
+    }
     // The game's page on GameBanana, where the community shares its mods.
     const char* gamebanana=T("Buscar mods en GameBanana","Find mods on GameBanana");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
@@ -6738,7 +6900,8 @@ bool AddToSteam(std::string& out_msg) {
     }
 
     fs::path assets_dir;
-    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid"}) {
+    for (const auto& candidate : {a.root / L"art" / L"steamgrid", a.root / L"steamgrid",
+                                  a.root / L"packaging" / L"windows" / L"steamgrid"}) {
         if (fs::is_directory(candidate, ec)) {
             assets_dir = candidate;
             break;
@@ -7915,9 +8078,7 @@ void ToolsTab() {
                              "bridge (MIT). NVIDIA, DLSS and GeForce RTX are trademarks of NVIDIA Corporation."));
     ImGui::PopTextWrapPos();
     {
-        std::error_code ec;
-        const bool dlss = fs::is_regular_file(a.root / L"bin" / L"sacredfire_dlss.dll", ec) &&
-                          fs::is_regular_file(a.root / L"bin" / L"nvngx_dlss.dll", ec);
+        const bool dlss = DlssFilesPresent();
         ImGui::TextColored(kGrey, "%s", dlss ? T("DLSS: archivos presentes (necesita una tarjeta NVIDIA RTX)",
                                                  "DLSS: files present (needs an NVIDIA RTX card)")
                                              : T("DLSS: archivos no incluidos (se usa FSR 3)",

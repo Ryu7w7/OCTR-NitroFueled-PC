@@ -100,6 +100,100 @@ def write_entries_patch(target, archive, guest, entries, base=None, override=())
     write(target, archive, guest, ranges)
 
 
+def path_hash(path):
+    """An entry's hash in an IGA v13 index: FNV-1a (32 bits) of its path in lower case."""
+    h = 0x811C9DC5
+    for c in path.lower().encode('utf-8'):
+        h = ((h ^ c) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def write_grown_patch(target, archive, guest, entries, added):
+    """A patch that replaces entries {index: payload} of an IGA v13 archive and adds new ones
+    {path: payload}, each stored uncompressed after the end of the archive. The index (header,
+    hashes in order, records, compression tables) is written again in place, which needs room
+    before the first entry's data (20 bytes an entry; the entries whose data is in the way move
+    after the end, uncompressed), and the names after the end. Entries keep their data but not
+    their index numbers, so it is the only patch for its archive (no base)."""
+    archive = resolve(archive)
+    size = Path(archive).stat().st_size
+    with open(archive, 'rb') as f:
+        blob = f.read()
+    u32 = lambda o: struct.unpack_from('<I', blob, o)[0]
+    count, names_at, names_size = u32(0xC), struct.unpack_from('<Q', blob, 0x28)[0], u32(0x30)
+    tables_size = u32(0x1C) * 4 + u32(0x20) * 2 + u32(0x24)
+    if u32(0) != 0x1A414749 or u32(4) != 13 or u32(8) != count * 20 + tables_size:
+        raise ValueError('not an IGA v13 archive index')
+    hashes = struct.unpack_from(f'<{count}I', blob, 0x38)
+    records = [struct.unpack_from('<4I', blob, 0x38 + 4 * count + 16 * i) for i in range(count)]
+    tables = blob[0x38 + 20 * count:0x38 + 20 * count + tables_size]
+    starts = sorted(set(struct.unpack_from(f'<{count}I', blob, names_at)))
+    name_blocks = []
+    for i in range(count):
+        at = u32(names_at + 4 * i)
+        later = [s for s in starts if s > at]
+        name_blocks.append(blob[names_at + at:names_at + (later[0] if later else names_size)])
+    paths = {name_blocks[i].split(b'\0')[1].decode('utf-8').lower() for i in range(count)}
+    total = count + len(added)
+    # Room for the longer index: the entries whose data comes first move after the end too.
+    entries, reader = dict(entries), None
+    position_of = lambda i: (records[i][1] & 0xFF) << 32 | records[i][0]
+    while True:
+        staying = [i for i in range(count) if i not in entries]
+        if not staying:
+            raise ValueError('no room in the archive index for the new entries')
+        first = min(staying, key=position_of)
+        if 0x38 + 20 * total + tables_size <= position_of(first):
+            break
+        if reader is None:
+            from archive_reader import Archive
+            reader = Archive(archive)
+        entries[first] = bytes(reader.extract(reader.files[first]))
+    end, ranges = size, []
+
+    def place(payload):
+        nonlocal end
+        position = (end + SECTOR - 1) // SECTOR * SECTOR
+        ranges.append((position, payload))
+        end = position + len(payload)
+        return position
+
+    def record(position, payload, ordinal):
+        return struct.pack('<4I', position & 0xFFFFFFFF, ordinal << 8 | position >> 32, len(payload), 0xFFFFFFFF)
+
+    rows = []  # (hash, record, name block)
+    for i in range(count):
+        row = records[i]
+        if i in entries:
+            row = struct.unpack('<4I', record(place(entries[i]), entries[i], row[1] >> 8))
+        rows.append((hashes[i], struct.pack('<4I', *row), name_blocks[i]))
+    ordinal = max((r[1] >> 8 for r in records if r[1] >> 8 != 0xFFFFFF), default=-1) + 1
+    for path, payload in added.items():
+        if path.lower() in paths:
+            raise ValueError(f'{path} is already in the archive')
+        name = path.encode('utf-8')
+        rows.append((path_hash(path), record(place(payload), payload, ordinal),
+                     b'temporary/octane/data/ps4/output/' + name + b'\0' + name + b'\0' + bytes(4)))
+        ordinal += 1
+    rows.sort(key=lambda row: row[0])
+    if len({row[0] for row in rows}) != total:
+        raise ValueError('two entries with the same hash')
+    names = bytearray(4 * total)
+    for i, row in enumerate(rows):
+        struct.pack_into('<I', names, 4 * i, len(names))
+        names += row[2]
+    names_position = place(bytes(names))
+    divider = 0xFFFFFFFF // total
+    slop = max(abs(i - row[0] // divider) for i, row in enumerate(rows))
+    header = bytearray(blob[:0x38])
+    struct.pack_into('<II', header, 0x8, total * 20 + tables_size, total)
+    struct.pack_into('<II', header, 0x14, divider, slop)
+    struct.pack_into('<QI', header, 0x28, names_position, len(names))
+    index = bytes(header) + b''.join(struct.pack('<I', row[0]) for row in rows) \
+        + b''.join(row[1] for row in rows) + tables
+    write(target, archive, guest, [(0, index)] + ranges)
+
+
 def view(archive, patch, offset, length):
     """What the game reads (for tests): the archive with the patch applied."""
     archive = resolve(archive)

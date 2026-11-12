@@ -111,6 +111,8 @@ int runtime_online_mode_lobby_open(void);        /* an online lobby is on screen
 void runtime_online_mode_note_frame(void);       /* the game's thread, every frame */
 int runtime_online_mode_room_on(void);           /* in_private as of the last frame, for any thread */
 int runtime_online_mode_public_on(void);         /* a public match's lobby as of the last frame */
+void runtime_load_guard_note(const void *buffer, size_t size); /* the game's stdout/stderr writes: a level load that cannot finish restarts the game (runtime_load_guard.c) */
+void runtime_presence_tick(void);                /* the game's thread, every frame: Discord presence facts (runtime_presence.c) */
 int runtime_online_mode_private_cup_race(void); /* a race of a private room's CUP is loading or running */
 void runtime_room_mode_hosting(void);
 void runtime_room_mode_joined(const char *session_id);

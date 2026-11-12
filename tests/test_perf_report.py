@@ -112,6 +112,34 @@ class PerfReportTests(unittest.TestCase):
         self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
         self.assertNotIn('fault', self.collector().report({}))
 
+    def test_a_lost_gpu_device_says_why_without_addresses(self):
+        # vk_breadcrumbs.cpp's report: where it was noticed, the driver's words, the bad access,
+        # a buffer freed under the GPU, and the command it stopped in (hashes kept, addresses not)
+        c = perf_report.Collector()
+        c.feed("LOADING LEVEL: 'octane/t112_roos_tubes/t112_roos_tubes'\n"
+               'GPU fault info: VK_EXT_device_fault on, a device loss reports its cause\n'
+               'GPU breadcrumbs at device lost (submit): what each command stream finished\n'
+               '  stream 0 (gfx): 812 commands noted, the GPU started #700 and did not finish it\n'
+               '    #699 finished: Pass main\n'
+               '    #700 STUCK: DrawIndirect vs 00112233aabbccdd ps 44556677eeff0011, up to 4 draws, '
+               'stride 20, arguments at 0x10f6901f78 (guest memory now 1 2 3 4 5)\n'
+               'GPU fault info: Page fault (1 addresses, 1 vendor records)\n'
+               '  invalid read at GPU address 0x1234567000 (range 0x1234567000-0x1234567fff)\n'
+               '    inside buffer 0x1f2e3d (GPU 0x1234560000, 65536 bytes) destroyed 3.1 ms before this report\n')
+        fault = c.report({})['fault']
+        self.assertEqual(fault['kind'], 'gpu device lost')
+        self.assertEqual(fault['where'], 'submit')
+        self.assertEqual(fault['cause'], 'Page fault')
+        self.assertEqual(fault['gpu_access'], 'invalid read')
+        self.assertEqual(fault['freed'], 'buffer')
+        self.assertIn('vs 00112233aabbccdd ps 44556677eeff0011', fault['stuck'])
+        self.assertNotIn('0x10f6901f78', fault['stuck'])
+        self.assertNotIn('guest memory', fault['stuck'])
+        # the status line printed at startup is not a loss
+        quiet = perf_report.Collector()
+        quiet.feed('GPU fault info: VK_EXT_device_fault on, a device loss reports its cause\n')
+        self.assertNotIn('fault', quiet.report({}))
+
     def test_a_corrupt_free_the_game_survived_is_reported(self):
         c = perf_report.Collector()
         c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 000000106d171ef8, '
