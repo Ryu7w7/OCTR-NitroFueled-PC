@@ -50,10 +50,12 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     if (!strcmp(target,"/ryunet/theme")) {
         snprintf(body,size,"%s",reply); return status;
     }
+    if (strstr(target,"/ryunet/matchmaking-status?")) { snprintf(body,size,"%s",reply); return status; }
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
         assert(strstr(target,"&ranked=1"));
+        assert(strstr(target,ranked_device()) && strlen(ranked_device())==64);
         snprintf(body,size,"ok"); return 200;
     }
     assert(!strcmp(method,"GET"));
@@ -758,7 +760,55 @@ static void ABI release_input_event(void *object) {
     --allocated_input_events; free(event);
 }
 
+static void test_ranked_device_and_search_clock(void) {
+    const char *device=ranked_device();
+    assert(strlen(device)==64 && !strspn(device,"-"));
+    assert(strspn(device,"0123456789abcdef")==64);
+    char *extended=extend("{\"members\":[1]}",32,42,1,0);
+    assert(extended && strstr(extended,device));free(extended);
+    unsigned char party[0x100]={0}, roster[0x40]={0}, peers[4][0x40]={{0}};
+    void *items[]={peers[0],peers[1],peers[2],peers[3]}, *party_pointer=party;
+    void **saved=party_manager;party_manager=&party_pointer;
+    *(void **)(party+0x30)=roster;*(void ***)(roster+0x20)=items;
+    *(int *)(roster+12)=3;assert(ranked_party_size()==4);
+    *(int *)(roster+12)=4;assert(ranked_party_size()==5);
+    assert(!ranked_entry_allowed());
+    matchmaking_search=ranked_selected=1;
+    runtime_public_itemless_update();
+    assert(!matchmaking_search && !rejection[0]);
+    ranked_selected=0;
+    peers[3][0x2c]=1;assert(ranked_party_size()==4);
+    party_manager=saved;
+    runtime_public_itemless_reset();
+    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=42;
+    search_is_ranked=1;search_range=700;search_policy_at=check_clock();
+    search_poll_after=UINT64_MAX;
+    int elapsed,timeout,range,ranked;
+    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
+    assert(elapsed==42 && timeout==180 && range==700 && ranked);
+    matchmaking_room=42;
+    assert(!runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
+    matchmaking_room=0;
+    /* Party followers use server elapsed time; stale worker replies cannot restore a cancelled search. */
+    runtime_public_itemless_reset();
+    snprintf(reply,sizeof reply,"{\"state\":\"searching\",\"elapsed\":45,\"timeout\":180,\"range\":1000,\"ranked\":true}");
+    struct SearchPoll *job=calloc(1,sizeof *job);
+    job->generation=session_generation;job->serial=search_poll_serial;
+    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");search_poll(job);
+    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
+    assert(elapsed==45 && range==1000 && ranked);
+    job=calloc(1,sizeof *job);job->generation=session_generation;job->serial=search_poll_serial;
+    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");
+    runtime_public_itemless_reset();search_poll(job);
+    assert(!runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
+    runtime_public_itemless_reset();
+    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;search_poll_after=UINT64_MAX;
+    update_search_clock();assert(rejection[0] && !matchmaking_search && !search_mark);
+    runtime_public_itemless_reset();rejection[0]=0;snprintf(reply,sizeof reply,"ok");
+}
+
 int main(void) {
+    test_ranked_device_and_search_clock();
     native_deferred_event_create = allocate_input_event;
     native_deferred_event_release = release_input_event;
     test_hof_project_shortcut();

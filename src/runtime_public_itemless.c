@@ -71,6 +71,9 @@ static unsigned char *room_owner;
 static uint64_t matchmaking_room;
 static unsigned char *matchmaking_owner;
 static int matchmaking_search;
+static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
+static int search_elapsed_base, search_timeout = 180, search_range, search_is_ranked;
+static int search_server_active, search_poll_running;
 
 typedef void *(ABI *Search)(void **, void *, const char *, unsigned, void *);
 typedef void *(ABI *Register)(void **, void *, const char *, unsigned);
@@ -149,6 +152,10 @@ static void reset_locked(void) {
     request_nonce = 0;
     searching = 0;
     allow_party = 0;
+    search_mark = search_ui_at = search_poll_after = search_policy_at = 0;
+    search_elapsed_base = search_range = search_is_ranked = search_server_active = search_poll_running = 0;
+    search_timeout = 180;
+    ++search_poll_serial;
 }
 void runtime_public_itemless_reset(void) {
     pthread_mutex_lock(&mode_lock);
@@ -255,7 +262,97 @@ static void reject_search(const char *message) {
     pthread_mutex_unlock(&mode_lock);
 }
 
+struct SearchPoll { uint64_t generation, serial; char target[160]; };
+
+static int search_integer(const char *body, const char *key, int *out) {
+    const char *value = runtime_json_field(body,key);
+    if (!value) return 0;
+    char *end;
+    long n = strtol(value,&end,10);
+    if (end==value || n < -1 || n > 10000 || (*end!=',' && *end!='}' && !isspace((unsigned char)*end))) return 0;
+    *out=(int)n;
+    return 1;
+}
+
+static void *search_poll(void *arg) {
+    struct SearchPoll *job=arg;
+    char body[512];
+    int elapsed=0, timeout=0, range=0;
+    int status=runtime_ryunet_request("GET",job->target,body,sizeof body);
+    const char *state=status==200 ? runtime_json_field(body,"state") : NULL;
+    int valid=state && search_integer(body,"elapsed",&elapsed) && search_integer(body,"timeout",&timeout) &&
+        search_integer(body,"range",&range) && elapsed>=0 && elapsed<=timeout && timeout>=30 && timeout<=1800;
+    const char *ranked=valid ? runtime_json_field(body,"ranked") : NULL;
+    const uint64_t now=check_clock();
+    pthread_mutex_lock(&mode_lock);
+    if (job->generation==session_generation && job->serial==search_poll_serial) {
+        search_poll_running=0;
+        if (valid) {
+            search_timeout=timeout;search_range=range;search_policy_at=now;
+            if (!strncmp(state,"\"searching\"",11) || !strncmp(state,"\"timed_out\"",11)) {
+                search_server_active=1;search_mark=now;search_elapsed_base=elapsed;
+                search_is_ranked=ranked && !strncmp(ranked,"true",4);
+            } else if (!strncmp(state,"\"matched\"",9)) {
+                search_server_active=0;search_mark=0;
+            } else if (!matchmaking_search) {
+                search_server_active=0;search_mark=0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mode_lock);
+    free(job);
+    return NULL;
+}
+
+int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked) {
+    uint64_t now=check_clock();
+    pthread_mutex_lock(&mode_lock);
+    search_ui_at=now;
+    int active=search_mark && !matchmaking_room && (matchmaking_search || search_server_active);
+    *elapsed=search_elapsed_base+(int)((now>=search_mark ? now-search_mark : 0)/1000);
+    *timeout=search_timeout;
+    *elapsed=*elapsed>*timeout ? *timeout : *elapsed;
+    *range=search_policy_at && now-search_policy_at<5000 ? search_range : 0;
+    *ranked=search_is_ranked;
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+
+static void update_search_clock(void) {
+    uint64_t now=check_clock();
+    pthread_mutex_lock(&mode_lock);
+    int expired=search_mark && !matchmaking_room && (matchmaking_search || search_server_active) &&
+        search_elapsed_base+(int)((now>=search_mark ? now-search_mark : 0)/1000)>=search_timeout;
+    struct SearchPoll *job=NULL;
+    if (!expired && search_ui_at && now-search_ui_at<500 && !matchmaking_room && !search_poll_running && now>=search_poll_after) {
+        const char *name=runtime_np_get_online_name();
+        if (name && *name && (job=calloc(1,sizeof *job))) {
+            job->generation=session_generation;job->serial=++search_poll_serial;
+            snprintf(job->target,sizeof job->target,"/ryunet/matchmaking-status?name=%s",name);
+            search_poll_running=1;search_poll_after=now+1000;
+        }
+    }
+    pthread_mutex_unlock(&mode_lock);
+    if (expired) { reject_search("No players found within the search limit. Matchmaking cancelled. Please try again."); return; }
+    if (job) {
+        pthread_t worker;
+        if (!pthread_create(&worker,NULL,search_poll,job)) pthread_detach(worker);
+        else {
+            pthread_mutex_lock(&mode_lock);
+            if (job->serial==search_poll_serial) search_poll_running=0;
+            pthread_mutex_unlock(&mode_lock);
+            free(job);
+        }
+    }
+}
+
 void runtime_public_itemless_update(void) {
+    update_search_clock();
+    pthread_mutex_lock(&mode_lock);
+    int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
+    pthread_mutex_unlock(&mode_lock);
+    if (ranked && ranked_party_size()>4)
+        reject_search("Ranked party exceeded 4 players. Matchmaking cancelled; reduce your party and search again.");
     char message[sizeof rejection];
     pthread_mutex_lock(&mode_lock);
     memcpy(message, rejection, sizeof message);
@@ -971,7 +1068,16 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
             return result;
         }
     }
+    pthread_mutex_lock(&mode_lock);
+    uint64_t previous_mark=matchmaking_search ? search_mark : 0;
+    int previous_elapsed=search_elapsed_base;
+    pthread_mutex_unlock(&mode_lock);
     runtime_public_itemless_reset();
+    pthread_mutex_lock(&mode_lock);
+    search_mark=previous_mark ? previous_mark : check_clock();
+    search_elapsed_base=previous_mark ? previous_elapsed : 0;
+    search_is_ranked=!!ranked_selected;
+    pthread_mutex_unlock(&mode_lock);
     fprintf(stderr, "Public matchmaking: starting %s %s search\n", ranked_selected ? "RANKED" : "CASUAL", selected ? "ITEMLESS" : "NORMAL");
     if (!selected && !ranked_selected) {
         pthread_mutex_lock(&mode_lock);

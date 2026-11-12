@@ -13,6 +13,7 @@ import archive_patch
 import hall_of_fame
 from ranked_results import score_card, manual_navigation
 from ranked_name_badges import add_badges
+from matchmaking_timer import add_timer
 from build_ui_asset import build_pak as build_ui_asset_pak, lobby_background_texture
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets, pack_offsets
@@ -1466,6 +1467,8 @@ def _prepare(game, out, elf, bases):
         lobby_root = team_selector_callback(iga.read_entry(f, *entries[lobby_root_index][1:]))
         public_index = next(i for i, e in enumerate(entries) if e[0].lower() == PUBLIC_LOBBY_ENTRY)
         public_lobby = public_lobby_card(current_entry(pak, entries, public_index, base))
+        timer_index = next(i for i,e in enumerate(entries) if e[0].lower().endswith('/ui/octane_lobby_timer.igz'))
+        public_lobby = add_timer(public_lobby, current_entry(pak,entries,timer_index,base))
         mode_select = payload
         lobby_members_index = next(i for i, e in enumerate(entries) if e[0].lower() == LOBBY_MEMBERS_ENTRY)
         lobby_members_native = current_entry(pak, entries, lobby_members_index, base)

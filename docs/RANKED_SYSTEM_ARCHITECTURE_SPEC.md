@@ -48,6 +48,35 @@ ranked rooms, and injects an `octr_ranked_v1` confirmation (`1/<room>/<mode>/<no
 backend lobby document. A room is only joined when that confirmation matches the client's own
 nonce. Parties preflight through the signed `GET /ryunet/ranked-party` first.
 
+### Device admission and search timer
+
+Ranked allows parties of at most four, and at most four active Ranked accounts per device
+across solo searches, parties, and rooms. Every member registers its own SHA-256 hash of
+Linux machine ID or Windows MachineGuid with a SacredFire-specific prefix. Raw OS IDs are
+not transmitted. The server reserves slots atomically and releases matching reservations
+on cancel, room leave, or disconnect. IP addresses do not affect this rule, and local testing
+uses the same four-account limit. Older clients need an update for Ranked.
+
+Members still race as solo opponents and receive individual MMR changes. A party can form
+a room by itself; room capacity remains eight. The client checks party size before Ranked
+entry and cancels if the party exceeds four while searching or in its confirmed lobby.
+Only members in a validated server search receive Ranked confirmation.
+
+Public Matchmaking and Ranked show elapsed search time up to 03:00, then cancel through
+the native matchmaking path. A background worker polls signed `/ryunet/matchmaking-status`
+once per second while the Public lobby is visible, so followers share the leader's elapsed
+time without HTTP on the game thread. Ranked shows the server's available range: 400 MMR,
+700 after 20 seconds, 1000 after 45 seconds, and no hard cap after 90 seconds. Both sides
+still need the threshold to match. Stale range data displays a checking message. Public
+shows elapsed time only. A matched room hides this panel and uses the native countdown.
+
+The passive panel reuses the native countdown artwork and anchor without copying its
+behavior graph. Its generated archive patch uses the existing preparation cache, including
+source invalidation and stale-file removal; warm boots reuse prepared output.
+
+The OS identifier is client-reported, not hardware attestation. Modified clients can spoof
+it, so this limit reduces ordinary multi-client boosting without proving distinct humans.
+
 ### Online session isolation
 
 Confirming Ranked, Matchmaking, or Private from Online main starts fresh transient

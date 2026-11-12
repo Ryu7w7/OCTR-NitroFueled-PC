@@ -68,6 +68,11 @@ int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_update(void) {}
+static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
+int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
+    *elapsed=search_test_elapsed;*timeout=180;*range=search_test_range;*ranked=search_test_ranked;
+    return search_test_active;
+}
 void runtime_public_itemless_select(int enabled) { public_selected = enabled; }
 static int synced_finished_mask=-1;
 int runtime_ai_catchup_results(void) { return synced_finished_mask; }
@@ -3422,6 +3427,31 @@ static void test_region(size_t shift) {
     following_host=0;
     runtime_online_mode_new_session();
     assert(!runtime_online_mode_private_cup() && speed==0);
+    unsigned char search_root[0x100]={0}, search_panel[0x100]={0}, search_table[0x40]={0};
+    unsigned char labels[4][0x100]={{0}};
+    void *search_items[]={search_panel,labels[0],labels[1],labels[2],labels[3]};
+    put_pointer(search_root,0x48,search_table);
+    put_pointer(search_table,0x20,search_items);
+    *(int *)(search_table+12)=5;
+    put_pointer(search_panel,0x28,"OCTR_SEARCH_PANEL");
+    put_pointer(labels[0],0x28,"OCTR_SEARCH_TITLE");
+    put_pointer(labels[1],0x28,"OCTR_SEARCH_TIME");
+    put_pointer(labels[2],0x28,"OCTR_SEARCH_RANGE");
+    put_pointer(labels[3],0x28,"TimerValue");
+    unsigned char countdown_before[0x100]; memcpy(countdown_before,labels[3],sizeof countdown_before);
+    search_test_active=search_test_ranked=1;search_test_elapsed=42;search_test_range=700;
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(!strcmp(*(char **)(labels[0]+0x30),"SEARCHING"));
+    assert(!strcmp(*(char **)(labels[1]+0x30),"00:42 / 03:00"));
+    assert(!strcmp(*(char **)(labels[2]+0x30),"RANGE WIDENED: 700 MMR"));
+    search_test_range=-1;runtime_online_mode_matchmaking_update(search_root);
+    assert(!strcmp(*(char **)(labels[2]+0x30),"ALL RANKS - CLOSEST FIRST"));
+    search_test_ranked=0;runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(labels[2]+12)&0x400);
+    search_test_active=0;runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(search_panel+12)&0x400);
+    assert(!memcmp(countdown_before,labels[3],sizeof countdown_before));
+    for(int i=0;i<3;++i) free_string(NULL,*(char **)(labels[i]+0x30)-16);
     free_string(NULL, *(char **)(private_settings + 0x10) - 16);
     munmap(image, size);
 }

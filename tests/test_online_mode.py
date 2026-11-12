@@ -1131,9 +1131,13 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                                  online_mode.lobby_card(lobby))
                 public = online_mode.current_entry(pak, entries, public_index, base)
                 actual_public = online_mode.current_entry(pak, entries, public_index, result)
-                self.assertEqual(actual_public, online_mode.public_lobby_card(public))
-                self.assertNotEqual(actual_public, online_mode.public_lobby_card(
-                    online_mode.current_entry(pak, entries, public_index, None)))
+                timer_index = next(i for i, entry in enumerate(entries)
+                                   if entry[0].lower().endswith('/ui/octane_lobby_timer.igz'))
+                timer = online_mode.current_entry(pak, entries, timer_index, base)
+                self.assertEqual(actual_public, online_mode.add_timer(
+                    online_mode.public_lobby_card(public), timer))
+                self.assertNotEqual(actual_public, online_mode.add_timer(online_mode.public_lobby_card(
+                    online_mode.current_entry(pak, entries, public_index, None)), timer))
                 # Unknown edits still fail closed, even on a supported widescreen menu.
                 with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
                     online_mode.private_team_settings(wide + b'unknown edit')

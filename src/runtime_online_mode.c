@@ -2520,10 +2520,46 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     resume_private_map();
 }
 
+static void matchmaking_labels(unsigned char *node, int active, int elapsed, int timeout, int range, int ranked, int depth) {
+    if (!node || depth>16) return;
+    const char *tag=pointer_at(node,0x28);
+    if (tag && !strcmp(tag,"OCTR_SEARCH_PANEL")) hide_placeable(node,!active);
+    if (tag && active) {
+        if (!strcmp(tag,"OCTR_SEARCH_TITLE")) set_text(node,"SEARCHING");
+        else if (!strcmp(tag,"OCTR_SEARCH_TIME")) {
+            char text[48];
+            snprintf(text,sizeof text,"%02d:%02d / %02d:%02d",elapsed/60,elapsed%60,timeout/60,timeout%60);
+            set_text(node,text);
+        } else if (!strcmp(tag,"OCTR_SEARCH_RANGE")) {
+            hide_placeable(node,!ranked);
+            if (ranked) {
+                char text[64];
+                if (range<0) snprintf(text,sizeof text,"ALL RANKS - CLOSEST FIRST");
+                else if (range>400) snprintf(text,sizeof text,"RANGE WIDENED: %d MMR",range);
+                else if (range>0) snprintf(text,sizeof text,"RANGE: %d MMR",range);
+                else snprintf(text,sizeof text,"CHECKING SEARCH RANGE");
+                set_text(node,text);
+            }
+        }
+    }
+    unsigned char *children=pointer_at(node,0x48);
+    int count=children ? *(int *)(children+12) : 0;
+    void **items=children ? pointer_at(children,0x20) : NULL;
+    for (int i=0;items && count<=256 && i<count;++i)
+        matchmaking_labels(items[i],active,elapsed,timeout,range,ranked,depth+1);
+}
+
+void runtime_online_mode_matchmaking_update(unsigned char *root) {
+    int elapsed=0,timeout=180,range=0,ranked=0;
+    int active=runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
+    matchmaking_labels(root,active,elapsed,timeout,range,ranked,0);
+}
+
 static void refresh_lobby_card(unsigned char *owner) {
     if (!owner) return;
     const char *tag = pointer_at(owner, 0x28);
     if (tag && !strcmp(tag, "OCTR_PUBLIC_LOBBY")) {
+        runtime_online_mode_matchmaking_update(owner);
         /* Party members can retain private scene/selector state in public. */
         int type = 0;
         if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);

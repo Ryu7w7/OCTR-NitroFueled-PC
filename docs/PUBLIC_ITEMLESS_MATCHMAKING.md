@@ -39,6 +39,17 @@ client's mod posts the finish order to `/ryunet/ranked-result`
 (docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md): the server scores the race when the
 room's host reports and the lobby card shows the rating it answered with.
 
+## Elapsed matchmaking
+
+Public and Ranked show a native-style elapsed search timer, capped at 180 seconds.
+At the cap the client cancels matchmaking and returns through the native lobby path.
+Ranked also shows server-owned range expansion; Public has no rank-range message.
+A confirmed match hides elapsed time and retains the native pre-race countdown.
+The timer artwork is prepared once through the existing archive cache.
+
+Ranked parties and active accounts per device are each capped at four. No IP restriction
+or localhost bypass applies. See the Ranked architecture spec for device identity limits.
+
 ## Verification
 
 I tested public matchmaking on a local server with two clients: Itemless matched

@@ -171,6 +171,8 @@ void runtime_public_itemless_reset(void);
 void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
+int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);
+void runtime_online_mode_matchmaking_update(unsigned char *root);
 int runtime_speed_mode_enabled(void);
 int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
