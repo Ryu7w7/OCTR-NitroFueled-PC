@@ -1,4 +1,5 @@
 """Validate passive matchmaking timer against both native regional layouts."""
+import math
 import os
 import struct
 import unittest
@@ -35,18 +36,41 @@ class MatchmakingTimerTests(unittest.TestCase):
         self.assertTrue(image.u32(panel+12) & 0x400)
         children = image.u64(panel+0x48)
         self.assertEqual(image.u32(children+12), 4)
+        # Native traversal must retain the panel's full subtree after attaching it.
+        expected=[panel]+[image.u64(image.u64(children+32)+8*i) for i in range(4)]
+        node=panel
+        for i,wanted in enumerate(expected):
+            self.assertEqual(node,wanted)
+            if i: self.assertEqual(image.u64(node+0x58),expected[i-1])
+            node=image.u64(node+0x50)
+        self.assertEqual(node,0)
         previous_bottom = None
+        angle = struct.unpack_from('<f',image.data,background+0x80)[0]
+        cosine,sine = math.cos(math.radians(angle)),math.sin(math.radians(angle))
         for name in ('TITLE', 'TIME', 'RANGE'):
             node = tags['OCTR_SEARCH_'+name]
             x, y = struct.unpack_from('<2f', image.data, node+0x60)
             width, height = struct.unpack_from('<2f', image.data, node+0x90)
-            self.assertEqual(x, -39)
-            self.assertGreater(width, 0)
-            # Native scale .4 keeps each fitted text inside the 256x148 artwork.
-            self.assertLessEqual(width*.4, 256)
+            self.assertEqual(image.data[node+0x98:node+0xb0],image.data[background+0x98:background+0xb0])
+            self.assertEqual(struct.unpack_from('<f',image.data,node+0x80)[0],angle)
+            # Compare boxes in the artwork's coordinate frame, including its native tilt.
+            local_x=cosine*(x+39)+sine*(y-84)
+            local_y=-sine*(x+39)+cosine*(y-84)
+            self.assertAlmostEqual(local_x,0,places=4)
+            self.assertLessEqual(abs(local_x)+width*.4/2,128-20)
+            self.assertLessEqual(abs(local_y)+height*.4/2,74-20)
             if previous_bottom is not None:
-                self.assertGreater(y-height*.4/2, previous_bottom)
-            previous_bottom = y+height*.4/2
+                self.assertGreater(local_y-height*.4/2,previous_bottom)
+            previous_bottom=local_y+height*.4/2
+        # Resolve each exported text asset and verify native fit-to-box, single-line centering.
+        names=next(o for o,k in objects.items() if k=='igNameList')
+        exports={image.string_at(image.u64(names+32)+16*i):image.u64(image.u64(32)+8*i)
+                 for i in range(image.u32(names+12))}
+        for name in ('TITLE','TIME','RANGE'):
+            text=exports['OCTR_SEARCH_'+name+'_ASSET']
+            self.assertEqual(image.u32(text+0x5c),1)
+            self.assertEqual(image.u32(text+0x60),1)
+            self.assertEqual(image.data[text+0x68:text+0x6a],b'\x01\x00')
         counts = Counter(image.u64(at) for at in image.sites['ROFS'])
         new_start = len(Igz(lobby).data)
         for obj, kind in objects.items():

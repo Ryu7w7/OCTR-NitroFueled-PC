@@ -1,4 +1,5 @@
 """Passive search timer using the native lobby countdown's anchor and artwork."""
+import math
 import struct
 from collections import Counter
 from igz_file import Igz, unpack_offsets
@@ -17,6 +18,7 @@ def add_timer(blob, timer_blob):
     parent = next(o for o,t in g.objects() if t=='igGuiPlaceable' and o+0x28 in g.sites['RSTT']
                   and g.string_at(o+0x28)=='OCTR_PUBLIC_LOBBY')
     first_new = len(g.data)
+    old_counts=Counter(g.u64(at) for at in g.sites['ROFS'])
     null_fields = {0x30,0x38,0x40,0x48,0x50,0x58,0xe8,0xf0,0xf8}
 
     def pointer(at, value):
@@ -81,23 +83,27 @@ def add_timer(blob, timer_blob):
     sprite=clone(0x12e0)
     g.set_u64(background+0x38,export(sprite,'OCTR_SEARCH_BACKGROUND_ASSET'));g.add_site('RHND',background+0x38)
     children=[background]
-    for tag,source,y,font in [('TITLE',0x5f0,44,.6),('TIME',0x4d0,82,.8),('RANGE',0x5f0,124,.45)]:
+    angle=struct.unpack_from('<f',g.data,background+0x80)[0]
+    radians=math.radians(angle)
+    for tag,source,offset,font in [('TITLE',0x5f0,-36,.5),('TIME',0x4d0,0,.72),('RANGE',0x5f0,36,.35)]:
         text=clone(0x11f0)
         g.set_u32(text+0x5c,1);g.set_u32(text+0x60,1)
         struct.pack_into('<f',g.data,text+0x64,font)
         g.data[text+0x68]=1;g.data[text+0x69]=0
         label=clone(source,True);marker(g,label,'OCTR_SEARCH_'+tag);pointer(label+0x40,panel)
-        struct.pack_into('<2f',g.data,label+0x60,-39,y)
+        # Native timer labels use center anchors; the artwork uses top-left anchors.
+        g.data[label+0x98:label+0xb0]=g.data[background+0x98:background+0xb0]
+        struct.pack_into('<3f',g.data,label+0x78,0,0,angle)
+        struct.pack_into('<2f',g.data,label+0x60,-39-math.sin(radians)*offset,84+math.cos(radians)*offset)
         struct.pack_into('<2f',g.data,label+0x90,520,70)
         g.set_u64(label+0x38,export(text,'OCTR_SEARCH_'+tag+'_ASSET'));g.add_site('RHND',label+0x38)
         children.append(label)
     table=g.append(g.data[g.u64(parent+0x48):g.u64(parent+0x48)+g.sizes[g.u64(g.u64(parent+0x48))]])
     g.add_site('RVTB',table)
     replace_list(table,children);pointer(panel+0x48,table)
-    append_traversal(g,panel,children)
     old_table=g.u64(parent+0x48)
     old_children=[g.u64(g.u64(old_table+32)+8*i) for i in range(g.u32(old_table+12))]
-    replace_list(old_table,old_children+[panel]);append_traversal(g,parent,[panel])
+    replace_list(old_table,old_children+[panel]);append_traversal(g,parent,[panel,*children])
     replace_list(0,exports);replace_list(asset_list,assets)
     array=g.append(names)
     for i in range(len(exports)):g.add_site('RSTT',array+16*i)
@@ -105,7 +111,7 @@ def add_timer(blob, timer_blob):
     g.set_u64(name_list+24,(g.u64(name_list+24)&~0xffffffff)|len(names));pointer(name_list+32,array)
     counts=Counter(g.u64(at) for at in g.sites['ROFS'])
     for obj,kind in g.objects():
-        if obj>=first_new:g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|counts[obj])
-    g.set_u32(parent+8,(g.u32(parent+8)&~0x7ffff)|((g.u32(parent+8)&0x7ffff)+1))
+        count=counts[obj] if obj>=first_new else (g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
+        g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|count)
     dependencies(g,{'juice_Octane_Lobby_Timer_materials':'ui:/materialInstances/juice_Octane_Lobby_Timer_materials.igz'})
     return g.build()

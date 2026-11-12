@@ -2525,6 +2525,17 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
     const char *tag=pointer_at(node,0x28);
     if (tag && !strcmp(tag,"OCTR_SEARCH_PANEL")) hide_placeable(node,!active);
     if (tag && active) {
+        if (!strcmp(tag,"OCTR_SEARCH_TITLE") || !strcmp(tag,"OCTR_SEARCH_TIME")) {
+            const int title=!strcmp(tag,"OCTR_SEARCH_TITLE");
+            const float offset=title ? (ranked ? -36.0f : -18.0f) : (ranked ? 0.0f : 18.0f);
+            float angle;memcpy(&angle,node+0x80,sizeof angle);
+            angle*=0.01745329252f;
+            const float position[]={-39.0f-sinf(angle)*offset,84.0f+cosf(angle)*offset};
+            if (memcmp(node+0x60,position,sizeof position)) {
+                memcpy(node+0x60,position,sizeof position);
+                *(unsigned *)(node+12)|=0x1000;
+            }
+        }
         if (!strcmp(tag,"OCTR_SEARCH_TITLE")) set_text(node,"SEARCHING");
         else if (!strcmp(tag,"OCTR_SEARCH_TIME")) {
             char text[48];
