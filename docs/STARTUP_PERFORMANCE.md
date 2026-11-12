@@ -209,3 +209,37 @@ or test suite was started.
 - Network setup, shader extraction/warmup, enabled mods and native runtime stages
   have not been benchmarked in this pass. No end-to-end speedup or zero-bug claim
   is made from preparation microbenchmarks.
+
+
+## Cache invalidation and cleanup, 2026-11-12
+
+Online UI preparation now caches its complete generated output. On this Linux USA
+fixture, an uncached preparation took 19.342 seconds; two cache hits took 0.154
+and 0.132 seconds. These are preparation measurements, not time to the first frame.
+The existing Itemless cache took 0.015 seconds on a subsequent hit, and generating
+the two local auth-key XML documents took 0.014 seconds.
+
+The Online stamp includes generator scripts, UI art, executable input, game archive
+identities, mod redirections and incoming overlay bytes. Missing or changed output
+files invalidate it. Invalidated Online and Itemless manifests discard their old
+managed output files before rebuilding; incoming overlay files remain protected.
+
+Boot preparation retains only the current verified build per edition. Widescreen,
+HUD, mod overlay and original-shader caches remove superseded managed fingerprint
+directories. Graphics archive identity includes archive timestamps and paths, so
+same-size game updates also invalidate it. Controller prompts, item rules, playlist,
+GCN extraction and Time Trial references track their generators and inputs. Time
+Trial also tracks ghost files and removes obsolete generated CSVs. Disabling custom
+controller prompts or item rules deletes the corresponding generated patches.
+
+Native shader completion records include translator code, compiler identity and
+game inputs; old completed generations are removed after publishing a valid new
+build. The active pipeline renderer already deletes incompatible pipeline-cache
+files before rebuilding them. Explicit shader reset deletes the private generated
+cache instead of retaining a `cache-before-reset` backup.
+
+Cleanup uses shared Python code on Windows and Linux. It does not follow symlinks
+or junctions. A failed deletion, including an open Windows file, is reported and
+retried on a later cache access. Saves, account keys, downloaded mods and user
+configuration are outside managed cache cleanup. Native Windows execution remains
+unverified; deletion failures and retry behavior have regression coverage.

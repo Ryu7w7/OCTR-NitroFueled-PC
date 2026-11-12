@@ -36,10 +36,37 @@ def shader_dir(data, title_id, app_version):
     return Path(data) / 'native-shaders' / f'{title_id}-{app_version}-g{GENERATION}'
 
 
-def ready(folder):
+def source_stamp(game=None):
+    import hashlib
+    port = Path(__file__).resolve().parent.parent
+    files = [Path(__file__), *sorted((port/'tools/shaders').glob('*.py')),
+             *sorted((port/'third_party/gcn2hlsl').glob('*.py'))]
+    code = hashlib.sha256(b''.join(path.read_bytes() for path in files)).hexdigest()
+    sources = []
+    if game is not None:
+        for path in (Path(game)/'eboot.bin', Path(game)/'archives/shaders_ps4.pak'):
+            stat = path.stat()
+            sources.append([str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns])
+    compiler = find_dxc(port)
+    compiler_stamp = None
+    if compiler:
+        path = Path(compiler); stat = path.stat()
+        compiler_stamp = [str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    return {'code': code, 'game': sources, 'compiler': compiler_stamp}
+
+
+def ready(folder, game=None):
     try:
-        return json.loads((Path(folder) / 'complete.json').read_text(encoding='utf-8')).get('generation') == GENERATION
-    except (OSError, ValueError):
+        folder = Path(folder)
+        kept = json.loads((folder/'complete.json').read_text(encoding='utf-8'))
+        if kept.get('generation') != GENERATION or kept.get('sources') != source_stamp(game):
+            return False
+        from cache_cleanup import prune
+        import re
+        prefix = folder.name.rsplit('-g',1)[0]
+        prune(folder, 'complete.json', re.escape(prefix)+r'-g[0-9]+')
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
         return False
 
 
@@ -150,10 +177,11 @@ def build(port, game, folder, say, python=None, progress=None):
     for f in (work / 'hlsl').iterdir():
         if f.suffix in ('.hlsl', '.dxbc'):
             f.unlink()
-    (work / 'complete.json').write_text(json.dumps({'generation': GENERATION, 'shaders': good,
+    (work / 'complete.json').write_text(json.dumps({'generation': GENERATION, 'sources': source_stamp(game), 'shaders': good,
                                                     'seconds': round(time.time() - started)}), encoding='utf-8')
     shutil.rmtree(folder, ignore_errors=True)
     work.rename(folder)
+    ready(folder, game)  # Remove superseded generations only after publishing a complete build.
     say(f'Native Vulkan: {good} shaders ready in {time.time() - started:.0f} s')
     return True
 
@@ -191,7 +219,7 @@ def main(argv=None):
             f'{a.app_version}, so the game starts with Vulkan (shadPS4)')
         return 0
     folder = shader_dir(a.data, a.title_id, a.app_version)
-    if not ready(folder):
+    if not ready(folder, a.game):
         say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
         last = [-1]
 
@@ -201,7 +229,7 @@ def main(argv=None):
                 say(f'@progress native-shaders {percent} {stage}')
         built = build(Path(__file__).resolve().parent.parent, a.game, folder, say, progress=progress)
         say(f'@progress native-shaders done {"ok" if built else "failed"}')
-    if not ready(folder):
+    if not ready(folder, a.game):
         say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
         return 0
     with open(a.env_file, 'wb') as out:

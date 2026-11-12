@@ -29,6 +29,55 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    def test_prepare_cache_reuses_output_and_invalidates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            out, elf, base = root/'online', root/'eboot.elf', root/'base.bbpatch'
+            elf.write_bytes(b'elf'); base.write_bytes(b'base')
+            (root/'archives').mkdir()
+            archive = root/'archives/update.pak'
+            archive.write_bytes(b'archive')
+            source = root/'sources/online_mode.py'
+            source.parent.mkdir()
+            source.write_text('original')
+            asset = source.parent/'assets/icon.png'
+            asset.parent.mkdir()
+            asset.write_bytes(b'original')
+            def build(game, output, executable, bases):
+                target = output/'result.bbpatch'
+                self.assertFalse((output/'obsolete.igz').exists())
+                target.write_bytes(b'prepared')
+                return [target], '1277e00'
+            with (patch.object(online_mode,'__file__',str(source)),
+                  patch.object(online_mode,'records',return_value=(None,{})),
+                  patch.object(online_mode,'_prepare',side_effect=build) as prepare):
+                first = online_mode.prepare(root,out,elf,[base])
+                self.assertEqual(online_mode.prepare(root,out,elf,[base]),first)
+                self.assertEqual(prepare.call_count,1)
+                stale = out/'obsolete.igz'
+                stale.write_bytes(b'old patch')
+                cache = out/'cache.json'
+                kept = json.loads(cache.read_text())
+                stat = stale.stat()
+                kept['files'].append([str(stale.resolve()),stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns])
+                cache.write_text(json.dumps(kept))
+                first[0][0].unlink()
+                online_mode.prepare(root,out,elf,[base])
+                self.assertEqual(prepare.call_count,2)
+                base.write_bytes(b'changed')
+                online_mode.prepare(root,out,elf,[base])
+                self.assertEqual(prepare.call_count,3)
+                elf.write_bytes(b'changed')
+                online_mode.prepare(root,out,elf,[base])
+                self.assertEqual(prepare.call_count,4)
+                for count, path in enumerate((asset, source, archive, first[0][0]),5):
+                    path.write_bytes(b'updated content')
+                    online_mode.prepare(root,out,elf,[base])
+                    self.assertEqual(prepare.call_count,count)
+                    online_mode.prepare(root,out,elf,[base])
+                    self.assertEqual(prepare.call_count,count)
+
+
     def test_compiled_ui_asset(self):
         png = Path(__file__).parents[1] / 'scripts/assets/normal_1.png'
         texture_path, texture, namespace, material_path, export, material = compiled_asset(

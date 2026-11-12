@@ -383,7 +383,7 @@ class PackageTests(unittest.TestCase):
         session,state=adapter.ACTIVE
         self.assertEqual(env['BB_CLEAR_SHADER_CACHE'],'0')
         self.assertEqual(original.read_bytes(),b'vanilla')
-        self.assertEqual((session/'cache-before-reset/CUSA13795/test.spv').read_bytes(),b'vanilla')
+        self.assertFalse((session/'cache-before-reset').exists())
     def test_hardlinked_file_write_refused(self):
         source=self.root/'source';source.write_bytes(b'original');linked=self.root/'link';os.link(source,linked)
         payload=self.root/'replacement';payload.write_bytes(b'changed')

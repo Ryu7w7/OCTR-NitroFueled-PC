@@ -228,10 +228,12 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             if [[ -n $speed_patch ]]; then speed_bases+=(--base "$speed_patch"); fi
         done
         if [[ ${BB_ONLINE:-0} == 1 ]]; then
+            echo "Online UI: preparing cached assets" >&2
             mode_result=$(startup_python scripts/online_mode.py "$game" --out "$out/online-mode" \
                 --elf "$boot/eboot.elf" "${speed_bases[@]}") || exit 1
             while IFS='=' read -r key value; do
                 case $key in
+                    'Online UI: '*) echo "$key" >&2 ;;
                     archive_patches) IFS='|' read -r -a speed_existing <<< "$value" ;;
                     online_mode_hook) export BB_ONLINE_MODE_HOOK=$value ;;
                     cup_file_map) export BB_MOD_FILE_MAP=$value BB_MOD_SOURCE_GAME=${BB_MOD_SOURCE_GAME:-$game} ;;

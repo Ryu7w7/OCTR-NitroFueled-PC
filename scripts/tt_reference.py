@@ -263,6 +263,11 @@ def export(game, out):
                          'finish_seconds': data['finish_seconds'],
                          'race_start_seconds': data['race_start_seconds'],
                          'move_keys': len(data['moves']), 'snapshots': len(data['snapshots'])})
+    from cache_cleanup import discard_files
+    active = {entry['track'].lower().split('/')[-1]+'-'+kind+'.csv'
+              for entry in manifest for kind in ('moves','snapshots')}
+    discard_files(out, [p for pattern in ('*-moves.csv','*-snapshots.csv')
+                        for p in out.glob(pattern) if p.name not in active])
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return manifest
 
@@ -272,9 +277,13 @@ def source_stamp(game):
     so a launch with the same game reuses them (the export takes seconds and writes ~50 MB)."""
     import hashlib
     archives = sorted((Path(game) / 'archives').glob('*.pak'))
-    return {'script': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    scripts = Path(__file__).resolve().parent
+    code = b''.join((scripts/name).read_bytes() for name in ('tt_reference.py','gcn_shaders.py','igz_file.py'))
+    return {'script': hashlib.sha256(code).hexdigest(),
             'game': str(Path(game).resolve()),
-            'archives': [[p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in archives]}
+            'archives': [[str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns] for p in archives],
+            'ghosts': [[p.name, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns]
+                       for p in sorted((Path(game)/'ghosts').glob('*')) if p.is_file()]}
 
 
 if __name__ == '__main__':

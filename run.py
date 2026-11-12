@@ -1164,7 +1164,7 @@ def launch(args, restarted=False):
                     f'{app_version}, so the game starts with Vulkan (shadPS4)')
             else:
                 shaders = native_shaders.shader_dir(data, title_id, app_version)
-                if not native_shaders.ready(shaders):
+                if not native_shaders.ready(shaders, game):
                     say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
                     # "@progress" lines: the launchers show a window with a progress bar meanwhile
                     last = [-1]
@@ -1175,7 +1175,7 @@ def launch(args, restarted=False):
                             emit(f'@progress native-shaders {percent} {stage}\n')
                     built = native_shaders.build(PORT, game, shaders, say, progress=progress)
                     emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
-                if native_shaders.ready(shaders):
+                if native_shaders.ready(shaders, game):
                     env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
                     say('Graphics engine: native Vulkan (experimental)')
                 else:

@@ -1363,9 +1363,61 @@ def permanent_ui_package(game, out, patches, mapped):
 
 
 def prepare(game, out, elf, bases):
+    """Reuse complete Online UI output while its sources, overlays and files match."""
+    import os
+    from speed_mode import stamp_of
+    from cache_cleanup import discard_files
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    cache = out / 'cache.json'
+    digest = hashlib.sha256(stamp_of(game, bases).encode())
+    digest.update(str(out.resolve()).encode())
+    digest.update(Path(elf).read_bytes())
+    here = Path(__file__).resolve().parent
+    for source in sorted([*here.glob('*.py'), *(here / 'assets').rglob('*')]):
+        if source.is_file():
+            digest.update(str(source.relative_to(here)).encode())
+            digest.update(source.read_bytes())
+    _, mapped = records()
+    inputs = sorted((str(name), str(Path(path).resolve())) for name, path in mapped.items())
+    graphics = os.environ.get('BB_GRAPHICS_TAB_ARCHIVE')
+    if graphics:
+        inputs.append(('graphics', str(Path(graphics).resolve())))
+    def identity(path):
+        stat = Path(path).stat()
+        return [str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    digest.update(json.dumps([(name, identity(path)) for name, path in inputs]).encode())
+    stamp = digest.hexdigest()
+    kept = {}
+    try:
+        kept = json.loads(cache.read_text())
+        if (kept['stamp'] == stamp and kept['files'] and
+                all(identity(row[0]) == row for row in kept['files'])):
+            print('Online UI: cache hit')
+            return [Path(path) for path in kept['patches']], kept['hook']
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        pass
+    if isinstance(kept, dict):
+        protected = {Path(path).resolve() for path in [elf, *bases]}
+        discard_files(out, [row[0] for row in kept.get('files', [])
+                            if isinstance(row, list) and row and Path(row[0]).resolve() not in protected])
+    cache.unlink(missing_ok=True)
+    patches, hook = _prepare(game, out, elf, bases)
+    files = [identity(path) for path in sorted(out.rglob('*'))
+             if path.is_file() and path not in (cache, cache.with_suffix('.tmp'))]
+    temporary = cache.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'stamp': stamp, 'files': files,
+                                    'patches': [str(path) for path in patches], 'hook': hook}))
+    temporary.replace(cache)
+    print('Online UI: cache rebuilt')
+    return patches, hook
+
+
+def _prepare(game, out, elf, bases):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     assets = out / 'cup-assets'
+    (assets / SINGLE_RACE_TEXTURE).unlink(missing_ok=True)
     (assets / 'vsc/ui/octane_lobby_main/octr_halloffamebutton.igz').unlink(missing_ok=True)
     (assets / 'vsc/ui/octane_lobby_privategame/octane_lobby_privategame_teambutton.igz').unlink(missing_ok=True)
     site = hook_site(Path(elf).read_bytes())

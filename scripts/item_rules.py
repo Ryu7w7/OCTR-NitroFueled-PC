@@ -253,9 +253,11 @@ def prepare(game, out, rules, base, log=print):
     (loaded_copies; empty without rules), each over the patch base ({guest: patch file}) has for
     its archive. Kept between launches while the archives, the rules and the base patches are
     the same."""
-    if not rules:
-        return {}
     folder = Path(out) / 'item_rules'
+    if not rules:
+        from cache_cleanup import discard_files
+        discard_files(folder, [*folder.glob('*.bbpatch'), *folder.glob('*.stamp.json')], log)
+        return {}
     made = {}
     digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
     for name, path in loaded_copies(game).items():
@@ -264,7 +266,8 @@ def prepare(game, out, rules, base, log=print):
         guest = f'/app0/archives/{name}'
         target = folder / (Path(name).stem.lower() + '.bbpatch')
         base_patch = base.get(guest)
-        stamp = {'archive': [str(path), path.stat().st_size, path.stat().st_mtime_ns], 'rules': digest,
+        stamp = {'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                 'archive': [str(path), path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns], 'rules': digest,
                  'base': hashlib.sha256(Path(base_patch).read_bytes()).hexdigest() if base_patch else None}
         stamp_file = folder / (Path(name).stem.lower() + '.stamp.json')
         try:
@@ -292,6 +295,10 @@ def prepare(game, out, rules, base, log=print):
                                           override={entry['index']})
         stamp_file.write_text(json.dumps(stamp), encoding='utf-8')
         made[guest] = target
+    from cache_cleanup import discard_files
+    active = set(made.values())
+    stale = [p for p in folder.glob('*.bbpatch') if p not in active]
+    discard_files(folder, [*stale, *(p.with_suffix('.stamp.json') for p in stale)], log)
     return made
 
 
