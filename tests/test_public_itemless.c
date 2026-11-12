@@ -27,6 +27,9 @@ static void ABI hof_focus_mock(void *project, void *list, int controller) {
 static int hof_legends;
 void runtime_online_mode_hof_legend(void *project) { assert(project); ++hof_legends; }
 void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
+static int new_sessions, hosted_sessions;
+void runtime_online_mode_new_session(void) { ++new_sessions; runtime_public_itemless_new_session(); }
+void runtime_room_mode_hosting(void) { ++hosted_sessions; }
 static int ranked_labels, hall_labels;
 void runtime_online_mode_set_text(void *placeable, const char *text) {
     assert(placeable);
@@ -44,6 +47,9 @@ static char payload[4096], message[512], reply[512] = "ok";
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t size) {
     ++requests;
+    if (!strcmp(target,"/ryunet/theme")) {
+        snprintf(body,size,"%s",reply); return status;
+    }
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
@@ -307,16 +313,18 @@ static void test_ranked_button_event(void) {
     int before_forwarded = forwarded;
     placeable_event(button, event);
     assert(ranked_selected && ranked_labels == 2);
+    assert(new_sessions==1 && hosted_sessions==1 && !selected);
     assert(forwarded == before_forwarded + 1);
     p = NULL; memcpy(button + 0x28, &p, 8);
     event_meta[2] = (char *)"igGuiEventPlaceableGainFocus";
     before_forwarded = forwarded;
     placeable_event(button, event);
     assert(forwarded == before_forwarded + 1 && synthetic_signal == 0 && handles == 0);
+    assert(selector_left_calls == 2); /* Returning to Matchmaking clears its selector state too. */
     p = "OCTR_RANKED_BUTTON"; memcpy(button + 0x28, &p, 8);
     event_meta[2] = (char *)"igGuiEventProjectGainFocus";
     placeable_event(button, event);
-    assert(selector_left_calls == 2);
+    assert(selector_left_calls == 3);
     /* LoseFocus fires during scene teardown, when the shared comp may already be gone. */
     ranked_selected = 0;
     event_meta[2] = (char *)"igGuiEventPlaceableLoseFocus";
@@ -330,10 +338,11 @@ static void test_ranked_button_event(void) {
     event_meta[2] = (char *)"igGuiEventFocusInputPressed";
     ranked_selected = 1;
     placeable_event(button, event);
-    assert(!ranked_selected);
+    assert(!ranked_selected && !selected && !searching && !confirmed_room);
+    assert(new_sessions==3 && hosted_sessions==3);
     event_meta[2] = (char *)"igGuiEventPlaceableGainFocus";
     placeable_event(button, event);
-    assert(selector_left_calls == 3);
+    assert(selector_left_calls == 4);
     focus_test_button = NULL;
 }
 static void *ABI focus_field(void *meta, const char *name) {
@@ -754,10 +763,25 @@ int main(void) {
     native_deferred_event_release = release_input_event;
     test_hof_project_shortcut();
     installed=1;
+    capability_next = UINT64_MAX;
     unsetenv("BB_PUBLIC_ITEMLESS"); assert(!runtime_public_itemless_available());
     setenv("BB_PUBLIC_ITEMLESS","1",1); unsetenv("BB_PRIVATE_ARCHIVE_PATCHES");
     assert(!runtime_public_itemless_available());
     setenv("BB_PRIVATE_ARCHIVE_PATCHES","prepared",1); assert(runtime_public_itemless_available());
+    setenv("BB_PUBLIC_ITEMLESS","0",1);
+    for (int response = 0; response < 4; ++response) {
+        status = response == 0 ? 0 : 200;
+        snprintf(reply,sizeof reply,"%s", response == 1 ? "{\"itemless_matchmaking\":2}" :
+                 response == 2 ? "{}" : "{\"itemless_matchmaking\":1}");
+        capability_running = 1;
+        capability_worker(NULL);
+        assert(!capability_running);
+        assert(runtime_public_itemless_available() == (response == 3));
+    }
+    capability_supported = 0;
+    setenv("BB_PUBLIC_ITEMLESS","1",1);
+    snprintf(reply,sizeof reply,"ok"); status=200; requests=0;
+
     native_search=send_search; native_register=send_info; native_notice=show;
     network_manager=&test_network; native_stop_matchmaking=stop_matchmaking;
     native_return_to_lobby=return_to_lobby;

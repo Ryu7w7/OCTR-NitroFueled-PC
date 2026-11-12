@@ -42,6 +42,7 @@ void runtime_online_mode_selector_left(void) {
 }
 static int private_cup_selected;
 static int remote_cup_selected = -1;
+static int private_settings_rejected;
 static int cup_reset_pending;
 static int private_cup_race_active;
 static int cup_transition_pending;
@@ -563,6 +564,7 @@ static int adopt_native_cup(unsigned char *cup) {
 }
 
 void runtime_online_mode_leave_cup(void) {
+    private_settings_rejected = 0;
     clear_team_selector();
     cup_timer_pending = 0;
     reset_team_count();
@@ -577,6 +579,59 @@ void runtime_online_mode_leave_cup(void) {
     remote_cup_selected = -1;
 }
 
+/* Network callbacks must never release native GUI handles on their worker thread. */
+static unsigned pending_online_reset;
+static uint64_t lobby_updated_ms;
+static int room_on, public_on;
+void runtime_online_mode_request_leave(int fresh) {
+    __atomic_fetch_or(&pending_online_reset, fresh ? 3u : 1u, __ATOMIC_ACQ_REL);
+}
+
+void runtime_online_mode_new_session(void) {
+    __atomic_store_n(&pending_online_reset, 0, __ATOMIC_RELEASE);
+    runtime_online_mode_leave_cup();
+    runtime_online_mode_selector_left();
+    private_speed_selected = private_cup_selected = selector_mode_index = 0;
+    remote_cup_selected = -1;
+    private_settings_rejected = 0;
+    private_cup_race_active = cup_reset_pending = cup_transition_pending = 0;
+    cup_final_results_ready = 0;
+    picker_previous_mode = -1;
+    pending_private_map[0] = 0;
+    clear_cup_finish_panel();
+    assign_handle((unsigned char *)&team_ranking_project, NULL);
+    assign_handle((unsigned char *)&team_leaders_project, NULL);
+    assign_handle((unsigned char *)&ranked_score_project, NULL);
+    team_race_ui_owner = NULL;
+    team_result_count = team_results_pending = team_score_opened = team_score_finished = team_effects_played = 0;
+    finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0;
+    ranked_score_started = ranked_score_phase = ranked_score_results_received = 0;
+    if (race_manager && *race_manager) {
+        unsigned char *manager = *race_manager;
+        const int single = 1;
+        set_race_mode(manager, single);
+        memcpy(manager + 0xd4c, &single, 4);
+        unsigned char *settings = pointer_at(manager, 0xde8);
+        if (settings) memcpy(settings + 0x20, &single, 4);
+        unsigned char *tracks = pointer_at(manager, 0xd80);
+        if (tracks) clear_zone_list(tracks);
+        assign_handle(manager + 0xd88, NULL);
+    }
+    if (!runtime_room_mode_following()) runtime_speed_mode_set(0);
+    runtime_public_itemless_new_session();
+    runtime_ranked_race_begin();
+    __atomic_store_n(&lobby_updated_ms, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&room_on, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&public_on, 0, __ATOMIC_RELAXED);
+    puts("Native Online session: reset private/team/cup/public/ranked state");
+}
+
+static void apply_pending_online_reset(void) {
+    const unsigned pending = __atomic_exchange_n(&pending_online_reset, 0, __ATOMIC_ACQ_REL);
+    if (pending & 2) runtime_online_mode_new_session();
+    else if (pending & 1) runtime_online_mode_leave_cup();
+}
+
 static void ensure_default_cup(void) {
     if (remote_cup_selected >= 0 || !runtime_online_mode_private_cup() || current_cup()) return;
     unsigned char *cup = cup_for_first_track(NULL);
@@ -584,17 +639,24 @@ static void ensure_default_cup(void) {
 }
 
 static void ABI private_settings_received(unsigned char *event) {
+    apply_pending_online_reset();
     int mode, type;
     memcpy(&type, event + 0x20, 4);
     memcpy(&mode, event + 0x3c, 4);
     unsigned char *cup = type == 1 && mode == 6 && pointer_at(event, 0x28) ?
         cup_for_first_track(pointer_at(event, 0x28)) : NULL;
+    if (type == 1 && mode == 6 && (!cup || !adopt_native_cup(cup))) {
+        private_settings_rejected = 1;
+        puts("Native private CUP: rejected unsynchronized host cup; retaining native settings");
+        return;
+    }
+    private_settings_rejected = 0;
     /* Private settings use the racing UI mode; native CUP mode is for the race. */
     if (type == 1 && mode == 6) {
         const int single = 1;
         memcpy(event + 0x3c, &single, 4);
     }
-    remote_cup_selected = cup && adopt_native_cup(cup);
+    remote_cup_selected = cup != NULL;
     receive_private_settings(event);
     if (type == 1 && (mode == 1 || mode == 6)) normalize_race_teams();
     memcpy(event + 0x3c, &mode, 4);
@@ -620,12 +682,19 @@ static void ABI private_settings_sending(unsigned char *event) {
 /* The map loader runs after settings synchronization, on host and peers. Keep
  * the lobby's racing UI mode until this boundary, then use native CUP scoring. */
 static void ABI load_private_map(const char *map, int reason) {
+    apply_pending_online_reset();
     runtime_private_party_cancel();
     private_grid_count = 0;
     const int lobby = map && (!strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby") ||
                              !strcasecmp(map, "octane/octane_startscreen/octane_startscreen"));
     if (lobby) { pending_private_map[0]=0; runtime_room_mode_end_race(); }
     else if (map && !runtime_public_match_active() && (runtime_online_mode_in_private() || runtime_private_match_active()) && !battle_selected()) {
+        if (runtime_room_mode_following() && private_settings_rejected) {
+            pending_private_map[0] = 0;
+            return_to_lobby();
+            native_notice("Cannot synchronize the host's cup. Return to the lobby and retry.", NULL);
+            return;
+        }
         int verified=runtime_room_mode_begin_race();
         if (verified<0) {
             if (strlen(map)>=sizeof pending_private_map) return;
@@ -851,7 +920,7 @@ static void ABI open_race_project(void **result, void *manager, const char *name
     if (name && !strcasecmp(name, "Octane_LobbyMembers")) {
         assign_handle((unsigned char *)&lobby_members_project, result ? *result : NULL);
     }
-    if (name && !strcasecmp(name, "Octane_Race_Ranking")) {
+    if (runtime_ranked_active() && name && !strcasecmp(name, "Octane_Race_Ranking")) {
         assign_handle((unsigned char *)&ranked_score_project, result ? *result : NULL);
         ranked_score_phase = 0;
         ranked_score_started = 0;
@@ -937,6 +1006,9 @@ static void ABI cup_project_event(void *self, void *event) {
             if (items[i]) synchronize_cup_finish_time(items[i]);
     }
     GetType event_type = (GetType)pointer_at(pointer_at(event, 0), 0);
+    if (runtime_ranked_active() && self == handle_object(&ranked_score_project) &&
+        event_type(event) == *race_finished_type)
+        ranked_score_results_received = 1;
     if (self == handle_object(&lobby_members_project) || self == handle_object(&hof_project) ||
         self == handle_object(&ranked_score_project)) {
         void *kind = event_type(event);
@@ -2268,10 +2340,10 @@ static int resume_private_map(void) {
 /* The lobby's screen is on: its behaviour updated just now. The level's name cannot say it: outside the online mode too,
  * a race that is left comes back to octane_onlinelobby, the menus' backdrop. */
 static uint64_t monotonic_ms(void);
-static uint64_t lobby_updated_ms;
+
 
 /* runtime_online_mode_in_private reads the game's entities, on the game's thread only */
-static int room_on, public_on;
+
 static void update_score_card(unsigned char *row, const struct runtime_ranked_result *result,
                               int shown, int ready, int tier, const char *animation, int depth) {
     if (!row || depth > 16) return;
@@ -2335,6 +2407,7 @@ static void refresh_ranked_score(void) {
 }
 
 void runtime_online_mode_note_frame(void) {
+    apply_pending_online_reset();
     refresh_ranked_score();
     if (hof_project) {
         unsigned char *project = handle_object(&hof_project);
@@ -2498,6 +2571,7 @@ static int race_type_selector(const unsigned char *self) {
 static int battle_selected(void) {
     /* The host's selector changes before the asynchronous lobby game type. */
     if (remote_cup_selected < 0) return selector_mode_index == 2;
+    if (remote_cup_selected) return 0; /* Valid host CUP overrides a previous lobby's Battle type. */
     int type = 0;
     if (network && *network) memcpy(&type, *network + 0x13c, sizeof type);
     return type == 2;
@@ -2624,11 +2698,17 @@ static void refresh_mode_options(unsigned char *self) {
     unsigned char *items = available ? pointer_at(available, 0x20) : NULL;
     if (!items) return;
     const int private = is_private();
-    items[0] = 1;
-    items[1] = (unsigned char)(private || runtime_public_itemless_available());
-    items[2] = (unsigned char)(private || !runtime_ranked_selected());
-    /* Native previous-option search loops forever with one enabled option and wrapping. */
-    self[0x194] = !!(items[1] || items[2]);
+    const unsigned char enabled[] = {1,
+        (unsigned char)(private || runtime_public_itemless_available()),
+        (unsigned char)(private || !runtime_ranked_selected())};
+    const int changed = memcmp(items, enabled, sizeof enabled);
+    memcpy(items, enabled, sizeof enabled);
+    self[0x194] = 1;
+    if (changed && self[0x1b8] && pointer_at(self, 0x198)) {
+        /* Refresh native disabled styling when the server recovers, preserving selection. */
+        memcpy(self + 0x190, self + 0x1a0, 4);
+        refresh_selector(self);
+    }
 }
 
 static void ABI selector_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -2779,6 +2859,7 @@ static void ABI select_mode(void *sender, int index) {
 }
 
 static void ABI selector_event(unsigned char *self, void *event, void *owner) {
+    apply_pending_online_reset();
     unsigned char *options;
     memcpy(&options, self + 0x1a8, sizeof options);
     int count;
@@ -3127,7 +3208,7 @@ static void ranked_member_icons(unsigned char *self) {
     } else if (!battle_selected() && runtime_online_mode_lobby_open()) {
         if (is_private() && (mode_select_active || runtime_room_mode_following()))
             selected_mode = runtime_speed_mode_enabled();
-        else if (!is_private() || runtime_public_match_active() || runtime_ranked_active())
+        else if (runtime_public_match_active() || runtime_ranked_active())
             selected_mode = runtime_public_itemless_lobby_mode();
     }
     int tier;
@@ -3619,6 +3700,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (memcmp(image + (0xe6675b), hud_gate, sizeof hud_gate)) return 0;
     if (memcmp(image + (0xf34573 - shift), "\x45\x85\xed\x7e\xc7", 5) ||
         memcmp(image + (0x125da80 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56", 8)) return 0;
+    if (memcmp(image + (0x125e131 - shift), "\x83\xf9\x02\x7f\x12", 5)) return 0;
     const unsigned char participant_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x49,0x89,0xfe};
     unsigned char finished_prefix[] = {0x48,0x8b,0x05,0x39,0x07,0xba,0x01,0x4c,0x8b,0x40,0x10,0x4d,0x85,0xc0};
     int32_t racer_displacement = (int32_t)(0x2ad4b70 - (0xf34437 - shift));
@@ -3921,6 +4003,9 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     network = (unsigned char **)(image + 0x2acb3d8);
     native_notice = (NativeNotice)(image + 0xa548e0);
     native_can_start = (PrivateState)(image + (0xf507f0 - shift));
+    /* Native previous-option search wraps one slot early, skipping Normal. */
+    const unsigned char previous_boundary = 1;
+    if (!write_code(image + (0x125e133 - shift), &previous_boundary, 1)) return 0;
     unsigned char jump[14];
     jump_to(jump, countdown_init);
     if (!write_code(image + (0xeb71d0 - shift), jump, sizeof jump)) return 0;

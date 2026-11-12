@@ -102,6 +102,8 @@ int runtime_time_trial_start(unsigned char *image, size_t size);
  * a player who joins takes it, also when joining by invitation (no selector seen). */
 void runtime_online_mode_adopt(int speed);
 void runtime_online_mode_leave_cup(void);
+void runtime_online_mode_new_session(void); /* game thread: fresh Online menu choice */
+void runtime_online_mode_request_leave(int fresh); /* worker-safe; consumed on game thread */
 int runtime_online_mode_private_speed(void);
 int runtime_online_mode_private_cup(void);
 int runtime_online_mode_private_single_options(void);
@@ -167,6 +169,7 @@ int runtime_online_mode_hof_activate(void *project);
 void runtime_online_mode_hof_cycle(void *placeable, int direction);
 void *runtime_online_mode_content(void *placeable);
 void runtime_public_itemless_reset(void);
+void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
 int runtime_speed_mode_enabled(void);

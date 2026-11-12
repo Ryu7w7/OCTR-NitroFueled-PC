@@ -69,9 +69,33 @@ static int itemless_client_available(void) {
     return installed && assets && *assets;
 }
 
+static uint64_t check_clock(void);
+static uint64_t capability_next;
+static int capability_running, capability_supported;
+static void *capability_worker(void *unused) {
+    (void)unused;
+    char body[16384] = "";
+    const int status = runtime_ryunet_request("GET", "/ryunet/theme", body, sizeof body);
+    const char *value = status == 200 ? runtime_json_field(body, "itemless_matchmaking") : NULL;
+    if (value && *value == '1' && (value[1] == ',' || value[1] == '}' || isspace((unsigned char)value[1])))
+        __atomic_store_n(&capability_supported, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&capability_running, 0, __ATOMIC_RELEASE);
+    return NULL;
+}
 int runtime_public_itemless_available(void) {
+    if (!itemless_client_available()) return 0;
     const char *v = getenv("BB_PUBLIC_ITEMLESS");
-    return itemless_client_available() && v && !strcmp(v, "1");
+    if ((v && !strcmp(v, "1")) || __atomic_load_n(&capability_supported, __ATOMIC_ACQUIRE)) return 1;
+    /* A server unavailable at launch must not disable Itemless for the whole session. */
+    const uint64_t now = check_clock();
+    if (now >= __atomic_load_n(&capability_next, __ATOMIC_RELAXED) && !__atomic_exchange_n(&capability_running, 1, __ATOMIC_ACQ_REL)) {
+        __atomic_store_n(&capability_next, now + 5000, __ATOMIC_RELAXED);
+        pthread_t worker;
+        if (pthread_create(&worker, NULL, capability_worker, NULL))
+            __atomic_store_n(&capability_running, 0, __ATOMIC_RELEASE);
+        else pthread_detach(worker);
+    }
+    return 0;
 }
 
 static void reset_locked(void) {
@@ -734,6 +758,13 @@ static void native_return_focus(void *node, int ancestors) {
 }
 
 /* Ranked uses a cloned Matchmaking button and VSC state. */
+void runtime_public_itemless_new_session(void) {
+    runtime_public_itemless_reset();
+    selected = ranked_selected = 0;
+    clear_private_pending();
+    runtime_public_itemless_party_ready();
+}
+
 static void ABI placeable_event(void *self, void *event) {
     char approval[sizeof checked_party] = "";
     int private_room = runtime_online_mode_in_private();
@@ -782,6 +813,14 @@ static void ABI placeable_event(void *self, void *event) {
             void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
             for (int i = 0; items && i < count; ++i) {
                 const char *name = vsc_graph_name(items[i]);
+                if (gain && !ranked_button && !hall_of_fame_button && name &&
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"))
+                    runtime_online_mode_selector_left();
+                if (confirm && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton") ||
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton"))) {
+                    runtime_online_mode_new_session();
+                    runtime_room_mode_hosting();
+                }
                 if (confirm && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton")) {
                     ranked_selected = ranked_button;
                     online_return_button = hall_of_fame_button ? 2 : ranked_button;

@@ -40,7 +40,7 @@ static int hof_pending_open, hof_named_opens, asset_opens;
 static unsigned char hof_open_options[0x28], hof_open_manager[0x1b0], hof_result_handle[0x30];
 int runtime_hof_take_open(void) { int pending = hof_pending_open; hof_pending_open = 0; return pending; }
 const char *runtime_hof_project(const char *name) { return name; }
-static int ranked_score_active, ranked_score_ready;
+static int ranked_score_active, ranked_score_ready, score_test_active;
 static struct runtime_ranked_result score_result;
 int runtime_ranked_active(void) { return ranked_score_active; }
 void runtime_ranked_gate_update(void *root, int ranked) { (void)root; (void)ranked; }
@@ -49,22 +49,22 @@ void runtime_ranked_race_end(void) {}
 void runtime_ranked_race_begin(void) {}
 int runtime_ranked_result_copy(struct runtime_ranked_result *result) { *result = score_result; return ranked_score_ready; }
 int runtime_ranked_tier(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
-static int ranked_profile_mode;
-int runtime_ranked_badge(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
+static int ranked_profile_mode, ranked_best_badge_mode, ranked_profile_tier;
+int runtime_ranked_badge(const char *name, int *mode) { (void)name; if (mode) *mode = ranked_best_badge_mode; return 0; }
 int runtime_ranked_mmr(const char *name) { (void)name; return 0; }
 int runtime_ranked_profile(const char *name, int mode, int *tier, int *mmr, int *placements, int *position) {
     (void)name; ranked_profile_mode = mode;
-    if (tier) *tier = 0;
-    if (mmr) *mmr = 0;
+    if (tier) *tier = ranked_profile_tier;
+    if (mmr) *mmr = ranked_profile_tier ? 1234 : 0;
     if (placements) *placements = 5;
     if (position) *position = 3;
     return 1;
 }
 const char *runtime_ranked_tier_name(int mode, int tier) { (void)mode; (void)tier; return "UNRANKED"; }
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
-const char *runtime_ranked_result_text(void) { return ""; }
 int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }
+void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_update(void) {}
 void runtime_public_itemless_select(int enabled) { public_selected = enabled; }
@@ -195,7 +195,7 @@ static void check_mode_options(void *self) {
     unsigned char *available = *(void **)((char *)self + 0x1b0);
     unsigned char *items = *(void **)(available + 0x20);
     assert(!memcmp(items, expected_mode_options, 3));
-    assert(((unsigned char *)self)[0x194] == !!(items[1] || items[2]));
+    assert(((unsigned char *)self)[0x194] == 1);
 }
 static void ABI base_update(void *self, void *owner, float dt) {
     check_mode_options(self);
@@ -252,6 +252,12 @@ static void *ABI event_type(void *event) {
 static void (ABI *choice)(void *, int);
 static int selector_refreshes;
 static void ABI refresh_selector_mock(unsigned char *self) {
+    if (checked_mode_selector == self) {
+        check_mode_options(self);
+        assert(*(int *)(self + 0x190) == *(int *)(self + 0x1a0));
+        ++selector_refreshes;
+        return;
+    }
     assert(*(int *)(self + 0x190) == 0);
     ++selector_refreshes;
     choice(NULL, 0); /* Must not dispatch a game-mode change while resetting Race Type. */
@@ -331,8 +337,8 @@ static void direct_stub(unsigned char *at, void *function) {
     memcpy(at + 2, &function, 8);
     memcpy(at + 10, "\xff\xe0", 2);
 }
-static int received_mode;
-static void ABI receive_settings(unsigned char *event) { memcpy(&received_mode, event + 0x3c, 4); }
+static int received_mode, received_settings_calls;
+static void ABI receive_settings(unsigned char *event) { ++received_settings_calls; memcpy(&received_mode, event + 0x3c, 4); }
 static unsigned char test_zones[4][0x1c0], test_handles[4][48];
 static unsigned char lobby_zone[0x1b8], lobby_data[0x78];
 static void *test_cup, *test_cup_handle;
@@ -442,7 +448,7 @@ static void ABI open_panel_mock(void **result, void *manager, const char *name,
         assert(options[0x21] == 1);
         ++hof_named_opens; *result = hof_result_handle; return;
     }
-    if (!strcmp(name, "Octane_EndRaceMenu")) { *result = score_handle; return; }
+    if (score_test_active && !strcmp(name, "Octane_Race_Ranking")) { *result = score_handle; return; }
     if (!strcmp(name, "Octane_LobbyMembers")) {
         *result = members_handle;
         return;
@@ -680,6 +686,26 @@ static void test_region(size_t shift) {
     image[0x1277e00 - shift + 13] += (unsigned char)shift;
     /* Record the remapped index and relocated LEA result, then undo the prologue. */
     memcpy(image + (0x1277e11 - shift), "\x89\x37\x48\x89\x47\x08\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d\xc3", 17);
+    /* Native next/previous searches: exercise real branches rather than input mocks. */
+    const unsigned char native_search[] =
+        "\x4c\x8b\x97\xb0\x01\x00\x00\x44\x8b\x87\xa0\x01\x00\x00\x80\xbf"
+        "\x94\x01\x00\x00\x00\x45\x8b\x4a\x0c\x45\x8d\x58\x01\x74\x05\x45"
+        "\x39\xcb\x7d\x2a\xb8\x01\x00\x00\x00\x45\x39\xcb\x7d\x1f\x4d\x8b"
+        "\x52\x20\x45\x39\xc3\x74\x0c\x49\x63\xcb\x41\x0f\xb6\x0c\x0a\x84"
+        "\xc9\x74\x13\x45\x85\xdb\x78\x05\x31\xc0\x44\x89\x1e\xc3\x45\x31"
+        "\xdb\xc6\x02\x01\xeb\xce\x41\xff\xc3\x45\x39\xcb\x7c\x11\x0f\xb6"
+        "\x8f\x94\x01\x00\x00\x84\xc9\x74\x06\x45\x31\xdb\xc6\x02\x01\x45"
+        "\x39\xcb\x7c\xbe\xeb\xd7\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90"
+        "\x53\x44\x8b\x97\xa0\x01\x00\x00\x45\x85\xd2\x44\x89\xd1\x7f\x1a"
+        "\x8a\x87\x94\x01\x00\x00\x44\x89\xd1\x84\xc0\x74\x0d\x48\x8b\x87"
+        "\xb0\x01\x00\x00\x8b\x48\x0c\xc6\x02\x01\xb8\x01\x00\x00\x00\x85"
+        "\xc9\x7e\x2c\x4c\x8b\x87\xb0\x01\x00\x00\x4d\x8b\x48\x20\x48\x63"
+        "\xd9\x4c\x8d\x5b\xff\x45\x39\xd3\x74\x0a\x41\x0f\xb6\x5c\x19\xff"
+        "\x84\xdb\x74\x0d\x41\x3b\x48\x0c\x7f\x05\x31\xc0\x44\x89\x1e\x5b"
+        "\xc3\x83\xf9\x02\x7f\x12\x0f\xb6\x8f\x94\x01\x00\x00\x84\xc9\x74"
+        "\x07\x45\x8b\x58\x0c\xc6\x02\x01\x45\x85\xdb\x44\x89\xd9\x7f\xbe"
+        "\xeb\xdd";
+    memcpy(image + (0x125e050 - shift), native_search, sizeof native_search - 1);
     stub(image + (0x125d570 - shift), (void *)base_event);
     stub(image + (0x125da80 - shift), (void *)refresh_selector_mock);
     memcpy(image + (0xf34573 - shift), "\x45\x85\xed\x7e\xc7", 5);
@@ -1077,7 +1103,41 @@ static void test_region(size_t shift) {
         update_mode(self, NULL, 0.25f);
         check_mode_options(self);
     }
+    /* Recover from a disabled Ranked selector after startup HTTP failure. */
+    private = 0; public_available = 1;
+    expected_mode_options[0] = expected_mode_options[1] = 1;
+    expected_mode_options[2] = 0;
+    items[0] = 1; items[1] = items[2] = 0;
+    self[0x1b8] = 1;
+    ptr = (void *)1; memcpy(self + 0x198, &ptr, 8);
+    *(int *)(self + 0x1a0) = 0;
+    int refresh_before = selector_refreshes;
+    update_mode(self, NULL, 0.25f);
+    assert(selector_refreshes == refresh_before + 1);
+    update_mode(self, NULL, 0.25f);
+    assert(selector_refreshes == refresh_before + 1);
+    ptr = NULL; memcpy(self + 0x198, &ptr, 8);
+    self[0x1b8] = 0;
     checked_mode_selector = NULL;
+    *(int *)(flags + 12) = 3;
+    int (ABI *next_option)(void *, int *, unsigned char *) = (void *)(image + (0x125e050 - shift));
+    int (ABI *previous_option)(void *, int *, unsigned char *) = (void *)(image + (0x125e0d0 - shift));
+    for (int mask = 1; mask < 8; ++mask) {
+        for (int i = 0; i < 3; ++i) items[i] = !!(mask & (1 << i));
+        self[0x194] = 1;
+        for (int start = 0; start < 3; ++start) {
+            if (!items[start]) continue;
+            *(int *)(self + 0x1a0) = start;
+            for (int direction = -1; direction <= 1; direction += 2) {
+                int expected = start;
+                do { expected = (expected + direction + 3) % 3; } while (!items[expected]);
+                int found = -1;
+                unsigned char wrapped = 0;
+                assert(!(direction < 0 ? previous_option : next_option)(self, &found, &wrapped));
+                assert(found == expected);
+            }
+        }
+    }
     private = 0;
     ranked_selected = 0;
     public_available = 0;
@@ -1255,6 +1315,7 @@ static void test_region(size_t shift) {
         put_pointer(label, 0x50, itemless_icon); put_pointer(itemless_icon, 0x50, normal_icon);
         put_pointer(itemless_icon, 0x28, "OCTR_RANK_ICON_1_0");
         put_pointer(normal_icon, 0x28, "OCTR_RANK_ICON_0_0");
+        public_active = 1;
         runtime_online_mode_selector_left();
         ranked_profile_mode = -1;
         void (ABI *member_event_handler)(void *, void *, void *) =
@@ -1263,6 +1324,25 @@ static void test_region(size_t shift) {
         assert(ranked_profile_mode == 1);
         assert(!(*(unsigned *)(itemless_icon + 12) & 0x400));
         assert(*(unsigned *)(normal_icon + 12) & 0x400);
+        ranked_best_badge_mode = 1;
+        for (int route = 0; route < 3; ++route) {
+            private = route == 2;
+            ranked_selected = route == 1;
+            public_active = public_normal_active = 0;
+            public_selected = 0;
+            runtime_online_mode_selector_left();
+            ranked_profile_mode = -1;
+            member_event_handler(member, NULL, NULL);
+            assert(ranked_profile_mode == -1); /* Online main uses the best badge, not the last queue. */
+            assert(!(*(unsigned *)(itemless_icon + 12) & 0x400));
+            assert(*(unsigned *)(normal_icon + 12) & 0x400);
+        }
+        private = 0;
+        public_normal_active = 1;
+        member_event_handler(member, NULL, NULL);
+        assert(ranked_profile_mode == 0); /* A confirmed Normal room still uses Normal. */
+        assert(!(*(unsigned *)(normal_icon + 12) & 0x400));
+        public_normal_active = ranked_selected = ranked_best_badge_mode = 0;
     }
     /* Party members can retain the private scene flag after entering public. */
     private = 1;
@@ -1910,7 +1990,9 @@ static void test_region(size_t shift) {
     private = 1;
     memcpy(packet + 0x3c, &cup_mode, 4);
     put_pointer(packet, 0x28, "unknown-track");
+    const int calls_before_bad_cup = received_settings_calls;
     received(packet);
+    assert(received_settings_calls == calls_before_bad_cup); /* Never downgrade an unknown CUP to Single. */
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
     runtime_online_mode_leave_cup();
     assert(runtime_online_mode_private_cup()); /* retain own host preference */
@@ -2125,12 +2207,21 @@ static void test_region(size_t shift) {
     put_pointer(score_composition, 0, image + 0x2431b18);
     put_pointer(score_composition, 0x20, score_icon);
     put_pointer(score_icon, 0x28, "OCTR_RESULT_ICON_0_3");
+    *(unsigned *)(score_icon+12)=0x400;
     score_result = (struct runtime_ranked_result){.mode=0,.ranked=1,.tier=3,.tier_before=3};
     ranked_score_ready = 1;
+    score_test_active = 1;
     void *score = NULL;
-    open_race_ui_project(&score, NULL, "Octane_EndRaceMenu", NULL, -1, NULL, 0);
+    open_race_ui_project(&score, NULL, "Octane_Race_Ranking", NULL, -1, NULL, 0);
     assert(*(unsigned *)(score_icon+12) & 0x400); /* Non-Ranked stays hidden. */
     ranked_score_active = 1;
+    open_race_ui_project(&score, NULL, "Octane_Race_Ranking", NULL, -1, NULL, 0);
+    unsigned char score_finish[0x20]={0}, score_finish_type[0x20]={0};
+    void *score_finish_vtable[]={panel_event_type};
+    put_pointer(score_finish,0,score_finish_vtable);put_pointer(score_finish,8,score_finish_type);
+    put_pointer(score_finish_type,0x10,"igGuiEventRaceFinished");
+    put_pointer(image,0x2ac02a8,score_finish_type);
+    project_event(score_project,score_finish);
     runtime_online_mode_note_frame();
     assert(!(*(unsigned *)(score_icon+12) & 0x400));
     assert(*(float *)(score_icon+0xe0) == 1);
@@ -2142,7 +2233,8 @@ static void test_region(size_t shift) {
     assert(*(unsigned *)score_handle == score_references-1);
     project_event(score_project, unload_event);
     assert(*(unsigned *)score_handle == score_references-1);
-    ranked_score_active = ranked_score_ready = 0;
+    ranked_score_active = ranked_score_ready = score_test_active = 0;
+    put_pointer(image,0x2ac02a8,(void *)12);
     hof_active = 0;
     runtime_online_mode_note_frame(); /* Retire the HOF handle after native unload. */
     hof_expected_root = hof_expected_project = NULL;
