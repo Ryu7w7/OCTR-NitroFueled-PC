@@ -7,6 +7,7 @@
 #include "runtime_np_online.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -329,6 +330,40 @@ static void *pointer_at(const void *object, size_t offset) {
     void *pointer;
     memcpy(&pointer, (const unsigned char *)object + offset, sizeof pointer);
     return pointer;
+}
+
+typedef void (ABI *UnloadDirectory)(void *, unsigned char *, int, int);
+static UnloadDirectory original_unload_directory;
+static struct UiDirectory { void *directory; struct UiDirectory *next; } *ui_directories;
+static pthread_mutex_t ui_directories_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void ABI unload_directory(void *manager, unsigned char *directory, int types, int flags) {
+    const char *name = directory ? pointer_at(directory, 0x10) : NULL;
+    int ui = name && (!strncasecmp(name, "Octane_", 7) ||
+                      !strncasecmp(name, "Scripts.Graph.Octane_", 21));
+    for (const char *p = name; p && *p && !ui; ++p)
+        if (p == name || p[-1] == '/' || p[-1] == '\\' || p[-1] == ':')
+            ui = !strncasecmp(p, "ui/", 3) || !strncasecmp(p, "ui\\", 3) ||
+                 !strncasecmp(p, "ui:/", 4);
+    if (!ui) { original_unload_directory(manager, directory, types, flags); return; }
+    pthread_mutex_lock(&ui_directories_lock);
+    struct UiDirectory *entry = ui_directories;
+    while (entry && entry->directory != directory) entry = entry->next;
+    int references = 0;
+    memcpy(&references, directory + 0x84, sizeof references);
+    if (!entry) {
+        entry = malloc(sizeof *entry);
+        if (entry) {
+            entry->directory = directory; entry->next = ui_directories; ui_directories = entry;
+        }
+        if (!references) { references = 1; memcpy(directory + 0x84, &references, sizeof references); }
+        pthread_mutex_unlock(&ui_directories_lock);
+        fprintf(stderr, "Native UI lifetime: retained %s\n", name);
+        return;
+    }
+    pthread_mutex_unlock(&ui_directories_lock);
+    /* shortcut: keep UI definitions/dependencies until exit; narrow when cross-domain ownership is explicit. */
+    if (references > 1) original_unload_directory(manager, directory, types, flags);
 }
 
 static void set_string(unsigned char *field, const char *text) {
@@ -3406,6 +3441,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x58};
     const unsigned char sound_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
+    if (memcmp(image + (0x14fb600 - shift), sound_prefix, sizeof sound_prefix)) return 0;
     unsigned char confetti_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x53,0x50,0x8a,0x05,0x68,0xa5,0xb5,0x01};
     confetti_prefix[12] += (unsigned char)shift;
@@ -3710,7 +3746,10 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     jump_to(trampoline + 2240 + sizeof lap_prefix, image + (0xf350c0 - shift) + sizeof lap_prefix);
     original_record_lap = (RecordLap)(trampoline + 2240);
     complete_racer = (CompleteRacer)(image + (0xf351b0 - shift));
-    stub_end = 2240 + sizeof lap_prefix + 14;
+    memcpy(trampoline + 2368, sound_prefix, sizeof sound_prefix);
+    jump_to(trampoline + 2368 + sizeof sound_prefix, image + (0x14fb600 - shift) + sizeof sound_prefix);
+    original_unload_directory = (UnloadDirectory)(trampoline + 2368);
+    stub_end = 2368 + sizeof sound_prefix + 14;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -3901,6 +3940,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xf31160 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, (void *)race_ui);
     if (!write_code(image + (0xe9ba30 - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, unload_directory);
+    if (!write_code(image + (0x14fb600 - shift), jump, sizeof jump)) return 0;
     const ProjectEvent project_replacement = cup_project_event;
     if (!write_code(image + 0x2432338, &project_replacement, sizeof project_replacement)) return 0;
     jump_to(jump, clock_target);

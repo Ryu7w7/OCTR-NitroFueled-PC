@@ -599,6 +599,16 @@ int64_t runtime_file_stat(const char *path, void *guest_stat) {
     return strstr(path, "/drivermymod.pak") ? 0 : -2;
 }
 
+static int directory_unloads;
+static void ABI unload_directory_mock(void *manager, unsigned char *directory, int types, int flags) {
+    assert(manager == (void *)0x42 && types == 1 && flags == 0);
+    int references;
+    memcpy(&references, directory + 0x84, sizeof references);
+    assert(references > 0); --references;
+    memcpy(directory + 0x84, &references, sizeof references);
+    ++directory_unloads;
+}
+
 static void test_region(size_t shift) {
     expected_ranking = NULL;
     team_score_opens = 0;
@@ -669,6 +679,9 @@ static void test_region(size_t shift) {
     memcpy(image + (0xeb71e1 - shift), "\x48\x83\xc4\x58\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0xeb71ef - shift), timer_init_mock);
     memcpy(image + (0x1093ca0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0x14fb600 - shift), image + (0x1093ca0 - shift), 17);
+    memcpy(image + (0x14fb611 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0x14fb61f - shift), unload_directory_mock);
     memcpy(image + (0x1093cb1 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0x1093cbf - shift), individual_sound_mock);
     direct_stub(image + (0x1024340 - shift), result_sound_mock);
@@ -897,6 +910,33 @@ static void test_region(size_t shift) {
     put_pointer(image, 0x2774d88, image + 0x1281810);
     put_pointer(image, 0x2774d98, image + 0x273fc0);
     assert(runtime_online_mode_start(image, size));
+    void (ABI *unload)(void *, unsigned char *, int, int) = (void *)(image + (0x14fb600 - shift));
+    const char *directory_names[] = {
+        "vsc:/UI/Octane_Lobby_Main_Root.igz",
+        "temporary/octane/data/ps4/output/vsc/ui/Octane_Lobby_PrivateGame_Root.igz",
+        "ui/Octane_HallOfFame.igz", "UI:/Octane_Lobby_ModeSelect.igz",
+        "Octane_Lobby_Main", "Scripts.Graph.Octane_Leaderboards_Root",
+        "textures/menu.igz", "levels/ngin_labs.igz"
+    };
+    static unsigned char directories[2][8][0xc0];
+    for (int i = 0; i < 8; ++i) {
+        unsigned char *directory = directories[shift != 0][i];
+        put_pointer(directory, 0x10, directory_names[i]);
+        int *references = (int *)(directory + 0x84);
+        *references = i == 0 ? 0 : 1;
+        int before = directory_unloads;
+        unload((void *)0x42, directory, 1, 0);
+        if (i < 6) {
+            assert(directory_unloads == before && *references == 1);
+            unload((void *)0x42, directory, 1, 0);
+            assert(directory_unloads == before && *references == 1);
+            ++*references; /* Re-entering any domain takes another native load reference. */
+            unload((void *)0x42, directory, 1, 0);
+            assert(directory_unloads == before + 1 && *references == 1);
+        } else {
+            assert(directory_unloads == before + 1 && !*references);
+        }
+    }
     void (ABI *open_asset)(void **, void *, void *, void *, int, void *, float) =
         (void *)(image + 0x986170);
     {
