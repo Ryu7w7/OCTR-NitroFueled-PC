@@ -510,10 +510,28 @@ Captured RunCaptured(const std::wstring& exe, const std::wstring& command_line, 
     si.hStdInput = nul;
     si.hStdOutput = write;
     si.hStdError = write;
+    // It inherits its output pipe and NUL, nothing else (v0.8.5): an inheritable handle of the
+    // launcher's (the EOS bridge's stdin, whose end stops the bridge) kept by a helper, or by a
+    // process the helper left running, would keep the bridge alive after the launcher closed.
+    HANDLE inherit[2] = {write, nul};
+    const DWORD inherit_count = nul != INVALID_HANDLE_VALUE ? 2 : 1;
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                                    inherit_count * sizeof(HANDLE), nullptr, nullptr);
+    STARTUPINFOEXW six{};
+    six.StartupInfo = si;
+    six.StartupInfo.cb = sizeof six;
+    six.lpAttributeList = attrs_ok ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = command_line;
-    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                   cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+                                   cwd.empty() ? nullptr : cwd.c_str(), &six.StartupInfo, &pi);
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
     CloseHandle(write);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
@@ -1090,8 +1108,50 @@ void EosBridgeStop() {
     g_eos.changed.notify_all();
 }
 
+void AddLog(const std::string& line);
+
+/// This install's processes named name (bin\sacredfire.exe, eos\ryunet-bridge.exe): their ids.
+std::vector<DWORD> InstallProcesses(const wchar_t* name, const fs::path& exe) {
+    std::vector<DWORD> found;
+    const std::wstring wanted = fs::absolute(exe).lexically_normal().wstring();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return found;
+    PROCESSENTRY32W pe{sizeof pe};
+    for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, name) != 0) continue;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!process) continue;
+        wchar_t path[MAX_PATH * 4];
+        DWORD size = DWORD(std::size(path));
+        if (QueryFullProcessImageNameW(process, 0, path, &size) &&
+            _wcsicmp(fs::path(path).lexically_normal().c_str(), wanted.c_str()) == 0)
+            found.push_back(pe.th32ProcessID);
+        CloseHandle(process);
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+/// A bridge an earlier launcher left running (v0.8.5 report: one that outlived its launcher held
+/// the local ports, and the new one could not start). Ended once, before this launcher's first
+/// bridge, unless this install's game is still running: that one may be using it.
+void EosBridgeEndLeftovers() {
+    static bool done = false;
+    if (std::exchange(done, true)) return;
+    if (!InstallProcesses(L"sacredfire.exe", g_app.bin / L"sacredfire.exe").empty()) return;
+    for (DWORD id : InstallProcesses(L"ryunet-bridge.exe", EosBridgeDir() / L"ryunet-bridge.exe")) {
+        if (HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, id)) {
+            TerminateProcess(process, 0);
+            WaitForSingleObject(process, 2000);
+            CloseHandle(process);
+            AddLog("EOS bridge: ended one left running by an earlier launcher (process " + std::to_string(id) + ")");
+        }
+    }
+}
+
 void EosBridgeStart(const std::string& wanted, const std::string& mode, const std::string& server) {
     EosBridgeStop();
+    EosBridgeEndLeftovers();
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
@@ -8893,6 +8953,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
     }
 
+    // The bridge first (v0.8.5): the waits below for background work (a network check, an update)
+    // could hold the closed launcher's process, and with it a bridge nobody uses any more.
+    if (g_app.game_running) {  // the game may go through the bridge: it ends with run.py
+        std::scoped_lock lock{g_eos.mutex};
+        if (g_eos.input) CloseHandle(std::exchange(g_eos.input, nullptr));
+        if (g_eos.process) CloseHandle(std::exchange(g_eos.process, nullptr));
+    }
+    if (g_eos.reader.joinable()) {
+        if (g_app.game_running) g_eos.reader.detach();
+        else EosBridgeStop();
+    }
     DiscordPresence::Shutdown();
     if (g_update.worker.joinable()) {  // a download stops; an install in progress finishes
         g_update.progress.cancel = true;
@@ -8904,15 +8975,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         else g_app.worker.join();
     }
     if (g_app.probe.joinable()) g_app.probe.join();
-    if (g_app.game_running) {  // the game may go through the bridge: it ends with run.py
-        std::scoped_lock lock{g_eos.mutex};
-        if (g_eos.input) CloseHandle(std::exchange(g_eos.input, nullptr));
-        if (g_eos.process) CloseHandle(std::exchange(g_eos.process, nullptr));
-    }
-    if (g_eos.reader.joinable()) {
-        if (g_app.game_running) g_eos.reader.detach();
-        else EosBridgeStop();
-    }
     ReleaseTrophies(g_trophies);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
