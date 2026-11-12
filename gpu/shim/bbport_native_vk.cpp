@@ -36,9 +36,11 @@
 #include "bbport_native_vk_geometry.h"
 #include "bbport_pm4_census.h"
 #include "bbport_thread_cpu.h"
+#include "bbport_native_vk_dlss.h"
 #include "bbport_native_vk_gpu.h"
 #include "bbport_native_vk_spirv.h"
 #include "bbport_native_vk_texture.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 
 #include "video_core/renderer_vulkan/bb_hud_scale.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -862,6 +864,7 @@ struct DrawPacket {
     bool writes_depth = false; // depth or stencil written (else the attachment is only read)
     bool writes_z = false;     // depth values written (writes_depth without it: stencil only)
     const Target* twin = nullptr; // a depth copy's destination, sampled as the depth target instead
+    const struct UpscaleJob* upscale = nullptr; // the display pass's first draw: DLSS first
     Ref ib;
     vk::IndexType ib_type = vk::IndexType::eUint32;
     u32 count = 0;
@@ -1005,6 +1008,11 @@ std::vector<const Gpu::Image*> stale_copies; // copy destinations a ReadInPlace 
 std::vector<CopyPacket> pending_copies; // recorder side; at most one per destination
 std::atomic<u64> copies_dropped{0}, copies_swapped{0}, copies_in_place{0}, copies_twinned{0}, stale_reads{0};
 void BeforeRead(const Gpu::Image* img);
+void ReportTemporalInputs(double seconds);
+struct DrawPacket;
+struct Target;
+void NativeTemporal(u64 ctx, DrawPacket& d, Target* const colors[8], Target* depth, u32 count);
+void UpscaleForDisplay(DrawPacket& d);
 void BeforeWrite(const Gpu::Image* img);
 void BeforeStencilWrite(const Gpu::Image* img);
 void ReadInPlace(DrawPacket& d);
@@ -2213,6 +2221,13 @@ std::vector<PipelineDesc> known;                  // every description this run 
 std::unordered_set<u64> known_keys;
 bool known_dirty = false;
 std::atomic<u64> compiles_done{0}, compile_ns{0}, preloaded{0}, skipped_compiling{0};
+/// BB_VK_PIPELINE_WAIT_MS=<n>: a draw whose shaders are still loading or whose pipeline is still
+/// compiling waits up to n ms for them (at most 4n ms in a second) instead of being left out
+/// (10 by default; 0: left out at once). On an RTX 5080 a first run's waits took about 1 ms each
+/// (275 draws, 278 ms in all) and caused none of its hitches.
+u32 pipeline_wait_ms = 10;
+std::condition_variable compiled_cv; // with compile_mutex: a compile finished
+std::atomic<u64> waited_pipelines{0}, waited_modules{0}, pipeline_wait_ns{0};
 
 void CompileThread() {
     BbCpu::Register("bb:NativeCompile");
@@ -2226,6 +2241,8 @@ void CompileThread() {
         }
         if (job->module) {
             LoadModule(*job->module);
+            { std::lock_guard lk(compile_mutex); } // a waiter checks load_done under it
+            compiled_cv.notify_all();
             continue;
         }
         const auto t0 = std::chrono::steady_clock::now();
@@ -2235,8 +2252,11 @@ void CompileThread() {
                                      .count()),
                              std::memory_order_relaxed);
         compiles_done.fetch_add(1, std::memory_order_relaxed);
-        std::lock_guard lk(compile_mutex);
-        compiled.emplace_back(job->key, pipeline);
+        {
+            std::lock_guard lk(compile_mutex);
+            compiled.emplace_back(job->key, pipeline);
+        }
+        compiled_cv.notify_all();
     }
 }
 
@@ -2321,6 +2341,61 @@ void Hurry(u64 key) {
         compile_queue.erase(it);
         compile_queue.push_front(std::move(job));
     }
+}
+
+/// BB_VK_PIPELINE_WAIT_MS: waits until `done()` (checked under compile_mutex), within the
+/// budget: n ms for one draw, 4n ms in a second (holding `mutex`; the compile threads never take
+/// it). True when it came true.
+std::chrono::steady_clock::time_point wait_window{}; // the budget's current second
+u64 wait_spent_ns = 0;                                // spent in it
+template <typename Done>
+bool WaitWithinBudget(Done done) {
+    using Clock = std::chrono::steady_clock;
+    auto& window = wait_window;
+    auto& spent_ns = wait_spent_ns;
+    const auto now = Clock::now();
+    if (now - window >= std::chrono::seconds(1)) {
+        window = now;
+        spent_ns = 0;
+    }
+    const u64 budget_ns = u64(pipeline_wait_ms) * 4'000'000ull;
+    if (spent_ns >= budget_ns) {
+        return false;
+    }
+    const u64 wait_ns = std::min<u64>(u64(pipeline_wait_ms) * 1'000'000ull, budget_ns - spent_ns);
+    bool ok = false;
+    {
+        std::unique_lock lk(compile_mutex);
+        ok = compiled_cv.wait_for(lk, std::chrono::nanoseconds(wait_ns), done);
+    }
+    const u64 took = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - now).count());
+    spent_ns += took;
+    pipeline_wait_ns.fetch_add(took, std::memory_order_relaxed);
+    return ok;
+}
+
+/// Waits for the compile of `key` within the budget, then takes the finished compiles (holding
+/// `mutex`). True when it is done.
+bool WaitForCompile(u64 key) {
+    const bool done = WaitWithinBudget([key] {
+        return std::any_of(compiled.begin(), compiled.end(),
+                           [key](const auto& c) { return c.first == key; });
+    });
+    if (done) {
+        waited_pipelines.fetch_add(1, std::memory_order_relaxed);
+        TakeCompiled();
+    }
+    return done;
+}
+
+/// Waits for the loads of a draw's shader modules (queued by ModuleReady) within the budget.
+bool WaitForModules(ShaderInfo* vs, ShaderInfo* ps, ShaderInfo* gs) {
+    const auto loaded = [](ShaderInfo* s) { return !s || s->load_done.load(std::memory_order_acquire); };
+    const bool done = WaitWithinBudget([&] { return loaded(vs) && loaded(ps) && loaded(gs); });
+    if (done) {
+        waited_modules.fetch_add(1, std::memory_order_relaxed);
+    }
+    return done;
 }
 
 /// Records the description of a pipeline seen for the first time (holding `mutex`).
@@ -3044,8 +3119,12 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
     if (!pipeline && compiling.count(key)) {
         Hurry(key);
-        skipped_compiling.fetch_add(1, std::memory_order_relaxed);
-        return;
+        if (pipeline_wait_ms && WaitForCompile(key)) {
+            pipeline = pipelines[key];
+        } else {
+            skipped_compiling.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
     }
     if (!pipeline) {
         skipped_pipeline.fetch_add(1, std::memory_order_relaxed);
@@ -3222,6 +3301,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     }
     d.layout = layout;
     d.pipeline = pipeline;
+    NativeTemporal(ctx, d, colors, depth_target, count);
     lap(SecPacket);
 }
 
@@ -3328,6 +3408,10 @@ void RecordDraw(DrawPacket& d) {
             Gpu::Trace("  %s read as the depth target (copy not made)\n",
                        Gpu::Describe(&d.twin->img).c_str());
         }
+    }
+    // DLSS before the ring is used (a new DLSS feature submits what was recorded)
+    if (d.upscale) {
+        UpscaleForDisplay(d);
     }
     if (!pending_copies.empty()) {
         for (const StageRes* res : {&d.res[0], &d.res[1]}) {
@@ -4147,6 +4231,9 @@ void StartTextures() {
                       Gpu::Init(*inst, shader_root.empty()
                                            ? std::string()
                                            : (shader_root / "pipeline_cache.bin").string());
+            if (drawing) {
+                Dlss::Init(*inst);
+            }
             const char* sh = std::getenv("BB_VK_SHOW");
             show = drawing && sh && sh[0] == '1';
             const char* al = std::getenv("BB_VK_ALONE");
@@ -4165,6 +4252,14 @@ void StartTextures() {
             std::printf("Native Vulkan: feedback loops %s\n", feedback_loops ? "on" : "off");
             const char* sp = std::getenv("BB_VK_SYNC_PIPELINES");
             async_pipelines = !(sp && sp[0] == '1');
+            if (const char* pw = std::getenv("BB_VK_PIPELINE_WAIT_MS"); pw && *pw) {
+                pipeline_wait_ms = u32(std::clamp(std::atoi(pw), 0, 100));
+            }
+            if (pipeline_wait_ms) {
+                std::printf("Native Vulkan: a draw waits up to %u ms for its pipeline (%u ms a "
+                            "second at most)\n",
+                            pipeline_wait_ms, pipeline_wait_ms * 4);
+            }
             if (drawing) {
                 StartRecorder();
                 Geo::Init(*inst, Geo::Host{GeoSerial, GeoUpload, GeoFree});
@@ -4392,11 +4487,15 @@ void Report() {
                 }
                 const u64 done = compiles_done.load();
                 std::printf("Native Vulkan: pipelines: %llu compiled (%.0f ms each, %llu from the "
-                            "last run), %zu waiting; %llu draws left out while compiling\n",
+                            "last run), %zu waiting; %llu draws left out while compiling, %llu "
+                            "waited for their pipeline and %llu for their shaders (%.0f ms in all)\n",
                             (unsigned long long)done, done ? compile_ns.load() / 1e6 / done : 0.0,
                             (unsigned long long)preloaded.load(), queued,
-                            (unsigned long long)skipped_compiling.load());
+                            (unsigned long long)skipped_compiling.load(),
+                            (unsigned long long)waited_pipelines.load(),
+                            (unsigned long long)waited_modules.load(), pipeline_wait_ns.load() / 1e6);
             }
+            ReportTemporalInputs(5.0);
             std::vector<Gpu::WorkTime> work;
             {
                 std::lock_guard g(gpu_mutex);
@@ -4509,6 +4608,616 @@ void Attach(const Vulkan::Instance& vulkan) {
 
 namespace {
 /// A draw from the engine context at `ctx` (the capture thread's copy, or the engine's own).
+// ------------------------------------------------------------------ temporal inputs
+/// What a temporal upscaler (DLSS, FSR 3) needs from a frame, as vk_ctr_fsr3 finds it in the
+/// shadPS4 renderer: CTR's G-buffer pass (four color targets and the scene depth) gives the
+/// scene depth, the velocity target the game writes for its motion blur (color 3) and the
+/// viewport; the first G-buffer draw's 528-byte vertex constants the camera (view, projection
+/// and the previous frame's view at floats 32, 48 and 64). Only logged for now (capture thread).
+struct TemporalInputs {
+    Target* depth = nullptr;    // capture thread only
+    Target* velocity = nullptr; // capture thread only
+    bool in_pass = false;       // the last draw was a G-buffer draw
+    bool camera_found = false;  // in this pass
+    u32 pass_draws = 0;         // draws in this pass
+};
+TemporalInputs temporal_inputs;
+/// The last G-buffer pass as the report prints it (under temporal_log_mutex).
+struct TemporalLog {
+    u32 depth_w = 0, depth_h = 0, vel_w = 0, vel_h = 0;
+    vk::Format depth_format{}, vel_format{};
+    ViewportI viewport{};
+    std::array<float, 132> camera{};
+    bool camera_valid = false;
+    // lab (temporal inputs): the vertex constants of the pass's first draw (slot:bytes), where a
+    // projection matrix was found (stage, slot, bytes, float index), the draws of recent passes
+    char first_cbs[160] = {};
+    char projection_at[96] = {};
+    u32 recent_draws[4] = {};
+    // lab: the constants holding the camera (from their start), where the projection is in
+    // them, their size, and whether each recent pass drew into the previous pass's depth
+    u32 camera_at = 0, camera_floats = 0;
+    bool same_depth[4] = {};
+    // the camera's motion of the last pass that had it: current view space -> previous clip
+    // space (column-major), from the draws of still objects, and how many draws agreed
+    std::array<float, 16> reproject{};
+    std::array<float, 16> projection{};
+    u32 reproject_votes = 0, reproject_draws = 0;
+};
+Target* temporal_last_depth = nullptr; // capture thread only
+std::mutex temporal_log_mutex;
+TemporalLog temporal_log;
+std::atomic<u64> gbuffer_passes{0}, gbuffer_cameras{0};
+
+/// A perspective projection (column-major, OpenGL style) at `m`: m[11] = -1 or 1, m[15] = 0.
+bool LooksLikeProjection(const float* m);
+
+/// 4x4 column-major helpers for the camera's motion.
+using Mat4f = std::array<float, 16>;
+Mat4f MulMat(const float* a, const float* b) {
+    Mat4f r{};
+    for (int c = 0; c < 4; ++c) {
+        for (int row = 0; row < 4; ++row) {
+            float v = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                v += a[k * 4 + row] * b[c * 4 + k];
+            }
+            r[c * 4 + row] = v;
+        }
+    }
+    return r;
+}
+/// Inverse of an affine matrix (last row 0 0 0 1); false when singular.
+bool InvertAffine(const float* m, Mat4f& out) {
+    const float a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6],
+                i = m[10];
+    const float A = e * i - f * h, B = f * g - d * i, C = d * h - e * g;
+    const float det = a * A + b * B + c * C;
+    if (!std::isfinite(det) || std::abs(det) < 1e-12f) {
+        return false;
+    }
+    const float k = 1.0f / det;
+    // rows of the inverse 3x3
+    const float r00 = A * k, r01 = (c * h - b * i) * k, r02 = (b * f - c * e) * k;
+    const float r10 = B * k, r11 = (a * i - c * g) * k, r12 = (c * d - a * f) * k;
+    const float r20 = C * k, r21 = (b * g - a * h) * k, r22 = (a * e - b * d) * k;
+    const float tx = m[12], ty = m[13], tz = m[14];
+    out = {r00, r10, r20, 0.0f, r01, r11, r21, 0.0f, r02, r12, r22, 0.0f,
+           -(r00 * tx + r01 * ty + r02 * tz), -(r10 * tx + r11 * ty + r12 * tz),
+           -(r20 * tx + r21 * ty + r22 * tz), 1.0f};
+    return true;
+}
+bool SameMatrix(const Mat4f& a, const Mat4f& b) {
+    float scale = 0.0f;
+    for (int k = 0; k < 16; ++k) {
+        scale = std::max(scale, std::abs(a[k]));
+    }
+    // rotation-sized elements and translation-sized ones: relative to their columns
+    for (int k = 0; k < 16; ++k) {
+        const float tol = (k >= 12 ? 1e-3f * scale : 1e-3f) + 1e-4f * std::abs(a[k]);
+        if (std::abs(a[k] - b[k]) > tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The camera's motion of a pass: each draw's vertex constants hold its previous
+/// model-view-projection (floats 0-15), the projection (32-47) and the model-view (48-63), so
+/// previous MVP * inverse(model-view) maps view space to the previous frame's clip space; it is
+/// the camera's motion for still objects, which the most draws agree on.
+struct ReprojectVotes {
+    struct Candidate {
+        Mat4f m{};
+        u32 votes = 0;
+    };
+    std::array<Candidate, 6> candidates{};
+    Mat4f projection{};
+    u32 draws = 0;
+    void Clear() {
+        *this = {};
+    }
+    static bool Affine(const float* m) {
+        return m[3] == 0.0f && m[7] == 0.0f && m[11] == 0.0f && std::abs(m[15] - 1.0f) < 1e-6f;
+    }
+    void Add(const float* f, u32 floats) {
+        if (floats < 64 || draws >= 256) {
+            return;
+        }
+        Mat4f m, inverse;
+        if (LooksLikeProjection(f + 32) && Affine(f + 48)) {
+            // previous MVP (0), projection (32), model-view (48)
+            if (!InvertAffine(f + 48, inverse)) {
+                return;
+            }
+            m = MulMat(f, inverse.data());
+            std::memcpy(projection.data(), f + 32, sizeof(projection));
+        } else if (floats >= 80 && LooksLikeProjection(f + 48) && Affine(f + 32) &&
+                   Affine(f + 64)) {
+            // the PS4 Pro path's 528 bytes (as vk_ctr_fsr3 reads them): view (32), projection
+            // (48), the previous frame's view (64): previous projection * previous view *
+            // inverse view
+            if (!InvertAffine(f + 32, inverse)) {
+                return;
+            }
+            const Mat4f prev = MulMat(f + 48, f + 64);
+            m = MulMat(prev.data(), inverse.data());
+            std::memcpy(projection.data(), f + 48, sizeof(projection));
+        } else {
+            return;
+        }
+        ++draws;
+        Candidate* weakest = &candidates[0];
+        for (Candidate& c : candidates) {
+            if (c.votes && SameMatrix(c.m, m)) {
+                ++c.votes;
+                return;
+            }
+            if (c.votes < weakest->votes) {
+                weakest = &c;
+            }
+        }
+        if (weakest->votes <= 1) {
+            weakest->m = m;
+            weakest->votes = 1;
+        }
+    }
+    const Candidate& Best() const {
+        const Candidate* best = &candidates[0];
+        for (const Candidate& c : candidates) {
+            if (c.votes > best->votes) {
+                best = &c;
+            }
+        }
+        return *best;
+    }
+};
+ReprojectVotes reproject_votes; // capture thread only
+
+/// DLSS (capture thread): what this frame's G-buffer passes gave so far.
+struct SceneFrame {
+    Target* depth = nullptr;
+    u32 draws = 0; // of the frame's biggest G-buffer pass
+    Target* velocity = nullptr;
+    bool camera = false;
+    Mat4f reproject{}, projection{};
+    vk::Viewport viewport{}; // of a G-buffer draw, without the jitter
+    bool has_viewport = false;
+};
+SceneFrame scene_frame;
+Target* jitter_depth = nullptr;      // the last frame's scene depth: draws into it are jittered
+std::array<float, 2> scene_jitter{}; // by this much (pixels), this frame
+Target* last_color = nullptr;        // the last draw's first color target (not a display buffer)
+bool last_display = false;           // the last draw was into a display buffer
+
+bool LooksLikeProjection(const float* m) {
+    return std::abs(std::abs(m[11]) - 1.0f) < 1e-4f && std::abs(m[15]) < 1e-6f && m[0] > 0.05f &&
+           m[0] < 20.0f && m[5] > 0.05f && m[5] < 20.0f && std::abs(m[1]) < 1e-4f &&
+           std::abs(m[4]) < 1e-4f && std::isfinite(m[10]) && std::isfinite(m[14]) && m[14] != 0.0f;
+}
+
+void ProbeTemporalInputs(u64 ctx, Target* const colors[8], Target* depth) {
+    TemporalInputs& t = temporal_inputs;
+    u32 n = 0;
+    for (int i = 0; i < 8; ++i) {
+        n += colors[i] != nullptr;
+    }
+    const bool gbuffer = n == 4 && colors[0] && colors[3] && depth && !colors[4];
+    if (!gbuffer) {
+        if (t.in_pass) {
+            std::lock_guard lk(temporal_log_mutex);
+            auto& r = temporal_log.recent_draws;
+            std::memmove(r, r + 1, sizeof(r) - sizeof(r[0]));
+            r[3] = t.pass_draws;
+            scene_frame.draws = std::max(scene_frame.draws, t.pass_draws);
+            const auto& best = reproject_votes.Best();
+            if (best.votes >= 4) {
+                scene_frame.camera = true;
+                scene_frame.reproject = best.m;
+                scene_frame.projection = reproject_votes.projection;
+            }
+            if (best.votes) {
+                temporal_log.reproject = best.m;
+                temporal_log.projection = reproject_votes.projection;
+                temporal_log.reproject_votes = best.votes;
+                temporal_log.reproject_draws = reproject_votes.draws;
+            }
+        }
+        t.in_pass = false;
+        return;
+    }
+    const Capture* c = capturing;
+    if (!t.in_pass) {
+        t.in_pass = true;
+        t.camera_found = false;
+        t.pass_draws = 0;
+        t.depth = depth;
+        t.velocity = colors[3];
+        scene_frame.depth = depth;
+        scene_frame.velocity = colors[3];
+        TemporalLog log;
+        log.depth_w = depth->img.width;
+        log.depth_h = depth->img.height;
+        log.depth_format = depth->img.format;
+        log.vel_w = colors[3]->img.width;
+        log.vel_h = colors[3]->img.height;
+        log.vel_format = colors[3]->img.format;
+        log.viewport = R<ViewportI>(ctx + CtxViewport);
+        if (c) {
+            int w = 0;
+            for (u32 k = 0; k < c->cb_count[0] && w < int(sizeof(log.first_cbs)) - 16; ++k) {
+                w += std::snprintf(log.first_cbs + w, sizeof(log.first_cbs) - w, "%s%u:%u",
+                                   k ? " " : "", c->cbs[0][k].slot, c->cbs[0][k].size);
+            }
+        }
+        gbuffer_passes.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lk(temporal_log_mutex);
+        std::memcpy(log.recent_draws, temporal_log.recent_draws, sizeof(log.recent_draws));
+        std::memcpy(log.projection_at, temporal_log.projection_at, sizeof(log.projection_at));
+        std::memmove(log.same_depth, temporal_log.same_depth + 1, 3);
+        log.same_depth[3] = depth == temporal_last_depth;
+        temporal_last_depth = depth;
+        // the camera stays the last one found (the pass after it may have none)
+        log.camera = temporal_log.camera;
+        log.camera_valid = temporal_log.camera_valid;
+        log.camera_at = temporal_log.camera_at;
+        log.camera_floats = temporal_log.camera_floats;
+        log.reproject = temporal_log.reproject;
+        log.projection = temporal_log.projection;
+        log.reproject_votes = temporal_log.reproject_votes;
+        log.reproject_draws = temporal_log.reproject_draws;
+        temporal_log = log;
+        reproject_votes.Clear();
+    }
+    ++t.pass_draws;
+    if (c) {
+        for (u32 k = 0; k < c->cb_count[0]; ++k) {
+            const Capture::Cb& cb = c->cbs[0][k];
+            if (cb.slot == 0) {
+                reproject_votes.Add(
+                    reinterpret_cast<const float*>(c->bytes.data() + cb.offset), cb.size / 4);
+            }
+        }
+    }
+    if (t.camera_found || !c) {
+        return;
+    }
+    // the camera: the first constants of the pass holding a projection matrix (any stage)
+    for (u32 stage = 0; stage < 3 && !t.camera_found; ++stage) {
+        for (u32 k = 0; k < c->cb_count[stage] && !t.camera_found; ++k) {
+            const Capture::Cb& cb = c->cbs[stage][k];
+            const float* f = reinterpret_cast<const float*>(c->bytes.data() + cb.offset);
+            const u32 floats = cb.size / 4;
+            for (u32 i = 0; i + 16 <= floats; i += 4) {
+                if (!LooksLikeProjection(f + i)) {
+                    continue;
+                }
+                t.camera_found = true;
+                gbuffer_cameras.fetch_add(1, std::memory_order_relaxed);
+                std::lock_guard lk(temporal_log_mutex);
+                TemporalLog& log = temporal_log;
+                std::snprintf(log.projection_at, sizeof(log.projection_at),
+                              "stage %u slot %u (%u bytes) float %u, draw %u of the pass", stage,
+                              cb.slot, cb.size, i, t.pass_draws);
+                log.camera.fill(0.0f);
+                log.camera_floats = std::min<u32>(floats, u32(log.camera.size()));
+                std::memcpy(log.camera.data(), f, log.camera_floats * sizeof(float));
+                log.camera_at = i;
+                log.camera_valid = true;
+                break;
+            }
+        }
+    }
+}
+
+/// The scene images DLSS takes: 8-bit colour, or the 16-bit float scene of the game's HDR output.
+bool DlssSource(vk::Format format) {
+    return format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eB8G8R8A8Unorm ||
+           format == vk::Format::eR16G16B16A16Sfloat;
+}
+
+/// What DLSS gets for a frame, made at the display pass's first draw (capture thread) and read
+/// when that draw is recorded (a ring: the recorder is at most a few frames behind).
+struct UpscaleJob {
+    Target* source = nullptr; // the finished scene the display pass samples
+    Target* depth = nullptr;
+    Target* velocity = nullptr;
+    Mat4f reproject{}, projection{};
+    bool camera = false;
+    float xscale = 0, yscale = 0, xoffset = 0, yoffset = 0, zscale = 0, zoffset = 0;
+    std::array<float, 2> jitter{};
+    bool reset = false;
+    u32 out_w = 0, out_h = 0;
+};
+std::array<UpscaleJob, 16> upscale_jobs;
+u32 upscale_job_next = 0;
+std::atomic<u64> upscale_frames{0}, upscale_done{0}, upscale_no_scene{0};
+// draws jittered; frames taken as a 3D scene, and as a menu (no history)
+std::atomic<u64> jittered_by_depth{0}, upscale_scene{0}, upscale_menu{0};
+
+/// Capture thread, for each draw: scene draws are jittered for DLSS, and the display pass's
+/// first draw (the frame's end, before the HUD) takes this frame's inputs.
+void NativeTemporal(u64 ctx, DrawPacket& d, Target* const colors[8], Target* depth, u32 count) {
+    if (!Dlss::Wanted()) {
+        last_display = false;
+        return;
+    }
+    if (depth && depth == scene_frame.depth && colors[3] && colors[3] == scene_frame.velocity &&
+        !scene_frame.has_viewport) {
+        scene_frame.viewport = d.viewport;
+        scene_frame.has_viewport = true;
+    }
+    // draws into the scene depth but full-screen passes (a quad: the edge column would be left);
+    // not the 2D drawn into the scene image without it (menus), which DLSS would smear
+    if (depth && depth == jitter_depth && count > 6) {
+        jittered_by_depth.fetch_add(1, std::memory_order_relaxed);
+        d.viewport.x += scene_jitter[0];
+        d.viewport.y += scene_jitter[1];
+    }
+    u64 base = 0;
+    if (const u64 h = Q(ctx + CtxColorTargets)) {
+        base = u64(R<u32>(h + 0x10)) << 8;
+    }
+    const bool display = base && colors[0] && Vulkan::FrameCapture::IsDisplayBuffer(base);
+    const bool start = display && !last_display;
+    last_display = display;
+    if (!display) {
+        last_color = colors[0];
+        return;
+    }
+    if (!start) {
+        return;
+    }
+    upscale_frames.fetch_add(1, std::memory_order_relaxed);
+    bool sampled = false;
+    for (const Slot& slot : d.res[1].slots) {
+        sampled |= last_color && slot.target == last_color;
+    }
+    const SceneFrame& sf = scene_frame;
+    // a menu (a small 3D scene under 2D drawn into the same image: the character select, the
+    // results): DLSS stays out of it, so the 2D and the waving flag leave no trails
+    static const u32 menu_draws = [] {
+        const char* v = std::getenv("BB_VK_DLSS_MENU_DRAWS");
+        return v ? u32(std::strtoul(v, nullptr, 10)) : 100u;
+    }();
+    const bool menu = sf.draws < menu_draws;
+    if (menu && sampled) {
+        // menus are shown as the game draws them: even without history, DLSS doubled the
+        // results screen's scrolling background (2026-11-10)
+        upscale_menu.fetch_add(1, std::memory_order_relaxed);
+    } else if (sampled && sf.depth && sf.velocity && sf.has_viewport &&
+               DlssSource(last_color->img.format)) {
+        UpscaleJob& j = upscale_jobs[upscale_job_next++ % upscale_jobs.size()];
+        j = {};
+        j.source = last_color;
+        j.depth = sf.depth;
+        j.velocity = sf.velocity;
+        j.camera = sf.camera;
+        j.reproject = sf.reproject;
+        j.projection = sf.projection;
+        const vk::Viewport& vp = sf.viewport;
+        j.xscale = vp.width * 0.5f;
+        j.yscale = vp.height * 0.5f; // negative: y flipped as drawn
+        j.xoffset = vp.x + vp.width * 0.5f;
+        j.yoffset = vp.y + vp.height * 0.5f;
+        // OpenGL-style clip depth (-1..1; the projection's [14] is -2fn/(f-n))
+        j.zscale = (vp.maxDepth - vp.minDepth) * 0.5f;
+        j.zoffset = (vp.maxDepth + vp.minDepth) * 0.5f;
+        const bool jittered = jitter_depth == sf.depth;
+        j.jitter = jittered ? scene_jitter : std::array<float, 2>{};
+        j.reset = !jittered;
+        upscale_scene.fetch_add(1, std::memory_order_relaxed);
+        j.out_w = colors[0]->img.width;
+        j.out_h = colors[0]->img.height;
+        d.upscale = &j;
+    } else {
+        upscale_no_scene.fetch_add(1, std::memory_order_relaxed);
+    }
+    // only a frame DLSS takes is jittered: its jitter is taken off again
+    jitter_depth = d.upscale && !menu ? sf.depth : nullptr;
+    scene_jitter = Dlss::NextJitter();
+    scene_frame = {};
+}
+
+/// The image DLSS writes (recorder thread): a target of its own, sampled by the display pass
+/// in place of the scene.
+std::unique_ptr<Target> dlss_output;
+
+Target* DlssOutput(u32 w, u32 h, vk::Format format, u32 comp_swap) {
+    if (dlss_output && dlss_output->img.width == w && dlss_output->img.height == h &&
+        dlss_output->img.format == format) {
+        return dlss_output.get();
+    }
+    const Vulkan::Instance* inst = instance.load();
+    if (!inst) {
+        return nullptr;
+    }
+    if (dlss_output) {
+        DestroyTarget(*inst, *dlss_output);
+        dlss_output.reset();
+    }
+    using U = vk::ImageUsageFlagBits;
+    const vk::ImageCreateInfo ici{
+        .imageType = vk::ImageType::e2D,
+        .format = format,
+        .extent = {w, h, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = U::eStorage | U::eSampled | U::eTransferSrc | U::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    };
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    aci.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    const VkImageCreateInfo& raw = ici;
+    if (vmaCreateImage(inst->GetAllocator(), &raw, &aci, &image, &allocation, nullptr) !=
+        VK_SUCCESS) {
+        std::printf("Native Vulkan: DLSS: its %ux%u output could not be made\n", w, h);
+        return nullptr;
+    }
+    auto view_of = [&](vk::ImageViewType type) {
+        auto [vr, view] = inst->GetDevice().createImageView({
+            .image = image,
+            .viewType = type,
+            .format = format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        });
+        return vr == vk::Result::eSuccess ? VkImageView(view) : VK_NULL_HANDLE;
+    };
+    dlss_output = std::make_unique<Target>();
+    Target& t = *dlss_output;
+    t.img.image = image;
+    t.allocation = allocation;
+    t.view = view_of(vk::ImageViewType::e2D);
+    t.view_array = view_of(vk::ImageViewType::e2DArray);
+    t.img.attach = t.view;
+    t.img.width = w;
+    t.img.height = h;
+    t.img.format = format;
+    t.img.layout = vk::ImageLayout::eUndefined;
+    t.comp_swap = comp_swap;
+    t.bytes = u64(w) * h * 4;
+    target_bytes.fetch_add(t.bytes, std::memory_order_relaxed);
+    if (!t.view || !t.view_array) {
+        DestroyTarget(*inst, t);
+        dlss_output.reset();
+        return nullptr;
+    }
+    return &t;
+}
+
+/// Recorder thread: DLSS before the display pass's first draw, which then samples its output.
+void UpscaleForDisplay(DrawPacket& d) {
+    const UpscaleJob& j = *d.upscale;
+    Target* const src = j.source;
+    if (!src || !j.depth || !j.velocity || !DlssSource(src->img.format)) {
+        return;
+    }
+    Target* const out = DlssOutput(j.out_w, j.out_h, src->img.format, src->comp_swap);
+    if (!out) {
+        return;
+    }
+    if (!pending_copies.empty()) { // copies into what DLSS reads are made first
+        BeforeRead(&src->img);
+        BeforeRead(&j.depth->img);
+        BeforeRead(&j.velocity->img);
+    }
+    Dlss::Frame f;
+    f.color = &src->img;
+    f.color_view = src->view;
+    f.hdr = src->img.format == vk::Format::eR16G16B16A16Sfloat;
+    f.depth = &j.depth->img;
+    f.depth_view = j.depth->view; // the depth aspect
+    f.velocity = &j.velocity->img;
+    f.velocity_view = j.velocity->view;
+    f.reproject = j.reproject;
+    f.projection = j.projection;
+    f.camera = j.camera;
+    f.xscale = j.xscale;
+    f.yscale = j.yscale;
+    f.xoffset = j.xoffset;
+    f.yoffset = j.yoffset;
+    f.zscale = j.zscale;
+    f.zoffset = j.zoffset;
+    f.jitter = j.jitter;
+    f.reset = j.reset;
+    f.output = &out->img;
+    f.output_view = out->view;
+    if (!Dlss::Upscale(f)) {
+        return;
+    }
+    upscale_done.fetch_add(1, std::memory_order_relaxed);
+    for (StageRes& res : d.res) {
+        for (Slot& slot : res.slots) {
+            if (slot.target == src) {
+                slot.target = out;
+            }
+        }
+    }
+}
+
+/// One line every 5 seconds.
+void ReportTemporalInputs(double seconds) {
+    const u64 passes = gbuffer_passes.exchange(0), cams = gbuffer_cameras.exchange(0);
+    TemporalLog t;
+    {
+        std::lock_guard lk(temporal_log_mutex);
+        t = temporal_log;
+    }
+    if (Dlss::Wanted()) {
+        const u64 frames = upscale_frames.exchange(0), done = upscale_done.exchange(0),
+                  no_scene = upscale_no_scene.exchange(0), by_depth = jittered_by_depth.exchange(0),
+                  scene = upscale_scene.exchange(0), menu = upscale_menu.exchange(0);
+        std::printf("Native Vulkan: DLSS: %.1f frames/s, %.1f upscaled, %.1f without a scene; "
+                    "%.1f as a scene, %.1f menus left as drawn; jittered draws/s %.0f\n",
+                    frames / seconds, done / seconds, no_scene / seconds, scene / seconds,
+                    menu / seconds, by_depth / seconds);
+    }
+    if (!passes) {
+        std::printf("Native Vulkan: temporal inputs: no G-buffer pass\n");
+        return;
+    }
+    float fov = 0, near_plane = 0, far_plane = 0;
+    if (t.camera_valid) {
+        const float* p = &t.camera[t.camera_at];
+        const float a = p[10], b = p[14];
+        if (p[5] > 0.0f && a != 1.0f && a != -1.0f) {
+            fov = 2.0f * std::atan(1.0f / p[5]) * 57.29578f;
+            near_plane = std::abs(b / (a - 1.0f));
+            far_plane = std::abs(b / (a + 1.0f));
+        }
+    }
+    std::printf("Native Vulkan: temporal inputs: %.1f G-buffer passes/s, %.1f with the camera; "
+                "depth %ux%u %s, velocity %ux%u %s; viewport %d,%d %dx%d z %.2f-%.2f; camera fov "
+                "%.1f deg, near %.2f, far %.0f; projection at %s; first draw's vertex constants "
+                "(slot:bytes) %s; draws in the last passes %u %u %u %u\n",
+                passes / seconds, cams / seconds, t.depth_w, t.depth_h,
+                vk::to_string(t.depth_format).c_str(), t.vel_w, t.vel_h,
+                vk::to_string(t.vel_format).c_str(), t.viewport.x, t.viewport.y, t.viewport.w,
+                t.viewport.h, t.viewport.zmin, t.viewport.zmax, fov, near_plane, far_plane,
+                t.projection_at[0] ? t.projection_at : "none", t.first_cbs[0] ? t.first_cbs : "none",
+                t.recent_draws[0], t.recent_draws[1], t.recent_draws[2], t.recent_draws[3]);
+    std::printf("Native Vulkan: temporal inputs: the passes drew into the previous one's depth: "
+                "%d %d %d %d\n",
+                t.same_depth[0], t.same_depth[1], t.same_depth[2], t.same_depth[3]);
+    static u32 dumped_sizes[8] = {};
+    const bool new_size = t.camera_valid &&
+                          std::find(std::begin(dumped_sizes), std::end(dumped_sizes),
+                                    t.camera_floats) == std::end(dumped_sizes);
+    if (new_size) {
+        if (u32* slot = std::find(std::begin(dumped_sizes), std::end(dumped_sizes), 0u);
+            slot != std::end(dumped_sizes)) {
+            *slot = t.camera_floats;
+        }
+    }
+    if (t.reproject_votes) {
+        // how far the camera moved: the reprojection against the projection alone
+        float moved = 0.0f;
+        for (int k = 0; k < 16; ++k) {
+            moved = std::max(moved, std::abs(t.reproject[k] - t.projection[k]));
+        }
+        const auto& m = t.reproject;
+        std::printf("Native Vulkan: camera motion: %u of %u draws agree; differs from the "
+                    "projection by %g; rows x [%g %g %g %g] y [%g %g %g %g] w [%g %g %g %g]\n",
+                    t.reproject_votes, t.reproject_draws, moved, m[0], m[4], m[8], m[12], m[1],
+                    m[5], m[9], m[13], m[3], m[7], m[11], m[15]);
+    }
+    if (new_size) {
+        // lab: the camera's constants, one row of 4 floats per line (column-major matrices)
+        std::printf("Native Vulkan: camera constants (%u floats, projection at %u):\n",
+                    t.camera_floats, t.camera_at);
+        for (u32 row = 0; row + 4 <= t.camera_floats && row < 96; row += 4) {
+            std::printf("  [%3u] %12g %12g %12g %12g\n", row, t.camera[row], t.camera[row + 1],
+                        t.camera[row + 2], t.camera[row + 3]);
+        }
+    }
+}
+
 void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
     lap.Start();
     const u64 vsh = Q(ctx + CtxVs);
@@ -4534,7 +5243,7 @@ void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
     if (gs) {
         ready &= ModuleReady(*gs);
     }
-    if (!ready) {
+    if (!ready && !(pipeline_wait_ms && WaitForModules(vs, ps, gs))) {
         skipped_compiling.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -4556,6 +5265,7 @@ void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
         return;
     }
     resolved.fetch_add(1, std::memory_order_relaxed);
+    ProbeTemporalInputs(ctx, colors, depth_target);
     if (drawing) {
         // with a GS, the ES runs as the vertex stage and its outputs feed the GS directly (the
         // ES -> GS ring of the PS4 becomes the pipeline's own interface, as in the D3D11 port)

@@ -15,6 +15,7 @@ from mod_file_paths import resolve
 
 MAGIC = b'BBPAK001'
 SECTOR = 0x800
+MAX_ARCHIVE_OVERLAYS = 128  # src/runtime_file.c: MAX_ARCHIVE_PATCHES
 
 
 def write(target, archive, guest, ranges):

@@ -69,3 +69,5 @@ gpu/shim/bbport_gnm_table.inc
 .projectmem/structure.json
 
 !scripts/assets/*.png
+# The EOS bridge's settings: the Epic product's ids (eosbridge/eosbridge.ini.example)
+/eosbridge/eosbridge.ini

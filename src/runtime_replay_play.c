@@ -82,7 +82,7 @@ static struct {
     active_camera_fn *active_camera;
     camera_refresh_fn *camera_refresh;
     make_handle_fn *make_handle;
-    pool_new_fn *ghost_look_end_new;
+    pool_new_fn *ghost_look_end_new, *ghost_look_start_new;
     send_message_fn *send_message;
     player_kart_fn *player_kart;
     void0_fn *despawn_items, *load_next_map;
@@ -129,6 +129,7 @@ static struct {
     int kart_slot[RR_RACERS];   /* each racer's kart slot in the replay's race (0 the player's), -1 none */
     void *ghost[RR_RACERS];
     uint8_t attached[RR_RACERS];
+    void *ghost_look[RR_RACERS];  /* the kart that got the ghost look (Time Trial ghosts), 0 none */
     uint32_t fed[RR_RACERS];
     int32_t accolade_player;
     int rewound;
@@ -454,6 +455,7 @@ static void drop_ghosts(void) {
         if (P.ghost[i]) game.release(P.ghost[i]);
         P.ghost[i] = 0;
         P.attached[i] = 0;
+        P.ghost_look[i] = 0;
     }
 }
 
@@ -811,7 +813,12 @@ static void unghost(void) {
     P.unghost_frames = 0;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = P.attached[i] ? kart_of_racer(i) : 0;
-        void *message = kart ? game.ghost_look_end_new(0) : 0;
+        /* A replay plays as a Single Race, where karts have no ghost look. In a Time Trial the others were
+         * ghosts: they get the look once (a second Start would add its effects twice). */
+        const int ghost = P.header.mode == 2 && i != P.player_slot;
+        if (ghost && P.ghost_look[i] == kart) continue;
+        void *message = kart ? (ghost ? game.ghost_look_start_new : game.ghost_look_end_new)(0) : 0;
+        if (ghost) P.ghost_look[i] = kart;
         if (!message) continue;
         game.send_message(message, kart, kart);
         game.release(message);
@@ -1444,6 +1451,7 @@ void ABI runtime_replay_level_start(void *manager) {
             P.camera = P.target = P.kart = 0;
             P.time = 0.0f;
             memset(P.attached, 0, sizeof P.attached);
+            memset(P.ghost_look, 0, sizeof P.ghost_look);
             memset(P.fed, 0, sizeof P.fed);
             puts("Replay: the race restarted: the replay starts again");
         } else {
@@ -2455,6 +2463,7 @@ int runtime_replay_play_install(int eu) {
     game.camera_refresh = fn(0xc8ade0, 0, eu);
     game.make_handle = fn(0x14bea20, 1, eu);
     game.ghost_look_end_new = fn(0x112da10, 1, eu);
+    game.ghost_look_start_new = fn(0x112d8b0, 1, eu);
     game.send_message = fn(0xd32160, 0, eu);
     game.player_kart = fn(0xe50f70, 0, eu);
     game.despawn_items = fn(0x1056bb0, 1, eu);
@@ -2486,7 +2495,7 @@ int runtime_replay_play_install(int eu) {
     void *const check[] = {game.ghost_new, game.move_key_new, game.input_key_new, game.list_reserve, game.list_set_count,
                            game.ghost_reset, game.ghost_attach, game.ghost_update, game.ai_load, game.ai_count, game.racer_of,
                            game.camera_instance, game.active_camera, game.camera_refresh, game.make_handle,
-                           game.ghost_look_end_new, game.send_message, game.player_kart, game.despawn_items, game.string,
+                           game.ghost_look_end_new, game.ghost_look_start_new, game.send_message, game.player_kart, game.despawn_items, game.string,
                            game.string_release, game.release, game.set_next_race_mode, game.set_next_map, game.load_next_map,
                            game.apply_choice, game.apply_player_count, game.enter_customization, game.zone_by_name,
                            game.decal_find, game.set_text, game.hud_set_lap, game.find_driver, game.spawn_placeable, game.hud_style_next};
@@ -2516,19 +2525,34 @@ int runtime_replay_play_install(int eu) {
  * players are ready" (the followed race loads once the online menus are left). That is the session, not the level:
  * octane_onlinelobby is also where a race or a replay left outside the online mode comes back to.
  * What stops it goes to the log when it changes. */
+/* The title screen and the lobby: menus, never a race. Giving the player's own character back after a
+ * replay (give_back) has the game load that character's kart there, in the player's kart slot: it is
+ * the menu's, not a race's (the second replay was refused "the player has a kart" until a restart). */
+static int has_word(const char *text, const char *word) {
+    const size_t n = strlen(word);
+    for (; *text; text++)
+        if (!strncasecmp(text, word, n)) return 1;
+    return 0;
+}
+static int menu_level(void) {
+    const char *level = rr_current_level();
+    return level && (has_word(level, "octane_startscreen") || has_word(level, "octane_onlinelobby"));
+}
+
+static const char *start_blocked;              /* runtime_replay_can_start's last "why" */
+const char *runtime_replay_blocked_reason(void) { return __atomic_load_n(&start_blocked, __ATOMIC_RELAXED); }
 int runtime_replay_can_start(void) {
-    static const char *told;
     PingPeer peers[PING_MAX_PEERS];
     const char *why = P.pending || P.step != STEP_NONE ? "a replay is on"
                       : !rr_game(0) ? "the game is not up"
-                      : rr_kart_of(0, 0) ? "the player has a kart"
+                      : rr_kart_of(0, 0) && !menu_level() ? "the player has a kart"
                       : race_timer() ? "a race clock is on"
                       : runtime_online_mode_lobby_open() ? "an online lobby is on screen"
                       : runtime_public_match_active() ? "a public match"
                       : runtime_private_match_active() || runtime_online_mode_room_on() ? "a private room"
                       : runtime_net_ping_view(peers, PING_MAX_PEERS) > 0 ? "players in the room"
                                                                          : 0;
-    if (__atomic_exchange_n(&told, why, __ATOMIC_RELAXED) != why) {
+    if (__atomic_exchange_n(&start_blocked, why, __ATOMIC_RELAXED) != why) {
         const char *level = rr_current_level();
         printf("Replay: %s%s (level %s)\n", why ? "cannot start now: " : "can start", why ? why : "", level ? level : "-");
         fflush(stdout);

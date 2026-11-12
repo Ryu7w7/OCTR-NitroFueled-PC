@@ -28,6 +28,9 @@ int runtime_replay_list(RrListEntry *out, int max);
 int runtime_replay_play_file(const char *name);
 /* 1 when a replay can start now: none is playing and no race is on (use it from the menus). */
 int runtime_replay_can_start(void);
+/* Why the last runtime_replay_can_start said no (its log words), 0 when it said yes: the menu tells
+ * the player what to do instead of only greying the button out. */
+const char *runtime_replay_blocked_reason(void);
 /* 1 while a replay is loading or playing. */
 int runtime_replay_playing(void);
 /* The chat stays out of a race: 1 with none on, or once this player finished it. */
@@ -62,6 +65,11 @@ typedef struct {
 } RrView;
 /* 1 and the view while a replay's race is on. */
 int runtime_replay_view(RrView *out);
+
+/* Time Trial runs for the leaderboards (runtime_ttrun.c): a personal best saved at path goes to the server
+ * when it places on its board; at startup, the Time Trials recorded before (each file once). */
+void runtime_ttrun_saved(const char *path);
+void runtime_ttrun_backfill(void);
 
 #ifdef __cplusplus
 }

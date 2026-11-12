@@ -3,6 +3,7 @@
 #include "runtime_net.h"
 #include "runtime_http.h"
 #include "runtime_net_overrides.h"
+#include "runtime_net_bridge.h"
 #include "bb_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -356,25 +357,66 @@ static long long http_date_seconds(const char *text) {
     return days * 86400 + hour * 3600 + minute * 60 + second;
 }
 
-/* An answer of the RyuNET server: its Date header sets the clock offset. */
+/* X-RyuNET-Clock: a fresh token for each request; the server answers with its time and that
+ * token (X-RyuNET-Time, its clock_stamp.go). Something on the way (an ISP's cache, an antivirus
+ * web shield) kept answers and gave them back hours later, and their Date made a right clock look
+ * hours off: every signed request then went with the wrong time. A kept answer carries an old
+ * token, so its time is not taken. A request and its answer go on one thread: the token is per
+ * thread. */
+static _Thread_local char g_clock_token[17];
+static int g_server_stamps; /* the server sends X-RyuNET-Time: an answer without it is not its own */
+
+static const char *ryunet_clock_token(void) {
+    static unsigned long long counter;
+    struct timespec now;
+    timespec_get(&now, TIME_UTC);
+    unsigned long long x = (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec;
+    x ^= __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) * 0x9E3779B97F4A7C15ull;
+    x ^= (unsigned long long)(uintptr_t)&now << 17;
+    snprintf(g_clock_token, sizeof g_clock_token, "%016llx", x);
+    return g_clock_token;
+}
+
+/* An answer of the RyuNET server sets the clock offset: its X-RyuNET-Time when it carries the
+ * token just sent, else (a server older than that) its Date, unless a cache says it kept the
+ * answer (Age). */
 static void ryunet_note_server_clock(const char *headers) {
+    long long server = -1, date = -1;
+    int stamped = 0, aged = 0;
     for (const char *line = headers; line && *line && *line != '\r' && *line != '\n';) {
-        if (!_strnicmp(line, "Date:", 5)) {
-            const long long server = http_date_seconds(line + 5);
-            if (server < 0) return;
-            ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
-            const long long offset = server - (long long)time(NULL);
-            /* The header has whole seconds: a few seconds either way change nothing. */
-            const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
-            if (llabs(offset - old) > 30) {
-                runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
-                                  offset > 0 ? "behind" : "ahead of",
-                                  llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
-            }
-            return;
+        if (!_strnicmp(line, "X-RyuNET-Time:", 14)) {
+            long long at;
+            char token[65] = "";
+            stamped = 1;
+            if (sscanf(line + 14, " %lld %64[0-9a-fA-F]", &at, token) == 2 && g_clock_token[0] &&
+                !strcmp(token, g_clock_token))
+                server = at;
+        } else if (!_strnicmp(line, "Age:", 4)) {
+            aged = 1;
+        } else if (!_strnicmp(line, "Date:", 5)) {
+            date = http_date_seconds(line + 5);
         }
         line = strchr(line, '\n');
         if (line) line++;
+    }
+    if (stamped) {
+        __atomic_store_n(&g_server_stamps, 1, __ATOMIC_RELAXED);
+        if (server < 0) {
+            runtime_net_trace("RyuNET server clock: an answer kept on the way (an old token): its time is not taken");
+            return;
+        }
+    } else {
+        if (date < 0 || aged || __atomic_load_n(&g_server_stamps, __ATOMIC_RELAXED)) return;
+        server = date;
+    }
+    ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
+    const long long offset = server - (long long)time(NULL);
+    /* The time has whole seconds: a few seconds either way change nothing. */
+    const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
+    if (llabs(offset - old) > 30) {
+        runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
+                          offset > 0 ? "behind" : "ahead of",
+                          llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
     }
 }
 
@@ -449,6 +491,23 @@ static void ryunet_keep_form(int form) {
         runtime_net_trace("RyuNET requests now go as %s, which this network lets through", ryunet_form_names[form]);
 }
 
+/* The RyuNET server's HTTP port (port: BB_ONLINE_HTTP_PORT, 8080 when unset): *sin is where to
+ * connect, the EOS bridge's local port for it when the bridge is on (runtime_net_bridge.h), and
+ * address the server's own address, for a Host header. 0 when its name does not resolve. */
+static int ryunet_http_addr(const char *host, const char *port, struct sockaddr_in *sin, char *address,
+                            size_t address_size) {
+    uint32_t ip;
+    if (!net_resolve_ipv4(host, &ip)) return 0;
+    uint16_t number = (uint16_t)(port && atoi(port) > 0 && atoi(port) < 65536 ? atoi(port) : 8080);
+    inet_ntop(AF_INET, &ip, address, (socklen_t)address_size);
+    net_bridge_route_tcp(&ip, &number);
+    memset(sin, 0, sizeof *sin);
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = ip;
+    sin->sin_port = htons(number);
+    return 1;
+}
+
 /* A signed request of the port's own (not the game's) to the RyuNET server's HTTP port
  * (BB_ONLINE_SERVER, BB_ONLINE_HTTP_PORT): the body goes to body (NUL-terminated, cut to
  * body_size). The HTTP status, or 0 when the server could not be reached. Blocking, with
@@ -458,16 +517,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
     if (!host || !*host) return 0;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
     struct sockaddr_in sin;
-    memcpy(&sin, res->ai_addr, sizeof sin);
-    freeaddrinfo(res);
     char address[INET_ADDRSTRLEN] = "";
-    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    if (!ryunet_http_addr(host, port, &sin, address, sizeof address)) return 0;
     char reply[32768];
     const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
     for (int tried = 0; tried < RYUNET_FORMS; tried++) {
@@ -492,8 +544,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
         char proof[160], request[4096]; /* a report's comment rides in the target */
         const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
         const int n = snprintf(request, sizeof request,
-                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n%s%s%s\r\n",
-                               method, target, host_header, signed_ok ? "X-RyuNET-Proof: " : "",
+                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n"
+                               "Cache-Control: no-cache\r\nX-RyuNET-Clock: %s\r\n%s%s%s\r\n",
+                               method, target, host_header, ryunet_clock_token(), signed_ok ? "X-RyuNET-Proof: " : "",
                                signed_ok ? proof : "", signed_ok ? "\r\n" : "");
         if (n <= 0 || n >= (int)sizeof request || send(s, request, n, 0) != n) {
             closesocket(s);
@@ -550,16 +603,9 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
     if (!host || !*host) return 0;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
     struct sockaddr_in sin;
-    memcpy(&sin, res->ai_addr, sizeof sin);
-    freeaddrinfo(res);
     char address[INET_ADDRSTRLEN] = "";
-    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    if (!ryunet_http_addr(host, port, &sin, address, sizeof address)) return 0;
     const size_t cap = max_reply + 4096; /* the answer's headers too */
     char *buffer = malloc(cap + 1);
     if (!buffer) return 0;
@@ -588,8 +634,9 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
         const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
         const int n = snprintf(request, sizeof request,
                                "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n"
-                               "Content-Type: application/octet-stream\r\n%s%s%s\r\n",
-                               method, target, host_header, size, signed_ok ? "X-RyuNET-Proof: " : "",
+                               "Content-Type: application/octet-stream\r\nCache-Control: no-cache\r\n"
+                               "X-RyuNET-Clock: %s\r\n%s%s%s\r\n",
+                               method, target, host_header, size, ryunet_clock_token(), signed_ok ? "X-RyuNET-Proof: " : "",
                                signed_ok ? proof : "", signed_ok ? "\r\n" : "");
         int sent_ok = n > 0 && n < (int)sizeof request && send(s, request, n, 0) == n;
         for (size_t done = 0; sent_ok && done < size;) {
@@ -646,7 +693,14 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
                          const char *address, const void *post_data, size_t size, char *resp, int resp_size) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return -1;
-    if (connect(s, (const struct sockaddr *)sin, sizeof(*sin)) != 0) {
+    struct sockaddr_in to = *sin;
+    uint32_t to_ip = to.sin_addr.s_addr;
+    uint16_t to_port = ntohs(to.sin_port);
+    if (net_bridge_route_tcp(&to_ip, &to_port)) { /* the server, through the EOS bridge */
+        to.sin_addr.s_addr = to_ip;
+        to.sin_port = htons(to_port);
+    }
+    if (connect(s, (const struct sockaddr *)&to, sizeof(to)) != 0) {
         runtime_net_trace("sceHttpSendRequest connect to %s:%u failed: %d", c->target_ip, c->port, WSAGetLastError());
         closesocket(s);
         return -1;
@@ -707,6 +761,11 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
     if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
         runtime_ryunet_proof(method_str, target, proof, sizeof proof)) {
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
+    }
+    /* The server's time with this request's token (ryunet_note_server_clock). */
+    if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 80) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
+                         "Cache-Control: no-cache\r\nX-RyuNET-Clock: %s\r\n", ryunet_clock_token());
     }
     /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
      * launcher's Online tab): the server then leaves the game its save's inventory. */
@@ -773,16 +832,9 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_port = htons(c->port);
-    sin.sin_addr.s_addr = inet_addr(c->target_ip);
-
-    if (sin.sin_addr.s_addr == INADDR_NONE) {
-        struct hostent *he = gethostbyname(c->target_ip);
-        if (he && he->h_addr_list[0]) {
-            memcpy(&sin.sin_addr, he->h_addr_list[0], sizeof(sin.sin_addr));
-        } else {
-            return HTTP_NETWORK;
-        }
-    }
+    uint32_t target_ip;
+    if (!net_resolve_ipv4(c->target_ip, &target_ip)) return HTTP_NETWORK;
+    sin.sin_addr.s_addr = target_ip;
     char address[INET_ADDRSTRLEN] = "";
     inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
 

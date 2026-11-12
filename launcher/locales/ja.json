@@ -356,5 +356,11 @@
  "Could not restore: {}": "復元できませんでした:{}",
  "Save restored. The one you had is in {}.": "セーブを復元しました。以前のセーブは {} にあります。",
  "This server does not allow playing online with just a nickname: you must log in or create your account (with Discord, or with your nickname and password).": "このサーバーではニックネームだけではオンラインでプレイできません。ログインまたはアカウント作成が必要です(Discord、またはニックネームとパスワード)。",
- "You play as {} without an account.": "{} としてアカウントなしでプレイ中です。"
+ "You play as {} without an account.": "{} としてアカウントなしでプレイ中です。",
+ "Configure mod": "MODを設定",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "設定を保存する前にゲームを終了してください。変更は次回ゲームを起動したときに適用されます。",
+ "Advanced settings": "詳細設定",
+ "Reset to defaults": "既定値に戻す",
+ "Saving...": "保存中...",
+ "Mod options saved. Applied when you start the game.": "MODの設定を保存しました。ゲームの起動時に適用されます。"
 }
