@@ -177,6 +177,23 @@ int main(void) {
     const char *tag = "OCTR_HOF_TIER";
     memcpy(tier_node + 0x28, &tag, sizeof tag);
     walk(tier_node, 0, 0, 0); assert(!strcmp(displayed, "Gold Mask"));
+    tag = "OCTR_HOF_MMR"; memcpy(tier_node + 0x28, &tag, sizeof tag);
+    walk(tier_node, 0, 0, 0); assert(!strcmp(displayed,"3500 MMR"));
+    walk(tier_node, -2, 0, 0); assert(!strcmp(displayed,"1200 MMR"));
+    unsigned char color_parent[0x60]={0}, color_list[0x40]={0}, color_tier[0x120]={0};
+    void *color_items[]={color_tier,tier_node};
+    void *color_pointer=color_parent;memcpy(tier_node+0x40,&color_pointer,sizeof color_pointer);
+    color_pointer=color_list;memcpy(color_parent+0x48,&color_pointer,sizeof color_pointer);
+    color_pointer=color_items;memcpy(color_list+0x20,&color_pointer,sizeof color_pointer);
+    *(int *)(color_list+12)=2;
+    const char *color_tag="OCTR_HOF_TIER";memcpy(color_tier+0x28,&color_tag,sizeof color_tag);
+    const float row_colors[][4]={{0,.25f,.4f,1},{1,1,1,1}};
+    for (unsigned c=0;c<2;++c) {
+        memcpy(color_tier+0xc0,row_colors[c],16);
+        walk(tier_node,0,0,0);
+        assert(!memcmp(tier_node+0xc0,row_colors[c],16));
+        assert(*(unsigned *)(tier_node+12)&0x1000);
+    }
     tag = "OCTR_HOF_ICON_0_3"; memcpy(tier_node + 0x28, &tag, sizeof tag);
     walk(tier_node, 0, 0, 0); assert(shown);
     mode = 1; walk(tier_node, 0, 0, 0); assert(!shown);

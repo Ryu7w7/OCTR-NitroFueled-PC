@@ -154,7 +154,6 @@ int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
 /* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */
 void runtime_ranked_start(void);
 void runtime_ranked_race_end(void);
-const char *runtime_ranked_result_text(void);
 /* The member's current Ranked tier (1..7), or 0 when unavailable. */
 int runtime_ranked_tier(const char *name, int *mode);
 int runtime_ranked_badge(const char *name, int *mode); /* -1 for an empty/placeholder slot. */

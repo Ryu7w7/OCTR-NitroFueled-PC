@@ -147,6 +147,7 @@ static void test_status_refresh(void) {
 static struct ranked_outbox *make_outbox(void) {
     struct ranked_outbox *out = calloc(1, sizeof *out);
     out->room = 42;
+    out->generation = result_generation;
     out->mode = 0;
     out->count = 3;
     snprintf(out->track, sizeof out->track, "electron_avenue");
@@ -159,10 +160,7 @@ static struct ranked_outbox *make_outbox(void) {
 }
 
 static void reset(void) {
-    pthread_mutex_lock(&lock);
-    result_text[0] = 0;
-    result_room = 0;
-    pthread_mutex_unlock(&lock);
+    runtime_ranked_race_begin();
     sent = 0;
 }
 
@@ -179,7 +177,8 @@ static void test_resolution(void) {
     assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false},"
                  "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true},"
                  "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false}]"));
-    assert(!strcmp(runtime_ranked_result_text(), " +45 (1045 Gold Mask)"));
+    struct runtime_ranked_result result;
+    assert(runtime_ranked_result_copy(&result) && result.delta == 45 && result.mmr == 1045);
 }
 
 static void test_guest_pending_then_delta(void) {
@@ -187,19 +186,21 @@ static void test_guest_pending_then_delta(void) {
     strcpy(transfer_reply, "{\"status\":\"pending\"}");
     ranked_sender(make_outbox());
     assert(sent == RANKED_RETRIES);   /* the whole budget goes on waiting for the host */
-    assert(runtime_ranked_result_text()[0] == 0); /* waits for the host */
+    struct runtime_ranked_result result;
+    assert(!runtime_ranked_result_copy(&result)); /* waits for the host */
     strcpy(transfer_reply, "{\"status\":\"resolved\",\"race\":8,\"delta\":30,\"mmr\":1030,\"placements\":4,\"tier\":\"Gold Mask\"}");
     ranked_sender(make_outbox());
     assert(sent == RANKED_RETRIES + 1);
-    assert(!strcmp(runtime_ranked_result_text(), " +30 (1030 Gold Mask)"));
+    assert(runtime_ranked_result_copy(&result) && result.delta == 30 && result.mmr == 1030);
 }
 
 static void test_room_change_clears_the_card(void) {
     reset();
     ranked_sender(make_outbox());
-    assert(runtime_ranked_result_text()[0] != 0);
+    struct runtime_ranked_result result;
+    assert(runtime_ranked_result_copy(&result));
     session_room = 43; /* the next room: the last room's delta has nowhere to show */
-    assert(runtime_ranked_result_text()[0] == 0);
+    assert(!runtime_ranked_result_copy(&result));
     session_room = 42;
 }
 
@@ -209,7 +210,8 @@ static void test_gives_up_after_retries(void) {
     strcpy(transfer_reply, "");
     ranked_sender(make_outbox());
     assert(sent == RANKED_RETRIES);
-    assert(runtime_ranked_result_text()[0] == 0);
+    struct runtime_ranked_result result;
+    assert(!runtime_ranked_result_copy(&result));
     transfer_status = 200;
 }
 
@@ -219,7 +221,8 @@ static void test_rejected_report_drops_out(void) {
     transfer_status = 409;
     ranked_sender(make_outbox());
     assert(sent == 1); /* a refusal is an answer, not a reason to retry */
-    assert(runtime_ranked_result_text()[0] == 0);
+    struct runtime_ranked_result result;
+    assert(!runtime_ranked_result_copy(&result));
     transfer_status = 200;
 }
 
@@ -339,6 +342,21 @@ static void test_result_snapshot(void) {
     runtime_ranked_race_begin();
 }
 
+static void test_tier_cache_replaces_departed_players(void) {
+    session_room=0;session_mode=0;tier_cache_reset(UINT64_MAX,0);
+    for (int i=0;i<RANKED_TIER_MEMBERS;++i) {
+        char name[17];snprintf(name,sizeof name,"Racer_%02d",i);
+        runtime_ranked_tier(name,NULL);
+        tier_members[i].touched=(uint64_t)i+1;
+    }
+    tier_members[0].touched=UINT64_MAX; /* Still active. */
+    runtime_ranked_tier("Fresh_Player",NULL);
+    assert(tier_member_count==RANKED_TIER_MEMBERS);
+    assert(!strcmp(tier_members[0].name,"Racer_00"));
+    assert(!strcmp(tier_members[1].name,"Fresh_Player"));
+    assert(tier_members[1].best_tier==-1 && !tier_members[1].mode_ready[0]);
+}
+
 int main(void) {
     test_status_contract();
     test_status_refresh();
@@ -352,6 +370,7 @@ int main(void) {
     test_tier_before_first_race();
     test_best_badge();
     test_tier_worker_refresh();
+    test_tier_cache_replaces_departed_players();
     puts("ranked-test: ok");
     return 0;
 }

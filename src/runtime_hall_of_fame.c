@@ -284,6 +284,21 @@ static void walk(void *node, int row, int control, int depth) {
             if (!strcmp(tag, "OCTR_HOF_NAME")) value = r->name;
             if (!strcmp(tag, "OCTR_HOF_RANK")) { snprintf(text, sizeof text, "%d", r->rank); value = text; }
             if (!strcmp(tag, "OCTR_HOF_TIER")) value = r->tier;
+            if (!strcmp(tag, "OCTR_HOF_MMR")) {
+                snprintf(text,sizeof text,"%d MMR",r->mmr); value=text;
+                void *parent=ptr(node,0x40), *children=parent ? ptr(parent,0x48) : NULL;
+                int count=children ? *(int *)((char *)children+12) : 0;
+                void **items=children ? ptr(children,0x20) : NULL;
+                for (int i=0;items && i<count && i<256;++i) {
+                    const char *name=items[i] ? ptr(items[i],0x28) : NULL;
+                    if (!name || strcmp(name,"OCTR_HOF_TIER")) continue;
+                    if (memcmp((char *)node+0xc0,(char *)items[i]+0xc0,16)) {
+                        memcpy((char *)node+0xc0,(char *)items[i]+0xc0,16);
+                        *(unsigned *)((char *)node+12)|=0x1000;
+                    }
+                    break;
+                }
+            }
             int icon_mode, icon_tier;
             if (sscanf(tag, "OCTR_HOF_ICON_%d_%d", &icon_mode, &icon_tier) == 2)
                 runtime_online_mode_show_placeable(node, icon_mode == mode &&

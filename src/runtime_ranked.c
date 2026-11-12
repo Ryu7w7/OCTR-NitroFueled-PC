@@ -59,14 +59,14 @@ static uint64_t monotonic_ms(void) {
 #endif
 }
 
-static char result_text[72];         /* " +45 (1045 Gold Mask)" once scored */
-static uint64_t result_room, result_generation;
+static uint64_t result_generation;
 static struct runtime_ranked_result race_result;
 static struct {
     char name[17];
     int tier, mode, mmr;
     int best_tier, best_mode;
     int mode_tier[2], mode_mmr[2], placements[2], positions[2], mode_ready[2];
+    uint64_t touched;
 } tier_members[RANKED_TIER_MEMBERS];
 static unsigned tier_member_count;
 static uint64_t tier_room, tier_changed_ms, tier_fetched_ms, tier_generation;
@@ -226,11 +226,17 @@ int runtime_ranked_tier(const char *name, int *badge_mode) {
     if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
     unsigned i = 0;
     while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
-    if (i == tier_member_count && tier_member_count < RANKED_TIER_MEMBERS) {
+    if (i == tier_member_count) {
+        if (tier_member_count < RANKED_TIER_MEMBERS) ++tier_member_count;
+        else {
+            i=0;
+            for (unsigned j=1;j<tier_member_count;++j)
+                if (tier_members[j].touched<tier_members[i].touched) i=j;
+        }
+        memset(tier_members+i,0,sizeof tier_members[i]);
         snprintf(tier_members[i].name, sizeof tier_members[i].name, "%s", name);
         tier_members[i].best_tier = -1;
         tier_members[i].placements[0] = tier_members[i].placements[1] = -1;
-        ++tier_member_count;
         tier_dirty = 1;
         tier_changed_ms = now;
         ++tier_generation;
@@ -239,7 +245,8 @@ int runtime_ranked_tier(const char *name, int *badge_mode) {
             fprintf(stderr, "Ranked tier queued: %s room=%llu mode=%d\n",
                     name, (unsigned long long)room, mode);
     }
-    const int tier = i < tier_member_count ? tier_members[i].tier : 0;
+    tier_members[i].touched=now;
+    const int tier = tier_members[i].tier;
     if (badge_mode) *badge_mode = tier ? tier_members[i].mode : 0;
     pthread_mutex_unlock(&lock);
     return tier; /* 0 selects the unranked badge. */
@@ -508,8 +515,6 @@ void runtime_ranked_race_begin(void) {
     pthread_mutex_lock(&lock);
     ++result_generation;
     memset(&race_result, 0, sizeof race_result);
-    result_text[0] = 0;
-    result_room = 0;
     pthread_mutex_unlock(&lock);
 }
 
@@ -590,11 +595,6 @@ void *ranked_sender(void *arg) {
             pthread_mutex_lock(&lock);
             if (out->generation == result_generation) {
                 race_result = result;
-                if (result.ranked)
-                    snprintf(result_text, sizeof result_text, " %+d (%d %s)", result.delta, result.mmr, tier);
-                else
-                    snprintf(result_text, sizeof result_text, " (%d placements remaining)", result.placements);
-                result_room = out->room;
             }
             pthread_mutex_unlock(&lock);
         }
@@ -624,14 +624,4 @@ void runtime_ranked_start(void) {
     pthread_t thread;
     if (pthread_create(&thread, NULL, ranked_tier_worker, NULL) == 0)
         pthread_detach(thread);
-}
-
-const char *runtime_ranked_result_text(void) {
-    uint64_t room = 0;
-    int mode = 0;
-    if (!runtime_ranked_session(&room, &mode)) return "";
-    pthread_mutex_lock(&lock);
-    const char *text = result_room == room && result_text[0] ? result_text : "";
-    pthread_mutex_unlock(&lock);
-    return text;
 }

@@ -121,7 +121,7 @@ echo "Version: $version (out/VERSION)"
 # GPU check for run.sh (live_resolution=auto) and the launcher's gamepad list (--gamepads).
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -o out/online-mode-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -lm -o out/online-mode-test
     out/online-mode-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_race_options.c src/runtime_tt_reference.c src/runtime_ai_catchup.c -lm -o out/race-options-test
     out/race-options-test

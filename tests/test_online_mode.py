@@ -18,13 +18,13 @@ from ranked_ui_assets import (HOF_BACKGROUND_IMAGE, HOF_BACKGROUND_MATERIAL,
                               HOF_BACKGROUND_TEXTURE, HOF_ICON_MATERIAL,
                               QUICK_ICON_TEXTURE, RANKED_BACKGROUND_MATERIAL,
                               RANKED_BACKGROUND_IMAGE, RANKED_BACKGROUND_TEXTURE,
-                              SINGLE_RACE_TEXTURE, TIERS, clone_animated_material,
+                              TIERS, clone_animated_material,
                               clone_lobby_rank_materials,
                               clone_lobby_materials, asset_replacements, compiled_asset,
                               menu_asset_replacements,
-                              menu_icon, quick_icon_texture, texture_replacements,
-                              tier_icon, tier_material, tier_shadow)
-from ui_texture import single_race_texture
+                              menu_icon, quick_icon_texture,
+                              tier_icon, tier_material)
+from ui_texture import SINGLE_RACE_TEXTURE
 from prepare import parse_self
 
 
@@ -77,7 +77,6 @@ class OnlineModeTests(unittest.TestCase):
                     online_mode.prepare(root,out,elf,[base])
                     self.assertEqual(prepare.call_count,count)
 
-
     def test_compiled_ui_asset(self):
         png = Path(__file__).parents[1] / 'scripts/assets/normal_1.png'
         texture_path, texture, namespace, material_path, export, material = compiled_asset(
@@ -87,12 +86,8 @@ class OnlineModeTests(unittest.TestCase):
         self.assertIn(namespace, material_path)
         self.assertTrue(texture_path.endswith('.igz'))
 
-    def test_single_race_texture_identity(self):
-        texture = asset_replacements()[SINGLE_RACE_TEXTURE]
-        self.assertEqual(_objects(texture)[1][0],
-                         'data/Octane/textures/ui/Octane/Icons/'
-                         'octane_ui_ico_singlerace.tga')
-        self.assertNotIn(b'/SaveMenu/', texture)
+    def test_rank_assets_do_not_override_single_race_texture(self):
+        self.assertNotIn(SINGLE_RACE_TEXTURE.lower(), {path.lower() for path in asset_replacements()})
         unranked = Path(__file__).parents[1] / 'scripts/assets/unranked.png'
         self.assertEqual(tier_icon(0, 0)[0], unranked)
         self.assertEqual(tier_icon(1, 0)[0], unranked)
@@ -245,14 +240,14 @@ class OnlineModeTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_ranked_tier_png_textures(self):
-        textures = texture_replacements()
+        assets = asset_replacements()
+        textures = {path: blob for path, blob in assets.items() if path.startswith('textures/')}
         self.assertEqual(len(textures), 16)
         self.assertEqual(len({len(blob) for blob in textures.values()}), 1)
         self.assertEqual(sum(b'octane_ranked_tier_' in blob for blob in textures.values()), 16)
         for blob in textures.values():
             image = next(off for off, kind in _objects(blob)[0] if kind == 'igImage2')
             self.assertEqual(struct.unpack_from('<HH', blob, image + IMG_W), (256, 256))
-        assets = asset_replacements()
         for mode, tier in TIERS:
             namespace, path, export = tier_material(mode, tier)
             material = Igz(assets[path])
@@ -572,15 +567,16 @@ class OnlineModeTests(unittest.TestCase):
                         with (patch.object(online_mode, 'hook_site', return_value=0x1277e00),
                               patch.dict(os.environ, {'BB_GRAPHICS_TAB_ARCHIVE': str(graphics_archive)})):
                             patches, _ = online_mode.prepare(game, out / 'online', elf, [base])
-                        graphics_patch = next(p for p in patches if archive_patch.read(p)[1] ==
-                                              '/app0/archives/update3.pak')
+                        graphics_patch = next((p for p in patches if archive_patch.read(p)[1] ==
+                                              '/app0/archives/update3.pak'), None)
                         graphics_entries = iga.pak_entries(graphics_archive)
                         graphics_texture = next(i for i, e in enumerate(graphics_entries)
                                                 if e[0].lower().removeprefix(online_mode.PACKAGE_PREFIX) ==
                                                 SINGLE_RACE_TEXTURE.lower())
                         self.assertEqual(online_mode.current_entry(graphics_archive, graphics_entries,
                                                                    graphics_texture, graphics_patch),
-                                         single_race_texture())
+                                         online_mode.current_entry(graphics_archive, graphics_entries,
+                                                                   graphics_texture, None))
                         from graphics_tab import Archive
                         main_archive = Archive(out / 'online/octane_lobby_main.pak')
                         try:

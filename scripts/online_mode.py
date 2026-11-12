@@ -5,14 +5,14 @@ The runtime keeps Speed disabled in public matchmaking until server queues suppo
 import argparse
 import hashlib
 import json
-import os
 import re
 import struct
 from pathlib import Path
 
 import archive_patch
 import hall_of_fame
-from ranked_results import score_card
+from ranked_results import score_card, manual_navigation
+from ranked_name_badges import add_badges
 from build_ui_asset import build_pak as build_ui_asset_pak, lobby_background_texture
 import gcn_shaders as iga
 from igz_file import Igz, unpack_offsets, pack_offsets
@@ -21,12 +21,13 @@ from mod_file_paths import resolve, records
 from mod_overlays import file_map
 from mod_components import long_path
 from patches import load_segments
+from ui_texture import SINGLE_RACE_TEXTURE
 from ranked_ui_assets import (HOF_BACKGROUND_IMAGE, HOF_BACKGROUND_MATERIAL,
                               HOF_BACKGROUND_TEXTURE, HOF_ICON_MATERIAL,
                               QUICK_ICON_TEXTURE, RANKED_BACKGROUND_MATERIAL,
                               RANKED_BACKGROUND_NAMESPACE, RANKED_BACKGROUND_PATH,
                               RANKED_BACKGROUND_TEXTURE,
-                              SINGLE_RACE_TEXTURE, TIERS, asset_replacements,
+                              TIERS, asset_replacements,
                               clone_lobby_materials, clone_lobby_rank_materials, tier_icon,
                               menu_asset_replacements,
                               menu_icon, quick_icon_texture)
@@ -864,6 +865,7 @@ def ranking_stream_archive(game, dest, package_blob, project, replacements, resi
                     dependency = 'materialinstances/' + dependency.removeprefix('<build>materials:/')
                 else:
                     dependency = dependency.replace(':/', '/')
+                dependency = dependency.removeprefix('<build>data/')
                 pending.append(dependency)
         # Shared VSC definitions load through TDEP; a second chunk must not own their metadata.
         selected = [(kind, path) for kind, path in rows if path in needed and kind != 'vsc']
@@ -1441,9 +1443,16 @@ def _prepare(game, out, elf, bases):
         ranking_ui_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_UI)
         race_ui_index = next(i for i, e in enumerate(entries) if e[0].lower() ==
                              PACKAGE_PREFIX + 'ui/octane_race_ranking.igz')
-        ranking_ui = team_ranking_header(current_entry(pak, entries, ranking_ui_index, base))
+        ranking_ui = add_badges(team_ranking_header(current_entry(pak, entries, ranking_ui_index, base)),
+                                'Octane_BattleTeam_Ranking')
         reward_index = next(i for i,e in enumerate(entries) if e[0].lower().endswith('/ui/octane_aar_wumpaonly.igz'))
-        score_ui = score_card(current_entry(pak, entries, race_ui_index, base), iga.read_entry(f, *entries[reward_index][1:]))
+        score_ui = add_badges(score_card(current_entry(pak, entries, race_ui_index, base),
+                             iga.read_entry(f, *entries[reward_index][1:])), 'Octane_Race_Ranking')
+        cup_ui_index=next(i for i,e in enumerate(entries) if e[0].lower().endswith('/ui/octane_cuprace_ranking.igz'))
+        cup_ui=add_badges(current_entry(pak,entries,cup_ui_index,base),'Octane_CupRace_Ranking')
+        score_graph_path = PACKAGE_PREFIX + 'vsc/ui/octane_race_ranking/octane_race_ranking_root.igz'
+        score_graph_index = next(i for i, e in enumerate(entries) if e[0].lower() == score_graph_path)
+        score_graph = manual_navigation(current_entry(pak, entries, score_graph_index, base))
         ranking_index = next(i for i, e in enumerate(entries) if e[0].lower() == TEAM_RANKING_ROOT)
         ranking = team_ranking_navigation(iga.read_entry(f, *entries[ranking_index][1:]))
         settings_index = next(i for i, e in enumerate(entries) if e[0].lower() == SETTINGS_ENTRY)
@@ -1508,6 +1517,13 @@ def _prepare(game, out, elf, bases):
     mapped = dict(mapped)
     race_package = package_with_rows(race_package, [
         ('material_instances', LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(PACKAGE_PREFIX)),
+        ('gui_project', 'ui/octane_aar_wumpaonly.igz'),
+        ('gui_project', 'ui/octane_cuprace_ranking.igz'),
+        ('sound_bank', 'sounds/banks/ui_grandprix_bank.igz'),
+        *[('sound_sample', 'sound_samples/wavs/ui/2018/' + name + ',ui_grandprix_bank,noloc,48000,40,0,0.igz')
+          for name in ('ui_grandprix_reward_challenge_bonus_in_01',
+                       'ui_grandprix_reward_unlock_01', 'ui_grandprix_tier_scroll_in_01',
+                       'ui_grandprix_tier_scroll_out_01')],
         *[('texture', path.lower()) for path in tier_assets if path.startswith('textures/')]])
     ranking_replacements = {
         TEAM_RANKING_UI.removeprefix(PACKAGE_PREFIX): ranking_ui,
@@ -1515,8 +1531,11 @@ def _prepare(game, out, elf, bases):
         LOBBY_MEMBERS_MATERIALS_ENTRY.removeprefix(PACKAGE_PREFIX): member_materials,
         **{path.lower(): data for path, data in tier_assets.items() if path.startswith('textures/')},
         'ui/octane_race_ranking.igz': score_ui,
+        'ui/octane_cuprace_ranking.igz': cup_ui,
+        score_graph_path.removeprefix(PACKAGE_PREFIX): score_graph,
     }
-    for project in ('octane_battleteam_ranking', 'octane_race_ranking', 'octane_race_leaders'):
+    for project in ('octane_battleteam_ranking', 'octane_race_ranking', 'octane_race_leaders',
+                    'octane_cuprace_ranking'):
         archive = out / (project + '.pak')
         ranking_stream_archive(game, archive, race_package, project, ranking_replacements)
         mapped.setdefault('archives/' + archive.name, archive)
@@ -1609,13 +1628,13 @@ def _prepare(game, out, elf, bases):
         music = team_finish_sounds(iga.read_entry(f, *entries[music_index][1:]))
     target = out / 'online-mode.bbpatch'
     archive_patch.write_entries_patch(target, pak, guest,
-                                      {index: payload, race_ui_index: score_ui, lobby_index: lobby, main_index: main_lobby,
+                                      {index: payload, race_ui_index: score_ui, cup_ui_index: cup_ui, score_graph_index: score_graph, lobby_index: lobby, main_index: main_lobby,
                                        main_material_index: main_materials, package_index: package,
                                        race_package_index: race_package,
                                        settings_index: settings, ranking_index: ranking, ranking_ui_index: ranking_ui,
                                        lobby_root_index: lobby_root, music_index: music, public_index: public_lobby,
                                        lobby_members_index: lobby_members}, base,
-                                      override={index, race_ui_index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
+                                      override={index, race_ui_index, cup_ui_index, score_graph_index, settings_index, ranking_ui_index, lobby_index, public_index, main_index,
                                                 main_material_index,
                                                  lobby_members_index})
     patches[guest] = target
@@ -1637,50 +1656,16 @@ def _prepare(game, out, elf, bases):
     try:
         domain_index = next(i for i, e in enumerate(domain_entries)
                             if e[0] == 'temporary/octane/data/ps4/output/ui/Octane_LobbyMembers.igz')
-        domain_texture_index = next(i for i, e in enumerate(domain_entries)
-                                    if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
-                                    SINGLE_RACE_TEXTURE.lower())
         with domain_pak.open('rb') as f:
             domain_native = iga.read_entry(f, *domain_entries[domain_index][1:])
         domain_patched = ranked_lobby_icons(domain_native)
         domain_replacements[domain_index] = domain_patched
-        domain_replacements[domain_texture_index] = tier_assets[SINGLE_RACE_TEXTURE]
         print("Online: Octane_LobbyMembers domain patch carries native Ranked materials")
     except Exception as e:
         print(f"Online: members panel left fully native ({e})")
     archive_patch.write_entries_patch(stale_domain, domain_pak, domain_guest,
                                       domain_replacements, patches.get(domain_guest))
     patches[domain_guest] = stale_domain
-
-    # update3 loads last and carries a native Single Race copy for the Graphics menu.
-    if graphics_archive := os.environ.get('BB_GRAPHICS_TAB_ARCHIVE'):
-        graphics_pak = Path(graphics_archive)
-        graphics_entries = iga.pak_entries(graphics_pak)
-        graphics_texture_index = next(i for i, e in enumerate(graphics_entries)
-                                      if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
-                                      SINGLE_RACE_TEXTURE.lower())
-        graphics_guest = '/app0/archives/update3.pak'
-        target = out / 'online-graphics-rank-icon.bbpatch'
-        archive_patch.write_entries_patch(
-            target, graphics_pak, graphics_guest,
-            {graphics_texture_index: tier_assets[SINGLE_RACE_TEXTURE]},
-            patches.get(graphics_guest))
-        patches[graphics_guest] = target
-
-    # This texture is duplicated and cached by whichever domain loads first.
-    for archive_name in ('juicedomain_startscreen', 'juicedomain_race',
-                         'juicedomain_race_flareday', 'juicedomain_race_flarenight'):
-        source = resolve(Path(game) / 'archives' / (archive_name + '.pak'))
-        source_entries = iga.pak_entries(source)
-        texture_index = next(i for i, e in enumerate(source_entries)
-                             if e[0].lower().removeprefix(PACKAGE_PREFIX) ==
-                             SINGLE_RACE_TEXTURE.lower())
-        guest = '/app0/archives/' + archive_name + '.pak'
-        target = out / ('online-' + archive_name + '-rank-icon.bbpatch')
-        archive_patch.write_entries_patch(
-            target, source, guest,
-            {texture_index: tier_assets[SINGLE_RACE_TEXTURE]}, patches.get(guest))
-        patches[guest] = target
 
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)

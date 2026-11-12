@@ -21,7 +21,7 @@ struct ranked_outbox {
  * the delta for the lobby card. Exposed so the test can run it inline. */
 void *ranked_sender(void *arg);
 
-/* Kept as a call site (runtime_net.c): each report now carries its own sender. */
+/* Start the background Ranked status/profile worker from runtime_net.c. */
 void runtime_ranked_start(void);
 
 /* Game thread, at the validated host results event: hands the finish order to
@@ -35,9 +35,6 @@ struct runtime_ranked_result {
 };
 void runtime_ranked_race_begin(void);
 int runtime_ranked_result_copy(struct runtime_ranked_result *out);
-
-/* The lobby card's suffix for the last scored race in this room ("" none). */
-const char *runtime_ranked_result_text(void);
 
 #ifdef __cplusplus
 }

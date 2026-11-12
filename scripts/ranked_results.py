@@ -48,7 +48,7 @@ def score_card(blob, reward_blob):
                 elif tag == 'ROFS': g.set_u64(new, translate(w.u64(at)))
                 elif tag in ('RHND', 'RNEX'):
                     value = w.u64(at)
-                    if value & 0x80000000:
+                    if tag == 'RNEX' or value & 0x80000000:
                         f = w.fixup('EXNM')
                         pairs = [(a,b) for a,b in struct.iter_unpack('<II', f[3][:f[1]*8]) if bool(b & 0x80000000) == (tag == 'RHND')]
                         a,b = pairs[value & 0x7fffffff]
@@ -82,7 +82,7 @@ def score_card(blob, reward_blob):
             values.reverse(); times = [times[-1] - t for t in reversed(times)]
         for key, time, value in zip(keys, times, values):
             g.set_u32(key + 12, time)
-            struct.pack_into('<2f', g.data, key + 0x18, *(v * 2.8 / .85 for v in value))
+            struct.pack_into('<2f', g.data, key + 0x18, *(v * 1.35 / .85 for v in value))
         pointer(a + 0x10, tags[0x4a8 if reverse else 0x4c0])
         struct.pack_into('<f', g.data, a + 0x20, times[-1] / 4096.0)
         animations.append(a)
@@ -120,6 +120,16 @@ def score_card(blob, reward_blob):
         struct.pack_into('<f', g.data, row+0xe0, 0)
         new.append(row)
         return row
+    panel = place('OCTR_RESULT_PANEL', external(g, 'octane_ui_buttonlegend_bg_tga',
+                  'Octane_Race_Ranking', True), 1595, 865, 610, 220)
+    struct.pack_into('<4f', g.data, panel+0xc0, .08, .19, .32, .98)
+    for name,asset,scale,color in (
+            ('UP','ctr_gui_reward_vfx',.65,(1,.90,.50,.95)),
+            ('DOWN','ctr_gui_wumpa_juiced_vfx',.45,(1,.45,.35,.72))):
+        effect = place('OCTR_RESULT_FX_'+name, external(g,asset,'Octane_AAR_WumpaOnly',True),
+                       1395,884,100,100,scale)
+        g.set_u32(effect+12,g.u32(effect+12)|0x400000)
+        struct.pack_into('<4f',g.data,effect+0xc0,*color)
     for mode, tier in TIERS:
         sprite = clone(0x7c30)
         material = tier_material(mode, tier)[2]
@@ -127,13 +137,20 @@ def score_card(blob, reward_blob):
         f[3] = f[3][:index*8] + struct.pack('<II', fnv1a(material), fnv1a('juice_Octane_LobbyMembers_materials'))
         f[1] += 1; f[4] = (f[2]+len(f[3])+3)&~3
         g.set_u64(sprite+0x20, index)
-        badge = place(f'OCTR_RESULT_ICON_{mode}_{tier}', export(sprite, f'OCTR_RESULT_BADGE_{mode}_{tier}'), 1280, 900, 100, 100, 2.8)
+        badge = place(f'OCTR_RESULT_ICON_{mode}_{tier}', export(sprite, f'OCTR_RESULT_BADGE_{mode}_{tier}'), 1395, 884, 100, 100, 1.35)
         pointer(badge+0xf0, table)
-    for name,y in (('TITLE',805), ('TIER',870), ('MMR',935)):
-        text = clone(0x7cf0)
-        struct.pack_into('<f',g.data,text+0x64,.65)
+    for name,y,height,font,source,color in (
+            ('TITLE',832,24,.28,0x7cf0,(.82,.91,1,1)),
+            ('DELTA',873,48,.60,0x7cf0,(1,1,1,1)),
+            ('TIER',913,28,.34,0x7cf0,(1,1,1,1)),
+            ('MMR',948,22,.26,0x7cf0,(.82,.91,1,1))):
+        text = clone(source)
+        struct.pack_into('<f',g.data,text+0x64,font)
+        g.set_u32(text+0x60, 1)  # Center vertically inside the fitted text box.
         g.data[text+0x68] = 1
-        place('OCTR_RESULT_'+name, export(text,'OCTR_RESULT_TEXT_'+name),1650,y,480,56)
+        g.data[text+0x69] = 0
+        row = place('OCTR_RESULT_'+name, export(text,'OCTR_RESULT_TEXT_'+name),1680,y,350,height)
+        struct.pack_into('<4f',g.data,row+0xc0,*color)
     def replace_list(o, values):
         data = g.append(struct.pack(f'<{len(values)}Q',*values))
         for i in range(len(values)): g.add_site('ROFS',data+i*8)
@@ -149,8 +166,33 @@ def score_card(blob, reward_blob):
     g.set_u32(name_list+12,len(exports));g.set_u32(name_list+16,len(exports))
     g.set_u64(name_list+0x18,(g.u64(name_list+0x18)&~0xffffffff)|len(names))
     pointer(name_list+0x20,data)
-    dependencies(g,{'juice_Octane_LobbyMembers_materials':'ui:/materialInstances/juice_Octane_LobbyMembers_materials.igz'})
+    dependencies(g,{'juice_Octane_LobbyMembers_materials':'ui:/materialInstances/juice_Octane_LobbyMembers_materials.igz',
+                    'Octane_AAR_WumpaOnly':'ui:/Octane_AAR_WumpaOnly.igz',
+                    'ui_grandprix_bank':'sounds:/banks/ui_grandprix_bank.igz'})
     # ROFS animation references own their targets; copied counts describe the old graph.
     for obj, count in [(table, len(TIERS)), *((tag, 2) for tag in tags.values())]:
         g.set_u32(obj + 8, (g.u32(obj + 8) & ~0x7ffff) | count)
+    return g.build()
+
+
+def manual_navigation(blob):
+    """Use native manual score navigation for Ranked; keep the online background."""
+    g = Igz(blob)
+    methods = g.fixup('EXNM')
+    names = [g.strings[a] for a, b in struct.iter_unpack('<II', methods[3][:methods[1] * 8])
+             if not b & 0x80000000]
+    method = names.index('CNetworkNodes::isInNetworkGame2_VSC')
+    # Only suppress automatic panel delays; keep End_Race_Flow and online controls native.
+    nodes = (0x3418, 0x5d60)
+    kinds = dict(g.objects())
+    if any(kinds.get(o) != 'igVscCppActionNode' or g.u64(o + 0x38) != method or
+           g.u32(o + 0x10) != 0 for o in nodes):
+        raise ValueError('unsupported native race ranking navigation')
+    pins = g.append(bytes(16))
+    for node in nodes:
+        g.set_u32(node + 0x10, 2)
+        g.set_u32(node + 0x14, 2)
+        g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 16)
+        g.set_u64(node + 0x20, pins)
+        g.add_site('ROFS', node + 0x20)
     return g.build()

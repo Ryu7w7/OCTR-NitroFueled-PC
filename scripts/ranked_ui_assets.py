@@ -4,7 +4,7 @@ from pathlib import Path
 
 from graphics_tab import fnv1a
 from igz_file import Igz, unpack_offsets
-from ui_texture import ASSETS, IMG_DATA, IMG_W, SINGLE_RACE_TEXTURE, _objects, single_race_texture, texture_igz as _texture_igz
+from ui_texture import ASSETS, IMG_DATA, IMG_W, _objects, texture_igz as _texture_igz
 
 
 ART = Path(__file__).resolve().parent / 'tier_icon'
@@ -52,15 +52,6 @@ def tier_material(mode, tier):
     namespace = f'juice_OCTR_Ranked_{mode}_{tier}_materials'
     return (namespace,
             f'ui/materialInstances/octr/{namespace}.igz',
-            image + '_tga__material')
-
-
-def tier_shadow(mode, tier):
-    image = f'octane_ranked_shadow_{mode}_{tier}'.ljust(34, '_')
-    namespace = f'juice_OCTR_RankedShadow_{mode}_{tier}_materials'
-    return (f'[{image}.tga]',
-            f'textures/guistandard_diffuse,textures@!ui!octane!gprix!{image}`tga,001.igz',
-            namespace, f'ui/materialInstances/octr/{namespace}.igz',
             image + '_tga__material')
 
 
@@ -366,20 +357,13 @@ def clone_lobby_materials(blob):
     return clone_hof_icon_material(blob)
 
 
-def asset_replacements(single_race_template=None):
+def asset_replacements():
     texture = _template('texture_template.igz').read_bytes()
     material = _template('material_template.igz').read_bytes()
-    result = {SINGLE_RACE_TEXTURE: single_race_texture(single_race_template or texture)}
+    result = {}
     for mode, tier in TIERS:
         result[tier_icon(mode, tier)[2]] = texture_igz(texture, mode, tier)
         result[tier_material(mode, tier)[1]] = material_igz(material, mode, tier)
     return result
-
-
-def texture_replacements(template=None):
-    """Compatibility helper used by focused asset tests."""
-    source = _template('texture_template.igz').read_bytes() if template is None else template
-    return {tier_icon(mode, tier)[2]: texture_igz(source, mode, tier)
-            for mode, tier in TIERS}
 
 

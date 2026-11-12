@@ -125,7 +125,7 @@ def leaderboard(blob):
     marker(g, 0x4030, 'OCTR_HOF_LOADING')
     struct.pack_into('<2f', g.data, 0x970 + 0x60, 140.0, 0.0)
     struct.pack_into('<3f', g.data, 0x970 + 0x6c, 0.0, 0.5, 0.5)
-    struct.pack_into('<2f', g.data, 0x970 + 0x90, 360.0, 50.0)
+    struct.pack_into('<2f', g.data, 0x970 + 0x90, 180.0, 50.0)
     struct.pack_into('<3f', g.data, 0x970 + 0x84, 1.0, 1.0, 1.0)
     for at in (0xa0, 0xa4):
         g.set_u32(0x970 + at, g.u32(0xa90 + at))
@@ -159,7 +159,7 @@ def leaderboard(blob):
         marker(g, off, tag)
     struct.pack_into('<2f', g.data, 0x8c50 + 0x60, 140.0, 0.0)
     struct.pack_into('<3f', g.data, 0x8c50 + 0x6c, 0.0, 0.5, 0.5)
-    struct.pack_into('<2f', g.data, 0x8c50 + 0x90, 360.0, 50.0)
+    struct.pack_into('<2f', g.data, 0x8c50 + 0x90, 180.0, 50.0)
     struct.pack_into('<3f', g.data, 0x8c50 + 0x84, 1.0, 1.0, 1.0)
     for at in (0xa0, 0xa4):
         g.set_u32(0x8c50 + at, g.u32(0x8b30 + at))
@@ -233,6 +233,20 @@ def leaderboard(blob):
         start = g.u64(table + 0x20)
         items = [g.u64(start + i * 8) for i in range(g.u32(table + 12))]
         icons = []
+        size = g.sizes[g.u64(label)]
+        mmr = g.append(g.data[label:label+size])
+        for tag, sites in g.sites.items():
+            for site in list(sites):
+                if label <= site < label+size:
+                    g.add_site(tag,mmr+site-label)
+        marker(g,mmr,'OCTR_HOF_MMR')
+        clear_behaviors(g,mmr)
+        for field in (0x48,0x50,0x58,0xf0):
+            g.set_u64(mmr+field,0)
+            if mmr+field in g.sites['ROFS']:g.sites['ROFS'].remove(mmr+field)
+        struct.pack_into('<2f',g.data,mmr+0x60,335.0,0.0)
+        struct.pack_into('<2f',g.data,mmr+0x90,120.0,50.0)
+        items.append(mmr);icons.append(mmr)
         for mode in range(2):
             for tier in range(1, 8):
                 source = 0xbb0

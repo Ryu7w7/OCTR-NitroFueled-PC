@@ -48,23 +48,43 @@ ranked rooms, and injects an `octr_ranked_v1` confirmation (`1/<room>/<mode>/<no
 backend lobby document. A room is only joined when that confirmation matches the client's own
 nonce. Parties preflight through the signed `GET /ryunet/ranked-party` first.
 
+### Online session isolation
+
+Confirming Ranked, Matchmaking, or Private from Online main starts fresh transient
+state before the native menu route runs. Previous public confirmation/nonces,
+ranked results, party preflight, Team/Cup selection and scoreboards, pending map
+loads, and native Cup track handles are retired. Persistent player MMR and the
+connection's compatibility registration are retained.
+
+A guest joining a different party queues the same reset before applying its host's
+native settings. Worker callbacks only queue GUI cleanup; native handle release
+runs on the game thread, before settings receipt, selector input, map loading, or
+the next frame. HTTP mode verification and polling keep generation checks, so
+responses from a departed host cannot alter the new session. Repeated information
+about the current party does not reset a live Cup between its tracks.
+
+An unresolved host Cup is rejected instead of being silently converted to Single.
+A subsequent private map load is refused until valid host settings replace the
+rejected payload. Native mode/track replication and the final Itemless verification
+remain authoritative on both host and guest.
+
 ### Skill matching
 
 Matchmaking uses the selected mode's authoritative MMR, including provisional ratings during
 placements. Players without a profile start at 1000. Tiers and leaderboard ranks do not
-partition queues. Parties retain the full range of their members' ratings rather than an average.
+partition queues. Each party uses its highest member's server-owned MMR as its matchmaking anchor, never an average. Any rank spread is allowed, including placed/provisional parties; provisional internal MMR participates in matching but remains hidden. A highest/lowest-tier party faces the highest member's peers. A placed/provisional party uses whichever internal rating is higher (new profiles start at 1000).
 
 | Both sides have waited | Maximum MMR spread |
 |---|---:|
 | 0–19 seconds | 400 |
 | 20–44 seconds | 700 |
 | 45–89 seconds | 1000 |
-| 90 seconds or more | 1500 |
+| 90 seconds or more | No hard cap; closest available MMR remains preferred |
 
 Every pair of searches in a new room must fit the range. Existing-room joins check every
 player and use both the incoming search's wait and the room's time since its last join.
 Room merges use both rooms' idle time. A long wait on one side cannot widen the other
-side's range; the 1500 cap never widens automatically.
+side's range. After both have waited 90 seconds, removing the hard cap prevents permanent isolation in a small Ranked population. There is no requirement for 200 players to be online; a room still needs two human seats.
 
 Geographic proximity remains first priority. Within the same distance band, closer MMR
 comes before room fullness. Rooms still need only two players, not eight. Searches retry
@@ -173,6 +193,8 @@ consecutive population-relative ranks; `global_rank` separately preserves the fu
 At the first visible row, Up passes back to native navigation to reach the selectors.
 The native time column displays the API's `tier` name and the matching Lobby Members
 sprite for the selected mode. It does not derive tier from MMR or display race times.
+A separate fitted column displays MMR for leaderboard rows and the placed local player.
+Placement MMR remains hidden.
 
 The server supplies `players`, optional `player`, `current_season`, and `seasons` containing
 `id`, `started`, `ended`, and `active`. The API returns seasons newest first; the client
@@ -326,3 +348,31 @@ those sprites.
   answer parsing, pending→resolved retries, the retry budget, room-change card clearing.
 * `tests/test_online_mode.c` / `test_public_itemless.c`: the finish-order accessor and the
   queue/confirmation behaviour that ranked rides on.
+
+
+### Online result badges and HOF rating columns
+
+HOF displays a separate fitted MMR column for every listed entry and the local player's
+row, next to the tier column. Placement MMR remains private under the existing server
+contract. Tier names use a 180-pixel column; MMR uses a separate 120-pixel column,
+with native fit-to-box text and the original row navigation intact.
+
+Online race, CUP and team-race result rows show the selected mode's tier badge before
+the nickname. Podium names remain entirely native and do not display tier badges.
+Normal and Itemless ratings are never mixed. Players in
+placements show Unranked; pending profiles show no fabricated badge. AI racers,
+Battle and offline panels retain their native layout. Shared BattleTeam assets are
+allowed for team races only; actual Battle gameplay is excluded at runtime.
+
+Badge siblings use local native sprites and existing rank materials. Native nickname
+keys, behavior pointers, text alignment and animations remain intact. Badge reservation
+follows the native text rotation in both axes; badge placement respects vertical alignment.
+The runtime reserves
+space within the original nickname rectangle, fits text into the remaining width and
+restores the original rectangle when badges are inactive. Lobby Members' UI and the
+Single Race texture are not changed by this feature. All generated UI/archive changes
+participate in the existing Online preparation cache and stale-output cleanup.
+
+Imported native badge animations keep `RNEX` field references separate from `EXID`
+material references. Both shrink and grow tracks resolve `igGuiPlaceable::_scale`;
+an invalid field reference can crash native track creation when the result card opens.

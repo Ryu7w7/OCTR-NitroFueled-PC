@@ -116,13 +116,21 @@ class HallOfFameTests(unittest.TestCase):
             self.assertEqual(g.u32(0x7f40 + 0x68), 1)  # Native forceFitInBox.
             row_icons = [icon for icon in icons if g.u64(icon + 0x40) == parent]
             self.assertEqual(len(row_icons), 14)
+            mmrs=[o for o,t in g.objects() if t=='igGuiPlaceable' and o+0x28 in g.sites['RSTT']
+                  and g.string_at(o+0x28)=='OCTR_HOF_MMR' and g.u64(o+0x40)==parent]
+            self.assertEqual(len(mmrs),1)
+            mx,my=struct.unpack_from('<2f',g.data,mmrs[0]+0x60)
+            mw,mh=struct.unpack_from('<2f',g.data,mmrs[0]+0x90)
+            self.assertEqual((mx,my,mw,mh),(335.0,0.0,120.0,50.0))
+            self.assertLessEqual(mx+mw,455)  # Inset from the card's slanted right edge.
+
             self.assertTrue(set(row_icons).issubset(chain(root)))
             label_x, label_y = struct.unpack_from('<2f', g.data, label + 0x60)
             self.assertEqual(struct.unpack_from('<3f', g.data, label + 0x6c), (0.0, 0.5, 0.5))
             label_width = struct.unpack_from('<f', g.data, label + 0x90)[0]
             label_scale = struct.unpack_from('<f', g.data, label + 0x84)[0]
             self.assertEqual(label_scale, 1.0)
-            self.assertLessEqual(label_x + label_width * label_scale, 500.0)
+            self.assertGreaterEqual(mx - (label_x + label_width * label_scale), 15.0)
             for icon in row_icons:
                 icon_x, icon_y = struct.unpack_from('<2f', g.data, icon + 0x60)
                 width, height = struct.unpack_from('<2f', g.data, icon + 0x90)

@@ -8,6 +8,8 @@
 #include "runtime_ranked.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
+#include <math.h>
 #include <pthread.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -110,8 +112,9 @@ static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
 static void *lobby_members_project, *hof_project, *ranked_score_project;
 static uint64_t ranked_score_started;
-static int ranked_score_phase, ranked_score_results_received;
+static int ranked_score_phase, ranked_score_finished;
 static void refresh_ranked_score(void);
+static void online_name_badge(unsigned char *name, int human);
 static void play_named_gui_animation(void *placeable, const char *name);
 static int hof_legend_list = -1;
 static void *hidden_lobby_members_root;
@@ -605,7 +608,7 @@ void runtime_online_mode_new_session(void) {
     team_race_ui_owner = NULL;
     team_result_count = team_results_pending = team_score_opened = team_score_finished = team_effects_played = 0;
     finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0;
-    ranked_score_started = ranked_score_phase = ranked_score_results_received = 0;
+    ranked_score_started = ranked_score_phase = ranked_score_finished = 0;
     if (race_manager && *race_manager) {
         unsigned char *manager = *race_manager;
         const int single = 1;
@@ -715,7 +718,7 @@ static void ABI load_private_map(const char *map, int reason) {
     if (!lobby) runtime_ranked_race_begin();
     assign_handle((unsigned char *)&ranked_score_project, NULL);
     ranked_score_started = 0;
-    ranked_score_phase = ranked_score_results_received = 0;
+    ranked_score_phase = ranked_score_finished = 0;
     finish_order_count = 0;
     cup_timer_pending = 0;
     runtime_race_options_map_loading(map);
@@ -957,6 +960,8 @@ static void ABI race_ui(unsigned char *self) {
     opening_team_race_ui = mode == 1 && !runtime_online_mode_private_cup() && teams >= 2 && teams <= 4 && runtime_online_mode_in_private();
     opening_cup_finish_ui = private_cup_race_active;
     original_race_ui(self);
+    if (runtime_ranked_active() && !ranked_score_project)
+        assign_handle((unsigned char *)&ranked_score_project, pointer_at(self, 0x60));
     if (opening_team_race_ui) {
         team_race_ui_owner = self;
         /* ea4540 owns Battle results population and dispatch through +68. */
@@ -1008,7 +1013,7 @@ static void ABI cup_project_event(void *self, void *event) {
     GetType event_type = (GetType)pointer_at(pointer_at(event, 0), 0);
     if (runtime_ranked_active() && self == handle_object(&ranked_score_project) &&
         event_type(event) == *race_finished_type)
-        ranked_score_results_received = 1;
+        ranked_score_finished = 1;
     if (self == handle_object(&lobby_members_project) || self == handle_object(&hof_project) ||
         self == handle_object(&ranked_score_project)) {
         void *kind = event_type(event);
@@ -1016,7 +1021,7 @@ static void ABI cup_project_event(void *self, void *event) {
         if (name && !strcmp(name, "igGuiEventProjectUnload")) {
             if (self == handle_object(&ranked_score_project)) {
                 assign_handle((unsigned char *)&ranked_score_project, NULL);
-                ranked_score_phase = ranked_score_results_received = 0;
+                ranked_score_phase = ranked_score_finished = 0;
             }
             /* Release before the domain removes the scripts backing these projects. */
             if (self == handle_object(&lobby_members_project)) {
@@ -1521,6 +1526,7 @@ static void team_ranking_row(unsigned char *self) {
             memcpy(name + 12, &flags, 4);
         }
     }
+    online_name_badge(name, key.human);
     /* The separate finish-time panel retains native time/status columns. */
     unsigned char *score = pointer_at(self, 0xd0);
     if (!score) return;
@@ -1573,6 +1579,8 @@ static void ABI ranking_row_event(unsigned char *self, void *event, void *owner)
     for (int i = 0; i < 2; ++i)
         if (extras[i]) memcpy(self + 0x98 + i * 8, &extras[i], sizeof extras[i]);
     if (team_race) team_ranking_row(self);
+    unsigned char *racer = handle_object((void **)(self+0x78));
+    if (!team_race) online_name_badge(pointer_at(self,0xa8),racer && handle_object((void **)(racer+0x10))!=NULL);
 }
 
 static int local_race_team(void) {
@@ -2106,8 +2114,8 @@ static void ABI race_results_received(unsigned char *event) {
         if (items[i]) restore_finish_position(items[i]);
     /* Native result handling can complete remote racers; score that final state. */
     apply_team_results(event);
+    ranked_score_finished = runtime_ranked_active();
     runtime_ranked_race_end();
-    ranked_score_results_received = runtime_ranked_active();
     refresh_ranked_score();
     if (team_race_ui_owner) trace_team_score("results-return", NULL, NULL);
     refresh_team_results();
@@ -2344,6 +2352,30 @@ static uint64_t monotonic_ms(void);
 
 /* runtime_online_mode_in_private reads the game's entities, on the game's thread only */
 
+static void ranked_result_sound(unsigned char *project, const char *name) {
+    if (!project || !racer_manager || !*racer_manager) return;
+    int controller = 1;
+    memcpy(&controller, project + 0x44, 4);
+    if (!controller) controller = 1;
+    int id = controller_player(controller);
+    if (id < 0 && controller != 1) id = controller_player(1);
+    void *players = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    void *local = players && id >= 0 ? find_player(players, id) : NULL;
+    unsigned char *list = pointer_at(*racer_manager, 0x10);
+    int count = list ? *(int *)(list + 12) : 0;
+    void **items = list ? pointer_at(list, 0x20) : NULL;
+    for (int i = 0; local && items && count <= 8 && i < count; ++i) {
+        unsigned char *racer = items[i];
+        if (!racer || handle_object((void **)(racer + 0x10)) != local) continue;
+        void *kart = handle_object((void **)(racer + 0x20));
+        if (!kart) return;
+        void *sound = NULL, *callback[2] = {NULL, NULL};
+        play_result_sound(kart, name, &sound, callback);
+        if (sound) release_result_sound(sound);
+        return;
+    }
+}
+
 static void update_score_card(unsigned char *row, const struct runtime_ranked_result *result,
                               int shown, int ready, int tier, const char *animation, int depth) {
     if (!row || depth > 16) return;
@@ -2357,16 +2389,36 @@ static void update_score_card(unsigned char *row, const struct runtime_ranked_re
             sscanf(tag + 17, "%d_%d", &mode, &badge);
             visible = shown && ready && mode == result->mode && badge == tier;
             if (visible && animation) play_named_gui_animation(row, animation);
+        } else if (!strncmp(tag, "OCTR_RESULT_FX_", 15)) {
+            const int changed = result->ranked && result->tier != result->tier_before;
+            const int up = !result->ranked || (changed ? result->tier > result->tier_before : result->delta > 0);
+            visible = shown && result->ready && ranked_score_phase == 2 &&
+                      !strcmp(tag, up ? "OCTR_RESULT_FX_UP" : "OCTR_RESULT_FX_DOWN");
         } else if (!strcmp(tag, "OCTR_RESULT_TITLE")) {
-            text = ready && result->mode ? "RANKED - ITEMLESS" : "RANKED - NORMAL";
+            text = result->mode ? "ITEMLESS RANKED" : "NORMAL RANKED";
         } else if (!strcmp(tag, "OCTR_RESULT_TIER")) {
-            text = ready ? runtime_ranked_tier_name(result->mode, tier) : "Updating rank...";
+            text = ready ? runtime_ranked_tier_name(result->mode, tier) : "";
+        } else if (!strcmp(tag, "OCTR_RESULT_DELTA")) {
+            float color[] = {.75f, .84f, .90f, 1};
+            if (!ready || (result->ranked && !result->ready)) snprintf(label, sizeof label, "CALCULATING");
+            else if (!result->ranked) {
+                snprintf(label, sizeof label, "%d / 5", 5 - result->placements);
+                color[0] = 1; color[1] = .86f; color[2] = .44f;
+            } else {
+                snprintf(label, sizeof label, "%+d MMR", result->delta);
+                if (result->delta) {
+                    color[0] = result->delta < 0 ? 1 : .73f;
+                    color[1] = result->delta < 0 ? .67f : .96f;
+                    color[2] = result->delta < 0 ? .58f : .43f;
+                }
+            }
+            memcpy(row + 0xc0, color, sizeof color);
+            text = label;
         } else if (!strcmp(tag, "OCTR_RESULT_MMR")) {
-            if (ready && result->ranked) snprintf(label, sizeof label, "%+d MMR   |   %d MMR", result->delta, result->mmr);
-            else if (ready) snprintf(label, sizeof label, "%d PLACEMENTS REMAINING", result->placements);
+            if (ready && result->ranked) snprintf(label, sizeof label, "TOTAL %d MMR", result->mmr);
+            else if (ready) snprintf(label, sizeof label, "PLACEMENT RACES");
             else label[0] = 0;
             text = label;
-
         }
         hide_placeable(row, !visible);
         const float alpha = visible ? 1.0f : 0.0f;
@@ -2387,19 +2439,37 @@ static void refresh_ranked_score(void) {
     root = runtime_online_mode_content(root);
     if (!root) return;
     struct runtime_ranked_result result = {0};
-    const int shown = ranked_score_results_received && runtime_ranked_active();
-    const int ready = shown && runtime_ranked_result_copy(&result);
-    const int changed = ready && result.ranked && result.tier != result.tier_before;
+    const int ranked = runtime_ranked_active();
+    const int scored = ranked && runtime_ranked_result_copy(&result);
+    result.ready = scored;
+    int ready = scored;
+    if (ranked && !scored) {
+        const char *name = runtime_np_get_online_name();
+        ready = name && runtime_ranked_profile(name, result.mode, &result.tier, &result.mmr, &result.placements, NULL);
+        result.ranked = result.tier > 0;
+    }
+    const int shown = ranked && (ranked_score_finished || scored);
+    const int changed = scored && result.ranked && result.tier != result.tier_before;
     const uint64_t now = monotonic_ms();
     const char *animation = NULL;
-    if (changed && !ranked_score_phase) {
+    if (scored && !ranked_score_phase) {
         ranked_score_started = now;
-        ranked_score_phase = 1;
-        animation = "PopUpContentOut";
+        if (changed) {
+            ranked_score_phase = 1;
+            animation = "PopUpContentOut";
+            ranked_result_sound(project, "UI_GrandPrix_Tier_Scroll_out");
+        } else {
+            ranked_score_phase = !result.ranked || result.delta ? 2 : 3;
+            if (ranked_score_phase == 2)
+                ranked_result_sound(project, result.delta < 0 ? "UI_GrandPrix_Tier_Scroll_out" :
+                                    "UI_GrandPrix_Challenge_Bonus_in");
+        }
     } else if (changed && ranked_score_phase == 1 && now - ranked_score_started >= 750) {
         ranked_score_phase = 2;
         animation = "PopUpContentIn";
-    } else if (ranked_score_phase == 2 && now - ranked_score_started >= 1500) {
+        ranked_result_sound(project, result.tier > result.tier_before ?
+                            "UI_GrandPrix_Reward_Unlock" : "UI_GrandPrix_Tier_Scroll_in");
+    } else if (ranked_score_phase == 2 && now - ranked_score_started >= (changed ? 1500u : 750u)) {
         ranked_score_phase = 3;
     }
     const int tier = changed && ranked_score_phase == 1 ? result.tier_before : result.tier;
@@ -2978,7 +3048,8 @@ static void ABI team_selector_disable_node(void *context, unsigned char *pins) {
 static void ABI ranking_network_branch(void *context, unsigned char *pins, unsigned char *outputs) {
     int count = 0;
     if (pins) memcpy(&count, pins, 4);
-    const int manual = count == 1 && team_ranking_project && private_single_race_active;
+    const int manual = (count == 1 && team_ranking_project && private_single_race_active) ||
+                       (count == 2 && runtime_ranked_active());
     void **nodes = pointer_at(outputs, 0x20);
     run_graph_node(context, nodes[manual ? 1 : !in_network_game()]);
 }
@@ -3122,6 +3193,75 @@ static unsigned char *resolved_object(void *handle) {
     unsigned flags;
     memcpy(&flags, handle, 4);
     return flags & 0x30000000 ? NULL : pointer_at(handle, 0x28);
+}
+
+/* Prebuilt sprites share the nickname's parent, preserving team/name colors. */
+static void online_name_badge(unsigned char *name, int human) {
+    const char *tag = name ? pointer_at(name,0x28) : NULL;
+    if (!tag || strcmp(tag,"[PlayerTagText]")) return;
+    unsigned char *parent = pointer_at(name,0x40);
+    unsigned char *list = parent ? pointer_at(parent,0x48) : NULL;
+    int count = list ? *(int *)(list+12) : 0;
+    void **items = list ? pointer_at(list,0x20) : NULL;
+    if (!items || count<1 || count>512) return;
+    int badges=0;
+    for (int i=0;i<count;++i) {
+        const char *label=items[i] ? pointer_at(items[i],0x28) : NULL;
+        if (label && !strncmp(label,"OCTR_NAME_ICON_",15)) { badges=1;break; }
+    }
+    if (!badges) return;
+    const char *nick = pointer_at(name,0x30);
+    int mode = runtime_speed_race_active() != 0, tier = -1;
+    const int online=in_network_game() && !battle_selected();
+    human=online && human>0 && nick && *nick;
+    if (human) runtime_ranked_profile(nick,mode,&tier,NULL,NULL,NULL);
+    struct NameBadgeLayout { void *name,*parent; float x,y,width,applied_x,applied_y,applied_width; };
+    static struct NameBadgeLayout layouts[64];
+    static unsigned next;
+    struct NameBadgeLayout *layout = NULL;
+    float x,y,width;
+    memcpy(&x,name+0x60,4);memcpy(&y,name+0x64,4);memcpy(&width,name+0x90,4);
+    for (unsigned i=0;i<64;++i) if (layouts[i].name==name) { layout=layouts+i;break; }
+    if (!layout) { layout=layouts+next++%64; *layout=(struct NameBadgeLayout){name,parent,x,y,width,x,y,width}; }
+    if (layout->parent!=parent) *layout=(struct NameBadgeLayout){name,parent,x,y,width,x,y,width};
+    if (x!=layout->applied_x) layout->x=x;
+    if (y!=layout->applied_y) layout->y=y;
+    if (width!=layout->applied_width) layout->width=width;
+    float height,pivot_x,pivot_y,sx,sy,angle;
+    memcpy(&height,name+0x94,4);memcpy(&pivot_x,name+0x6c,4);memcpy(&pivot_y,name+0x70,4);
+    memcpy(&sx,name+0x84,4);memcpy(&sy,name+0x88,4);memcpy(&angle,name+0x80,4);
+    const float cosine=cosf(angle*(3.14159265358979323846f/180)), sine=sinf(angle*(3.14159265358979323846f/180));
+    const int visible = human && tier>=0 && height>0 && layout->width>80 && !(*(unsigned *)(name+12)&0x400);
+    const float size = height*.72f<36 ? height*.72f : 36;
+    const float reserve = visible ? size+8 : 0;
+    layout->applied_x=layout->x+reserve*(1-pivot_x)*sx*cosine;
+    layout->applied_y=layout->y+reserve*(1-pivot_x)*sx*sine;
+    layout->applied_width=layout->width-reserve;
+    memcpy(name+0x60,&layout->applied_x,4);memcpy(name+0x64,&layout->applied_y,4);memcpy(name+0x90,&layout->applied_width,4);
+    if (x!=layout->applied_x || y!=layout->applied_y || width!=layout->applied_width) name_color_changed(name);
+    unsigned char *text_asset=resolved_object(pointer_at(name,0x38));
+    int alignment=1;
+    if (text_asset) memcpy(&alignment,text_asset+0x60,4);
+    for (int i=0;i<count;++i) {
+        unsigned char *icon=items[i];
+        const char *label=icon ? pointer_at(icon,0x28) : NULL;
+        int icon_mode,icon_tier;
+        if (!label || sscanf(label,"OCTR_NAME_ICON_%d_%d",&icon_mode,&icon_tier)!=2) continue;
+        const int shown=visible && mode==icon_mode && tier==icon_tier;
+        hide_placeable(icon,!shown);
+        float alpha=0;
+        if (shown) memcpy(&alpha,name+0xe0,4);
+        memcpy(icon+0xe0,&alpha,4);
+        if (!shown) continue;
+        const float local_x=(-layout->applied_width*pivot_x-reserve*.5f)*sx;
+        const float local_y=((0.5f-pivot_y)*height+(alignment-1)*(height-size)*.5f)*sy;
+        const float position[]={layout->applied_x+local_x*cosine-local_y*sine,
+                                layout->applied_y+local_x*sine+local_y*cosine,-10};
+        const float scale[]={size*.01f*sx,size*.01f*sy,1};
+        memcpy(icon+0x60,position,sizeof position);memcpy(icon+0x84,scale,sizeof scale);
+        memcpy(icon+0x78,name+0x78,12);
+        name_color_changed(icon);
+    }
 }
 
 static void name_color_tree(unsigned char *placeable, int depth, int allowed) {
@@ -3273,6 +3413,8 @@ static void ABI results_item_update(unsigned char *self, unsigned char *owner, f
         team_ranking_row(self);
     }
     colored_name(pointer_at(self, 0xa8), name_colors_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
+    unsigned char *racer=handle_object((void **)(self+0x78));
+    if (!team_ranking_project) online_name_badge(pointer_at(self,0xa8),racer && handle_object((void **)(racer+0x10))!=NULL);
 }
 
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {

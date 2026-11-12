@@ -74,10 +74,3 @@ def texture_igz(template, png, image_name, black=False, texture_name=None):
                                   template[at:at + length]) + template[at + length:]
     desired = texture_name or 'data/Octane/textures/ui/Octane/GPrix/' + image_name[1:-1]
     return _replace_texture_name(result, desired)
-
-
-def single_race_texture(template=None):
-    template = template or (ASSETS / 'texture_template.igz').read_bytes()
-    return texture_igz(
-        template, ASSETS / 'unranked.png', '[octane_ui_ico_singlerace.tga]',
-        texture_name='data/Octane/textures/ui/Octane/Icons/octane_ui_ico_singlerace.tga')
