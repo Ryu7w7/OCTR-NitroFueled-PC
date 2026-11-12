@@ -1,5 +1,4 @@
 """Passive search timer using the native lobby countdown's anchor and artwork."""
-import math
 import struct
 from collections import Counter
 from igz_file import Igz, unpack_offsets
@@ -83,9 +82,7 @@ def add_timer(blob, timer_blob):
     sprite=clone(0x12e0)
     g.set_u64(background+0x38,export(sprite,'OCTR_SEARCH_BACKGROUND_ASSET'));g.add_site('RHND',background+0x38)
     children=[background]
-    angle=struct.unpack_from('<f',g.data,background+0x80)[0]
-    radians=math.radians(angle)
-    for tag,source,offset,font in [('TITLE',0x5f0,-36,.5),('TIME',0x4d0,0,.72),('RANGE',0x5f0,36,.35)]:
+    for tag,source,offset,font,height in [('TITLE',0x5f0,-28,.7,60),('TIME',0x4d0,0,.95,75),('RANGE',0x5f0,28,.52,60)]:
         text=clone(0x11f0)
         g.set_u32(text+0x5c,1);g.set_u32(text+0x60,1)
         struct.pack_into('<f',g.data,text+0x64,font)
@@ -93,9 +90,8 @@ def add_timer(blob, timer_blob):
         label=clone(source,True);marker(g,label,'OCTR_SEARCH_'+tag);pointer(label+0x40,panel)
         # Native timer labels use center anchors; the artwork uses top-left anchors.
         g.data[label+0x98:label+0xb0]=g.data[background+0x98:background+0xb0]
-        struct.pack_into('<3f',g.data,label+0x78,0,0,angle)
-        struct.pack_into('<2f',g.data,label+0x60,-39-math.sin(radians)*offset,84+math.cos(radians)*offset)
-        struct.pack_into('<2f',g.data,label+0x90,520,70)
+        struct.pack_into('<2f',g.data,label+0x60,-39,84+offset)
+        struct.pack_into('<2f',g.data,label+0x90,560,height)
         g.set_u64(label+0x38,export(text,'OCTR_SEARCH_'+tag+'_ASSET'));g.add_site('RHND',label+0x38)
         children.append(label)
     table=g.append(g.data[g.u64(parent+0x48):g.u64(parent+0x48)+g.sizes[g.u64(g.u64(parent+0x48))]])
@@ -115,3 +111,4 @@ def add_timer(blob, timer_blob):
         g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|count)
     dependencies(g,{'juice_Octane_Lobby_Timer_materials':'ui:/materialInstances/juice_Octane_Lobby_Timer_materials.igz'})
     return g.build()
+

@@ -2527,10 +2527,8 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
     if (tag && active) {
         if (!strcmp(tag,"OCTR_SEARCH_TITLE") || !strcmp(tag,"OCTR_SEARCH_TIME")) {
             const int title=!strcmp(tag,"OCTR_SEARCH_TITLE");
-            const float offset=title ? (ranked ? -36.0f : -18.0f) : (ranked ? 0.0f : 18.0f);
-            float angle;memcpy(&angle,node+0x80,sizeof angle);
-            angle*=0.01745329252f;
-            const float position[]={-39.0f-sinf(angle)*offset,84.0f+cosf(angle)*offset};
+            const float offset=title ? (ranked ? -28.0f : -15.5f) : (ranked ? 0.0f : 12.5f);
+            const float position[]={-39.0f,84.0f+offset};
             if (memcmp(node+0x60,position,sizeof position)) {
                 memcpy(node+0x60,position,sizeof position);
                 *(unsigned *)(node+12)|=0x1000;
@@ -2545,10 +2543,10 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
             hide_placeable(node,!ranked);
             if (ranked) {
                 char text[64];
-                if (range<0) snprintf(text,sizeof text,"ALL RANKS - CLOSEST FIRST");
-                else if (range>400) snprintf(text,sizeof text,"RANGE WIDENED: %d MMR",range);
+                if (range<0) snprintf(text,sizeof text,"ALL RANKS");
+                else if (range>400) snprintf(text,sizeof text,"WIDENED: %d MMR",range);
                 else if (range>0) snprintf(text,sizeof text,"RANGE: %d MMR",range);
-                else snprintf(text,sizeof text,"CHECKING SEARCH RANGE");
+                else snprintf(text,sizeof text,"CHECKING RANGE");
                 set_text(node,text);
             }
         }
