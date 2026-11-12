@@ -50,13 +50,23 @@ The timer artwork is prepared once through the existing archive cache.
 Ranked parties and active accounts per device are each capped at four. No IP restriction
 or localhost bypass applies. See the Ranked architecture spec for device identity limits.
 
+## Implementation status
+
+Implemented in the current branch: queue separation, room confirmation, device-based Ranked
+admission, elapsed timer, server range messages, native timeout cancellation, and cached timer
+assets. See [Ranked roadmap](RANKED_ROADMAP.md) for shipped features and remaining work.
+
+The latest timer/device changes have automated coverage but still require live multi-client
+validation. Their implementation does not imply production server deployment.
+
 ## Verification
 
 I tested public matchmaking on a local server with two clients: Itemless matched
 with Itemless, and Normal did not match with Itemless. I also tested the public
 Itemless compatibility gate with an outdated client.
 
-Automated tests cover queue-mode confirmation, party compatibility, and lobby
-labels. Eight-client gameplay has not been verified. Automated coverage does not
+Automated tests cover queue-mode confirmation, party compatibility, lobby labels, device
+serialization, party growth, elapsed/range display, stale status replies, and timeout.
+USA/EU native asset and widescreen checks cover the generated timer panel. Eight-client gameplay has not been verified. Automated coverage does not
 establish full multiplayer behavior for every party, rematch, or host-change
 combination.

@@ -1,57 +1,100 @@
-# RANKED ROADMAP
+# Ranked roadmap
 
-The queue separation and the ladder core are shipped. This roadmap orders everything else,
-largest value first. The client architecture is specified in
-`docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md`.
+Status reviewed against the current source on 2026-11-13 (Asia/Jakarta).
+“Shipped” below means implemented in this branch with automated coverage. It does not
+mean deployed to the production server or verified in every live multiplayer scenario.
 
-## Shipped
+## Shipped: shared protocol and backend
 
-* **Queue separation** — server-owned `octr_ranked` search filter, `octr_ranked_v1` room
-  confirmation, signed party preflight. (client f4e2d9b)
-* **Ladder core (v1)** — signed finish-order reports, host-authority scoring,
-  void without a host report; Solo FFA deltas with placement K; DNF/DC
-  penalties; two ratings (Normal / Itemless); tiers with the top-100 gate for tier 7; monthly
-  seasons with archived final ladders and a soft reset (halfway to 1000, placements restored);
-  `ranked-result` / `ranked-profile` / `ranked-leaderboard` endpoints; the lobby-card delta;
-  the launcher's Ranked row; opponent tier icons in Lobby Members, using stock kart-decal sprites
-  fetched through `ranked-tiers`.
+- Separate Ranked Normal and Itemless queues, server-owned filters, signed party preflight,
+  per-member capability checks, and room-bound nonce confirmation. Ranked remains Solo FFA
+  with 2–8-player rooms; party members compete as individual opponents.
+- Two independent ratings, five placements per mode, server-owned MMR and tiers, the top-100
+  gate for tier 7, and DNF/disconnect penalties. Provisional MMR stays private.
+- Signed race reports, host-authority resolution, stored guest corroboration/disagreement,
+  duplicate protection, and immutable result snapshots. A race without a host report is void.
+- Highest-member MMR party anchor, including mixed placement parties. Matching windows are
+  400/700/1000 MMR after both sides wait 0/20/45 seconds, with no hard cap after 90 seconds.
+  Closest-rating preference and the existing minimum of two seats remain.
+- At most four members per Ranked party and four active Ranked accounts per OS device hash
+  across solo searches, parties, and confirmed rooms. Atomic reservations and matching
+  cancel/leave/disconnect cleanup protect the limit. No IP restriction or localhost bypass.
+  A party can still form a room without another party; scoring is unchanged.
+- Signed search status for leaders and followers, exposing elapsed time, a 180-second
+  unmatched-search limit, matched state, and actual Ranked range expansion. Expired searches
+  cannot match. Public Matchmaking also has the timeout, without Ranked range information.
+- SQLite persistence and one-time legacy JSON import, transactional scoring, full match
+  history, seasonal archives, configurable 30-day seasons, a 15-minute drain, soft reset
+  halfway to 1000, and restored placements. Migration is complete, not future work.
+- Profile, result, batch-tier, season-status, and game leaderboard APIs, including
+  Normal/Itemless, Everyone/Friends, archived seasons, and personal standing.
+- Website Hall of Fame API with 50-entry pagination, search, archived standings, and
+  session-linked personal standing. Website frontend delivery is separate from this API.
 
-* **Hall of Fame — completed and verified in game.** The native leaderboard supports
-  Normal/Itemless, Everyone/Friends,
-  and season selection, with tier names, tier badges, and the local player's position.
-  Rendering, navigation, scrolling, refresh, and returning to Online are confirmed working.
-  C regressions and real-game asset tests cover the implementation.
+## Shipped: client integration
 
-## Current work
+- Ranked entry and mode selection, season-status admission gate, deferred Confirm, and
+  profile invalidation after season changes. New searches fail closed when status is unknown.
+- Native lobby rank card and Lobby Members tier badges, with mode-aware lookup and session
+  cleanup. Rank UI assets participate in archive preparation caching and stale-file removal.
+- Native Ranked result card with MMR change, tier badge, placement progress without exposing
+  provisional MMR, fitted text, native animations/effects, and promotion/demotion sounds.
+  Ranked suppresses automatic navigation to Wumpa; manual Next/Back and legends remain.
+- Tier badges before human nicknames in Online finish/end result rows for Single Race,
+  Cup, and Team Race, across Private, Public Matchmaking, and Ranked where supported.
+  Normal and Itemless use their own ratings. AI, Battle, and offline rows retain native UI.
+  Podium tier badges were deliberately removed; podium names remain native.
+- Native Hall of Fame with mode/population/season selection, tier names and badges,
+  separate fitted MMR columns for listed players and the local player, scrolling and Back.
+  Existing HOF navigation has prior in-game confirmation; recent layout fixes have regression coverage.
+- Elapsed matchmaking panel using the native countdown artwork and anchor, server polling
+  on a background worker, 180-second native cancellation, and Ranked range messages.
+  Public shows elapsed time only. A confirmed match restores the native pre-race countdown.
+  Generated assets reuse the existing preparation cache on warm boots.
+- GTK launcher Ranked profile row, including placement progress and placed ratings.
 
-* **Season admission gate — implemented, live QA pending.** The Ranked menu remains accessible;
-  Go to Lobby is dimmed and Confirm waits for `ranked-status` before transitioning, in both
-  modes. Retry uses `retry_after`; status failure fails closed. A season change invalidates
-  cached profiles. Active races and their result submissions are unaffected. C regression
-  tests cover the parser, retries, invalidation, deferred entry, and cancellation.
+## Implemented, live QA still pending
 
-## Next
+- Season-gate dimming, deferred entry, retries, and cancellation during an actual season drain.
+- Latest result-card alignment, badge animation/SFX/VFX, DNF timing, and manual Next/Back
+  across host/guest, regional layouts, and supported race formats.
+- Four-account device admission and party growth before/after Ranked entry in real multi-client
+  sessions, including cancel, reconnect, room changes, and host migration.
+- Live retest of the search timer after the reported overflow/flicker fix: matching artwork/text
+  anchors and tilt, centered fitted text, and an intact native traversal chain. Also verify
+  timeout cancellation, follower synchronization, range messages, and countdown handoff.
+- Latest HOF selected-row contrast, row centering, and fitted columns across display sizes.
 
-1. **Visible ranked (client-facing polish)** — the results screen marks each row with its
-   delta and tier once the race resolves (the lobby card already does); a placement-progress
-   banner during the first five matches; the Windows launcher gets the same Ranked row as GTK.
-2. **Season life** — season-end rewards (a badge per final tier, maybe wumpa), a season-open
-   announcement, and season and match administration.
-3. **Integrity hardening** — strengthen race-result verification and abuse prevention.
-4. **Team queues** — 4v4 and 2v2v2v2 ranked: the matchmaker learns team-shaped searches, the
-   confirmation string carries the format, scoring switches to driver points (10/8/6/5/4/3/2/1)
-   with team outcomes (+30/−30, +35/+15/−15/−35) and the team disconnect penalties
-   (−50/−70). Same two ratings, per the spec.
-5. **USF lap bonus** — the native replay sampler already tracks boost/reserve continuity per
-   racer; detect a maintained Blue Fire across a full lap in ranked Itemless and add the
-   spec's +5.
-6. **History and administration** — expose per-season and per-player match history to
-   authorized administration tools.
-7. **Discord** — season standings posts, a player's recent form, and linked-nickname lookups.
-8. **Cross-season stats** — per-track win rates, head-to-head records, and longest streaks
-   on a public ladder page.
+Automated evidence includes client C regressions, USA/EU native asset checks, widescreen
+integration checks, the Go server suite, focused race-detector checks, and Linux amd64,
+Linux arm64, and Windows amd64 server builds. The latest client build used `BB_SKIP_GPU=1`.
+The server changes are on PR #3; no production deployment or server restart was performed.
 
-## Deliberately out of scope
+## Not shipped
 
-* A separate team MMR — two ratings total, forever (spec rule).
-* Client-trusted MMR math — the client reports standings; only the server scores.
+1. Windows launcher parity for the GTK Ranked profile row.
+2. Per-opponent MMR delta labels in result rows; the local result card and row tier badges
+   are implemented, but do not imply a delta column for every opponent.
+3. Season-end rewards, season-open announcements, and dedicated season/match administration UI.
+   Season closure API, persistence, and archives already exist.
+4. Stronger result verification, report abuse detection, and anti-win-trading analysis.
+   Independent corroboration is not required to score today. Device identity is client-reported
+   and spoofable by modified clients; it is not hardware attestation or complete anti-cheat.
+5. Ranked team formats (4v4 or 2v2v2v2), their matchmaking/confirmation protocol, and team scoring.
+   Online Team Race result badges do not mean a Ranked team queue exists.
+6. Ranked USF full-lap detection and the proposed +5 bonus.
+7. Player/season history views and authorized history tools. Match history is already stored.
+8. Ranked-specific Discord standings/recent-form delivery and cross-season analytics such as
+   per-track win rates, head-to-head records, and longest streaks.
+
+## Deliberately excluded
+
+- A separate team MMR: retain exactly the Normal and Itemless ratings.
+- Client-owned MMR calculations: only the server scores.
+- IP-based Ranked account limits or a localhost exemption from the device limit.
+- Podium tier badges.
+
+## Reference
+
+See [RANKED_SYSTEM_ARCHITECTURE_SPEC.md](RANKED_SYSTEM_ARCHITECTURE_SPEC.md) for protocol and implementation details.
+Server PR: https://github.com/Ryu7w7/RyuNET-Demonware-CTR/pull/3

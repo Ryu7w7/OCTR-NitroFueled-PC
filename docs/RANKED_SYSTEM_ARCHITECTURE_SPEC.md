@@ -1,5 +1,12 @@
 # TECHNICAL SPECIFICATION: CTR NITRO-FUELED NATIVE RANKED SYSTEM (PC PORT / SacredFire)
 
+## Implementation status
+
+Reviewed on 2026-11-13 (Asia/Jakarta). The [Ranked roadmap](RANKED_ROADMAP.md) separates
+implemented features, outstanding live QA, and unimplemented work. Implemented does not
+imply production deployment. The current branch includes device-based admission and elapsed
+matchmaking status; latest UI/device changes still need live multi-client validation.
+
 ## 1. SYSTEM OVERVIEW
 
 This document is the client-side specification of the Ranked system. It replaces the earlier
@@ -71,7 +78,9 @@ still need the threshold to match. Stale range data displays a checking message.
 shows elapsed time only. A matched room hides this panel and uses the native countdown.
 
 The passive panel reuses the native countdown artwork and anchor without copying its
-behavior graph. Its generated archive patch uses the existing preparation cache, including
+behavior graph. Text uses the artwork's anchors and tilt, centered fitted boxes, and a
+complete native traversal chain. These layout/traversal corrections follow a live report
+of overflow and flicker; their live retest remains pending. Its generated archive patch uses the existing preparation cache, including
 source invalidation and stale-file removal; warm boots reuse prepared output.
 
 The OS identifier is client-reported, not hardware attestation. Modified clients can spoof
@@ -305,8 +314,8 @@ mask from `team_racer_finished` / the host's AI-catchup mask for guests). At tha
    an expired season are rejected rather than rewritten with the new season's profile.
    Clients must not require MMR during placements or assume a fixed small response size.
 
-5. The worker retries a `pending` answer a few times over ~16 s, then gives up (the rating was
-   recorded server-side regardless). The last scored delta joins the lobby card:
+5. The worker retries a `pending` answer a few times over ~16 s, then stops polling.
+   A pending guest report does not guarantee scoring: the host report must still resolve the race. The last scored delta joins the lobby card:
    `RANKED - NORMAL  +45 (1045 Gold Mask)`.
 
 Disconnects are not reported by the client: the server derives them (a confirmed room member
@@ -359,17 +368,23 @@ those sprites.
 
 ## 7. WHAT THE CLIENT SHOWS
 
-* **Lobby card** — the queue label plus the last scored delta in this room.
-* **Lobby Members** — each placed player's tier uses one of seven stock kart-decal sprites,
-  fetched in one batch from `GET /ryunet/ranked-tiers?names=...&mode=0|1`. Unplaced players have
-  no icon. The JSON response contains `tiers` and `mmr` maps keyed by lowercase nickname. The icon
-  follows the nickname in the member row.
-* **Launcher Online tab** — the Ranked row reads `GET /ryunet/ranked-profile?name=<nick>&mode=0|1`
-  (or `mode=all` for both modes). Placed profiles include `mmr`, `tier`, and `rank`.
-  Unplaced profiles expose only placement progress and race count; no provisional rating
-  or tier is published.
-* **Roadmap** — per-row tier marks on the results screen, opponent tiers in the lobby,
-  placement-progress banner.
+- **Lobby:** native rank card, last resolved room delta, and tier badges fitted into Lobby
+  Members rows. The mode context selects the rating; returning to Online clears stale mode state.
+- **Ranked results:** local MMR change, old/new tier, placement progress, native animated badge
+  and effects, and sounds for rating/tier changes. Placement results need no public MMR.
+  Automatic Wumpa navigation is suppressed in Ranked; manual Next/Back remains available.
+- **Online result rows:** mode-specific tier badges before human nicknames in supported
+  finish/end panels. AI, Battle, and offline rows remain native; podium badges are excluded.
+  This does not add an MMR delta column for every opponent.
+- **Hall of Fame:** mode, Everyone/Friends, and season selection; tier names and badges;
+  fitted MMR columns for leaderboard entries and the local player; native scrolling and Back.
+- **Matchmaking:** elapsed search time up to 03:00, then native cancellation. Ranked shows
+  server-owned range expansion; Public shows elapsed time only. Confirmed rooms use the
+  original pre-race countdown.
+- **GTK launcher:** profiles from `GET /ryunet/ranked-profile?name=<nick>&mode=all` show
+  placement progress or placed MMR/tier/rank. Windows launcher parity remains unimplemented.
+
+Recent UI fixes have automated coverage; outstanding live checks are listed in the roadmap.
 
 ## 8. TESTS
 
