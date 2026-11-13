@@ -138,17 +138,16 @@ def convert(game_folder, source, output, log=print):
                 m.update(image=image, texture=texture)
             online = (meta.get('compatibility') or {}).get('online')
             m['online'] = 'private' if online == 'allowed' else 'offline-only'
-            # The shared files the mod's own streaming list has (and the game's does not) stay in it.
-            stream = []
+            # The streaming list gets what the mod's own list added for its files, and nothing
+            # more (content_package.track).
             mine = entries.get(next((p for p in entries if p.casefold() == tr.CHUNKS.casefold()), ''), (None, b''))[1]
-            if mine and kept:
+            if mine:
                 from igz_merge import File
                 theirs = game.newest(tr.CHUNKS)
                 own = {p.casefold() for _, p in tr.chunk_entries(File(mine))[1]}
                 base = {p.casefold() for _, p in tr.chunk_entries(File(theirs))[1]} if theirs else set()
-                stream = [p for p in kept if p.casefold() in own - base]
-            if stream:
-                m['stream'] = stream
+                ours = kept + [p for p, (kind, _) in entries.items() if kind == cd.NEW]
+                m['stream'] = [p for p in ours if p.casefold() in own - base]
             m['credits'] = (f'{m["name"]["en"]} by {m["author"]}. Converted by the OCTR launcher from the mod '
                             f'{meta.get("id", Path(source).stem)} {m["version"]}'
                             + (f', without {len(dropped)} changes to game files.' if dropped else '.'))

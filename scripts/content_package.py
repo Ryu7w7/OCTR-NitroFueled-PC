@@ -15,8 +15,8 @@ creators) with this layout:
                                  (Neo Bowser City: Sewer Speedway's scripts and menu textures,
                                  which the game keeps in archives it loads only for that track);
                                  they must be the game's bytes, which the launcher checks; they
-                                 go in the update archive, and in the track's streaming list only
-                                 when "stream" names them
+                                 go in the update archive, and in the streaming list only when
+                                 "stream" names them
     README*, preview.png ...     text and pictures at the top, for people
 
 content.json (format 1):
@@ -29,8 +29,10 @@ content.json (format 1):
                                                           that picture's texture (in files/)
      "online": "offline-only",                            or "private": private rooms
      "credits": "...", "convertedFrom": {...},            optional, shown to people
-     "stream": ["textures/...igz"],                       optional: shared/ files streamed with
-                                                          the track (as the converted mod had them)
+     "stream": ["maps/...zoneinfo.igz", ...],             optional: the files of files/ and shared/
+                                                          in the game's streaming list (a converted
+                                                          mod's own list); without it, every file of
+                                                          files/ but the menu picture's texture
      "files": [{"file": "archives/t922_suzuka.pak", "sha256": "...", "bytes": 560351667}, ...]}
 
 A package cannot replace a game file, carry executable patches or change the registration files
@@ -142,8 +144,9 @@ def validate_manifest(m):
     if 'texture' in m and 'files/' + texture_file(m['texture']).casefold() not in seen:
         raise ValueError('content.json: the picture texture must be in files/')
     stream = m.get('stream', [])
-    if not isinstance(stream, list) or not all(isinstance(p, str) and 'shared/' + p.casefold() in seen for p in stream):
-        raise ValueError('content.json: stream lists files of shared/ (their logical paths)')
+    if not isinstance(stream, list) or not all(
+            isinstance(p, str) and ('shared/' + p.casefold() in seen or 'files/' + p.casefold() in seen) for p in stream):
+        raise ValueError('content.json: stream lists files of files/ and shared/ (their logical paths)')
     return m
 
 
@@ -440,10 +443,16 @@ def shared_files(m, folder):
 def track(m):
     """The track_registry.Track of a track package."""
     from track_registry import Track
-    # shared/ files are in the update archive, found by path; the streaming list gets only those
-    # "stream" names (a converted mod's own list: a sound stream in it breaks the game's loading).
-    files = [(stream_kind(p), p) for p, _ in game_files(m, '.')]
-    files += [(stream_kind(p), p) for p in m.get('stream', [])]
+    # The streaming list (a permanent package) gets "stream", a converted mod's own entries, else
+    # the files of files/ but the menu picture's texture. Never more: the picture's texture is
+    # already the track menu's (its LevelImage material), and a file with two owners there is
+    # freed while the other still uses it (the game crashes unloading); a sound stream in the
+    # list breaks the game's loading.
+    if 'stream' in m:
+        files = [(stream_kind(p), p) for p in m['stream']]
+    else:
+        picture = texture_file(m['texture']).casefold() if m.get('texture') else None
+        files = [(stream_kind(p), p) for p, _ in game_files(m, '.') if p.casefold() != picture]
     return Track(m['map'], image=m.get('image'), texture=m.get('texture'), files=files)
 
 

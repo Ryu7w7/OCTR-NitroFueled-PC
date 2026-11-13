@@ -77,7 +77,11 @@ class ManifestTests(unittest.TestCase):
                          [f'archives/{ID}.pak', f'archives/{ID}_flyby.pak'])
         track = cp.track(m)
         self.assertEqual((track.map, track.image, track.texture, track.page), (MAP, 'LevelImage_Suzuka', TEXTURE, None))
-        self.assertEqual(sorted(track.files), [('igx_file', ZONE), ('texture', f'textures/{TEXTURE}.igz')])
+        # The picture's texture is the track menu's (its LevelImage material), never the streaming
+        # list's too: two owners there crash the game when it unloads.
+        self.assertEqual(sorted(track.files), [('igx_file', ZONE)])
+        streamed = dict(m, stream=[f'textures/{TEXTURE}.igz'])  # a converted mod's own list wins
+        self.assertEqual(cp.track(streamed).files, [('texture', f'textures/{TEXTURE}.igz')])
 
     def test_bad_manifests_are_refused(self):
         base = write_package(self.dir / 'p')
