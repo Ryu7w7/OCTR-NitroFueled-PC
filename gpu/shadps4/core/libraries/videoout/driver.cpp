@@ -27,6 +27,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/flip_timing.h"
 #include "core/libraries/kernel/equeue.h"
 
 extern "C" void runtime_sleep_stats(uint64_t* calls, uint64_t* ns);
@@ -848,7 +849,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::AccurateTimer timer{vblank_period};
 
     // bbport: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
-    // until its slot; slots advance by one period (no drift) but never lag behind by more.
+    // until its slot; missed slots are discarded so loading cannot cause catch-up bursts.
     // SacredFire: BB_FPS_LIMIT when set, else the in-game menu's limit, read every tick.
     const char* const limit_env = std::getenv("BB_FPS_LIMIT");
     const auto current_limit = [limit_env]() -> u32 {
@@ -895,7 +896,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = NextFlipDeadline(next_flip, now, frame_period);
             }
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
@@ -947,7 +948,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     break; // next vblank
                 }
             }
-            if (std::chrono::steady_clock::now() < next_flip) {
+            if (frame_limit && std::chrono::steady_clock::now() < next_flip) {
                 if (next_flip >= tick_deadline) {
                     break;
                 }
@@ -956,7 +957,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();
             if (request) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = NextFlipDeadline(next_flip, now, frame_period);
                 Flip(request);
                 FRAME_END;
             }
