@@ -83,7 +83,18 @@ if (NOT miniz_FOUND)
     unset(CMAKE_POLICY_VERSION_MINIMUM)
     add_library(miniz::miniz ALIAS miniz)
 endif()
-find_package(Zydis REQUIRED)
+# Zydis: on Windows built in from its single-file release (third_party/zydis-amalgamated): MSYS2
+# has it only as libzydis.dll, which antivirus heuristics flagged (a disassembler DLL next to a
+# game reads as a cheat tool). Elsewhere the system's.
+if(WIN32)
+    add_library(zydis_builtin STATIC third_party/zydis-amalgamated/src/Zydis.c)
+    target_include_directories(zydis_builtin PUBLIC third_party/zydis-amalgamated/include
+                               PRIVATE third_party/zydis-amalgamated/include/Zydis)
+    target_compile_definitions(zydis_builtin PUBLIC ZYDIS_STATIC_BUILD ZYCORE_STATIC_BUILD)
+    add_library(Zydis::Zydis ALIAS zydis_builtin)
+else()
+    find_package(Zydis REQUIRED)
+endif()
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)

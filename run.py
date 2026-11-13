@@ -43,6 +43,8 @@ UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or 
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
+import season_art  # noqa: E402
+import track_names  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
 import online_mode  # noqa: E402
@@ -726,10 +728,10 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
-    # Every player loads the theme the server announces (bbport.ini theme= only applies offline),
-    # and the server's race-end countdown.
+    # Every player loads the theme the server announces (bbport.ini theme= only applies offline;
+    # christmas: the title screen's, scripts/season_art.py), and the server's race-end countdown.
     theme = announced.get('theme')
-    if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden'):
+    if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden', 'christmas'):
         env['BB_THEME'] = theme
         if theme != 'default':
             say(f'Season theme from the server: {theme}')
@@ -877,8 +879,44 @@ def main():
         fail('Launch failed: ' + str(error))
 
 
+def remove_obsolete_files():
+    """Files an older package left that a newer one no longer carries (an update copies the new
+    package's files over the old ones and removes none): v0.8.5 builds Zydis into sacredfire.exe
+    (no bin/libzydis.dll) and ships iced-x86's modules as bytecode only, so its old sources go (Python
+    would keep importing a .py beside its .pyc, and its Code.py is what antivirus heuristics flagged)."""
+    stale = [PORT / 'bin' / 'libzydis.dll']
+    iced = PORT / 'python' / 'Lib' / 'site-packages' / 'iced_x86'
+    if (iced / 'Code.pyc').is_file():
+        stale += [p for p in iced.glob('*.py') if p.with_suffix('.pyc').is_file()]
+        stale += list(iced.glob('*.pyi'))
+    # v0.8.5's tidier folder: the third-party list in licenses\, the Steam artwork in art\, no docs\
+    # (only where the new places are there, so a source checkout keeps its own).
+    stale_folders = []
+    if (PORT / 'licenses' / 'THIRD-PARTY.txt').is_file():  # a v0.8.5+ package, not a source checkout
+        stale += [PORT / 'THIRD-PARTY.txt', PORT / 'tools' / 'merge_update.py']
+        stale_folders.append(PORT / 'docs')
+    if (PORT / 'art' / 'steamgrid').is_dir():
+        stale_folders.append(PORT / 'steamgrid')
+    removed = 0
+    for path in stale:
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            say(f'Could not remove the old {path.name}: {error}')
+    for folder in stale_folders:
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+            removed += 1
+    if removed:
+        say(f'Removed {removed} file(s) an older version left behind')
+
+
 def launch(args, restarted=False):
     env = os.environ
+    remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
@@ -1049,6 +1087,19 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('button_prompts.prepare', button_prompts.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f'Button prompts: {error}; PlayStation buttons')
+        # A seasonal title screen (bbport.ini title_theme, scripts/season_art.py): the start screen's
+        # background through archive patches, each keeping the ones before for the same archive.
+        try:
+            base_patches.update(startup_call('season_art.prepare', season_art.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f"Title theme: {error}; the game's own")
+        # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE
+        # (src/runtime_presence.c), and the tracks' own names go beside it (scripts/track_names.py).
+        presence = Path(env.setdefault('BB_PRESENCE_FILE', str((out / 'presence' / 'presence.txt').resolve())))
+        try:
+            startup_call('track_names.prepare', track_names.prepare, game, presence.parent)
+        except (OSError, ValueError, KeyError) as error:
+            say(f'Track names for Discord: {error}')
         env.setdefault('BB_NEO', '0')
         # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),

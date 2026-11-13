@@ -434,6 +434,18 @@ static uint64_t g_eos_retry_at;
 
 static const char *eos_text(EOS_EResult r) { return p_EOS_EResult_ToString ? p_EOS_EResult_ToString(r) : "?"; }
 
+#if defined(_WIN32) && defined(EOS_LINKED)
+/* Linked with the SDK's import library (eosbridge/build.sh): Windows loads EOSSDK-Win64-Shipping.dll
+ * with the program, from its folder, and the SDK's functions are named in the import table. A
+ * program that only resolved them by hand at run time (LoadLibrary + GetProcAddress) and talks to the
+ * network was what antivirus heuristics took for a trojan (v0.8.4's bridge). */
+static int eos_load(void) {
+#define X(name) p_##name = name;
+    EOS_FUNCS(X)
+#undef X
+    return 1;
+}
+#else
 static int eos_load(void) {
     char dir[1024], path[1200];
     exe_dir(dir, sizeof dir);
@@ -462,6 +474,7 @@ static int eos_load(void) {
 #undef SYM
     return 1;
 }
+#endif
 
 static void EOS_CALL eos_log(const EOS_LogMessage *m) {
     if (m->Level <= EOS_LOG_Warning || g_verbose) LOG("EOS %s: %s", m->Category, m->Message);

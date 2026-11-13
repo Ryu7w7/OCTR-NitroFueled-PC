@@ -206,10 +206,12 @@ static int items_restore;            /* drive cleared the track: the recent item
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
 static float ghost_time(const struct rr_frame *f) { return f->time - P.header.go_time + RACE_START; }
-/* live: the play time stays this far behind the newest frame. It grows by 1 s (up to 6 s) each time the stream
- * ran dry (a sender with a slow or uneven connection), and comes back down by 0.5 s after 90 s without that. */
-#define LIVE_DELAY 2.0f
-#define LIVE_DELAY_MAX 6.0f
+/* live: the play time stays this far behind the newest frame (frames come about ten times a second and the
+ * server hands them on as they come). It grows by 0.5 s (up to 3 s) each time the stream ran dry (a sender
+ * with a slow or uneven connection), and comes back down by 0.25 s after 30 s without that. */
+#define LIVE_DELAY 0.6f
+#define LIVE_DELAY_MAX 3.0f
+#define LIVE_DELAY_STEP 0.5f
 static float live_delay = LIVE_DELAY, live_smooth;
 static uint32_t frames_now(void) { return __atomic_load_n(&P.count, __ATOMIC_ACQUIRE); }
 /* the last play time there is: live, a little behind the newest frame until the race is over */
@@ -893,12 +895,15 @@ static void read_buttons(float dt) {
     const int was_buffering = P.buffering;
     P.buffering = P.live && !P.paused && !P.scrubbing && P.time >= end;
     if (P.buffering && !was_buffering && P.started && live_delay < LIVE_DELAY_MAX) {
-        live_delay += 1.0f;
-        printf("Replay: the live stream ran dry: now %.0f s behind\n", live_delay);
+        live_delay = live_delay + LIVE_DELAY_STEP < LIVE_DELAY_MAX ? live_delay + LIVE_DELAY_STEP : LIVE_DELAY_MAX;
+        printf("Replay: the live stream ran dry: now %.1f s behind\n", live_delay);
         fflush(stdout);
     }
     live_smooth = P.buffering ? 0.0f : live_smooth + dt;
-    if (live_smooth > 90.0f && live_delay > LIVE_DELAY) live_delay -= 0.5f, live_smooth = 0.0f;
+    if (live_smooth > 30.0f && live_delay > LIVE_DELAY) {
+        live_delay = live_delay - 0.25f > LIVE_DELAY ? live_delay - 0.25f : LIVE_DELAY;
+        live_smooth = 0.0f;
+    }
     /* live, past the point (the delay just grew): it waits there, it does not jump back */
     if (P.time > end) P.time = live_open() && before > end && !P.scrubbing ? before : end;
     if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : forward ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
@@ -2321,6 +2326,7 @@ void ABI runtime_replay_tick(void) {
     skip_intro();
     __atomic_store_n(&racing, rr_kart_of(0, 0) && race_timer(), __ATOMIC_RELAXED);
     runtime_online_mode_note_frame();
+    runtime_presence_tick();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
