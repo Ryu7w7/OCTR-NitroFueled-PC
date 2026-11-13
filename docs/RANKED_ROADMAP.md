@@ -19,7 +19,9 @@ mean deployed to the production server or verified in every live multiplayer sce
 - At most four members per Ranked party and four active Ranked accounts per OS device hash
   across solo searches, parties, and confirmed rooms. Atomic reservations and matching
   cancel/leave/disconnect cleanup protect the limit. No IP restriction or localhost bypass.
-  A party can still form a room without another party; scoring is unchanged.
+  Ranked requires at least two non-overlapping searches. Public solo players and parties
+  of two through seven need outside opponents; a full eight-member Public party can form
+  a room immediately. Public has no Ranked device cap. Private and scoring are unchanged.
 - Signed search status for leaders and followers, exposing elapsed time, a 180-second
   unmatched-search limit, matched state, and actual Ranked range expansion. Expired searches
   cannot match. Public Matchmaking also has the timeout, without Ranked range information.
@@ -51,45 +53,73 @@ mean deployed to the production server or verified in every live multiplayer sce
   on a background worker, 180-second native cancellation, and Ranked range messages.
   Public shows elapsed time only. A confirmed match restores the native pre-race countdown.
   Generated assets reuse the existing preparation cache on warm boots.
-- Party-preserving Back between Private, Ranked, Matchmaking, and Online menus. Native
-  race-lobby/UI cleanup remains separate from explicit Leave Party and offline resets.
-- GTK launcher Ranked profile row, including placement progress and placed ratings.
+- Party-preserving Back between Private, Ranked, Matchmaking, and Online menus. Opening
+  Back confirmation leaves search/party untouched; Cancel retains elapsed time. Only an
+  accepted exit or timeout commits cancellation. Lobby graphs reset the race session instead of using
+  native matchmaking stop/private disconnect paths that tear down the party. Followers use
+  native Quit with Party notification. Explicit Leave Party/offline exit remain unchanged.
+  Late cancelled-host callbacks and duplicate lobby entries are ignored. Two-client menu
+  navigation is live-confirmed; timeout and explicit party-exit checks remain pending.
+- Ranked/MMR information stays in the native game UI; Linux and Windows launchers omit it.
+- Updated Ranked/HOF background PNGs follow the extracted native Matchmaking source
+  orientation, retain native animation, and use the existing archive preparation cache.
+  In-game background pattern correctness was confirmed on 2026-11-13.
+
+## Confirmed in current live testing
+
+- Two-client testing confirms the Public matchmaking policy works in the tested setup.
+  Normal and Itemless policy checks are reported working; this does not establish eight-client gameplay coverage.
+- Ranked result card, DNF display, badge effects/sounds, HOF, and manual Next/Back are
+  reported working for host and guest in the tested setup.
+- Ranked/HOF background pattern correctness is confirmed in game.
+- Host/guest menu navigation: repeated Private entry/exit, Ranked/Public switching, and
+  Private-to-Public/Ranked re-entry retain the party and restore the guest Waiting for Host
+  view with Customization only. The final mixed-transition fix was confirmed on 2026-11-13.
 
 ## Implemented, live QA still pending
 
 - Season-gate dimming, deferred entry, retries, and cancellation during an actual season drain.
-- Latest result-card alignment, badge animation/SFX/VFX, DNF timing, and manual Next/Back
-  across host/guest, regional layouts, and supported race formats.
-- Four-account device admission and party growth before/after Ranked entry in real multi-client
-  sessions, including cancel, reconnect, room changes, and host migration.
+- Ranked party admission: four members across all devices, independently of the four-account
+  device cap. Five or more members are blocked at entry with a native host notice. A fifth
+  member during search or a confirmed lobby cancels Ranked, preserves the party, and notifies
+  the host. Native entry/search/confirmed-room overflow routes have C regression coverage; live
+  tests with five or more clients, reconnect, and host migration remain pending.
+- Public parties of eight forming immediately, and solo/parties of two through seven waiting
+  for outsiders, across Normal and Itemless. Focused server policy tests pass; the full server
+  suite and platform builds predate the latest eight-member exception and need rerunning.
+- Windows launcher executable rebuild/live check. Linux launcher locale tests pass; the
+  latest combined launcher run had two OAuth tests fail with `busy`.
 - Live retest of the search timer after the reported overflow/flicker fix: matching artwork/text
   anchors, native text rotation, larger closely spaced fitted text, and an intact traversal chain. Also verify
   party-preserving timeout cancellation, return to the previous selector with the same options,
   follower synchronization, range messages, and countdown handoff.
-- Party-preserving Back from Private/Ranked/Matchmaking to Online, including host/guest
-  synchronization and explicit Leave Party/offline exit afterward.
-- Latest HOF selected-row contrast, row centering, and fitted columns across display sizes.
+- Dedicated 180-second timeout retest: preserve the party, restore the previous selector
+  and options, reset elapsed time on re-entry, and keep cancelled room/map polling stopped.
+- Explicit Leave Party, network disconnect, and offline exit after repeated menu transitions.
+- Display-size/format combinations beyond the two-client UI setup already tested.
 
 Automated evidence includes client C regressions, USA/EU native asset checks, widescreen
 integration checks, the Go server suite, focused race-detector checks, and Linux amd64,
 Linux arm64, and Windows amd64 server builds. The latest client build used `BB_SKIP_GPU=1`.
-The server changes are on PR #3; no production deployment or server restart was performed.
+Earlier server changes are tracked by PR #3; latest local edits are not evidence that the
+remote PR contains them. No production deployment or server restart was performed.
+The final mixed-transition fix was built CPU-only as `dev-de9946858e11595fc02b` and
+confirmed in two-client testing. This does not establish timeout or larger-party coverage.
 
 ## Not shipped
 
-1. Windows launcher parity for the GTK Ranked profile row.
-2. Per-opponent MMR delta labels in result rows; the local result card and row tier badges
+1. Per-opponent MMR delta labels in result rows; the local result card and row tier badges
    are implemented, but do not imply a delta column for every opponent.
-3. Season-end rewards, season-open announcements, and dedicated season/match administration UI.
+2. Season-end rewards, season-open announcements, and dedicated season/match administration UI.
    Season closure API, persistence, and archives already exist.
-4. Stronger result verification, report abuse detection, and anti-win-trading analysis.
+3. Stronger result verification, report abuse detection, and anti-win-trading analysis.
    Independent corroboration is not required to score today. Device identity is client-reported
    and spoofable by modified clients; it is not hardware attestation or complete anti-cheat.
-5. Ranked team formats (4v4 or 2v2v2v2), their matchmaking/confirmation protocol, and team scoring.
+4. Ranked team formats (4v4 or 2v2v2v2), their matchmaking/confirmation protocol, and team scoring.
    Online Team Race result badges do not mean a Ranked team queue exists.
-6. Ranked USF full-lap detection and the proposed +5 bonus.
-7. Player/season history views and authorized history tools. Match history is already stored.
-8. Ranked-specific Discord standings/recent-form delivery and cross-season analytics such as
+5. Ranked USF full-lap detection and the proposed +5 bonus.
+6. Player/season history views and authorized history tools. Match history is already stored.
+7. Ranked-specific Discord standings/recent-form delivery and cross-season analytics such as
    per-track win rates, head-to-head records, and longest streaks.
 
 ## Deliberately excluded

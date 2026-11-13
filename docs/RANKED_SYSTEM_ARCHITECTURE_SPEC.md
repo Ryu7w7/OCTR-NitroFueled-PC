@@ -21,8 +21,8 @@ feature already uses.
   RyuNET server (`runtime_ryunet_transfer`, the same path as chat, spectate and name colors).
 * **The RyuNET service** validates race reports and provides authoritative ratings,
   seasons, match history, and archived ladders.
-* **The launcher (Python)** is not in the results path. It only reads: the Online tab shows the
-  nickname's two ratings from `GET /ryunet/ranked-profile` (`ryunet_http.ranked_profile`).
+* **The launchers (Linux and Windows)** are not in the results path. Ranked profiles and
+  MMR information are displayed only in the native game UI.
 
 There is no launcher-to-game IPC. The launcher prepares files and environment variables before
 boot; the mod talks to the server itself, from a worker thread, exactly like spectate does.
@@ -64,9 +64,15 @@ not transmitted. The server reserves slots atomically and releases matching rese
 on cancel, room leave, or disconnect. IP addresses do not affect this rule, and local testing
 uses the same four-account limit. Older clients need an update for Ranked.
 
-Members still race as solo opponents and receive individual MMR changes. A party can form
-a room by itself; room capacity remains eight. The client checks party size before Ranked
-entry and cancels if the party exceeds four while searching or in its confirmed lobby.
+Members still race as solo opponents and receive individual MMR changes. Ranked must find
+a non-overlapping outside search. Public solo players and parties of two through seven
+also need an outside search; a full eight-member Public party can form a room immediately.
+Private can play without outside opponents. Room capacity remains eight. The Ranked party
+limit applies across devices, independently of the per-device limit; Public supports eight
+without the Ranked device cap. The client blocks Ranked entry for five or more members
+with a native host notice. If a fifth member joins during search or a confirmed Ranked
+lobby, it cancels Ranked through the native menu path, preserves the party, and notifies
+the host. Search cancellation and confirmed-room leave use separate native input routes.
 Only members in a validated server search receive Ranked confirmation.
 
 Public Matchmaking and Ranked show elapsed search time up to 03:00, then cancel through
@@ -93,192 +99,44 @@ it, so this limit reduces ordinary multi-client boosting without proving distinc
 
 ### Party-preserving menu navigation
 
-Private and Public lobby roots and the Online root skip their additional `quitParty`
-step during menu navigation. Race-lobby leave, UI transitions, native private/async flags,
-and explicit offline network/party resets remain intact. Ranked and Matchmaking share
-the Mode Select return path, so Back to Online retains party members in both modes.
-Both update2 and the Online domain copies are prepared through the existing cache.
-Explicit Leave Party and network kick/disconnect behavior are outside this menu patch.
-Live host/guest checks remain pending.
+Pressing Back in Private or Public/Ranked only opens the native confirmation dialog.
+Cancel does not change party, search, or elapsed time. The accepted exit's destination focus
+commits queue/race cleanup; timeout explicitly invokes the same cleanup. It uses native session leave with party
+retention, direct race-session reset, and party-lobby close without restarting search.
+The host then queues the native Quit with Party notification for followers. Timeout uses
+the same cancellation; followers wait for the host instead of leaving independently.
+The inbound party-return handler distinguishes menus from a frozen race. Menu guests use
+a dedicated host-closed input, using the native host/guest branch to open Waiting for Host
+with Customization only, or explicitly load Online Lobby
+when no matchmaking project is active. Native race-exit handling is retained during a
+frozen race; it must not be used to send menu guests to Start Screen. The domain archive
+uses the modern update2 matchmaking graph/UI pair because its original graph lacks this route.
+The guest branch registers `Octane_Lobby_WaitingRoom` with native `setLobbyMenuName_VSC`
+before opening it. Otherwise the next `CGuiEventEnterLobby` targets the closed matchmaking
+project and the guest remains waiting. Ranked/Public/Ranked re-entry is live-confirmed.
+Private focus rearms the lifecycle and retains its GUI handle for the native
+`CGuiEventPrivateLobbyClose` route. This avoids treating an active Private session as an
+already-returned guest and avoids the scene reload fallback. Repeated Private entry/exit
+is live-confirmed. The Private close route also updates the registered menu name at
+race manager `+0xdf0` to Waiting Room before dispatch, matching native enter-lobby lookup.
+Private-to-Public/Ranked re-entry is also live-confirmed in the two-client setup.
 
-### Online session isolation
+Lobby graphs replace `CNetworkNodes::stopMatchMaking_VSC` and Private's `disconnectAll_VSC`
+with `resetNetworkSessionManager_VSC`; the Private reset alias is normalized too. The named
+matchmaking stop calls the asynchronous disconnect path, whose callback at `0xa181e0`
+resets the party. Live diagnostics captured its reset call at `0xa181fd` with a connected
+guest, followed by zero connections and no inbound return notification at the guest.
+Unrelated native sync-stop functions and their call sites are left unchanged.
 
-Confirming Ranked, Matchmaking, or Private from Online main starts fresh transient
-state before the native menu route runs. Previous public confirmation/nonces,
-ranked results, party preflight, Team/Cup selection and scoreboards, pending map
-loads, and native Cup track handles are retired. Persistent player MMR and the
-connection's compatibility registration are retained.
-
-A guest joining a different party queues the same reset before applying its host's
-native settings. Worker callbacks only queue GUI cleanup; native handle release
-runs on the game thread, before settings receipt, selector input, map loading, or
-the next frame. HTTP mode verification and polling keep generation checks, so
-responses from a departed host cannot alter the new session. Repeated information
-about the current party does not reset a live Cup between its tracks.
-
-An unresolved host Cup is rejected instead of being silently converted to Single.
-A subsequent private map load is refused until valid host settings replace the
-rejected payload. Native mode/track replication and the final Itemless verification
-remain authoritative on both host and guest.
-
-### Skill matching
-
-Matchmaking uses the selected mode's authoritative MMR, including provisional ratings during
-placements. Players without a profile start at 1000. Tiers and leaderboard ranks do not
-partition queues. Each party uses its highest member's server-owned MMR as its matchmaking anchor, never an average. Any rank spread is allowed, including placed/provisional parties; provisional internal MMR participates in matching but remains hidden. A highest/lowest-tier party faces the highest member's peers. A placed/provisional party uses whichever internal rating is higher (new profiles start at 1000).
-
-| Both sides have waited | Maximum MMR spread |
-|---|---:|
-| 0–19 seconds | 400 |
-| 20–44 seconds | 700 |
-| 45–89 seconds | 1000 |
-| 90 seconds or more | No hard cap; closest available MMR remains preferred |
-
-Every pair of searches in a new room must fit the range. Existing-room joins check every
-player and use both the incoming search's wait and the room's time since its last join.
-Room merges use both rooms' idle time. A long wait on one side cannot widen the other
-side's range. After both have waited 90 seconds, removing the hard cap prevents permanent isolation in a small Ranked population. There is no requirement for 200 players to be online; a room still needs two human seats.
-
-Geographic proximity remains first priority. Within the same distance band, closer MMR
-comes before room fullness. Rooms still need only two players, not eight. Searches retry
-every two seconds, including when geographic filtering is disabled. Existing-room ratings
-refresh when checking candidates after at least 15 seconds since the last rating capture.
-
-### Season admission gate
-
-`runtime_ranked.c` requests `GET /ryunet/ranked-status` on its existing background worker.
-The response contains `season`, `enabled`, and `retry_after` in seconds. Missing, malformed,
-or unsuccessful responses fail closed. The Ranked menu stays accessible in both modes.
-While admission is closed or being checked, the native Go to Lobby button is dimmed and its
-Confirm event is intercepted before the native graph can transition to the lobby.
-
-Confirm starts a fresh status check when admission was open. The existing deferred-input
-mechanism retains native handles, not raw UI pointers, and replays Confirm only after an
-open response. Back, focus loss, a changed session, or timeout cancels that pending entry.
-A closed response waits the server's `retry_after` before another request; transport failures
-retry after five seconds. A zero retry interval while closed is limited to one second.
-The search hook also checks admission. The server remains authoritative if a reset starts
-between the preflight and the search.
-
-A changed `season` invalidates both mode profiles and highest-tier badges while preserving
-the registered player names for immediate refetch. Status handling does not leave an active
-room or stop a race. Race reports continue using their captured room and mode; the server
-assigns those results to the draining season.
-
-Tests cover response validation, retry timing, season invalidation, both modes, deferred
-Confirm, and Back cancellation. Native dimming and transition behavior still need live QA.
-
-### Hall of Fame
-
-Ranked and Hall of Fame clone the native Online Matchmaking button with independent
-state. Both preserve the original destination project handle in VSC +0x38. This field
-is not a self-button reference: low RHND values index EXID hashes, while high-bit values
-index the handle subset of EXNM.
-HOF Confirm arms a one-shot request. The native asset-opening entry at 0x986170 consumes
-that request and forwards the same manager, options, player, context, and delay to the
-named opening entry at 0x986820 with `Octane_HallOfFame`. It temporarily enables the
-native streaming option at options +0x21, then restores its previous value. Native
-0x987450 only invokes the package loader when this option equals 1. The request is
-consumed before the named path calls the asset path again. Other opens preserve the
-native asset path.
-The native button graph is unchanged; no custom script class or directional input replay
-is introduced. HOF's Back target redirects to Online Main and restores focus.
-
-The native Matchmaking graph writes 0 to `MainMenu_Base_ButtonIndex`; Private writes 1.
-Lobby Main's native switch uses this value to call `setFocus_VSC`, then resets the saved
-index. Ranked and HOF preserve the clone's index 0 and update the root's native case-0
-and default destination handles to the selected button. Runtime VSC instances do not
-retain the serialized IGZ field layout: live instances had no dynamic-memory pointer
-at +0x18. The native reflection lookup at 0x14a7250 resolves the fields
-`Gui_Placeable_id_rcxu6uoi` and `Gui_Placeable_id_bdnprt14`; each returned meta-field
-provides its runtime offset at +0x14. `Gui_Placeable_id_gto91nsu` retains Matchmaking's
-destination. Selection stores only a button identity across menus. Targets are resolved
-from the current tree, including composition content, and native handles manage their
-lifetime. Private and other switch cases remain unchanged. No synthetic navigation
-input is sent.
-
-`scripts/hall_of_fame.py` retains the native project graph, navigation, selector visuals,
-fonts, shadows, and row composition. It removes the time-trial data behaviors and Track,
-and creates eight independent native row compositions for the displayed window. The
-native footer displays the local player's position in the selected population when available. The existing
-HOF is excluded from Lobby Main's TDEP and the Online domain manifest. Its complete
-standalone streaming package and loose-file dependencies remain available for the named
-opening path. This isolates HOF project initialization from entering Online.
-Each row composition is a named export referenced through a native RHND handle.
-Runtime traversal resolves the placeable's +0x38 asset handle before reading composition
-content; treating that handle as an asset pointer skipped the row and selector trees.
-
-The retained Leaderboards root graph starts its entry animation on
-`CGuiEventLeaderboardReady`. Removing the native time-trial list behavior also removes
-the original event producer. After initializing HOF's root, the client therefore creates
-this event with native factory 0x1104d80, dispatches it through the project's native
-virtual event handler at +0xb0, and releases it with 0x149d260. The event is allocated by the engine, never fabricated on the stack. HOF owns
-its loading and empty labels, so the event selects the native HasData presentation.
-It is sent once per HOF opening, not on filter changes. The callback follows its +0x20
-project reference, that project's root wrapper, and the wrapper's composition content
-to find the tagged HOF root. It passes the project separately for event dispatch,
-matching the native leaderboard producer at 0x9aff57.
-
-Live debugger tracing corrected the earlier interpretation of the open handle: it was
-a streaming placeholder, not a loaded HOF view. At 0x985180 the pending slot was in
-state 3, but 0x14fad90 returned no directory for `UI/Octane_HallOfFame.igz`. The asset
-passed to 0x986170 was null, and the slot was then retired. The active file map contained
-the HOF archive and UI files but omitted `packages/generated/ui/octane_halloffame_pkg.igz`.
-Preparation now publishes that manifest in the loose file map as well as the archive;
-the regression checks both its bytes and mapped path. HOF opening and Ranked Back focus
-are verified in game.
-Rows and tier icons must also join the native next/previous traversal chain; child-table
-registration alone is insufficient. Tier icons share the tier label’s parent so they inherit
-the same row transforms. The HOF root retains ReturnToMainMenuOnDisconnect for its update hook.
-The renamed project also packages native Leaderboards language tables under
-`octane_halloffame_<language>.lng`, matching the UI loader’s project-based lookup.
-
-`runtime_hall_of_fame.c` fetches
-`GET /ryunet/ranked-leaderboard?mode=0|1&count=100&season=<id>&name=<nickname>&population=everyone|friends`
-using the existing proof-signing HTTP transport. Everyone is public. Friends requires a
-signed request and includes the authenticated account plus accepted native friends, including
-offline friends. Pending friend requests are excluded. Filtering precedes the 100-entry limit,
-so friends beyond the global top 100 remain eligible. Friends responses are not cached.
-The client sends one request for either population and does not supply arbitrary friend names.
-
-HOF rows sort by `rank` in ascending order. Everyone uses the global rank. Friends uses
-consecutive population-relative ranks; `global_rank` separately preserves the full-ladder position.
-At the first visible row, Up passes back to native navigation to reach the selectors.
-The native time column displays the API's `tier` name and the matching Lobby Members
-sprite for the selected mode. It does not derive tier from MMR or display race times.
-A separate fitted column displays MMR for leaderboard rows and the placed local player.
-Placement MMR remains hidden.
-
-The server supplies `players`, optional `player`, `current_season`, and `seasons` containing
-`id`, `started`, `ended`, and `active`. The API returns seasons newest first; the client
-sorts them oldest to newest for navigation. Entry defaults to
-the current season at the right end; left/right navigation clamps without wrapping. A mode,
-population, or season change clears stale rows and starts a new request. Late replies from
-an earlier selection or closed menu cannot replace the current view. Native list direction
-input scrolls the displayed window. Failed requests show an unavailable state; Confirm retries.
-
-The optional `player` is independent of the page limit: a ranked player outside `players`
-still has a position; an unranked player returns `player:null`. Without `name`, `player` is
-omitted. `player.in_leaderboard` uses the selected population's `rank < count`, strictly:
-with `count=100`, rank 99 is true and rank 100 is false, although row 100 remains on the
-page. This flag does not remove rows or change numeric ranks. Valid counts are 1–500;
-omitted or invalid counts default to 100. The same contract applies to archived seasons.
-An unknown archive returns HTTP 404. `mode=all` returns `normal` and `itemless` boards.
-
-The website Hall of Fame has a separate public API with 50-entry pages selected by `offset`,
-using `rows` and optional session-account `mine` instead of the game's `players` and `player`.
-Its pagination does not use the game's `count` or `in_leaderboard` contract.
-
-A changed `ranked-status.season` refreshes the board. If the user was viewing the current
-season, selection follows the new current season; an explicitly selected archive stays selected.
-HTTP workers own copied query data and never retain guest UI pointers. Native Back/unload
-invalidates pending work. The native return route to Highscore Select is redirected to Online
-for the Hall of Fame flow.
-
-C tests cover parsing, season ordering and bounds, modes, server-side Friends responses,
-request count, stale replies, retry, and scrolling bounds. Python tests check independent row
-objects, the native opener, streaming dependencies, and the existing widescreen preparation.
-Hall of Fame rendering, focus, scrolling, refresh, and Back transitions are verified in game.
+Menu lobby-closed status and native UI cleanup remain. Main's explicit offline-exit graph,
+explicit Leave Party, and network kick/disconnect retain their native behavior. PSN
+race-session cleanup preserves host-follow state and session records while native
+`hasActiveParty_VSC` transport count remains positive; race roster size is not sufficient.
+Old status replies cannot revive cancelled searches, and polling stays suspended until
+lobby re-entry. Both update2 and Online-domain graph copies use the existing preparation
+cache with source invalidation. Repeated menu transitions are live-confirmed in the
+two-client setup; 180-second timeout party retention and explicit Leave Party/offline
+cleanup still require dedicated live checks.
 
 ## 4. RACE-END REPORTING (the mod's job)
 
@@ -396,8 +254,22 @@ those sprites.
 - **Matchmaking:** elapsed search time up to 03:00, then native cancellation. Ranked shows
   server-owned range expansion; Public shows elapsed time only. Confirmed rooms use the
   original pre-race countdown.
-- **GTK launcher:** profiles from `GET /ryunet/ranked-profile?name=<nick>&mode=all` show
-  placement progress or placed MMR/tier/rank. Windows launcher parity remains unimplemented.
+- **Launchers:** Linux and Windows omit Ranked/MMR information. Placement progress,
+  ratings, and tiers remain available in the native game UI.
+
+### Background artwork and preparation
+
+`scripts/assets/ranked_background.png` and `scripts/assets/hof_background.png` use the
+native Matchmaking source orientation. The texture compiler flips PNGs vertically before
+BC3 encoding; do not apply an additional flip or rotation when editing the reference.
+The native pattern quad has no rotation or negative scale; Matchmaking and Private use
+identical animation curves. Custom materials retain the native animation.
+The extracted authoring reference is generated locally at
+`out/research/native-online-pattern/matchmaking-png-source.png` (not a tracked asset).
+Both updated PNGs are 256×256, non-interlaced 8-bit RGBA. PNG edits invalidate the existing
+archive preparation cache; subsequent warm preparation reuses the output.
+USA/EU texture compilation passes. In-game background pattern correctness was confirmed
+on 2026-11-13.
 
 Recent UI fixes have automated coverage; outstanding live checks are listed in the roadmap.
 
