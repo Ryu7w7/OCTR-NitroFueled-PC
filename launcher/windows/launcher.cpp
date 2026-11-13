@@ -144,6 +144,8 @@ const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
 // The game found no Vulkan 1.3 (GPU, driver or loader): UnsupportedVulkanExitCode in vk_platform.h.
 constexpr DWORD kUnsupportedGpuCode = 24;
+// Windows could not give the game its memory (error 1455): OUT_OF_MEMORY_CODE in run.py.
+constexpr DWORD kOutOfMemoryCode = 26;
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 // The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
@@ -3369,6 +3371,20 @@ void PlayTab() {
                                        "Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game needs. Update "
                                        "the GPU driver; if it is already the latest, the card is too old for Windows (on Linux, "
                                        "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
+            ImGui::PopStyleColor();
+        }
+        else if (a.exit_code == kOutOfMemoryCode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", T("El juego se quedó sin memoria: Windows no pudo darle la que necesita (error 1455, la RAM más el "
+                                       "archivo de paginación no alcanzan). Agranda el archivo de paginación: busca \"Ajustar la "
+                                       "apariencia y rendimiento de Windows\" > Opciones avanzadas > Memoria virtual > Cambiar, marca "
+                                       "\"Administrar automáticamente\" o pon al menos 8192 MB en C:, y reinicia el PC. Antes de jugar, "
+                                       "cierra los programas y overlays que no uses.",
+                                       "The game ran out of memory: Windows could not give it what it needs (error 1455, RAM plus the "
+                                       "page file are not enough). Enlarge the page file: search \"Adjust the appearance and "
+                                       "performance of Windows\" > Advanced > Virtual memory > Change, tick \"Automatically manage\" "
+                                       "or set at least 8192 MB on C:, and restart the PC. Before playing, close the programs and "
+                                       "overlays you don't use."));
             ImGui::PopStyleColor();
         }
         else ImGui::TextColored(kRed, T("El juego se cerró con un error (código %lu). Mira el registro abajo o en last_run.log.",

@@ -39,6 +39,11 @@ START_FAULT_CODE = 3  # a fault the game could not go on from (probe.c)
 START_FAULT_SECONDS = 45  # the title screen comes later than this
 START_FAULT_TRIES = 2
 UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
+# Windows could not give the game its memory (RAM plus the page file): the game's "Runtime: cannot
+# commit ... (error 1455)" line, after which it stops a moment later on a fault (code 3). The
+# launchers tell the player to enlarge the page file instead of "code 3".
+OUT_OF_MEMORY_CODE = 26
+OUT_OF_MEMORY = re.compile(r'^Runtime: cannot commit \d+ MiB of guest memory \(error (1455|1450|8)\)')
 
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
@@ -181,6 +186,8 @@ def emit(text):
             VULKAN_START['ready'] = True
         elif line.startswith('Vulkan: starting'):
             VULKAN_START['layers'] = line.partition('layers installed: ')[2].strip()
+        elif OUT_OF_MEMORY.match(line):
+            VULKAN_START['out_of_memory'] = True
 
 
 def say(message):
@@ -1361,7 +1368,7 @@ def launch(args, restarted=False):
             except PermissionError as error:
                 blocked(probe, error)
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
-            VULKAN_START.update(window=0.0, ready=False)
+            VULKAN_START.update(window=0.0, ready=False, out_of_memory=False)
             reader.start()
             hung = watch_vulkan_start(process, env)
             code = process.wait()
@@ -1371,6 +1378,17 @@ def launch(args, restarted=False):
                 env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
                 continue
+            if code not in (0, RESTART_CODE) and VULKAN_START.get('out_of_memory'):
+                # no point starting again: the memory is still missing
+                say(f'--- the game ended with code {code}')
+                say('--- Windows ran out of memory for the game (error 1455: RAM plus the page file are too small). '
+                    'Enlarge the page file (System > Advanced system settings > Performance > Advanced > Virtual '
+                    'memory: "Automatically manage", or at least 8192 MB on C:), restart the PC, and close other '
+                    'programs and overlays before playing.')
+                finish_perf_report(env, config, data, version, title_id, code)
+                cloud_sync_game(env, config, progress_dir, title_id, True)
+                mod_packages.finish(code)
+                return OUT_OF_MEMORY_CODE
             if retry_taken_range(code, range_tries):
                 range_tries += 1
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
