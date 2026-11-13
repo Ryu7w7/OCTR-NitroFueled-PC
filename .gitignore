@@ -57,3 +57,6 @@ gpu/shim/bbport_gnm_table.inc
 /patches/OCTR-Mod-Library.xml
 /CUSA13795*/
 *.pkg
+
+# The extra cups pictures (tools/make_builtin_mods.py): built from the author's package, not kept here.
+scripts/builtin_mods/extra-cups-art/

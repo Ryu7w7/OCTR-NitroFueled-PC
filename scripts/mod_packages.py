@@ -7,6 +7,7 @@ from mod_components import copy_tree,save_json,apply_shader,under
 from mod_library import scan,PREFIX
 from mod_session import launch_lock,adopt_mod_profile
 ACTIVE=None
+UC,ART='battle-point-limit-selector','extra-cups-art'  # built-in mods (scripts/builtin_mods)
 
 @lru_cache(maxsize=8)
 def engine_features(executable,digest):
@@ -113,6 +114,12 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
+        # The extra cups' pictures (built-in extra-cups-art) replace the Space Cup's texture: only
+        # with Ultimate Customizer's extra cups on.
+        if ART in names:
+            uc=catalog['entries'].get(UC,{})
+            if UC not in names or not uc.get('option_values',{}).get('extra-cups',False):
+                names.remove(ART);log('OCTR mods: '+ART+' is used only with the extra cups on')
         # The performance report's mods (scripts/perf_report.py): BB_MODS_ENABLED=0 below only
         # keeps loose mods out, so the packages in use are named here.
         if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)

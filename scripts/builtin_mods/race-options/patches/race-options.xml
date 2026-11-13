@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Race and battle options: the executable side of three-digit lap counts and long races.
+     The lap menu and the HUD lap counter print their numbers with the game's own three-digit
+     string builder (0x9bf710) instead of its one- and two-digit twins (0x9b5b70, 0xb39870),
+     which are the same code with less room; nothing else that uses those twins changes.
+     The race clock already switches to MM:SS:CC past ten minutes in races of 7 laps or more;
+     here it does so for any lap count and goes on to 999:59:99, with room for the third digit.
+     A race's achievement events are sent 512 at most, so races of hours do not run the
+     MP_NETWORK pool out at the finish. The cup menu finds a cup by its first track among cup
+     starts only, so added cups keep their own tracks. The added cups keep their stars in
+     /savedata0/rbo_cups.bin, and Square on the cup menu picks a random cup. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Race and battle options"
+              Note="Laps up to 3 digits in the menu and the HUD; race clock up to 999:59:99; long races without running out of network memory; random cup with Square. Kyouko8 (Ultimate Customizer)."
+              Author="Kyouko8"
+              PatchVer="5.1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin"
+              isEnabled="true">
+        <PatchList>
+            <!-- Cup stars: the code for the added cups (their table, its file) -->
+            <Line Type="bytes" Address="0x2738000" Value="4183FC0B730F83F8207705E9A161CAFEE9BA61CAFE4489E183E90B83F94073F04183FE0277EA488D15EB668B000FB6140A440FA3F20F92C0E99461CAFE83FB0B73118D045B83F81E0F8FAB5EE6FEE92E60E6FE89D883E80B83F840733189CA85D2790231D283FA027605BA0200000089D1BA02000000D3E2FFCA488D3597668B00081406488D3575668B00830E02E9665EE6FE554889E5534154415541564989FD4885FF0F84CE000000488D3541030000E8820E8BFF85C00F85BA0000004C8D353B668B00488D1D44668B0041F70601000000754F488D3D2103000031F631D2E8932A8BFF4189C44585E478334489E74889DEBA4800000031C9E8B9268BFF4489E7E831298BFF488B05C1020000483903740D31C0B9090000004889DFF348AB41830E0141F70602000000744B488B059B020000488903488D3DBF020000BE01060000BAB6010000E82B2A8BFF4189C44585E478234489E74889DEBA4800000031C9E801278BFF83F8487504418326FD4489E7E8C0288BFF4C89EF415E415D415C5B5DE900288BFF5051488D0DDF658B00C70100000000488D0DDA658B0048C7010000000059584D8B7F2049837D5000E94B47F4FE554889E541574156505152565741504151415241534883EC0848893C24488D0D9F658B00483939743D488B87D00000004885C0743183780C007E2B488B4020488B384885FF741F488B07FF10488D0DE8F27A00483B01750E488B0424488D0D60658B004889014883C408415B415A415941585F5E5A5958E937A6F2FD554889E553415441564157488D0535658B00488B184885DB0F8488000000488B034889DFFF10488D0D2A976E00483B0175744C8BA3D00000004D85E47468458B74240C4183FE027C5DE8216D61FE8B90AC00000069F2A741000089B0AC00000069C20000701AC1EE0C09F031D241F7F6498B4C2420488B34D1483BB370010000750DFFC24439F2720231D2488B34D14885F674124889DFBAFF000000B901000000E8D9B3F2FD415F415E415C5B5DC341837F1808743341837F180A7527505152565741504151415241534883EC08E82DFFFFFF4883C408415B415A415941585F5E5A5958E93A52F4FEE93C46F4FE50515256574150415141524153534883EC10488D0538648B008338007574C7000100000048C7042400000000488D3D8F0000004889E6E8A6EA6CFE488B1C244885DB744E488D05FE638B00488338007520488D0589A27B00488B38488D3556000000E8FABC23FF488D0DDB638B004889014889DFBE03000000488D15C9638B00B901000000E887196DFE4889DFE8AF4E16FF4883C4105B415B415A415941585F5E5A5958488B3D4EB87A00E98D48F4FE52424F4355505331416C6561746F72696F004F6374616E655F43757053656C656374002F736176656461746130002F7361766564617461302F72626F5F637570732E62696E000F1F0000803302000000003D8033020000000093803302000000008881330200000000B5813302000000001F83330200000000E082330200000000"
+                  ExpectedSHA256="9688ec46af8fa56e8423a06a9e420db47500eb701e44ba3855faf7984ed1a0a6"/>
+            <!-- Lap menu: lap counts with 3 digits -->
+            <Line Type="bytes" Address="0x168d7a5" Value="671F73FF"
+                  Signature="24 48 89 45 d8 31 c0 e8 c7 83 72 ff 48 8b 83 c0 01 00 00 48"
+                  SignatureOffset="0x8"/>
+            <!-- HUD: current lap with 3 digits -->
+            <Line Type="bytes" Address="0x1263fff" Value="0DB7B5FF"
+                  Signature="41 89 44 24 28 31 c0 e8 6d 58 cd ff 48 8b 3d f6 e5 c8 01 48"
+                  SignatureOffset="0x8"/>
+            <!-- HUD: total laps with 3 digits -->
+            <Line Type="bytes" Address="0x1264067" Value="A5B6B5FF"
+                  Signature="00 48 8d 7d 90 31 c0 e8 05 58 cd ff 48 8b 3d 8e e5 c8 01 48"
+                  SignatureOffset="0x8"/>
+            <!-- Race clock: long format for any lap count (was 7 or more) -->
+            <Line Type="bytes" Address="0x1263ec2" Value="01"
+                  Signature="84 c0 75 41 41 83 7d 0c 07 7c 3a 41 81 ff 6f 17 00"
+                  SignatureOffset="0x8"/>
+            <!-- Race clock: up to 999:59:99 (was 99:59:99) -->
+            <Line Type="bytes" Address="0x1263ec8" Value="5FEA0000"
+                  Signature="7d 0c 07 7c 3a 41 81 ff 6f 17 00 00 7f 48 c5 fa 10 45 a4 44"
+                  SignatureOffset="0x8"/>
+            <!-- Race clock: text capacity 12 (was 9) -->
+            <Line Type="bytes" Address="0x1263d5f" Value="0C"
+                  Signature="55 c0 48 b9 00 00 00 00 09 00 00 00 c5 7a 2c fa 49"
+                  SignatureOffset="0x8"/>
+            <!-- Race clock: end marker after the 12 characters -->
+            <Line Type="bytes" Address="0x1263d88" Value="CC"
+                  Signature="55 b0 c6 45 c0 00 c6 45 c9 fd 48 69 d8 89 88 88 88"
+                  SignatureOffset="0x8"/>
+            <!-- Achievement events: send at most 512 per race (long races ran out of MP_NETWORK memory) -->
+            <Line Type="bytes" Address="0xe2aae8" Value="4885C07442488B5F2068000200005939C80F47C14C6BF808"
+                  Signature="80 00 00 00 48 63 47 0c 48 85 c0 0f 84 8f 00 00 00 48 8b 5f 20 49 89 c7 49 c1 e7 03 0f 1f 40 00 48 8b 4f 20 48 8b 33 48"
+                  SignatureOffset="0x8"/>
+            <!-- Random cup: a cup button forgets the old cup list when its list fills -->
+            <Line Type="bytes" Address="0x167c8f7" Value="E98CB80B0190909090"
+                  Signature="00 00 00 e9 9f 0c 00 00 4d 8b 7f 20 49 83 7d 50 00 0f 84 43 03 00 00 8a 05"
+                  SignatureOffset="0x8"/>
+            <!-- Random cup: Square on the focused cup button gives a random cup -->
+            <Line Type="bytes" Address="0x167c950" Value="E98BB90B01909090909090"
+                  Signature="8b 40 20 e9 50 05 00 00 41 83 7f 18 08 0f 85 f9 0b 00 00 48 8b 3d b6 72 86 01 49"
+                  SignatureOffset="0x8"/>
+            <!-- Random cup: a list whose items are cups is the cup list -->
+            <Line Type="bytes" Address="0x662860" Value="E950590D02909090"
+                  Signature="5e 41 5f 5d c3 90 90 90 55 48 89 e5 41 57 41 56 41 54 53 48 8d 05 46 f6"
+                  SignatureOffset="0x8"/>
+            <!-- Random cup: the cup menu button bar gets Square "Aleatorio" (first cup focus) -->
+            <Line Type="bytes" Address="0x167cc55" Value="E9C5B60B019090"
+                  Signature="00 00 00 e9 4b 03 00 00 48 8b 3d bc 6f 86 01 49 8b 75 70 e8 bb 16 db"
+                  SignatureOffset="0x8"/>
+        </PatchList>
+    </Metadata>
+</Patch>

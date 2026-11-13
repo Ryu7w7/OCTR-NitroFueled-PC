@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "id": "custom-cup",
+  "name": "Custom cup",
+  "version": "1.4.1",
+  "author": "Kyouko8",
+  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.",
+  "requiresCapabilities": [
+    "archive-assets",
+    "xml-patches",
+    "code-signatures"
+  ],
+  "compatibility": {
+    "online": "allowed"
+  },
+  "operations": [
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_LevelSelect_Proto.igz",
+      "index": 3622,
+      "original_sha256": "802d2d5710d4d31e7a8ff6d293767ab14356febbf9423fd7086dd4a3a6aacd56",
+      "patched_sha256": "d2e815ca22fe2833441e9639ce76b21581a1cb3e5eda86b77511c786fee730b9",
+      "payload": "payloads/menu-pistas-miniaturas.delta.json"
+    }
+  ],
+  "patches": [
+    "patches/custom-cup.xml"
+  ],
+  "files": [
+    {
+      "file": "octr-mod.required",
+      "sha256": "2d5586c93e82ea2dbaaf8ddd5fc63068a0399479ef9824fb49c477b62a4ccc26",
+      "bytes": 19
+    },
+    {
+      "file": "patches/custom-cup.xml",
+      "sha256": "4db1cbbc3d6f39a6600d87af2efe20bcdd43b9823600bc8789245c4c37ecc24e",
+      "bytes": 11256
+    },
+    {
+      "file": "payloads/menu-pistas-miniaturas.delta.json",
+      "sha256": "1fb9c3396fc658e2ed4795f6b8fcd23c9f78204e1ff3de335bf75e9c9b07c527",
+      "bytes": 2975
+    }
+  ]
+}

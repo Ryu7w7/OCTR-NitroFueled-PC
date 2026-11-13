@@ -272,6 +272,9 @@ def main():
         shutil.copy2(script, folder / 'scripts')
     for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts'):
         shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
+    # Built-in mods (tools/make_builtin_mods.py); extra-cups-art only when it was built here.
+    if (ROOT / 'scripts' / 'builtin_mods').is_dir():
+        shutil.copytree(ROOT / 'scripts' / 'builtin_mods', folder / 'scripts' / 'builtin_mods', dirs_exist_ok=True)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its

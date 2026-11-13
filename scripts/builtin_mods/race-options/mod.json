@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 2,
+  "id": "battle-point-limit-selector",
+  "name": "Race and battle options (Ultimate Customizer)",
+  "version": "5.1.0",
+  "author": "Kyouko8",
+  "description": "Built into the launcher, from Ultimate Customizer by Kyouko8.\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n- Random cup: Square on the cup menu.\n- Extra cups (option): 25 more Arcade cups built around a character, with their stars. Their pictures need the extra cups art.",
+  "requiresCapabilities": [
+    "archive-assets",
+    "xml-patches",
+    "code-signatures",
+    "mod-options",
+    "variants"
+  ],
+  "compatibility": {
+    "online": "allowed"
+  },
+  "conflicts": [
+    "custom-lap-number-selector",
+    "custom-lap-number-selector-16"
+  ],
+  "operations": [
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_MainMenu_RaceSetting.igz",
+      "index": 3210,
+      "original_sha256": "0751567cdebff0893a05ee96fa7ebb3b53233de260b239ddba626777a373a7e3",
+      "patched_sha256": "d11320683728f9be23b2c34469c17392bed869cab61a070b036eeb93e9dc9339",
+      "payload": "payloads/vueltas-offline.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_Lobby_PrivateGameSettings.igz",
+      "index": 8839,
+      "original_sha256": "a2259e5840343814fa5901ce16de69a3c7295760a5ceb8ed51baf2176608fbc4",
+      "patched_sha256": "8c6f85666d3dafbef04f0566651a7e1a992761808c5904ac255a68dec899f863",
+      "payload": "payloads/vueltas-privada.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/GuiSharedAssets/Octane_RacerHud_LapDisplay.igz",
+      "index": 806,
+      "original_sha256": "c5d768ad7447165a6a3c2e7e59c5d05bcb6f8936b1c267e544de16288a18a7ff",
+      "patched_sha256": "999ce8de754ce682008e5843dc7274104298fac5b0a94ac7b14b3ecc10062e4d",
+      "payload": "payloads/hud-vueltas-update2.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/GuiSharedAssets/Octane_RacerHud_LapDisplay.igz",
+      "index": 50,
+      "original_sha256": "d58acdab661780ee2475149688a217a58aa6772cca851ec3f34bfff19b5ab116",
+      "patched_sha256": "1c4c5d86a371ecd3466d60560605a1c71ec82d6c80bcf881d35150cd44f4c76a",
+      "payload": "payloads/hud-vueltas-juicedomain_race.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/GuiSharedAssets/Octane_RacerHud_LapDisplay.igz",
+      "index": 52,
+      "original_sha256": "d58acdab661780ee2475149688a217a58aa6772cca851ec3f34bfff19b5ab116",
+      "patched_sha256": "1c4c5d86a371ecd3466d60560605a1c71ec82d6c80bcf881d35150cd44f4c76a",
+      "payload": "payloads/hud-vueltas-juicedomain_race_flareday.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/GuiSharedAssets/Octane_RacerHud_LapDisplay.igz",
+      "index": 52,
+      "original_sha256": "d58acdab661780ee2475149688a217a58aa6772cca851ec3f34bfff19b5ab116",
+      "patched_sha256": "1c4c5d86a371ecd3466d60560605a1c71ec82d6c80bcf881d35150cd44f4c76a",
+      "payload": "payloads/hud-vueltas-juicedomain_race_flarenight.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "vsc/UI/Octane_MainMenu_RaceSetting/Octane_MainMenu_RaceSetting_Root.igz",
+      "index": 9223,
+      "original_sha256": "35410b6d7523410bc8938f53334a515f999117892860132c04bb3d5d51fa0fd5",
+      "patched_sha256": "46f9c8744365c76e7727b7bad01823c46ea60c72707cfc2a055abae1519ac5c9",
+      "payload": "payloads/menu-carrera-copa.delta.json"
+    }
+  ],
+  "patches": [
+    "patches/race-options.xml"
+  ],
+  "operationSets": {
+    "battle": [
+      {
+        "kind": "archive_asset",
+        "archive": "update2.pak",
+        "asset": "looseData/systemData.igz",
+        "index": 7322,
+        "original_sha256": "8b5ca70daefc0ee75a8cb3bd8e45eb73cdf35450d5583ea9a5782df3459920ce",
+        "patched_sha256": "b418f3b0248658120bbd0ba40e83bb2bfafbe52e4c179c3da67522848c73b0f0",
+        "payload": "payloads/systemdata-battle.delta.json"
+      }
+    ],
+    "cups": [
+      {
+        "kind": "archive_asset",
+        "archive": "update2.pak",
+        "asset": "looseData/systemData.igz",
+        "index": 7322,
+        "original_sha256": "8b5ca70daefc0ee75a8cb3bd8e45eb73cdf35450d5583ea9a5782df3459920ce",
+        "patched_sha256": "f76c7845a706fcf87687f750a2283c9c7dedbd0415b48a2beaeb194073070789",
+        "payload": "payloads/systemdata-battle-cups.delta.json"
+      },
+      {
+        "kind": "archive_asset",
+        "archive": "update2.pak",
+        "asset": "materialinstances/UI/CupSelect_materials.igz",
+        "index": 2346,
+        "original_sha256": "733fac12a61bf850f176c5062272f55f9b3393cefeed082d5c180261e1f279a2",
+        "patched_sha256": "16adb2f988d78dcb30c91fdb02e396871e8d010efd3c418f6e207a6ef71045b6",
+        "payload": "payloads/cupselect-materiales.delta.json"
+      }
+    ]
+  },
+  "configuration": {
+    "extra-cups": {
+      "type": "boolean",
+      "label": "Extra cups",
+      "default": true,
+      "description": "The 25 added Arcade cups (Coco Cup onward and the Tawna Cup), with their stars."
+    }
+  },
+  "variants": [
+    {
+      "id": "extra-cups",
+      "whenOptions": {
+        "extra-cups": [
+          true
+        ]
+      },
+      "useOperations": [
+        "cups"
+      ],
+      "patches": [
+        "patches/extra-cups.xml"
+      ]
+    },
+    {
+      "id": "game-cups",
+      "whenOptions": {
+        "extra-cups": [
+          false
+        ]
+      },
+      "useOperations": [
+        "battle"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "file": "octr-mod.required",
+      "sha256": "2d5586c93e82ea2dbaaf8ddd5fc63068a0399479ef9824fb49c477b62a4ccc26",
+      "bytes": 19
+    },
+    {
+      "file": "patches/extra-cups.xml",
+      "sha256": "9b78a0f142c95578678e13835455ef971317593cb09b4b21243bab280e62f922",
+      "bytes": 4263
+    },
+    {
+      "file": "patches/race-options.xml",
+      "sha256": "01b02f581b2d4e25acc528d4de7cc76f8a199341720cfb8172d4a0351d9579c2",
+      "bytes": 7424
+    },
+    {
+      "file": "payloads/cupselect-materiales.delta.json",
+      "sha256": "4b6f5213c3391bd45e1df367bea05219e5709d81281363ef23230280113ce3a8",
+      "bytes": 14483
+    },
+    {
+      "file": "payloads/hud-vueltas-juicedomain_race.delta.json",
+      "sha256": "65dc868aca0da112f8e26e885d073270e83932f8d414b5da96236dd4726887f5",
+      "bytes": 618
+    },
+    {
+      "file": "payloads/hud-vueltas-juicedomain_race_flareday.delta.json",
+      "sha256": "65dc868aca0da112f8e26e885d073270e83932f8d414b5da96236dd4726887f5",
+      "bytes": 618
+    },
+    {
+      "file": "payloads/hud-vueltas-juicedomain_race_flarenight.delta.json",
+      "sha256": "65dc868aca0da112f8e26e885d073270e83932f8d414b5da96236dd4726887f5",
+      "bytes": 618
+    },
+    {
+      "file": "payloads/hud-vueltas-update2.delta.json",
+      "sha256": "d0f6baae2e6fa7682d672430edd45c1ed7af22418e0183644d0a95d66e2f2c45",
+      "bytes": 562
+    },
+    {
+      "file": "payloads/menu-carrera-copa.delta.json",
+      "sha256": "8822e53837d6931530525d6d7005886378fccc2651550feb53efdf0d93a83860",
+      "bytes": 141
+    },
+    {
+      "file": "payloads/systemdata-battle-cups.delta.json",
+      "sha256": "52db21e2d7f7f0022a58d86fda7d8d4ac2bacceec28c8a6651f7089faaa8b62e",
+      "bytes": 13307
+    },
+    {
+      "file": "payloads/systemdata-battle.delta.json",
+      "sha256": "5891891aa9b6d76872a09ca96260985f517d988f41ac38b3beb6b027d0826f93",
+      "bytes": 742
+    },
+    {
+      "file": "payloads/vueltas-offline.delta.json",
+      "sha256": "f48889e47226a0ba4971bcea30808d680a37b1fbedab8ccde98e8511c8b5ef5e",
+      "bytes": 558
+    },
+    {
+      "file": "payloads/vueltas-privada.delta.json",
+      "sha256": "9f0986231fbab5750913ae4f6172e970424e843dfc55e649fd0d19ddfa0a6761",
+      "bytes": 529
+    }
+  ]
+}

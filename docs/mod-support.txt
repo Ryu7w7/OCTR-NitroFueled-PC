@@ -120,6 +120,22 @@ Legacy full-game profiles under mod-state/extensions/profiles are never reused.
 New state lives in extensions/overlays and contains mod data/metadata, not a game
 copy. Separate user saves/shader caches remain, and are not original game content.
 
+BUILT-IN MODS
+scripts/builtin_mods holds format 2 packages that ship with the launcher, listed with
+the built-in mods and on by default (catalog isEnabled="true", ModBuiltin="1"); one wins
+over a copy of the same mod ID in the mods folder, and they cannot be removed, only
+turned off. Their assets are copy deltas (copy-delta-v1, payloads/*.delta.json), rebuilt
+from the player's own game files, so no game file is in the repository.
+  race-options    Ultimate Customizer (Kyouko8): laps to 250, three-digit HUD and menus,
+                  the long race clock, battle points/time/lives, the random cup; option
+                  "extra-cups" (on) adds its 25 Arcade cups and their stars.
+  custom-cup      Custom Cup (Kyouko8): a cup of four tracks of the player's choice.
+  extra-cups-art  The extra cups' pictures: built locally, not in the repository; used only
+                  with race-options and its extra cups on.
+tools/make_builtin_mods.py rebuilds them from the authors' release ZIPs and the game:
+  python tools/make_builtin_mods.py GAME_FOLDER ULTIMATE_CUSTOMIZER.zip CUSTOM_CUP.zip
+BB_BUILTIN_MODS names another folder, or none when empty.
+
 EXTERNAL CONTENT (TRACKS)
 Tracks added to the game, never replacing it, go in the custom_content folder beside
 the launcher (not in mods): ZIPs in the OCTR content format (scripts/content_package.py:
