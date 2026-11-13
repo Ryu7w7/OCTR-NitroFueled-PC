@@ -210,6 +210,23 @@ static int cup_result_count;
 static int cup_timer_pending;
 typedef void (ABI *MakeHandle)(void **, void *);
 static MakeHandle make_handle;
+static EventHandler original_navigation_input;
+typedef int (ABI *InputMask)(void *, int);
+static InputMask startup_input_mask;
+static unsigned char **startup_network;
+static void **startup_notice_type;
+static void *startup_behavior, *startup_owner, *startup_project;
+static void *startup_notice_target, *startup_notice_event;
+typedef void (ABI *QueueNotice)(void *, void *, int);
+static QueueNotice original_queue_notice;
+static int startup_notice_shown;
+static pthread_mutex_t startup_notice_lock = PTHREAD_MUTEX_INITIALIZER;
+static int startup_disconnected;
+static NativeEvent startup_release_event;
+static unsigned char startup_input[0x20];
+static uint64_t startup_requested_ms;
+static uint64_t monotonic_ms(void);
+static void startup_update(void);
 
 typedef void (ABI *LoadMap)(const char *, int);
 static LoadMap original_load_map;
@@ -489,6 +506,113 @@ static void assign_handle(unsigned char *field, void *value) {
             destroy_handle(&old);
     }
     memcpy(field, &value, sizeof value);
+}
+
+static int startup_state(void) {
+    int state = 0;
+    if (startup_network && *startup_network) memcpy(&state, *startup_network + 0x220, 4);
+    return state;
+}
+
+static void startup_cancel_input(void) {
+    assign_handle((unsigned char *)&startup_behavior, NULL);
+    assign_handle((unsigned char *)&startup_owner, NULL);
+    assign_handle((unsigned char *)&startup_project, NULL);
+}
+
+static void startup_cancel_notice(void) {
+    assign_handle((unsigned char *)&startup_notice_target, NULL);
+    void *event = startup_notice_event;
+    startup_notice_event = NULL;
+    if (event) startup_release_event(event);
+}
+
+/* LSG login can finish before bdNet's UPnP/NAT startup. Keep the native banner truthful. */
+static void ABI queue_startup_notice(void *target, void *event, int shown) {
+    void *kind = event ? ((GetType)pointer_at(pointer_at(event, 0), 0))(event) : NULL;
+    if (*startup_notice_type && kind == *startup_notice_type) {
+        int message;
+        memcpy(&message, (unsigned char *)event + 0x20, 4);
+        pthread_mutex_lock(&startup_notice_lock);
+        const int state = startup_state();
+        if (message == 1) {
+            startup_cancel_notice();
+            __atomic_store_n(&startup_disconnected, 1, __ATOMIC_RELEASE);
+        }
+        if (message == 0 && state == 2) startup_cancel_notice();
+        if (message == 0 && state != 2) {
+            if (!startup_notice_event && state >= 0) {
+                make_handle(&startup_notice_target, target);
+                __atomic_fetch_add((unsigned *)((unsigned char *)event + 8), 1, __ATOMIC_SEQ_CST);
+                startup_notice_event = event;
+                startup_notice_shown = shown;
+            }
+            pthread_mutex_unlock(&startup_notice_lock);
+            return;
+        }
+        pthread_mutex_unlock(&startup_notice_lock);
+    }
+    original_queue_notice(target, event, shown);
+}
+
+static void ABI navigation_input(unsigned char *self, void *event, void *owner) {
+    int action;
+    memcpy(&action, (unsigned char *)event + 0x18, 4);
+    int controllers;
+    memcpy(&controllers, (unsigned char *)event + 0x1c, 4);
+    const int accepted = controllers & startup_input_mask(pointer_at(owner, 0x20), 0);
+    if (accepted && startup_behavior && (action != 8 || handle_object(&startup_owner) != owner))
+        startup_cancel_input();
+    if (accepted && self[0x125] && action == 8 && startup_state() < 0) {
+        native_notice("Failed to initialize network, try again later", NULL);
+        return;
+    }
+    if (accepted && self[0x125] && action == 8 && startup_state() >= 0 && startup_state() < 2) {
+        if (!startup_behavior) {
+            make_handle(&startup_behavior, self);
+            make_handle(&startup_owner, owner);
+            make_handle(&startup_project, pointer_at(owner, 0x20));
+            memcpy(startup_input, event, sizeof startup_input);
+            startup_requested_ms = monotonic_ms();
+            puts("Online startup: waiting for native network readiness");
+        }
+        return;
+    }
+    original_navigation_input(self, event, owner);
+}
+
+static void startup_update(void) {
+    if (!startup_network) return;
+    const int state = startup_state();
+    if (__atomic_exchange_n(&startup_disconnected, 0, __ATOMIC_ACQ_REL)) startup_cancel_input();
+    pthread_mutex_lock(&startup_notice_lock);
+    if (startup_notice_event && (state == 2 || state < 0)) {
+        void *target_handle = startup_notice_target, *event = startup_notice_event;
+        const int shown = startup_notice_shown;
+        startup_notice_target = startup_notice_event = NULL;
+        pthread_mutex_unlock(&startup_notice_lock);
+        void *target = handle_object(&target_handle);
+        if (state == 2 && target && event) original_queue_notice(target, event, shown);
+        assign_handle((unsigned char *)&target_handle, NULL);
+        startup_release_event(event);
+    } else pthread_mutex_unlock(&startup_notice_lock);
+    if (!startup_behavior) return;
+    unsigned char *self = handle_object(&startup_behavior), *owner = handle_object(&startup_owner);
+    unsigned char *project = handle_object(&startup_project);
+    if (!self || !owner || !project || pointer_at(project, 0x50) != owner) {
+        startup_cancel_input();
+        return;
+    }
+    if (state == 0 || state == 1) {
+        if (monotonic_ms() - startup_requested_ms < 45000) return;
+        startup_cancel_input();
+        native_notice("Connection timed out. Please try Online again.", NULL);
+        return;
+    }
+    unsigned char input[sizeof startup_input];
+    memcpy(input, startup_input, sizeof input);
+    navigation_input(self, input, owner);
+    startup_cancel_input();
 }
 
 static void refresh_lobby_members_visibility(void) {
@@ -2483,6 +2607,7 @@ static void refresh_ranked_score(void) {
 }
 
 void runtime_online_mode_note_frame(void) {
+    startup_update();
     apply_pending_online_reset();
     refresh_ranked_score();
     if (hof_project) {
@@ -3813,6 +3938,16 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     else if (!strcmp(setting, "1277df0")) shift = 0x10;
     else return 0;
     if (size < 0x2af1fb0) return 0;
+    const char *online = getenv("BB_ONLINE");
+    const int startup = online && !strcmp(online, "1");
+    static const unsigned char navigation_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x78};
+    static const unsigned char upnp_default[] = {0x41,0xc6,0x87,0xe8,0,0,0,0};
+    static const unsigned char notice_prefix[] = {0x55,0x48,0x89,0xe5,0x53,0x48,0x83,0xec,0x48,
+        0x48,0x8b,0x1d,0x88,0xe0,0xdd,0x01};
+    if (startup && (memcmp(image + (0x125c7d0 - shift), navigation_prefix, sizeof navigation_prefix) ||
+                    memcmp(image + 0xa29000, notice_prefix, sizeof notice_prefix) ||
+                    memcmp(image + 0x195abd, upnp_default, sizeof upnp_default))) return 0;
     const unsigned char start_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x18};
     if (memcmp(image + (0x12108f0 - shift), start_prefix, sizeof start_prefix)) return 0;
     unsigned char start_guard[] = {0x4c,0x8b,0x3d,0x14,0x8b,0x94,0x01};
@@ -4129,6 +4264,20 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     original_record_lap = (RecordLap)(trampoline + 2240);
     complete_racer = (CompleteRacer)(image + (0xf351b0 - shift));
     stub_end = 2335;
+    if (startup) {
+        memcpy(trampoline + 2368, navigation_prefix, sizeof navigation_prefix);
+        jump_to(trampoline + 2368 + sizeof navigation_prefix,
+                image + (0x125c7d0 - shift) + sizeof navigation_prefix);
+        original_navigation_input = (EventHandler)(trampoline + 2368);
+        memcpy(trampoline + 2432, notice_prefix, 9);
+        memcpy(trampoline + 2441, "\x48\xbb", 2);
+        void *notice_guard = image + 0x2807098;
+        memcpy(trampoline + 2443, &notice_guard, 8);
+        memcpy(trampoline + 2451, "\x48\x8b\x1b", 3);
+        jump_to(trampoline + 2454, image + 0xa29010);
+        original_queue_notice = (QueueNotice)(trampoline + 2432);
+        stub_end = 2468;
+    }
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -4240,6 +4389,23 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     const unsigned char previous_boundary = 1;
     if (!write_code(image + (0x125e133 - shift), &previous_boundary, 1)) return 0;
     unsigned char jump[14];
+    startup_network = startup ? (unsigned char **)(image + 0x2a1a3d0) : NULL;
+    startup_input_mask = (InputMask)(image + 0x24a560);
+    startup_notice_type = (void **)(image + 0x2abfc10);
+    startup_release_event = (NativeEvent)(image + (0x149d260 - shift));
+    if (startup) {
+        jump_to(jump, navigation_input);
+        if (!write_code(image + (0x125c7d0 - shift), jump, sizeof jump)) return 0;
+        jump_to(jump, queue_startup_notice);
+        if (!write_code(image + 0xa29000, jump, sizeof jump)) return 0;
+        /* NAT probes and the port's tunnel remain active; explicit port mapping stays opt-in. */
+        const char *upnp_port = getenv("BB_UPNP_PORT");
+        if (!upnp_port || !*upnp_port) {
+            const unsigned char skip_upnp = 1;
+            if (!write_code(image + 0x195ac4, &skip_upnp, 1)) return 0;
+        }
+        puts("Native Online startup: one pending entry; Connected waits for NAT readiness");
+    }
     jump_to(jump, countdown_init);
     if (!write_code(image + (0xeb71d0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, individual_confetti);

@@ -247,7 +247,11 @@ static void ABI lobby_start_mock(unsigned char *self) {
     ++gate_native_calls;
     self[0x42] = 1; /* This is the broadcast's native one-shot latch. */
 }
+static int startup_failures;
 static void ABI gate_notice_mock(const char *text, void *callback) {
+    if (!strcmp(text, "Failed to initialize network, try again later")) {
+        assert(!callback); ++startup_failures; return;
+    }
     assert(!callback && ((strstr(text, "TEAMS WITH NO AI NEED") && strstr(text, "ENABLE AI")) ||
                         strstr(text, "synchroniz")));
     ++gate_notices;
@@ -370,6 +374,24 @@ static void direct_stub(unsigned char *at, void *function) {
     memcpy(at + 2, &function, 8);
     memcpy(at + 10, "\xff\xe0", 2);
 }
+static int startup_input_calls, startup_event_releases;
+static int startup_notice_calls;
+static void *startup_event_kind;
+static int ABI startup_mask(void *project, int unused) { assert(project && !unused); return 1; }
+static void *ABI startup_event_type(void *event) { (void)event; return startup_event_kind; }
+static void ABI startup_input_mock(unsigned char *self, void *event, void *owner) {
+    assert(self && owner && event);
+    ++startup_input_calls;
+}
+static void ABI startup_release_mock(unsigned char *event) {
+    assert(*(unsigned *)(event + 8) > 1);
+    --*(unsigned *)(event + 8);
+    ++startup_event_releases;
+}
+static void ABI startup_notice_mock(void *target, void *event, int shown) {
+    assert(target && event && shown == 1);
+    ++startup_notice_calls;
+}
 static int received_mode, received_settings_calls;
 static void ABI receive_settings(unsigned char *event) { ++received_settings_calls; memcpy(&received_mode, event + 0x3c, 4); }
 static unsigned char test_zones[4][0x1c0], test_handles[4][48];
@@ -477,6 +499,87 @@ static void ABI project_event_mock(void *self, void *event) {
 static void ABI broadcast_mock(void *layer, void *event) {
     (void)layer;
     if (broadcast_routes) project_event_mock(ready_target, event);
+}
+
+static void test_startup(unsigned char *image, size_t shift) {
+    unsigned char net[0x228] = {0}, behavior[0x138] = {0}, owner[0x100] = {0};
+    unsigned char project[0x400] = {0}, event[0x28] = {0};
+    unsigned char input[0x20] = {0};
+    void *vtable[] = {(void *)startup_event_type};
+    void (ABI *navigate)(unsigned char *, void *, void *) = (void *)(image + 0x125c7d0 - shift);
+    void (ABI *dispatch)(void *, void *, int) = (void *)(image + 0xa29000);
+    put_pointer(image, 0x2a1a3d0, net);
+    put_pointer(image, 0x2abfc10, (void *)0x300001);
+    put_pointer(owner, 0x20, project);
+    put_pointer(project, 0x50, owner);
+    behavior[0x125] = 1;
+    *(int *)(input + 0x18) = 8;
+    *(int *)(input + 0x1c) = 1;
+    *(int *)(net + 0x220) = 1;
+    int before = startup_input_calls, failures = startup_failures;
+    navigate(behavior, input, owner);
+    navigate(behavior, input, owner);
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 1);
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    put_pointer(project, 0x50, NULL);
+    runtime_online_mode_note_frame();
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 1);
+    put_pointer(project, 0x50, owner);
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    *(int *)(input + 0x18) = 9;
+    navigate(behavior, input, owner);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 2);
+    *(int *)(input + 0x18) = 8;
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    *(int *)(net + 0x220) = -2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 2 && startup_failures == failures + 1);
+    navigate(behavior, input, owner);
+    assert(startup_input_calls == before + 2 && startup_failures == failures + 2);
+    direct_stub(image + 0x149d260 - shift, startup_release_mock);
+    put_pointer(event, 0, vtable);
+    *(unsigned *)(event + 8) = 1;
+    put_pointer(event, 0x18, "Localized connected text");
+    startup_event_kind = (void *)0x300001;
+    *(int *)(net + 0x220) = 1;
+    int banners = startup_notice_calls, released = startup_event_releases;
+    dispatch(project, event, 1);
+    dispatch(project, event, 1);
+    assert(startup_notice_calls == banners && *(unsigned *)(event + 8) == 2);
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 1 && startup_event_releases == released + 1);
+    assert(*(unsigned *)(event + 8) == 1);
+    *(int *)(net + 0x220) = 1;
+    dispatch(project, event, 1);
+    *(int *)(event + 0x20) = 1;
+    dispatch(project, event, 1);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 2 && startup_event_releases == released + 2);
+    *(int *)(event + 0x20) = 0;
+    *(int *)(net + 0x220) = 1;
+    dispatch(project, event, 1);
+    *(int *)(net + 0x220) = -2;
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 2 && *(unsigned *)(event + 8) == 1);
+    put_pointer(image, 0x2a1a3d0, NULL);
+    direct_stub(image + 0x149d260 - shift, release_result_sound_mock);
 }
 static void ABI open_asset_mock(void **result, void *manager, void *asset,
                                 void *options, int player, void *context, float delay) {
@@ -996,7 +1099,21 @@ static void test_region(size_t shift) {
     direct_stub(image + 0x273fc0, member_update_mock);
     put_pointer(image, 0x2774d88, image + 0x1281810);
     put_pointer(image, 0x2774d98, image + 0x273fc0);
+    setenv("BB_ONLINE", "1", 1);
+    if (shift) setenv("BB_UPNP_PORT", "3074", 1); else unsetenv("BB_UPNP_PORT");
+    memcpy(image + 0x195abd, "\x41\xc6\x87\xe8\0\0\0\0", 8);
+    memcpy(image + 0x125c7d0 - shift, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x78", 17);
+    memcpy(image + 0x125c7e1 - shift, "\x48\x83\xc4\x78\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0x125c7ef - shift, startup_input_mock);
+    direct_stub(image + 0x24a560, startup_mask);
+    memcpy(image + 0xa29000, "\x55\x48\x89\xe5\x53\x48\x83\xec\x48\x48\x8b\x1d\x88\xe0\xdd\x01", 16);
+    memcpy(image + 0xa29010, "\x48\x83\xc4\x48\x5b\x5d", 6);
+    direct_stub(image + 0xa29016, startup_notice_mock);
     assert(runtime_online_mode_start(image, size));
+    assert(image[0x195ac4] == !shift);
+    test_startup(image, shift);
+    unsetenv("BB_ONLINE");
+    unsetenv("BB_UPNP_PORT");
     void (ABI *unload)(void *, unsigned char *, int, int) = (void *)(image + (0x14fb600 - shift));
     const unsigned char unload_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};

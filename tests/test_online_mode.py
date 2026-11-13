@@ -30,6 +30,32 @@ from prepare import parse_self
 
 class OnlineModeTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_native_online_startup_and_connected_banner(self):
+        elf, _, headers, *_ = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())
+        def native(address, size):
+            segment = next(p for p in headers if p['type'] == 1 and
+                           p['vaddr'] <= address and address + size <= p['vaddr'] + p['filesz'])
+            offset = segment['offset'] + address - segment['vaddr']
+            return bytes(elf[offset:offset + size])
+        shift = 0 if native(0x125c7d0, 4) == bytes.fromhex('55 48 89 e5') else 0x10
+        self.assertEqual(native(0x125c7d0 - shift, 17), bytes.fromhex(
+            '55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 78'))
+        self.assertEqual(native(0xa29000, 16), bytes.fromhex(
+            '55 48 89 e5 53 48 83 ec 48 48 8b 1d 88 e0 dd 01'))
+        self.assertEqual(native(0x195abd, 8), bytes.fromhex('41 c6 87 e8 00 00 00 00'))
+        # Native UPnP opt-out returns success without starting router discovery.
+        self.assertEqual(native(0x192cc5, 17), bytes.fromhex(
+            '41 80 7e 20 00 74 2c 41 c7 45 00 00 00 00 00 b0 01'))
+        self.assertEqual(native(0x1954e0, 7), bytes.fromhex('8b 87 20 02 00 00 c3'))
+        singleton = native(0xdbb1b, 7)
+        self.assertEqual(0xdbb22 + struct.unpack('<i', singleton[3:])[0], 0x2a1a3d0)
+        # The actual banner consumes this event type and kind +0x20, then localizes Connected.
+        banner_type = native(0x1284248 - shift, 7)
+        self.assertEqual(0x128424f - shift + struct.unpack('<i', banner_type[3:])[0], 0x2abfc10)
+        self.assertEqual(native(0x1284367 - shift, 3), bytes.fromhex('8b 42 20'))
+        self.assertEqual(native(0x1284392 - shift, 7), bytes.fromhex('4c 8b b0 90 02 00 00'))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_native_party_preserving_stop_and_return_sites(self):
         elf, _, headers, *_ = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())
         def native(address, size):
