@@ -172,6 +172,11 @@ own after the game's, "External Tracks", or go at the end of Bonus Tracks with
 "page": "bonus" in content-state/selection.json, which also turns packages, or all
 external content, off. Several tracks are on at once; a mod shipping a whole
 update3.pak cannot be on with external content.
+The launcher's Mods tab has an "External content" section, apart from the mods: the
+packages with a switch each, a switch for all external content, where the tracks go (their
+own page or the end of the last one), Add packages, Convert a track mod, Remove (moved to
+content-state/removed) and the folder. It reads the folder with scripts/content_cli.py
+(list, remove, convert) and writes content-state/selection.json itself.
 A classic track mod (its archives and a whole update3.pak) converts into a package:
   python scripts/content_convert.py GAME_FOLDER MOD.zip OUTPUT_FOLDER --zip
 It keeps the track's archives and new files and leaves out, and names, its changes to

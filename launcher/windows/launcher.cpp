@@ -4753,6 +4753,240 @@ bool ModActionIcon(const char* id, const char* tooltip, bool folder, float size)
     return clicked;
 }
 
+// ---- External content (scripts/content_cli.py, scripts/content_package.py) ----
+// Tracks (later racers and karts) added to the game, never replacing it: packages in the
+// custom_content folder beside the launcher. The launcher combines them with the rest when the
+// game starts (scripts/content_build.py). Its own section, apart from the mods: the switches
+// are kept in content-state/selection.json {"enabled", "disabled", "page"}, written here.
+struct ContentPackage {
+    std::string id, type, name, version, author, online, source, map, credits;
+    bool on = true;
+};
+struct ContentState {
+    std::future<Captured> listing, action;
+    std::vector<ContentPackage> packages;
+    std::vector<std::string> messages;
+    std::string page = "own", notice;
+    bool enabled = true, loaded = false, failed = false, converting = false;
+};
+ContentState g_content;
+
+fs::path ContentFolder() { return g_app.root / L"custom_content"; }
+
+std::wstring ContentCommand(const std::wstring& args) {
+    App& a = g_app;
+    return Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+        Quote((a.root / L"scripts" / L"content_cli.py").wstring()) + L" " + Quote(a.root.wstring()) + L" " + args;
+}
+
+void LoadContent() {
+    App& a = g_app;
+    if (!a.python || g_content.listing.valid()) return;
+    const auto exe = a.python->exe;
+    const auto root = a.root;
+    const std::wstring cmd = ContentCommand(L"list");
+    // The first look at a new ZIP unpacks it (a track is hundreds of MB): not on the UI thread.
+    g_content.listing = std::async(std::launch::async, [exe, cmd, root] { return RunCaptured(exe, cmd, root, 900000); });
+}
+
+void ReadContentListing(const Captured& r) {
+    ContentState& c = g_content;
+    c.loaded = true;
+    c.failed = !(r.started && r.code == 0);
+    if (c.failed) { if (!r.output.empty()) AddLog(r.output); return; }
+    c.packages.clear();
+    c.messages.clear();
+    std::stringstream ss(r.output);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::vector<std::string> f;
+        size_t at = 0;
+        while (true) {
+            const size_t tab = line.find('\t', at);
+            f.push_back(line.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+            if (tab == std::string::npos) break;
+            at = tab + 1;
+        }
+        if (f[0] == "selection" && f.size() >= 3) { c.enabled = f[1] == "1"; c.page = f[2]; }
+        else if (f[0] == "package" && f.size() >= 11)
+            c.packages.push_back({f[1], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[2] == "1"});
+        else if (f[0] == "message" && f.size() >= 2) c.messages.push_back(f[1]);
+    }
+}
+
+void SaveContentSelection() {
+    const ContentState& c = g_content;
+    std::string disabled;
+    for (const auto& p : c.packages) if (!p.on) disabled += (disabled.empty() ? "\"" : ", \"") + p.id + "\"";  // ids: [a-z0-9_]
+    std::error_code ec;
+    fs::create_directories(g_app.root / L"content-state", ec);
+    WriteTextAtomic(g_app.root / L"content-state" / L"selection.json",
+                    std::string("{\n  \"enabled\": ") + (c.enabled ? "true" : "false") + ",\n  \"disabled\": [" + disabled +
+                    "],\n  \"page\": \"" + (c.page == "bonus" ? "bonus" : "own") + "\"\n}\n");
+}
+
+void ContentAction(const std::wstring& args, bool converting) {
+    App& a = g_app;
+    if (!a.python || g_content.action.valid()) return;
+    const auto exe = a.python->exe;
+    const auto root = a.root;
+    const std::wstring cmd = ContentCommand(args);
+    g_content.converting = converting;
+    g_content.notice.clear();
+    g_content.action = std::async(std::launch::async, [exe, cmd, root] { return RunCaptured(exe, cmd, root, 1800000); });
+}
+
+void ImportContent(const std::vector<fs::path>& inputs) {
+    size_t added = 0;
+    std::error_code ec;
+    fs::create_directories(ContentFolder(), ec);
+    for (const auto& source : inputs) {
+        const fs::path destination = ContentFolder() / source.filename();
+        if (fs::exists(destination)) {
+            g_content.notice = T("Ya existe un paquete con ese nombre. No se ha sobrescrito.",
+                                 "A package with that filename already exists. It was not overwritten.");
+            continue;
+        }
+        fs::copy_file(source, destination, fs::copy_options::none, ec);
+        if (ec) { AddLog("External content import: " + ec.message()); g_content.notice = T("No se pudo añadir el paquete.", "Could not add the package."); }
+        else ++added;
+    }
+    if (added) LoadContent();
+}
+
+void ContentCard(ContentPackage& p, bool& changed, std::string& remove) {
+    const ImVec4 muted(.65f,.73f,.87f,1);
+    ImGui::PushID(p.id.c_str());
+    const bool on = p.on && g_content.enabled;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, on ? ImVec4(.075f,.19f,.38f,1) : ImVec4(.065f,.14f,.29f,1));
+    ImGui::PushStyleColor(ImGuiCol_Border, on ? ImVec4(.12f,.36f,.57f,1) : ImVec4(.12f,.21f,.36f,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 11);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(17,10));
+    ImGui::BeginChild("content_card", ImVec2(0,0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginDisabled(g_app.game_running || !g_content.enabled);
+    if (ModEnableToggle(p.on)) changed = true;
+    ImGui::EndDisabled();
+    ImGui::SameLine(0,18);
+    const float remove_width = ImGui::CalcTextSize(T("Quitar","Remove")).x + 20;
+    ImGui::BeginChild("summary", ImVec2(std::max(80.0f, ImGui::GetContentRegionAvail().x - remove_width - 12), 0),
+                      ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (g_font_heading) ImGui::PushFont(g_font_heading, 0);
+    ImGui::TextWrapped("%s", p.name.c_str());
+    if (g_font_heading) ImGui::PopFont();
+    const char* kind = p.type == "track" ? T("Pista", "Track") : p.type.c_str();
+    const char* online = p.online == "private" ? T("también en salas privadas", "also in private rooms")
+                                               : T("solo sin conexión", "offline only");
+    ImGui::TextColored(muted, "%s  ·  %s  ·  v%s  ·  %s  ·  %s", kind, p.author.c_str(), p.version.c_str(), online, p.id.c_str());
+    if (!p.credits.empty()) { ImGui::PushStyleColor(ImGuiCol_Text, muted); ImGui::TextWrapped("%s", p.credits.c_str()); ImGui::PopStyleColor(); }
+    ImGui::TextColored(muted, "custom_content/%s", p.source.c_str());
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_app.game_running || !g_app.python || g_content.action.valid());
+    if (ImGui::Button(T("Quitar","Remove"), ImVec2(remove_width, 0))) remove = p.id;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", T("Lo mueve a content-state/removed (no se borra).", "Moves it to content-state/removed (nothing is deleted)."));
+    ImGui::EndDisabled();
+    ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    ImGui::PopID();
+}
+
+void ContentSection() {
+    App& a = g_app;
+    ContentState& c = g_content;
+    const ImVec4 muted(.65f,.73f,.87f,1);
+    if (!c.loaded && !c.listing.valid()) LoadContent();
+    if (c.listing.valid() && c.listing.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        ReadContentListing(c.listing.get());
+    if (c.action.valid() && c.action.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        const Captured r = c.action.get();
+        if (!r.output.empty()) AddLog(r.output);
+        const bool ok = r.started && r.code == 0;
+        c.notice = c.converting
+            ? (ok ? T("Mod convertido: ya está en Contenido externo. Revisa el registro por los cambios que se dejaron fuera.",
+                      "Mod converted: it is in External content now. The log lists the changes left out.")
+                  : T("No se pudo convertir el mod. Revisa el registro.", "Could not convert the mod. Check the log."))
+            : (ok ? T("Paquete quitado (se movió a content-state/removed).", "Package removed (moved to content-state/removed).")
+                  : T("No se pudo quitar el paquete. Revisa el registro.", "Could not remove the package. Check the log."));
+        c.converting = false;
+        LoadContent();
+    }
+    ImGui::Dummy(ImVec2(0,14));
+    ImGui::AlignTextToFramePadding();
+    ModHeading(T("Contenido externo","External content"));
+    ImGui::SameLine(0,12);
+    ImGui::BeginDisabled(a.game_running || !c.loaded);
+    bool all = c.enabled;
+    if (ModEnableToggle(all)) { c.enabled = all; SaveContentSelection(); }
+    ImGui::EndDisabled();
+    ImGui::SameLine(0,8);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(muted, "%s", c.enabled ? T("activo", "on") : T("apagado: el juego no ve ningún paquete", "off: the game sees no package"));
+    ImGui::TextWrapped("%s", T("Los mods reemplazan partes del juego. El contenido externo se suma al juego: el launcher lo combina con lo demás.",
+                               "Mods replace parts of the game. External content is added to the game: the launcher combines it with the rest."));
+    ImGui::Spacing();
+    // Where the tracks go on the track menu.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(T("Pistas:", "Tracks:"));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(a.game_running || !c.loaded || !c.enabled);
+    if (ImGui::RadioButton(T("en su propia página, \"Pistas externas\"", "on a page of their own, \"External Tracks\""), c.page != "bonus")) {
+        c.page = "own"; SaveContentSelection();
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton(T("al final de la última página del juego", "at the end of the game's last page"), c.page == "bonus")) {
+        c.page = "bonus"; SaveContentSelection();
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::BeginDisabled(a.game_running || !a.python || c.action.valid());
+    if (ModActionIcon("##reload_content", T("Recargar contenido externo", "Reload external content"), false, 36.0f)) LoadContent();
+    ImGui::SameLine();
+    if (ModActionIcon("##open_content", T("Abrir carpeta custom_content", "Open the custom_content folder"), true, 36.0f)) {
+        std::error_code ec; fs::create_directories(ContentFolder(), ec); OpenInShell(ContentFolder());
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("Convertir mod de pista...", "Convert a track mod..."), ImVec2(0, 36.0f))) {
+        if (a.game_dir.empty() || !fs::is_regular_file(a.game_dir / L"eboot.bin"))
+            c.notice = T("Primero elige la carpeta del juego en Jugar.", "Choose the game folder in Play first.");
+        else {
+            const auto files = PickFiles(a.hwnd, L"Classic track mod", L"Mods (*.zip)", L"*.zip");
+            if (!files.empty())
+                ContentAction(L"convert " + Quote(a.game_dir.wstring()) + L" " + Quote(files.front().wstring()), true);
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete de contenido externo.\nSe dejan fuera sus cambios a archivos que usan todas las pistas.",
+                                  "A classic track mod (its .pak files and a whole update3.pak) becomes an external content package.\nIts changes to files every track uses are left out."));
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.17f,.72f,.94f,1));
+    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.02f,.10f,.20f,1));
+    if (ImGui::Button(T("+ Añadir paquetes", "+ Add packages"), ImVec2(0, 36.0f)))
+        ImportContent(PickFiles(a.hwnd, L"Add external content", L"Content packages (*.zip)", L"*.zip"));
+    ImGui::PopStyleColor(2);
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    if (c.listing.valid())
+        ImGui::TextColored(muted, "%s", T("Leyendo custom_content (la primera vez un paquete nuevo tarda: se descomprime)...",
+                                          "Reading custom_content (a new package takes a while the first time: it is unpacked)..."));
+    if (c.action.valid())
+        ImGui::TextColored(muted, "%s", c.converting ? T("Convirtiendo el mod (copia sus archivos; puede tardar un par de minutos)...",
+                                                         "Converting the mod (it copies its files; this can take a couple of minutes)...")
+                                                     : T("Quitando el paquete...", "Removing the package..."));
+    if (!c.notice.empty()) ImGui::TextColored(kYellow, "%s", c.notice.c_str());
+    if (c.failed) ImGui::TextColored(kYellow, "%s", T("No se pudo leer custom_content. Revisa el registro.", "Could not read custom_content. Check the log."));
+    for (const auto& m : c.messages) ImGui::TextColored(kYellow, "%s", m.c_str());
+    bool changed = false;
+    std::string remove;
+    for (auto& p : c.packages) ContentCard(p, changed, remove);
+    if (changed) SaveContentSelection();
+    if (c.loaded && c.packages.empty() && !c.listing.valid())
+        ImGui::TextColored(muted, "%s", T("No hay paquetes. Añade el .zip de una pista o convierte un mod de pista clásico.",
+                                          "No packages yet. Add a track's .zip or convert a classic track mod."));
+    if (!remove.empty()) ContentAction(L"remove " + Quote(Widen(remove)), false);
+}
+
 void ModsTab() {
     App& a = g_app;
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
@@ -4829,6 +5063,7 @@ void ModsTab() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    ContentSection();
     ModConfigurationDialog();
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);
