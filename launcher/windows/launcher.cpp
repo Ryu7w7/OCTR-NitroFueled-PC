@@ -674,6 +674,10 @@ struct PatchInfo {
     std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
     bool mod_builtin = false;  // a package shipped with the launcher (scripts/builtin_mods)
+    // The External content tab draws its cards with ModCard too: a package of custom_content
+    // (content_id), or the card of all external content (content_master).
+    std::string content_id;
+    bool content_master = false;
     const char* ini_key = nullptr;
 };
 
@@ -4218,6 +4222,7 @@ void OnlineTab() {
 }
 
 std::string PackagePatchId(const PatchInfo& patch) {
+    if (!patch.content_id.empty()) return patch.content_id;
     const std::string prefix = "OCTR-Mod-Library.xml/Mod: ";
     return patch.key.rfind(prefix, 0) == 0 ? patch.key.substr(prefix.size()) : std::string();
 }
@@ -4299,8 +4304,13 @@ void ImportMods(const std::vector<fs::path>& inputs) {
 }
 
 
+bool ContentIsOn(const PatchInfo& p);
+void SetContentOn(const PatchInfo& p, bool on);
+void ContentPageRow();
+
 bool ModIsOn(const PatchInfo& p) {
     const App& a = g_app;
+    if (!p.content_id.empty()) return ContentIsOn(p);
     if (p.ini_key) return a.game.Flag(p.ini_key, false);
     const bool enabled = std::find(a.patch_enabled.begin(), a.patch_enabled.end(), p.key) != a.patch_enabled.end();
     const bool disabled = std::find(a.patch_disabled.begin(), a.patch_disabled.end(), p.key) != a.patch_disabled.end();
@@ -4317,6 +4327,7 @@ bool VisibleMod(const PatchInfo& p) {
 
 void SetModOn(const PatchInfo& p, bool on) {
     App& a = g_app;
+    if (!p.content_id.empty()) { SetContentOn(p, on); return; }
     if (p.ini_key) { a.game.Set(p.ini_key, on ? "1" : "0"); SaveGameIni(); return; }
     auto drop = [&](std::vector<std::string>& v) { v.erase(std::remove(v.begin(), v.end(), p.key), v.end()); };
     drop(a.patch_enabled); drop(a.patch_disabled);
@@ -4663,7 +4674,8 @@ bool ModCard(const PatchInfo& p) {
         ImGui::TextWrapped("%s", p.mod_description.empty()
             ? T("El creador no ha añadido una descripción.","The creator has not provided a description.")
             : p.mod_description.c_str());
-        ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"mods/%s",p.mod_source.c_str());
+        if (!p.mod_source.empty())
+            ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),p.content_id.empty() ? "mods/%s" : "custom_content/%s",p.mod_source.c_str());
         if (!p.mod_versions.empty()) ImGui::TextWrapped("%s",p.mod_versions.c_str());
     }
     if (details && !package) {
@@ -4671,8 +4683,9 @@ bool ModCard(const PatchInfo& p) {
         if (!p.note.empty()) ImGui::TextWrapped("%s",p.note.c_str());
         ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"%s",p.key.c_str());
     }
-    if (p.mod_builtin) BuiltinStatusRow(PackagePatchId(p));
-    if (PackagePatchId(p) == "battle-point-limit-selector") CupArtRow();
+    if (p.mod_builtin && p.content_id.empty()) BuiltinStatusRow(PackagePatchId(p));
+    if (PackagePatchId(p) == "battle-point-limit-selector" && p.content_id.empty()) CupArtRow();
+    if (p.content_master) ContentPageRow();
     ImGui::EndChild();
     const float end_y = ImGui::GetCursorPosY();
     ImGui::SetCursorPos(ImVec2(right-action_width,top));
@@ -4848,54 +4861,58 @@ void ImportContent(const std::vector<fs::path>& inputs) {
                                  "A package with that filename already exists. It was not overwritten.");
             continue;
         }
-        fs::copy_file(source, destination, fs::copy_options::none, ec);
+        std::wstring extension = source.extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+        if (!fs::is_directory(source) && extension != L".zip") {
+            g_content.notice = T("Añade paquetes .zip o la carpeta de un paquete.", "Add .zip packages or a package's folder.");
+            continue;
+        }
+        if (fs::is_directory(source)) fs::copy(source, destination, fs::copy_options::recursive, ec);
+        else fs::copy_file(source, destination, fs::copy_options::none, ec);
         if (ec) { AddLog("External content import: " + ec.message()); g_content.notice = T("No se pudo añadir el paquete.", "Could not add the package."); }
         else ++added;
     }
     if (added) LoadContent();
 }
 
-void ContentCard(ContentPackage& p, bool& changed, std::string& remove) {
-    const ImVec4 muted(.65f,.73f,.87f,1);
-    ImGui::PushID(p.id.c_str());
-    const bool on = p.on && g_content.enabled;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, on ? ImVec4(.075f,.19f,.38f,1) : ImVec4(.065f,.14f,.29f,1));
-    ImGui::PushStyleColor(ImGuiCol_Border, on ? ImVec4(.12f,.36f,.57f,1) : ImVec4(.12f,.21f,.36f,1));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 11);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(17,10));
-    ImGui::BeginChild("content_card", ImVec2(0,0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::BeginDisabled(g_app.game_running || !g_content.enabled);
-    if (ModEnableToggle(p.on)) changed = true;
-    ImGui::EndDisabled();
-    ImGui::SameLine(0,18);
-    const float remove_width = ImGui::CalcTextSize(T("Quitar","Remove")).x + 20;
-    ImGui::BeginChild("summary", ImVec2(std::max(80.0f, ImGui::GetContentRegionAvail().x - remove_width - 12), 0),
-                      ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    if (g_font_heading) ImGui::PushFont(g_font_heading, 0);
-    ImGui::TextWrapped("%s", p.name.c_str());
-    if (g_font_heading) ImGui::PopFont();
-    const char* kind = p.type == "track" ? T("Pista", "Track") : p.type.c_str();
-    const char* online = p.online == "private" ? T("también en salas privadas", "also in private rooms")
-                                               : T("solo sin conexión", "offline only");
-    ImGui::TextColored(muted, "%s  ·  %s  ·  v%s  ·  %s  ·  %s", kind, p.author.c_str(), p.version.c_str(), online, p.id.c_str());
-    if (!p.credits.empty()) { ImGui::PushStyleColor(ImGuiCol_Text, muted); ImGui::TextWrapped("%s", p.credits.c_str()); ImGui::PopStyleColor(); }
-    ImGui::TextColored(muted, "custom_content/%s", p.source.c_str());
-    ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(g_app.game_running || !g_app.python || g_content.action.valid());
-    if (ImGui::Button(T("Quitar","Remove"), ImVec2(remove_width, 0))) remove = p.id;
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", T("Lo mueve a content-state/removed (no se borra).", "Moves it to content-state/removed (nothing is deleted)."));
-    ImGui::EndDisabled();
-    ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
-    ImGui::PopID();
+bool ContentIsOn(const PatchInfo& p) {
+    if (p.content_master) return g_content.enabled;
+    for (const auto& c : g_content.packages) if (c.id == p.content_id) return c.on && g_content.enabled;
+    return false;
 }
 
-void ContentSection() {
+void SetContentOn(const PatchInfo& p, bool on) {
+    if (p.content_master) g_content.enabled = on;
+    else {
+        if (on) g_content.enabled = true;  // a package turned on turns external content on
+        for (auto& c : g_content.packages) if (c.id == p.content_id) c.on = on;
+    }
+    SaveContentSelection();
+}
+
+/// On the External content card: where the tracks go on the track menu.
+void ContentPageRow() {
+    ContentState& c = g_content;
+    ImGui::Spacing();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImVec4(.65f,.73f,.87f,1), "%s", T("Pistas en el menú:", "Tracks on the menu:"));
+    ImGui::SameLine(0, 10);
+    const char* own = T("su propia página, \"Pistas externas\"", "a page of their own, \"External Tracks\"");
+    const char* bonus = T("al final de la última página del juego", "the end of the game's last page");
+    ImGui::SetNextItemWidth(std::min(360.0f, ImGui::GetContentRegionAvail().x));
+    ImGui::BeginDisabled(g_app.game_running || !c.loaded);
+    if (ImGui::BeginCombo("##content_page", c.page == "bonus" ? bonus : own)) {
+        if (ImGui::Selectable(own, c.page != "bonus")) { c.page = "own"; SaveContentSelection(); }
+        if (ImGui::Selectable(bonus, c.page == "bonus")) { c.page = "bonus"; SaveContentSelection(); }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+}
+
+/// The External content tab: the Mods tab's layout, for the packages of custom_content.
+void ContentTab() {
     App& a = g_app;
     ContentState& c = g_content;
-    const ImVec4 muted(.65f,.73f,.87f,1);
     if (!c.loaded && !c.listing.valid()) LoadContent();
     if (c.listing.valid() && c.listing.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
         ReadContentListing(c.listing.get());
@@ -4903,53 +4920,86 @@ void ContentSection() {
         const Captured r = c.action.get();
         if (!r.output.empty()) AddLog(r.output);
         const bool ok = r.started && r.code == 0;
-        c.notice = c.converting
-            ? (ok ? T("Mod convertido: ya está en Contenido externo. Revisa el registro por los cambios que se dejaron fuera.",
-                      "Mod converted: it is in External content now. The log lists the changes left out.")
+        a.notice = c.converting
+            ? (ok ? T("Mod convertido: ya está en tus paquetes. El registro dice qué cambios se dejaron fuera.",
+                      "Mod converted: it is in your packages now. The log lists the changes left out.")
                   : T("No se pudo convertir el mod. Revisa el registro.", "Could not convert the mod. Check the log."))
-            : (ok ? T("Paquete quitado (se movió a content-state/removed).", "Package removed (moved to content-state/removed).")
-                  : T("No se pudo quitar el paquete. Revisa el registro.", "Could not remove the package. Check the log."));
+            : (ok ? T("Paquete quitado. Se conserva una copia en content-state/removed.",
+                      "Package removed. A copy is kept in content-state/removed.")
+                  : T("No se pudo quitar el paquete. Revisa el registro y pulsa Recargar.",
+                      "Could not remove the package. Check the log and press Reload."));
         c.converting = false;
         LoadContent();
     }
+    if (!c.notice.empty()) { a.notice = c.notice; c.notice.clear(); }
+
+    // The same cards as the Mods tab (ModCard).
+    PatchInfo master;
+    master.key = "content:*";
+    master.content_id = "content";
+    master.content_master = true;
+    master.mod_builtin = true;
+    master.mod_name = T("Contenido externo", "External content");
+    master.author = T("pistas de custom_content", "tracks from custom_content");
+    master.mod_description = T("Los mods reemplazan partes del juego. El contenido externo se suma al juego: el launcher lo combina "
+                               "con lo demás al iniciar. Apagado, el juego no ve ningún paquete; cada uno conserva su interruptor.",
+                               "Mods replace parts of the game. External content is added to the game: the launcher combines it "
+                               "with the rest at start. Off, the game sees no package; each keeps its own switch.");
+    std::vector<PatchInfo> cards;
+    for (const auto& p : c.packages) {
+        PatchInfo card;
+        card.key = "content:" + p.id;
+        card.content_id = p.id;
+        card.mod_name = p.name;
+        card.author = p.author;
+        card.version = p.version;
+        card.mod_source = p.source;
+        std::string kind = p.type == "track" ? T("Pista", "Track") : p.type;
+        card.mod_description = kind + " " + p.id + ". " +
+            (p.online == "private" ? T("Sin conexión y en salas privadas.", "Offline and in private rooms.")
+                                   : T("Solo sin conexión.", "Offline only.")) +
+            (p.credits.empty() ? std::string() : "\n" + p.credits);
+        cards.push_back(std::move(card));
+    }
+    int on = 0;
+    for (const auto& card : cards) if (ContentIsOn(card)) ++on;
+
+    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));
+    ModHeading(T("General","General"));
+    ImGui::Spacing();
+    ModCard(master);
     ImGui::Dummy(ImVec2(0,14));
+    const float left=ImGui::GetCursorPosX();
+    const float right=ImGui::GetWindowContentRegionMax().x;
+    const float gap=ImGui::GetStyle().ItemSpacing.x;
+    const float icon_size=36.0f;
+    const float convert_width=ImGui::CalcTextSize(T("Convertir mod de pista","Convert track mod")).x+24;
+    const float folder_width=ImGui::CalcTextSize(T("Añadir carpeta","Add folder")).x+24;
+    const float files_width=ImGui::CalcTextSize(T("+ Añadir archivos","+ Add files")).x+28;
+    const float toolbar_width=icon_size*2+convert_width+folder_width+files_width+gap*4;
+    ImGui::BeginGroup();
     ImGui::AlignTextToFramePadding();
-    ModHeading(T("Contenido externo","External content"));
-    ImGui::SameLine(0,12);
-    ImGui::BeginDisabled(a.game_running || !c.loaded);
-    bool all = c.enabled;
-    if (ModEnableToggle(all)) { c.enabled = all; SaveContentSelection(); }
-    ImGui::EndDisabled();
-    ImGui::SameLine(0,8);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(muted, "%s", c.enabled ? T("activo", "on") : T("apagado: el juego no ve ningún paquete", "off: the game sees no package"));
-    ImGui::TextWrapped("%s", T("Los mods reemplazan partes del juego. El contenido externo se suma al juego: el launcher lo combina con lo demás.",
-                               "Mods replace parts of the game. External content is added to the game: the launcher combines it with the rest."));
-    ImGui::Spacing();
-    // Where the tracks go on the track menu.
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(T("Pistas:", "Tracks:"));
-    ImGui::SameLine();
-    ImGui::BeginDisabled(a.game_running || !c.loaded || !c.enabled);
-    if (ImGui::RadioButton(T("en su propia página, \"Pistas externas\"", "on a page of their own, \"External Tracks\""), c.page != "bonus")) {
-        c.page = "own"; SaveContentSelection();
+    ModHeading(T("Tus paquetes","Your packages")); ImGui::SameLine(0, 12);
+    ImGui::TextColored(ImVec4(.65f,.72f,.85f,1), T("%d de %d activos", "%d of %d on"), on, int(cards.size()));
+    ImGui::EndGroup();
+    const float heading_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
+    if (heading_end+24+toolbar_width<=right) ImGui::SameLine(right-toolbar_width);
+    else {
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(std::max(left,right-toolbar_width));
     }
-    ImGui::SameLine();
-    if (ImGui::RadioButton(T("al final de la última página del juego", "at the end of the game's last page"), c.page == "bonus")) {
-        c.page = "bonus"; SaveContentSelection();
-    }
-    ImGui::EndDisabled();
-    ImGui::Spacing();
+    ImGui::BeginGroup();
     ImGui::BeginDisabled(a.game_running || !a.python || c.action.valid());
-    if (ModActionIcon("##reload_content", T("Recargar contenido externo", "Reload external content"), false, 36.0f)) LoadContent();
+    if (ModActionIcon("##reload_content",T("Recargar paquetes","Reload packages"),false,icon_size)) LoadContent();
     ImGui::SameLine();
-    if (ModActionIcon("##open_content", T("Abrir carpeta custom_content", "Open the custom_content folder"), true, 36.0f)) {
-        std::error_code ec; fs::create_directories(ContentFolder(), ec); OpenInShell(ContentFolder());
+    if (ModActionIcon("##open_content",T("Abrir carpeta custom_content","Open the custom_content folder"),true,icon_size)) {
+        std::error_code ec; fs::create_directories(ContentFolder(),ec); OpenInShell(ContentFolder());
     }
     ImGui::SameLine();
-    if (ImGui::Button(T("Convertir mod de pista...", "Convert a track mod..."), ImVec2(0, 36.0f))) {
+    if (ImGui::Button(T("Convertir mod de pista","Convert track mod"),ImVec2(convert_width,icon_size))) {
         if (a.game_dir.empty() || !fs::is_regular_file(a.game_dir / L"eboot.bin"))
-            c.notice = T("Primero elige la carpeta del juego en Jugar.", "Choose the game folder in Play first.");
+            a.notice = T("Primero elige la carpeta del juego en Jugar.", "Choose the game folder in Play first.");
         else {
             const auto files = PickFiles(a.hwnd, L"Classic track mod", L"Mods (*.zip)", L"*.zip");
             if (!files.empty())
@@ -4957,34 +5007,62 @@ void ContentSection() {
         }
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete de contenido externo.\nSe dejan fuera sus cambios a archivos que usan todas las pistas.",
-                                  "A classic track mod (its .pak files and a whole update3.pak) becomes an external content package.\nIts changes to files every track uses are left out."));
+        ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete.\n"
+                                  "Se dejan fuera sus cambios a archivos que usan todas las pistas.",
+                                  "A classic track mod (its .pak files and a whole update3.pak) becomes a package.\n"
+                                  "Its changes to files every track uses are left out."));
+    ImGui::SameLine();
+    if (ImGui::Button(T("Añadir carpeta","Add folder"),ImVec2(folder_width,icon_size)))
+        if (const auto folder=PickFolder(a.hwnd,L"Add a content package folder",fs::path())) ImportContent({*folder});
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.17f,.72f,.94f,1));
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.02f,.10f,.20f,1));
-    if (ImGui::Button(T("+ Añadir paquetes", "+ Add packages"), ImVec2(0, 36.0f)))
-        ImportContent(PickFiles(a.hwnd, L"Add external content", L"Content packages (*.zip)", L"*.zip"));
-    ImGui::PopStyleColor(2);
-    ImGui::EndDisabled();
+    if (ImGui::Button(T("+ Añadir archivos","+ Add files"),ImVec2(files_width,icon_size)))
+        ImportContent(PickFiles(a.hwnd,L"Add external content",L"Content packages (*.zip)",L"*.zip"));
+    ImGui::PopStyleColor(2); ImGui::EndDisabled();
+    ImGui::EndGroup();
     ImGui::Spacing();
+    const ImVec4 muted(.65f,.73f,.87f,1);
     if (c.listing.valid())
-        ImGui::TextColored(muted, "%s", T("Leyendo custom_content (la primera vez un paquete nuevo tarda: se descomprime)...",
+        ImGui::TextColored(muted, "%s", T("Leyendo custom_content (un paquete nuevo tarda la primera vez: se descomprime)...",
                                           "Reading custom_content (a new package takes a while the first time: it is unpacked)..."));
     if (c.action.valid())
         ImGui::TextColored(muted, "%s", c.converting ? T("Convirtiendo el mod (copia sus archivos; puede tardar un par de minutos)...",
                                                          "Converting the mod (it copies its files; this can take a couple of minutes)...")
                                                      : T("Quitando el paquete...", "Removing the package..."));
-    if (!c.notice.empty()) ImGui::TextColored(kYellow, "%s", c.notice.c_str());
     if (c.failed) ImGui::TextColored(kYellow, "%s", T("No se pudo leer custom_content. Revisa el registro.", "Could not read custom_content. Check the log."));
     for (const auto& m : c.messages) ImGui::TextColored(kYellow, "%s", m.c_str());
-    bool changed = false;
     std::string remove;
-    for (auto& p : c.packages) ContentCard(p, changed, remove);
-    if (changed) SaveContentSelection();
-    if (c.loaded && c.packages.empty() && !c.listing.valid())
-        ImGui::TextColored(muted, "%s", T("No hay paquetes. Añade el .zip de una pista o convierte un mod de pista clásico.",
-                                          "No packages yet. Add a track's .zip or convert a classic track mod."));
-    if (!remove.empty()) ContentAction(L"remove " + Quote(Widen(remove)), false);
+    for (const auto& card : cards) if (ModCard(card)) remove = card.content_id;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0.015f,0.13f,0.32f,0.82f));
+    ImGui::PushStyleColor(ImGuiCol_Border,ImVec4(.18f,.29f,.44f,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,11);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(18,17));
+    ImGui::BeginChild("content_drop_area",ImVec2(0,0),ImGuiChildFlags_Borders|ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysUseWindowPadding);
+    const auto centered = [](const char* text) {
+        const float available=ImGui::GetContentRegionAvail().x;
+        const float width=ImGui::CalcTextSize(text).x;
+        if (width<available) ImGui::SetCursorPosX(ImGui::GetCursorPosX()+(available-width)*.5f);
+        ImGui::TextWrapped("%s",text);
+    };
+    centered(T("Añade paquetes .zip o la carpeta de un paquete con los botones de arriba.",
+               "Use the buttons above to add .zip packages or a package's folder."));
+    centered(T("Se copian a la carpeta custom_content junto al launcher.","They're copied into the custom_content folder next to the launcher."));
+    centered(T("¿Un mod de pista clásico? Usa Convertir mod de pista.","A classic track mod? Use Convert track mod."));
+    ImGui::Spacing();
+    const char* guide=T("Lee el formato de los paquetes","Read the package format");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
+    if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-support.txt");
+    const char* gamebanana=T("Buscar pistas en GameBanana","Find tracks on GameBanana");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
+    if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
+    const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
+    if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
+    ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar el contenido externo.","Close the game to change external content."));
+    ImGui::PopStyleColor(2);
+    if (!remove.empty() && !c.action.valid()) ContentAction(L"remove " + Quote(Widen(remove)), false);
 }
 
 void ModsTab() {
@@ -5063,7 +5141,6 @@ void ModsTab() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
-    ContentSection();
     ModConfigurationDialog();
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);
@@ -7961,6 +8038,9 @@ void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
     } else if (id == 7) { // crate
         d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
         d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
+    } else if (id == 10) { // a track piece with a plus: content added to the game
+        d->AddRectFilled({c.x-8*s,c.y-8*s},{c.x+8*s,c.y+8*s},navy,3*s); d->AddRectFilled({c.x-6*s,c.y-6*s},{c.x+6*s,c.y+6*s},ink,2*s);
+        d->AddLine({c.x-3.5f*s,c.y},{c.x+3.5f*s,c.y},navy,2.4f*s); d->AddLine({c.x,c.y-3.5f*s},{c.x,c.y+3.5f*s},navy,2.4f*s);
     } else { // crossed tools
         line({c.x-7*s,c.y-7*s},{c.x+7*s,c.y+7*s},3); line({c.x+7*s,c.y-7*s},{c.x-7*s,c.y+7*s},3); d->AddCircleFilled(c,2.5f*s,ink,12);
     }
@@ -8048,8 +8128,11 @@ void Frame() {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
     const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
                            T("Teclado", "Keyboard"), "Mods", T("Guardados", "Saves"), "DLC",
-                           T("Logros", "Achievements"), T("Herramientas", "Tools")};
-    for (int i=0; i<10; ++i) {
+                           T("Logros", "Achievements"), T("Herramientas", "Tools"),
+                           T("Contenido externo", "External content")};
+    // External content (page 10) goes right after Mods; pages keep their numbers.
+    const int order[] = {0, 1, 2, 3, 4, 5, 10, 6, 7, 8, 9};
+    for (const int i : order) {
         ImGui::SetCursorPosX(8.0f);
         if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
             a.active_page = i;
@@ -8078,6 +8161,7 @@ void Frame() {
     case 6: SavesTab(); break;
     case 7: DlcTab(); break;
     case 8: TrophiesTab(); break;
+    case 10: ContentTab(); break;
     default: ToolsTab(); break;
     }
     ImGui::PopStyleColor();
