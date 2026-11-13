@@ -295,6 +295,12 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
+    if (sel.graphics_key.no_motion_blur) {
+        auto& module = sel.modules[static_cast<u32>(Shader::SwStage::Fragment)];
+        const auto it = blur_variants.find(module);
+        if (it == blur_variants.end()) return false;
+        module = *it->second;
+    }
     auto pipeline = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
         sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, true);
@@ -338,13 +344,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     // bbport: a module the driver rejects is a damaged entry (WarmUp rebuilds the cache), not a
     // fatal error as in CompileSPV.
     const auto compile = [&] {
-        const auto hud = BbHud::ForModule(program->info.pgm_hash, perm_idx, spv);
+        const auto hud = BbHud::ForModule(program->info.pgm_hash, perm_idx, spv, false);
         const auto& code = hud ? *hud : spv; // the cache keeps the shader as it is
         auto [result, created] = instance.GetDevice().createShaderModule(
             {.codeSize = code.size() * sizeof(u32), .pCode = code.data()});
         if (result != vk::Result::eSuccess) {
             throw Serialization::CorruptData{"cached SPIR-V rejected by the driver"};
         }
+        CreateBlurVariant(created, program->info.pgm_hash, code);
         return created;
     };
 
@@ -777,6 +784,7 @@ void PipelineCache::PrebuildFromRecipe() {
         instance.GetDevice().destroyShaderModule(vk::ShaderModule{module});
     }
     program_cache.clear();
+    blur_variants.clear();
 
     WriteText(marker, id_text + "\n");
     const auto now = std::chrono::steady_clock::now();
@@ -905,6 +913,7 @@ void PipelineCache::WarmUp() {
             instance.GetDevice().destroyShaderModule(vk::ShaderModule{module});
         }
         program_cache.clear();
+        blur_variants.clear();
         Storage::DataBase::Instance().Clear();
         Storage::DataBase::Instance().FinishPreload();
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",

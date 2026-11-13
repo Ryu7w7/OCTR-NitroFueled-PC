@@ -22,6 +22,7 @@ usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
 """
 import argparse
 from contextlib import ExitStack
+import hashlib
 import lzma
 import struct
 import sys
@@ -29,6 +30,7 @@ import zlib
 from pathlib import Path
 
 from mod_components import long_path
+import quit_confirmation
 
 # Searched newest first: the first archive that has a file wins.
 ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak',
@@ -41,7 +43,6 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 37  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -407,6 +408,7 @@ def own_quit_level(blob, wireless):
     if len(mine) != 1 or others < 1:
         raise ValueError(f'Octane_MainMenu.igz: Wireless level references {len(mine)}, others {others}')
     igz.set_u64(mine[0], igz.string_index(QUIT_LEVEL[1][:-1].decode()))
+    quit_confirmation.bind(igz, owner(mine[0])[0])
     out = igz.build()
     check = Igz(out)
     if (check.strings[check.u64(mine[0])] != QUIT_LEVEL[1][:-1].decode() or
@@ -419,6 +421,7 @@ def own_quit_level(blob, wireless):
 OPTIONAL = {f'ui/octane_mainmenu_{lang}.lng': quit_labels(*labels)
             for lang, labels in QUIT_LABELS.items()}
 OPTIONAL['ui/octane_mainmenu.igz'] = show_quit
+OPTIONAL[quit_confirmation.SOURCE] = quit_confirmation.graph
 # The main menu's root script handles Wireless by name (hidden off the Switch): the name matches
 # nothing now, as with the Graphics tab.
 OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
@@ -486,6 +489,9 @@ def build(game, dest, dump, *, asset_transform=None):
                 for low in sorted(quit_required):
                     archive, i, name = found[low]
                     full, logical = archive.names[i]
+                    if low == quit_confirmation.SOURCE:
+                        full = full.replace(quit_confirmation.ORIGINAL, quit_confirmation.NAME)
+                        logical = logical.replace(quit_confirmation.ORIGINAL, quit_confirmation.NAME)
                     quit_files.append((full, logical, archive.infos[i][1] & ~0xFF,
                                        OPTIONAL[low](source(archive, i, name, low))))
                 files += quit_files
@@ -517,15 +523,22 @@ def main():
     if (args.game / OUTPUT).exists():
         print(f'Graphics tab: the game already has {OUTPUT}, off')
         return
-    stamp = '-'.join(f'{(args.game / "archives" / a).stat().st_size}'
-                     for a in ARCHIVES if (args.game / 'archives' / a).is_file())
+    stamp = hashlib.sha256(repr([
+        (a, str((args.game / 'archives' / a).resolve()),
+         (args.game / 'archives' / a).stat().st_size,
+         (args.game / 'archives' / a).stat().st_mtime_ns,
+         (args.game / 'archives' / a).stat().st_ctime_ns)
+        for a in ARCHIVES if (args.game / 'archives' / a).is_file()]).encode()).hexdigest()[:16]
     folder = args.out / 'graphics-tab'
-    dest = folder / f'update3-v{VERSION}-{stamp}.pak'
+    scripts = Path(__file__).resolve().parent
+    digest = hashlib.sha256(b''.join((scripts / name).read_bytes() for name in
+        ('graphics_tab.py', 'graphics_widgets.py', 'igz_file.py', 'quit_confirmation.py'))).hexdigest()[:16]
+    dest = folder / f'update3-{digest}-{stamp}.pak'
     try:
         if not dest.is_file():
-            for old in folder.glob('*.pak'):
-                old.unlink()
             build(args.game, dest, folder / 'dump')
+        from cache_cleanup import discard_files
+        discard_files(folder, [old for old in folder.glob('update3-*.pak') if old != dest])
     except (OSError, ValueError, lzma.LZMAError, zlib.error) as error:
         print(f'Graphics tab: {error}, off')
         return

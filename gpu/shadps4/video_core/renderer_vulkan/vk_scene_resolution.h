@@ -26,7 +26,10 @@ public:
     ~SceneTargets();
     bool SetSize(SceneResolution::Size);
     SceneResolution::Size Size() const { return size; }
-    bool Reduced() const { return size != SceneResolution::Size{}; }
+    SceneResolution::Size NativeSize() const { return native_size; }
+    void SetNativeSize(SceneResolution::Size);
+    u32 ShaderSize() const;
+    bool Reduced() const { return size != native_size; }
     /// A reduced proxy can stand in for the image: a 1920x1080 scene target or, scaled by
     /// the same factor, a half-resolution (960x540) one (toggle SceneHalfRes).
     bool Eligible(const VideoCore::Image&) const;
@@ -91,7 +94,7 @@ private:
     bool ShaderResampled(const VideoCore::Image&) const;
     void Resample(vk::Image src, vk::Image dst, const VideoCore::Image& original,
                   vk::Extent2D dst_size);
-    vk::Pipeline ResamplePipeline(vk::Format, bool stencil);
+    vk::Pipeline ResamplePipeline(vk::Format, bool stencil, u32 samples = 1, bool depth = true);
     void CreateResampleResources();
     void Transition(Entry&, vk::ImageAspectFlags, vk::ImageLayout,
                     vk::PipelineStageFlags2, vk::AccessFlags2);
@@ -99,7 +102,7 @@ private:
     Scheduler& scheduler;
     Runtime& runtime;
     Lookup lookup;
-    SceneResolution::Size size;
+    SceneResolution::Size size, native_size;
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
     bool copying = false;
@@ -111,8 +114,9 @@ private:
     std::array<std::pair<u64, Entry*>, 8> recent{}; ///< last entries by Key
     u32 recent_next = 0;
     vk::UniqueShaderModule fs_tri_vert, depth_frag, depth_stencil_frag, stencil_bits_frag;
+    vk::UniqueShaderModule ms_color_frag, ms_depth_frag, ms_stencil_frag, ms_bits_frag;
     vk::UniqueDescriptorSetLayout resample_set_layout;
     vk::UniquePipelineLayout resample_layout;
-    std::vector<std::pair<std::pair<vk::Format, bool>, vk::UniquePipeline>> resample_pipelines;
+    std::vector<std::pair<std::tuple<vk::Format, bool, u32, bool>, vk::UniquePipeline>> resample_pipelines;
 };
 } // namespace Vulkan

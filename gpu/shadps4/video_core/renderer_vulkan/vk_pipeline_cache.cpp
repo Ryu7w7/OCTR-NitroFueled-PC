@@ -436,6 +436,18 @@ struct PipelineCache::PendingPipeline {
 
 PipelineCache::~PipelineCache() = default;
 
+void PipelineCache::CreateBlurVariant(vk::ShaderModule module, u64 hash, std::span<const u32> spv) {
+    if (std::ranges::find(BbBlur::Shaders, hash) == std::end(BbBlur::Shaders)) return;
+    if (auto code = BbBlur::Unblur(spv)) {
+        blur_variants.insert_or_assign(module, vk::UniqueShaderModule(
+            CompileSPV(*code, instance.GetDevice()), instance.GetDevice()));
+        std::printf("Motion blur: shader %llx live variant ready\n", static_cast<unsigned long long>(hash));
+    } else {
+        std::printf("Motion blur: shader %llx has no matching blur branch; live variant unavailable\n",
+                    static_cast<unsigned long long>(hash));
+    }
+}
+
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.
 std::atomic<u64> g_bb_compile_ns;
 std::atomic<u32> g_bb_compiles;
@@ -966,6 +978,15 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     sel.modules.fill(nullptr);
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    key.no_motion_blur = false;
+    if (!sel.worker && (BbSettings::Get().shad_live_graphics ?
+                        BbSettings::Get().game_patches[1].load() : BbBlur::Enabled())) {
+        const auto it = blur_variants.find(sel.modules[static_cast<u32>(SwStage::Fragment)]);
+        if (it != blur_variants.end()) {
+            key.no_motion_blur = true;
+            sel.modules[static_cast<u32>(SwStage::Fragment)] = *it->second;
+        }
+    }
 
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -1087,12 +1108,13 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
-    } else if (const auto hud = BbHud::ForModule(info.pgm_hash, perm_idx, spv)) {
+    } else if (const auto hud = BbHud::ForModule(info.pgm_hash, perm_idx, spv, false)) {
         module = CompileSPV(*hud, instance.GetDevice()); // the cache keeps the shader as it is
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }
 
+    CreateBlurVariant(module, info.pgm_hash, is_patched ? std::span<const u32>(*patch) : std::span<const u32>(spv));
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
@@ -1110,6 +1132,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.worker) {
+        if (std::ranges::find(BbBlur::Shaders, params.hash) != std::end(BbBlur::Shaders)) {
+            sel.worker->failed = true;
+            return {};
+        }
         // bbport: draw-preparation worker: look up only, with the worker's own Info copy.
         auto& worker = *sel.worker;
         std::shared_lock lk{programs_mutex};

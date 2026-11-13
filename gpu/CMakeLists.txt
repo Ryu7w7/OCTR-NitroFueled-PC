@@ -159,6 +159,10 @@ add_host_shader(buffer_multi_copy.comp buffer_multi_copy_comp)
 add_host_shader(depth_resample.frag depth_resample_frag)
 add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
 add_host_shader(depth_resample.frag depth_stencil_bits_frag STENCIL_BITS=1)
+add_host_shader(depth_resample.frag depth_ms_resample_frag MSAA=1)
+add_host_shader(depth_resample.frag depth_stencil_ms_resample_frag MSAA=1 HAS_STENCIL=1)
+add_host_shader(depth_resample.frag depth_stencil_ms_bits_frag MSAA=1 STENCIL_BITS=1)
+add_host_shader(ms_image_blit.frag ms_resample_frag SRC_MSAA=1 RESAMPLE=1)
 add_host_shader(camera_motion.comp camera_motion_debug_comp DEBUG_OVERLAY=1)
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)
@@ -333,6 +337,21 @@ if (NOT WIN32)
     set_source_files_properties(../tests/test_native_texture_batch.cpp PROPERTIES
         COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
     target_link_libraries(native-texture-batch-test PRIVATE bbgpu)
+    add_executable(native-live-graphics-test EXCLUDE_FROM_ALL
+        ../tests/test_native_live_graphics.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(native-live-graphics-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(native-live-graphics-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_native_live_graphics.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(native-live-graphics-test PRIVATE bbgpu)
+    set(BLUR_TEST_VERTEX ${CMAKE_CURRENT_BINARY_DIR}/motion-blur-test.vert.spv)
+    add_custom_command(OUTPUT ${BLUR_TEST_VERTEX}
+        COMMAND ${GLSLANG_COMPILER} --target-env vulkan1.3 -V
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_motion_blur.vert -o ${BLUR_TEST_VERTEX}
+        DEPENDS ../tests/test_motion_blur.vert VERBATIM)
+    add_custom_target(motion-blur-test-shader DEPENDS ${BLUR_TEST_VERTEX})
+    add_dependencies(native-live-graphics-test motion-blur-test-shader)
+    target_compile_definitions(native-live-graphics-test PRIVATE BLUR_TEST_VERTEX="${BLUR_TEST_VERTEX}")
     add_executable(native-shader-async-test EXCLUDE_FROM_ALL
         ../tests/test_native_shader_async.cpp ../tests/test_gpu_runtime_stubs.cpp)
     target_include_directories(native-shader-async-test PRIVATE shim shadps4 third_party/gcn/include)

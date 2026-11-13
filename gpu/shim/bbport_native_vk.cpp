@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_native_vk.h"
+#include "bbport_live_graphics.h"
+#include "bbport_settings.h"
 
 #include <algorithm>
 #include <array>
@@ -109,6 +111,7 @@ struct ShaderInfo {
     std::vector<u32> ubo_slots; // b# of its uniform buffers, ascending (dynamic offset order)
     u32 input_locations = 0;
     VkShaderModule module = VK_NULL_HANDLE;
+    VkShaderModule no_blur_module = VK_NULL_HANDLE;
     std::unordered_map<u64, VkShaderModule> variants; // integer inputs: uint mask | sint mask << 32
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     bool load_tried = false;
@@ -132,6 +135,8 @@ struct Target {
     VkImageView view_array = VK_NULL_HANDLE; // sampled as a one-slice 2D array
     u32 comp_swap = 0; // CB_COLOR_INFO.COMP_SWAP: channel order the engine writes in
     u64 bytes = 0;
+    u32 native_w = 0, native_h = 0;
+    float scale = 1.0f;
     // the game wrote or freed the target's memory (a video decoded where a menu target was): the
     // texture there is read from memory until the GPU draws to the target again
     std::atomic<bool> written_over{false};
@@ -214,6 +219,10 @@ u64 image_base = 0;
 bool enabled = false;
 bool drawing = false; // stage 5 on (BB_VK_DRAW != 0) and the recorder is up
 bool show = false;    // BB_VK_SHOW=1
+bool live_patch_ready = false;
+u32 live_height = 0, requested_height = 0;
+u32 native_scene_w = 0, native_scene_h = 0;
+bool native_gbuffer_open = false;
 std::atomic<bool> alone{false}; // BB_VK_ALONE=1: shadPS4 draws nothing
 // Vertex streams are copied at each draw (default): the game rewrites its vertex memory before
 // our recorded frame runs on the GPU, so reading in place shows later data. BB_VK_VERTEX_COPY=0
@@ -577,13 +586,19 @@ void LoadModule(ShaderInfo& s) {
     // the guest program by its OrbShdr hash, which the dumped GCN program carries
     if (!s.native && (!BbHud::Entries().empty() || BbBlur::Enabled())) {
         if (const u64 pgm = GuestProgramHash(s.name)) {
-            if (auto changed = BbHud::ForModule(pgm, 0, s.code)) {
+            if (auto changed = BbHud::ForModule(pgm, 0, s.code, false)) {
                 s.code = std::move(*changed);
             }
         }
     }
     slow_load.prepared = LoadClock::now();
     s.module = MakeModule(*inst, s.code);
+    if (!s.native) {
+        const u64 pgm = GuestProgramHash(s.name);
+        if (std::find(std::begin(BbBlur::Shaders), std::end(BbBlur::Shaders), pgm) != std::end(BbBlur::Shaders)) {
+            if (auto code = BbBlur::Unblur(s.code)) s.no_blur_module = MakeModule(*inst, *code);
+        }
+    }
     if (!s.module) {
         modules_failed.fetch_add(1, std::memory_order_relaxed);
         std::printf("Native Vulkan: %s: vkCreateShaderModule failed\n", s.name.c_str());
@@ -884,6 +899,7 @@ struct CopyPacket {
     Target* dst = nullptr;
     bool from_depth = false, same_format = false;
     u32 sx = 0, dx = 0, w = 0, h = 0, src_bytes = 0;
+    u32 dst_w = 0, dst_h = 0;
     s32 s_top = 0, d_top = 0;
 };
 
@@ -953,6 +969,22 @@ u64 recording_seq = 0; // Batch::seq of the batch being recorded (recorder side)
 void OpenBatch(Batch* b) {
     open_batch = b;
     b->seq = ++batch_seq;
+    const auto& settings = BbSettings::Get();
+    const int res = settings.render_res >= 0 ? settings.render_res.load() : settings.startup_render_res;
+    requested_height = settings.native_resolution_requested ?
+        (res >= 0 ? BbSettings::RenderResHeights[res] : 1080) : 0;
+    if (settings.temporal == BbSettings::TemporalDlss && settings.dlss_quality > 0) {
+        constexpr float ratios[] = {1, 1, 2.0f/3, 0.58f, 0.5f, 1.0f/3};
+        if (settings.startup_temporal != BbSettings::TemporalDlss ||
+            settings.dlss_quality != settings.startup_dlss_quality || settings.native_resolution_requested) {
+            const u64 device = image_base ? Q(image_base + DeviceGlobal) : 0;
+            const u32 output = device ? R<u32>(device + 0x544) : 0;
+            requested_height = BbLiveGraphics::Extent(output ? output : settings.dlss_output ? 2160 : 1080,
+                                                       ratios[settings.dlss_quality.load()]);
+        }
+    } else if (settings.startup_temporal == BbSettings::TemporalDlss && settings.startup_dlss_quality > 0) {
+        requested_height = res >= 0 ? BbSettings::RenderResHeights[res] : 1080;
+    }
 }
 
 /// A draw, clear or submission as the game's thread hands it to the capture thread: the engine
@@ -1227,11 +1259,22 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     if (!inst) {
         return nullptr;
     }
+    const u32 native_w = w, native_h = h;
+    float scale = 1.0f;
+    const auto& settings = BbSettings::Get();
+    if (settings.native_live_graphics && native_scene_w && native_scene_h) {
+        scale = BbLiveGraphics::SceneScale(w, h, native_scene_h, live_height,
+                    Vulkan::FrameCapture::IsDisplayBuffer(base), format == vk::Format::eD16Unorm,
+                    native_scene_w);
+        w = BbLiveGraphics::Extent(w, scale);
+        h = BbLiveGraphics::Extent(h, scale);
+    }
     std::unique_ptr<Target>& slot = targets[base];
-    if (slot && slot->img.width == w && slot->img.height == h && slot->img.format == format) {
+    if (slot && slot->img.width == w && slot->img.height == h && slot->img.format == format &&
+        slot->native_w == native_w && slot->native_h == native_h && slot->scale == scale) {
         if (slot->written_over.load(std::memory_order_acquire)) { // drawn to again: ours again
             slot->written_over.store(false, std::memory_order_relaxed);
-            Tex::WatchTarget(base, slot->bytes, &slot->written_over);
+            Tex::WatchTarget(base, u64(native_w) * native_h * FormatBytes(format), &slot->written_over);
             if (targets_reclaimed.fetch_add(1, std::memory_order_relaxed) < 32) {
                 std::printf("Native Vulkan: %s %llx %ux%u %s drawn to again after the game wrote "
                             "over it\n", what, (unsigned long long)base, w, h,
@@ -1253,6 +1296,9 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     }
     slot = std::make_unique<Target>();
     Target& t = *slot;
+    t.native_w = native_w;
+    t.native_h = native_h;
+    t.scale = scale;
     using U = vk::ImageUsageFlagBits;
     // only RGBA8 targets are viewed in another format (the presenter's sRGB-ness of the display
     // buffer); naming both formats keeps them compressible (AMD drops DCC on an image whose views
@@ -1332,7 +1378,7 @@ Target* MakeTarget(u64 base, u32 w, u32 h, vk::Format format, bool depth, u32 co
     t.img.layout = vk::ImageLayout::eUndefined;
     t.comp_swap = comp_swap;
     t.bytes = u64(w) * h * FormatBytes(format);
-    Tex::WatchTarget(base, t.bytes, &t.written_over);
+    Tex::WatchTarget(base, u64(native_w) * native_h * FormatBytes(format), &t.written_over);
     target_bytes.fetch_add(t.bytes, std::memory_order_relaxed);
     targets_made.fetch_add(1, std::memory_order_relaxed);
     std::printf("Native Vulkan: %s %llx %ux%u %s swap %u%s\n", what, (unsigned long long)base, w, h,
@@ -1392,7 +1438,7 @@ Target* DepthTarget(u64 handle) {
         // copy); a target already made with stencil keeps it rather than being remade
         const auto it = targets.find(base);
         const bool had_stencil = it != targets.end() && it->second && it->second->img.stencil &&
-                                 it->second->img.width == w && it->second->img.height == h;
+                                 it->second->native_w == w && it->second->native_h == h;
         const vk::Format want =
             no_stencil && !had_stencil ? vk::Format::eD32Sfloat : vk::Format::eD32SfloatS8Uint;
         const Vulkan::Instance* inst = instance.load();
@@ -1401,6 +1447,27 @@ Target* DepthTarget(u64 handle) {
                       : want;
     }
     return MakeTarget(base, w, h, format, true, 0, "depth target");
+}
+
+/// A four-target G-buffer identifies the scene without assuming a display aspect ratio.
+void ObserveScene(u64 ctx, bool clearing) {
+    unsigned colors = 0;
+    for (unsigned i = 0; i < 8; ++i) colors += Q(ctx + CtxColorTargets + i * 8) != 0;
+    const u64 depth = Q(ctx + CtxDepthTarget);
+    if (colors != 4 || !depth || !Q(ctx + CtxColorTargets) || !Q(ctx + CtxColorTargets + 24)) {
+        native_gbuffer_open = false;
+        return;
+    }
+    const u32 size = R<u32>(depth + 0x80);
+    const u32 w = size & 0xffff, h = size >> 16;
+    if (w < 640 || h < 360) return;
+    native_scene_w = w;
+    native_scene_h = h;
+    if (clearing && !native_gbuffer_open) {
+        live_height = requested_height; // All attachments switch together, before their clear.
+        BbSettings::Get().native_scene_height = live_height ? live_height : h;
+    }
+    native_gbuffer_open = true;
 }
 
 /// Effective channel order the shader sees (the port's SwizzleCode): T# dst_sel applied to the
@@ -1934,6 +2001,7 @@ struct PipelineState {
     u32 color_count = 0;
     vk::Format depth = vk::Format::eUndefined;
     bool stencil = false, depth_read_only = false;
+    bool no_blur = false;
     u32 blend = 0, mask = 0, dctl = 0, refmask = 0, sops = 0, setup = 0;
     bool bias = false;
     vk::PrimitiveTopology topology = vk::PrimitiveTopology::eTriangleList;
@@ -1943,6 +2011,7 @@ struct PipelineState {
         u64 k = 0xcbf29ce484222325ull;
         Mix(k, vs_module);
         Mix(k, ps);
+        Mix(k, no_blur);
         Mix(k, gs);
         Mix(k, colors);
         Mix(k, color_count);
@@ -2028,7 +2097,8 @@ VkPipeline MakePipeline(const PipelineState& s, VkPipelineLayout layout) {
     }
     if (s.ps) {
         stages.push_back(
-            {.stage = vk::ShaderStageFlagBits::eFragment, .module = s.ps->module, .pName = "main"});
+            {.stage = vk::ShaderStageFlagBits::eFragment,
+             .module = s.no_blur ? s.ps->no_blur_module : s.ps->module, .pName = "main"});
     }
     std::vector<vk::VertexInputBindingDescription> vb;
     std::vector<vk::VertexInputAttributeDescription> va;
@@ -2413,7 +2483,7 @@ void Remember(u64 key, const PipelineState& st, const VertexInput& vi) {
     std::copy(std::begin(st.colors), std::end(st.colors), d.colors);
     d.color_count = st.color_count;
     d.depth = st.depth;
-    d.stencil = st.stencil;
+    d.stencil = u32(st.stencil) | (st.no_blur ? 2u : 0u);
     d.depth_read_only = st.depth_read_only;
     d.bias = st.bias;
     d.blend = st.blend;
@@ -2538,7 +2608,8 @@ void PreloadKnown() {
         std::copy(std::begin(d.colors), std::end(d.colors), st.colors);
         st.color_count = d.color_count;
         st.depth = d.depth;
-        st.stencil = d.stencil;
+        st.stencil = (d.stencil & 1) != 0;
+        st.no_blur = (d.stencil & 2) && ps && ps->no_blur_module;
         st.depth_read_only = d.depth_read_only;
         st.bias = d.bias;
         st.blend = d.blend;
@@ -2621,7 +2692,8 @@ bool StageConstants(u32 stage, u64 shader, Ref cbs[14]) {
     return true;
 }
 
-bool InfoConstants(u32 stage, const ShaderInfo& s, const StageRes& res, const u32* vin, Ref* span) {
+bool InfoConstants(u32 stage, const ShaderInfo& s, const StageRes& res, const u32* vin, Ref* span,
+                   float scale = 1.0f) {
     if (s.ubo_slots.empty() || s.ubo_slots.back() != 13) {
         return true; // not read (gen 3 shaders without input conversion or texture scales)
     }
@@ -2630,8 +2702,12 @@ bool InfoConstants(u32 stage, const ShaderInfo& s, const StageRes& res, const u3
     if (vin) {
         std::memcpy(info.vin, vin, sizeof(info.vin));
     }
-    info.scale[0] = info.scale[1] = 1.0f; // render scaling comes with presentation
+    info.scale[0] = 1.0f / scale;
+    info.scale[1] = scale;
     std::fill(std::begin(info.tscale), std::end(info.tscale), 1.0f);
+    for (std::size_t slot = 0; slot < std::size(res.slots); ++slot) {
+        if (res.slots[slot].target) info.tscale[slot] = res.slots[slot].target->scale;
+    }
     *span = Constants(stage, 13, &info, sizeof(info));
     return true;
 }
@@ -3083,6 +3159,7 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     st.vs = &vs;
     st.vs_module = Variant(vs, vi.uint_mask, vi.sint_mask);
     st.ps = ps;
+    st.no_blur = ps && ps->no_blur_module && BbSettings::Get().game_patches[1];
     st.gs = gs;
     for (u32 i = 0; i < 8; ++i) {
         if (pass.color[i]) {
@@ -3159,9 +3236,11 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     const StageRes gres{}; // the geometry shader samples nothing (as the port binds it)
     // a draw given up from here is left in the batch as nothing to record
     auto drop = [&] { d.pipeline = VK_NULL_HANDLE; };
-    if (!StageConstants(0, vsh, vcb) || !InfoConstants(0, vs, vres, vi.vin, &vcb[13]) ||
-        (ps && (!StageConstants(1, psh, pcb) || !InfoConstants(1, *ps, pres, nullptr, &pcb[13]))) ||
-        (gs && (!StageConstants(2, gsh, gcb) || !InfoConstants(2, *gs, gres, nullptr, &gcb[13])))) {
+    const float render_scale = pass.depth && depth_target ? depth_target->scale :
+                                colors[0] ? colors[0]->scale : 1.0f;
+    if (!StageConstants(0, vsh, vcb) || !InfoConstants(0, vs, vres, vi.vin, &vcb[13], render_scale) ||
+        (ps && (!StageConstants(1, psh, pcb) || !InfoConstants(1, *ps, pres, nullptr, &pcb[13], render_scale))) ||
+        (gs && (!StageConstants(2, gsh, gcb) || !InfoConstants(2, *gs, gres, nullptr, &gcb[13], render_scale)))) {
         skipped_memory.fetch_add(1, std::memory_order_relaxed);
         drop();
         return;
@@ -3245,8 +3324,10 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     // viewport and scissor: the engine counts y from the bottom of the target (the shadow
     // cascades of the 2048x8192 atlas are at y 6144, 4096, 2048); a negative height flips y as
     // in D3D
-    const ViewportI vp = R<ViewportI>(ctx + CtxViewport);
-    const u32 target_h = depth_target ? depth_target->img.height
+    ViewportI vp = R<ViewportI>(ctx + CtxViewport);
+    const auto scaled = [render_scale](s32 v) { return s32(std::lround(v * render_scale)); };
+    vp.x = scaled(vp.x); vp.y = scaled(vp.y); vp.w = scaled(vp.w); vp.h = scaled(vp.h);
+    const u32 target_h = pass.depth ? pass.depth->height
                          : pass.color[0] ? pass.color[0]->height
                                          : 0;
     // the rendering area: the smallest attachment (as Gpu::Render)
@@ -3268,7 +3349,8 @@ void Draw(u64 ctx, u64 dev, u64 vsh, ShaderInfo& vs, u64 psh, ShaderInfo* ps, u6
     s32 x0 = 0, y0 = 0, x1 = s32(area_w), y1 = s32(area_h);
     if (R<u8>(ctx + CtxScissorEnabled)) {
         // bottom-up too (the GUI clips the sliding values of its option selectors with it)
-        const ViewportI sc = R<ViewportI>(ctx + CtxScissor);
+        ViewportI sc = R<ViewportI>(ctx + CtxScissor);
+        sc.x = scaled(sc.x); sc.y = scaled(sc.y); sc.w = scaled(sc.w); sc.h = scaled(sc.h);
         const s32 sy = target_h ? s32(target_h) - sc.y - sc.h : sc.y;
         x0 = std::clamp(sc.x, 0, x1);
         y0 = std::clamp(sy, 0, y1);
@@ -3777,6 +3859,7 @@ u32 StreamSlots(u64 ctx, u64 vsh) {
 /// kClearRenderTarget(ctx, flags, float4* color, stencil, float depth): flags 1 color (every
 /// bound target), 2 depth, 4 stencil. Runs before the engine's own clear.
 void ClearFrom(u64 ctx, u32 flags, const float* color, u32 stencil, float depth) {
+    ObserveScene(ctx, true);
     clears.fetch_add(1, std::memory_order_relaxed);
     if (flags & 6) {
         if (const u64 dh = Q(ctx + CtxDepthTarget)) {
@@ -3975,21 +4058,26 @@ bool CopyTexture(u64 ctx, const u32* src, const u32* dst, const s32* p) {
         return false;
     }
     const u32 sw = st.img.width, sh = st.img.height, dw = dt->img.width, dh = dt->img.height;
-    u32 w = a[4] >= 0 ? u32(a[4]) : sw, h = a[5] >= 0 ? u32(a[5]) : sh;
-    const u32 sx = std::min<u32>(a[0], sw - 1), sy = std::min<u32>(a[1], sh - 1);
+    u32 w = a[4] >= 0 ? BbLiveGraphics::Extent(a[4], st.scale) : sw;
+    u32 h = a[5] >= 0 ? BbLiveGraphics::Extent(a[5], st.scale) : sh;
+    const auto coordinate = [](s32 value, float scale) { return u32(std::lround(value * scale)); };
+    const u32 sx = std::min(coordinate(a[0], st.scale), sw - 1);
+    const u32 sy = std::min(coordinate(a[1], st.scale), sh - 1);
     w = std::min(w, sw - sx);
     h = std::min(h, sh - sy);
-    const u32 dx = std::min<u32>(a[2], dw - 1), dy = std::min<u32>(a[3], dh - 1);
-    w = std::min(w, dw - dx);
-    h = std::min(h, dh - dy);
+    const u32 dx = std::min(coordinate(a[2], dt->scale), dw - 1);
+    const u32 dy = std::min(coordinate(a[3], dt->scale), dh - 1);
+    const u32 copy_dw = std::min(a[4] >= 0 ? BbLiveGraphics::Extent(a[4], dt->scale) : dw, dw - dx);
+    const u32 copy_dh = std::min(a[5] >= 0 ? BbLiveGraphics::Extent(a[5], dt->scale) : dh, dh - dy);
     if (!w || !h) {
         return false;
     }
-    const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - h);
+    const s32 s_top = s32(sh - sy - h), d_top = s32(dh - dy - copy_dh);
     missed_copies.erase(d.base);
     CopyPacket& c = Push(Op::Copy, open_batch->copies);
     c = CopyPacket{.src = &st, .dst = dt, .from_depth = from_depth, .sx = sx, .dx = dx, .w = w,
-                   .h = h, .src_bytes = src_bytes, .s_top = s_top, .d_top = d_top};
+                   .h = h, .src_bytes = src_bytes, .dst_w = copy_dw,
+                   .dst_h = copy_dh, .s_top = s_top, .d_top = d_top};
     ForgetTwin(dt);
     if (from_depth && feedback_loops && !sx && !dx && !s_top && !d_top && w == sw && h == sh &&
         dw == sw && dh == sh) {
@@ -4014,13 +4102,18 @@ void DoCopy(const CopyPacket& c) {
     // depth through the upload ring
     const bool same_format = st.img.format == dt->img.format && !IntegerFormat(dt->img.format);
     if ((from_depth || same_format) &&
-        Blit::Copy(st.img, st.view, {s32(sx), s_top}, dt->img, {{s32(dx), d_top}, {w, h}})) {
+        Blit::Copy(st.img, st.view, {s32(sx), s_top}, dt->img,
+                   {{s32(dx), d_top}, {c.dst_w, c.dst_h}}, {w, h})) {
         depth_copies.fetch_add(from_depth, std::memory_order_relaxed);
         draw_copies.fetch_add(1, std::memory_order_relaxed);
         copies.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     Gpu::Span span{};
+    if (c.dst_w != w || c.dst_h != h) {
+        copies_skipped.fetch_add(1, std::memory_order_relaxed);
+        return; // A scaled copy needs the draw path; never issue an out-of-bounds transfer.
+    }
     if (from_depth) { // the ring first: a full ring submits early
         span = Gpu::Upload(u64(w) * h * src_bytes, 16);
         if (!span.data) {
@@ -4168,7 +4261,7 @@ bool DropCopyInto(const Gpu::Image* img) {
 void RunCopy(const CopyPacket& c) {
     BeforeRead(&c.src->img);
     FlushCopiesFrom(&c.dst->img); // copies reading the destination's present contents go first
-    const bool whole = c.dx == 0 && c.d_top == 0 && c.w >= c.dst->img.width && c.h >= c.dst->img.height;
+    const bool whole = c.dx == 0 && c.d_top == 0 && c.dst_w >= c.dst->img.width && c.dst_h >= c.dst->img.height;
     if (whole) {
         Covered(&c.dst->img);
     }
@@ -4256,6 +4349,7 @@ void StartTextures() {
             }
             const char* sh = std::getenv("BB_VK_SHOW");
             show = drawing && sh && sh[0] == '1';
+            BbSettings::Get().native_live_graphics = show && live_patch_ready;
             const char* al = std::getenv("BB_VK_ALONE");
             if (al && al[0] == '1') {
                 alone.store(show, std::memory_order_release);
@@ -4618,6 +4712,11 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
                     reinterpret_cast<u64>(&OnCopy), "Native Vulkan", "kCopyTexture");
     std::fflush(stdout);
     enabled = true;
+    const char* live_show = std::getenv("BB_VK_SHOW");
+    const char* live_draw = std::getenv("BB_VK_DRAW");
+    live_patch_ready = live_show && live_show[0] == '1' && (!live_draw || live_draw[0] != '0') &&
+                       BbLiveGraphics::CameraBlurAvailable({image, std::size_t(size)}) &&
+                       BbLiveGraphics::UnlockPatch({image, std::size_t(size)});
     std::thread(Report).detach();
     StartTextures();
 }
@@ -5153,10 +5252,16 @@ void UpscaleForDisplay(DrawPacket& d) {
         return;
     }
     upscale_done.fetch_add(1, std::memory_order_relaxed);
-    for (StageRes& res : d.res) {
-        for (Slot& slot : res.slots) {
+    for (std::size_t stage = 0; stage < std::size(d.res); ++stage) {
+        StageRes& res = d.res[stage];
+        Ref& constants = d.cb[stage][13];
+        auto* info = constants.data && constants.size >= sizeof(InfoCB) ?
+                         reinterpret_cast<InfoCB*>(constants.data) : nullptr;
+        for (std::size_t index = 0; index < std::size(res.slots); ++index) {
+            Slot& slot = res.slots[index];
             if (slot.target == src) {
                 slot.target = out;
+                if (info) info->tscale[index] = 1.0f;
             }
         }
     }
@@ -5268,6 +5373,7 @@ void DrawFrom(u64 ctx, u64 dev, bool indexed, u32 count, u64 index_addr) {
         skipped_compiling.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    ObserveScene(ctx, false);
     Target* colors[8]{};
     bool any_color = false;
     for (int i = 0; i < 8; ++i) {

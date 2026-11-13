@@ -40,6 +40,9 @@
 #include <cmath>
 #include "bbport_threads.h"
 #include "bbport_settings.h"
+#include "video_core/renderer_vulkan/bb_motion_blur.h"
+
+extern "C" void runtime_memory_read_backing(std::uintptr_t, void*, std::uint64_t);
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -612,6 +615,34 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             .zoffset = vp_ctl.zoffset_enable ? vp.zoffset : 0.0f,
         };
         ctr_fsr3->OnGBufferPass(db_desc.first, cb_descs[3].first, viewport);
+    }
+    if (BbSettings::Get().shad_live_graphics && !scene_started && db_desc.first &&
+        std::popcount(key.mrt_mask & 0x7f) == 4) {
+        const auto& depth = texture_cache.GetImage(db_desc.first);
+        const auto w = depth.info.size.width, h = depth.info.size.height;
+        if (w >= 640 && h >= 360 && w * 2 >= h * 3 && w <= h * 4) {
+            scene_targets->SetNativeSize({w, h});
+            begin_memo.valid = false;
+            auto& settings = BbSettings::Get();
+            u32 height = h;
+            if (settings.native_resolution_requested) {
+                const int res = settings.render_res;
+                height = res >= 0 ? BbSettings::RenderResHeights[res] : 1080;
+            }
+            if (settings.temporal == BbSettings::TemporalDlss && settings.dlss_quality > 0 &&
+                (settings.startup_temporal != BbSettings::TemporalDlss ||
+                 settings.dlss_quality != settings.startup_dlss_quality || settings.native_resolution_requested)) {
+                constexpr float ratios[] = {1, 1, 2.0f/3, 0.58f, 0.5f, 1.0f/3};
+                height = u32(std::lround((settings.dlss_output ? 2160 : 1080) *
+                                        ratios[settings.dlss_quality.load()]));
+            }
+            const SceneResolution::Size size{u32(std::lround(double(w) * height / h)), height};
+            if (scene_targets->SetSize(size)) begin_memo.valid = false;
+            settings.native_scene_height = height;
+            settings.active_render_width = size.width;
+            settings.active_render_height = size.height;
+            scene_started = true;
+        }
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -1502,6 +1533,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const bool display_start = display_draw && !last_draw_display;
     last_draw_display = display_draw;
     if (display_start) {
+        scene_started = false;
         // The previous draw's target is the finished scene the display pass stretches.
         fsr_pending = (BbSettings::Get().temporal == BbSettings::TemporalFsr1 || ctr_fsr3->Enabled()) &&
                       cb_descs[0].first;
@@ -1512,7 +1544,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         fsr_pending = false;
     }
     if (camera_motion->Enabled() && display_start) {
-        scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
@@ -1687,6 +1718,31 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (ps_info) {
+        static std::array<int, 2> last_blur_state{-1, -1};
+        for (std::size_t i = 0; i < std::size(BbBlur::Shaders); ++i) {
+            if (ps_info->pgm_hash != BbBlur::Shaders[i]) continue;
+            const bool disabled = pipeline->GetGraphicsKey().no_motion_blur;
+            const bool requested = BbSettings::Get().game_patches[1];
+            const int state = int(disabled) | (int(requested) << 1);
+            if (last_blur_state[i] != state) {
+                last_blur_state[i] = state;
+                std::array<float, 10> constants{};
+                for (const auto& resource : ps_info->buffers) {
+                    if (resource.IsSpecial()) continue;
+                    const auto buffer = resource.GetSharp(*ps_info);
+                    if (buffer.Valid() && buffer.GetSize() >= sizeof(constants)) {
+                        runtime_memory_read_backing(buffer.base_address, constants.data(), sizeof(constants));
+                        break;
+                    }
+                }
+                std::printf("Motion blur: shadPS4 requested %s, drawing %s (shader %llx, strength %g, velocity scale %g)\n",
+                            requested ? "Off" : "On", disabled ? "Off" : "On",
+                            static_cast<unsigned long long>(ps_info->pgm_hash), constants[8], constants[9]);
+                std::fflush(stdout);
+            }
+        }
+    }
     const Breadcrumbs::Crumb crumb{
         .kind = is_indexed ? Breadcrumbs::Kind::DrawIndexed : Breadcrumbs::Kind::Draw,
         .hash = {vs_info.pgm_hash, ps_info ? ps_info->pgm_hash : 0},
@@ -3625,7 +3681,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
-    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
+    bool reduced = scene_started && upscaler->RasterScaling();
     // BB_SCENE_DEBUG=<file>: once the file exists, why the passes of one frame keep the
     // native size (see NoteFrameStart).
     const bool debug_pass = scene_debug_frame && scene_started;
@@ -3680,7 +3736,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    push_data.scene_size = reduced ? scene_targets->ShaderSize() : 0;
     if (BbStats::enabled) {
         BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -3924,7 +3980,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto native = scene_targets->NativeSize();
+        target_scale = {float(size.width) / native.width, float(size.height) / native.height};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};

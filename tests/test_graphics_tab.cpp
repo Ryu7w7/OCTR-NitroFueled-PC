@@ -12,10 +12,11 @@ namespace BbOverlay {
 void QuitGame() {}
 }
 namespace BbSettings {
+bool render_size_pending = false, resolution_pending = false;
 Values& Get() { static Values values; return values; }
 void Save() {}
-bool RenderSizeNeedsRestart() { return false; }
-bool ResolutionNeedsRestart() { return false; }
+bool RenderSizeNeedsRestart() { return render_size_pending; }
+bool ResolutionNeedsRestart() { return resolution_pending; }
 bool UltrawideAvailable() { return false; }
 void SetUltrawide(bool) {}
 bool Fsr4Available() { return true; }
@@ -94,6 +95,9 @@ static void controls_test() {
     v.dlss_quality = 0; Row(3, -1); assert(v.dlss_quality == 5);
     v.fps_limit = 30; Row(6, -1); assert(v.fps_limit == 0);
     Row(6, 1); assert(v.fps_limit == 30);
+    v.fps_limit = 60; assert(Row(6, 1) == "72");
+    assert(Row(6, 1) == "90");
+    assert(Row(6, 1) == "120");
     unsigned char item[0x38] = {}, list_item[0x80] = {};
     rows.assign(8, 0); rows[7] = reinterpret_cast<u64>(item);
     list_items.assign(8, 0); list_items[7] = reinterpret_cast<u64>(list_item);
@@ -108,8 +112,9 @@ static void controls_test() {
     *reinterpret_cast<void***>(event) = vtable;
     *reinterpret_cast<u32*>(event+0x18) = 9;
     language_item_original = native_event;
+    RequestRefresh(); // Closing ImGui queues work for the guest UI thread.
     assert(LanguageItemHook(item,event,nullptr,nullptr,nullptr,nullptr) == 17);
-    assert(native_events == 1); // Back works even on the Restart row.
+    assert(native_events == 1 && !refresh_requested); // Refresh keeps native Back handling.
     alignas(8) u8 anchor[0x120] = {}, selector[0x120] = {}, button[0x120] = {};
     alignas(8) u8 root[0x120] = {}, table[0x28] = {};
     u64 children[] = {reinterpret_cast<u64>(selector),reinterpret_cast<u64>(button)};
@@ -197,6 +202,61 @@ int main(int argc, char** argv) {
     assert(settings.aspect_w == 5120 && settings.aspect_h == 1440);
     assert(Row(1, 1) == "16:9");
     assert(!NeedsRestart());
+    for (int temporal = 0; temporal < BbSettings::TemporalCount; ++temporal) {
+        settings.temporal = temporal;
+        assert(!NeedsRestart()); // Provider changes at the current render size are live.
+    }
+    settings.dlss_quality = (settings.startup_dlss_quality + 1) % BbSettings::DlssQualityCount;
+    settings.output_res = (settings.startup_output_res + 1) % BbSettings::OutputCount;
+    settings.fps_limit = 120;
+    assert(!NeedsRestart());
+    BbSettings::render_size_pending = true;
+    assert(NeedsRestart());
+    BbSettings::render_size_pending = false;
+    BbSettings::resolution_pending = true;
+    assert(NeedsRestart());
+    BbSettings::resolution_pending = false;
+    settings.game_patches[0] = !settings.startup_game_patches[0];
+    assert(NeedsRestart());
+    settings.game_patches[0] = settings.startup_game_patches[0];
+    assert(!NeedsRestart());
+    settings.native_live_graphics = true;
+    for (int g : {0, 1}) {
+        settings.game_patches[g] = !settings.startup_game_patches[g];
+        assert(!NeedsRestart());
+        settings.game_patches[g] = settings.startup_game_patches[g];
+    }
+    settings.game_patches[2] = !settings.startup_game_patches[2];
+    assert(NeedsRestart());
+    settings.game_patches[2] = settings.startup_game_patches[2];
+    settings.native_live_graphics = false;
+    settings.shad_live_graphics = true;
+    for (int g : {0, 1}) {
+        settings.game_patches[g] = !settings.startup_game_patches[g];
+        assert(!NeedsRestart());
+        settings.game_patches[g] = settings.startup_game_patches[g];
+    }
+    assert(Description(0).find("live") != std::string::npos);
+    assert(Description(4).find("immediately") != std::string::npos);
+    assert(Description(5).find("immediately") != std::string::npos);
+    settings.native_scene_height = 1200;
+    settings.native_resolution_requested = false;
+    settings.temporal = BbSettings::TemporalDlss;
+    settings.dlss_quality = 2;
+    assert(Row(0, 0) == "1200p");
+    assert(Row(0, 1) == "1440p");
+    assert(settings.native_resolution_requested && settings.dlss_quality == 0);
+    settings.SetRenderResolution(1); // ImGui uses the same mutation as the native row.
+    assert(Row(0, 0) == "720p");
+    settings.fps_limit = 90;
+    assert(Row(6, 0) == "90");
+    settings.model_lod = settings.startup_model_lod + 1;
+    assert(NeedsRestart() && settings.GraphicsRestartRequired());
+    settings.model_lod = settings.startup_model_lod;
+    settings.ultrawide = 1;
+    settings.SetAspectRatio(BbSettings::Aspect16x9);
+    assert(settings.ultrawide == 0 && !settings.GraphicsRestartRequired());
+    settings.shad_live_graphics = false;
     settings.aspect_w = 2560;
     settings.aspect_h = 1600;
     assert(Row(1, 1) == "16:10");

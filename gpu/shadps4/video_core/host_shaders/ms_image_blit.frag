@@ -16,7 +16,12 @@ layout (location = 0) out vec4 out_color;
 void main()
 {
 #if defined(SRC_MSAA)
+    #if defined(RESAMPLE)
+    const ivec2 size = textureSize(in_tex);
+    out_color = texelFetch(in_tex, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), gl_SampleID);
+    #else
     out_color = texelFetch(in_tex, ivec2(gl_FragCoord.xy), gl_SampleID);
+    #endif
 #else
     out_color = texelFetch(in_tex, ivec2(gl_FragCoord.xy), 0);
 #endif
