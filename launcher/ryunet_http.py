@@ -179,12 +179,3 @@ def password_login(data_dir, server, nick, password):
 def discord_unlink(data_dir, server, nick):
     answer = request(data_dir, server, "/ryunet/discord/unlink", {"nick": nick}, timeout=10)
     return bool(answer and answer.get("unlinked"))
-
-
-def ranked_profile(data_dir, server, nick, mode=0):
-    """The nickname's Ranked profile {"ranked", "mmr", "tier", "placements", "races", "wins"},
-    {"ranked": False} before its first race, or None when the server could not be asked. mode:
-    0 Normal (items), 1 Itemless — two separate ratings."""
-    path = "/ryunet/ranked-profile?name=" + urllib.parse.quote(nick or "") + f"&mode={mode}"
-    answer = request(data_dir, server, path)
-    return answer if answer and "ranked" in answer else None

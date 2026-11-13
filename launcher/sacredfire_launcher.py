@@ -60,7 +60,7 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 MAX_LOG_LINES = 5000
 COMMUNITY_DISCORD = "https://discord.gg/PAT5SJzdXw"  # bugs, questions, ban appeals
-RANK_SITE = "https://crashteamrank.vercel.app"  # record validation; ranked play later
+RANK_SITE = "https://crashteamrank.vercel.app"  # record validation
 UNSUPPORTED_GPU_CODE = 24  # the game found no Vulkan 1.3 (GPU, driver or loader): vk_platform.h
 TITLE = "SacredFire"
 GAME = "Crash Team Racing: Nitro-Fueled"
@@ -1215,12 +1215,6 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.discord_unlink_button.connect("clicked", lambda _b: self.confirm_discord_unlink())
         self.nick_status_row.add_suffix(self.discord_unlink_button)
         online.add(self.nick_status_row)
-        # The server's Ranked ladder (docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md): two ratings, one
-        # for Normal (items) and one for Itemless; five placement matches place each of them.
-        self.ranked_row = Adw.ActionRow(title=tr("Ranked"))
-        self.rank_asked = ""
-        self.rank_profiles = {}
-        online.add(self.ranked_row)
         self.server_row = Adw.EntryRow(title=tr("Server"), text=self.ini.get("online_server") or ONLINE_SERVER)
         self.server_row.connect("changed", lambda _row: self.nick_changed())
         online.add(self.server_row)
@@ -1249,7 +1243,7 @@ class LauncherWindow(Adw.ApplicationWindow):
                "also by IP."))
         for title, button, url in (
                 (tr("Bugs, questions or a ban appeal: our Discord"), tr("Open Discord"), COMMUNITY_DISCORD),
-                (tr("Crash Team Rank: validate your records (ranked play with MMR coming)"), tr("Open page"), RANK_SITE)):
+                (tr("Crash Team Rank: validate your records"), tr("Open page"), RANK_SITE)):
             row = Adw.ActionRow(title=title)
             row.set_title_lines(0)
             open_button = flat_button("web-browser-symbolic", button, lambda _b, url=url: open_external(url))
@@ -3061,43 +3055,6 @@ class LauncherWindow(Adw.ApplicationWindow):
                 self.nick_info = info or {}
                 self.show_nick_status()
         self.in_thread(lambda: ryunet_http.nick_status(DATA_DIR, server, nick if nick_ok(nick) else ""), done)
-        self.ask_ranked()
-
-    def ask_ranked(self):
-        """The nickname's two Ranked ratings (Normal, Itemless) from the server's ladder."""
-        server, nick = self.server(), self.nick()
-        asked = f"{server}|{nick}"
-        self.rank_asked = asked
-        self.rank_profiles = {}
-        self.show_ranked()
-
-        def done(profiles):
-            if self.rank_asked == asked:
-                self.rank_profiles = profiles or {}
-                self.show_ranked()
-
-        def fetch():
-            return {mode: ryunet_http.ranked_profile(DATA_DIR, server, nick if nick_ok(nick) else "", mode)
-                    for mode in (0, 1)}
-        self.in_thread(fetch, done)
-
-    def show_ranked(self):
-        profiles = self.rank_profiles or {}
-        if all(profiles.get(mode) is None for mode in (0, 1)):
-            text = tr("The ladder could not be asked (it shows up once you play).")
-        else:
-            parts = []
-            for mode, label in ((0, tr("Normal")), (1, tr("Itemless"))):
-                profile = profiles.get(mode) or {}
-                if not profile.get("ranked"):
-                    continue
-                placed = 5 - int(profile.get("placements", 0))
-                parts.append(tr("{}: {}, {} ({} of 5 placed)").format(
-                    label, profile.get("mmr"), profile.get("tier"), placed))
-            text = "  ·  ".join(parts) if parts else tr(
-                "Not ranked yet: five placement matches in a Ranked queue place you. "
-                "Normal (items) and Itemless are rated separately.")
-        self.ranked_row.set_subtitle(GLib.markup_escape_text(text))
 
     def show_nick_status(self):
         nick, info = self.nick(), self.nick_info
