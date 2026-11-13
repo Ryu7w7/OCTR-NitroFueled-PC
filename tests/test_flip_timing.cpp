@@ -22,4 +22,9 @@ int main() {
         assert(NextFlipDeadline(deadline, deadline, period) == resumed + 2 * period);
     }
     assert(NextFlipDeadline(start, start + seconds(10), nanoseconds(0)) == start + seconds(10));
+    // Flips a little late each time (a player's 60 FPS limit showed 59): no drift, still 60 a second.
+    deadline = start;
+    for (int frame = 1; frame <= 600; ++frame)
+        deadline = NextFlipDeadline(deadline, deadline + microseconds(900), period);
+    assert(deadline == start + 600 * period);
 }
