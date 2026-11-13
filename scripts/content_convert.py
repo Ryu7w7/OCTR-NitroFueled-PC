@@ -30,6 +30,7 @@ from pathlib import Path
 import content_delta as cd
 import content_package as cp
 import track_registry as tr
+import track_registry as tr
 from graphics_tab import Archive
 from igz_merge import File
 
@@ -114,10 +115,12 @@ def convert(game_folder, source, output, log=print):
             # Unchanged game files the mod carries that the game keeps only in archives it loads
             # for one track or menu (Sewer Speedway's scripts and menu textures, for Neo Bowser
             # City) stay, in shared/: the track needs them loaded with it.
+            kept = []
             for logical, (kind, data) in entries.items():
                 if kind == cd.NEW:
                     folder_name = 'files'
                 elif kind == cd.FILLER and cd.streamed_only(game, logical):
+                    kept.append(logical)
                     folder_name = 'shared'
                 else:
                     continue
@@ -135,6 +138,17 @@ def convert(game_folder, source, output, log=print):
                 m.update(image=image, texture=texture)
             online = (meta.get('compatibility') or {}).get('online')
             m['online'] = 'private' if online == 'allowed' else 'offline-only'
+            # The shared files the mod's own streaming list has (and the game's does not) stay in it.
+            stream = []
+            mine = entries.get(next((p for p in entries if p.casefold() == tr.CHUNKS.casefold()), ''), (None, b''))[1]
+            if mine and kept:
+                from igz_merge import File
+                theirs = game.newest(tr.CHUNKS)
+                own = {p.casefold() for _, p in tr.chunk_entries(File(mine))[1]}
+                base = {p.casefold() for _, p in tr.chunk_entries(File(theirs))[1]} if theirs else set()
+                stream = [p for p in kept if p.casefold() in own - base]
+            if stream:
+                m['stream'] = stream
             m['credits'] = (f'{m["name"]["en"]} by {m["author"]}. Converted by the OCTR launcher from the mod '
                             f'{meta.get("id", Path(source).stem)} {m["version"]}'
                             + (f', without {len(dropped)} changes to game files.' if dropped else '.'))

@@ -287,11 +287,15 @@ class BuildTests(unittest.TestCase):
                          files={'archives/t929_neo_bowser_city.pak': b'x', 'shared/' + game_copy: b'a'}, image=False)
         _, update = self.build([a, b])  # two packages may carry the same copy
         self.assertEqual(update[game_copy], b'a')
-        listed = {p for _, p in tr.chunk_entries(File(update[tr.CHUNKS]))[1]}
-        self.assertIn(game_copy, listed)  # loaded with the track
+        # Found by path, not streamed with the track: no streaming list gets it (nothing else to add).
+        self.assertNotIn(tr.CHUNKS, update)
         changed = self.package('c', files={f'archives/{ID}.pak': b'x', 'shared/' + game_copy: b'changed'}, image=False)
         with self.assertRaisesRegex(ValueError, 'not an unchanged copy'):
             self.build([changed])
+        streamed = self.package('e', files={f'archives/{ID}.pak': b'x', 'shared/' + game_copy: b'a'}, image=False,
+                                manifest={'stream': [game_copy]})
+        _, update = self.build([streamed])  # as the converted mod had it: streamed with the track
+        self.assertIn(game_copy, {p for _, p in tr.chunk_entries(File(update[tr.CHUNKS]))[1]})
         new = self.package('d', files={f'archives/{ID}.pak': b'x', 'shared/maps/new.igz': b'n'}, image=False)
         with self.assertRaisesRegex(ValueError, 'not a game file; put it in files/'):
             self.build([new])
