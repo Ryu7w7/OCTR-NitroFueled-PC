@@ -97,6 +97,7 @@ std::uint64_t TSharpBase(const std::uint32_t* tsharp);
 Info Describe(const std::uint32_t* tsharp);
 
 /// The texture for a T#, built (and queued for upload) the first time, and again once stale.
+/// A stale texture stays visible until its replacement's upload is submitted.
 /// nullptr: not supported (format, tiling), not readable, or not created; each logged once.
 const Texture* Get(const std::uint32_t* tsharp);
 
