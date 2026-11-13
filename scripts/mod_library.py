@@ -12,6 +12,11 @@ FILENAME='OCTR-Mod-Library.xml'
 # One wins over a copy of the same mod ID in the mods folder; they cannot be removed.
 BUILTIN=Path(__file__).resolve().parent/'builtin_mods'
 BUILTIN_PREFIX='builtin:'
+# Ultimate Customizer's extra cups option needs the pictures made by "Prepare" (scripts/cup_art.py).
+EXTRA_CUPS=('battle-point-limit-selector','extra-cups','extra-cups-art')
+def generated_builtin(root):
+    """Built-in mods made on this PC from the game's files (scripts/cup_art.py: extra-cups-art)."""
+    return storage(root)/'builtin'
 def builtin_sources(directory=None):
     # BB_BUILTIN_MODS: another folder, or empty for none (the tests' default: tests/paths.py).
     directory=directory or os.environ.get('BB_BUILTIN_MODS',str(BUILTIN))
@@ -145,6 +150,7 @@ def scan(root,patchdir):
     cache=storage(root)/'packages';cache.mkdir(parents=True,exist_ok=True)
     found={};messages=sync_xml(root,patchdir);candidates={}
     builtins=set(builtin_sources())
+    if os.environ.get('BB_BUILTIN_MODS','x'):builtins|=set(builtin_sources(generated_builtin(root)))
     for source in sorted(root.iterdir(),key=lambda p:p.name.casefold())+sorted(builtins):
         if not source.is_dir() and source.suffix.lower() not in ('.zip','.pak'):continue
         try:
@@ -281,5 +287,7 @@ def configure(root,patchdir,ident,expected_sha256,values):
         settings=read_ini(ini) if ini.is_file() else {}
         settings.setdefault('widescreen_layout','off')
         fmt.resolve(manifest,settings,converted)
+        if ident==EXTRA_CUPS[0] and converted.get(EXTRA_CUPS[1]) and EXTRA_CUPS[2] not in catalog['entries']:
+            raise ValueError('Prepare the extra cups art first (Race and battle options: Prepare)')
         save(storage(root)/'options.json',ident,manifest,converted)
         return scan(root,patchdir)

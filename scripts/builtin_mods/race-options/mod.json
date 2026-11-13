@@ -124,7 +124,7 @@
     "extra-cups": {
       "type": "boolean",
       "label": "Extra cups",
-      "default": true,
+      "default": false,
       "description": "The 25 added Arcade cups (Coco Cup onward and the Tawna Cup), with their stars."
     }
   },

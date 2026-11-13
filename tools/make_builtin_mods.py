@@ -11,11 +11,12 @@ file. This rebuilds the folders from the authors' release ZIPs and the game:
 
   race-options      Ultimate Customizer: laps up to 250, three-digit HUD and menus, the long race
                     clock, battle points/time/lives, the random cup; with the "extra-cups" option
-                    (on by default) its 25 added cups and their stars.
+                    (off by default) its 25 added cups and their stars.
   custom-cup        Custom Cup: four tracks of the player's choice, with the track thumbnails.
-  extra-cups-art    The added cups' pictures (a 37 MB texture of the author's collages). Built
-                    from the ZIP like the others, but not kept in the repository (.gitignore):
-                    the portable build carries it when the folder is there.
+
+The added cups' pictures (37 MB of collages of the game's own track pictures) are not kept: the
+launcher's "Prepare" draws them on the player's PC from the game files (scripts/cup_art.py), and
+the extra cups option can be turned on only then.
 
 Ultimate Customizer's systemData.igz holds both the battle values and the added cups; the
 battle-only copy is made here from the game's file and the author's three battle lists, so the
@@ -218,7 +219,7 @@ def race_options(game, uc, out):
         'patches': ['patches/race-options.xml'],
         'operationSets': sets,
         'configuration': {'extra-cups': {
-            'type': 'boolean', 'label': 'Extra cups', 'default': True,
+            'type': 'boolean', 'label': 'Extra cups', 'default': False,
             'description': 'The 25 added Arcade cups (Coco Cup onward and the Tawna Cup), with their stars.'}},
         'variants': [
             # The variant's patches are added to the base ones.
@@ -244,18 +245,6 @@ def custom_cup(game, cc, out):
     write_package(out / 'custom-cup', manifest, files)
 
 
-def extra_cups_art(game, uc, out):
-    folder, m = uc
-    op = next(o for o in m['operations'] if o['asset'] == ART_ASSET)
-    game_entry(game, op['archive'], op['index'], op['asset'], op['original_sha256'])
-    payload = (folder / op['payload']).read_bytes()
-    manifest = {
-        'schemaVersion': 2, 'id': 'extra-cups-art', 'name': 'Extra cups art (Ultimate Customizer)',
-        'version': m['version'], 'author': m['author'],
-        'description': 'The pictures of the 25 extra cups: collages of their four tracks, by Kyouko8.',
-        'requiresCapabilities': ['archive-assets'], 'compatibility': {'online': 'allowed'},
-        'operations': [{**op, 'payload': 'payloads/cupselect-art.igz'}]}
-    write_package(out / 'extra-cups-art', manifest, {'payloads/cupselect-art.igz': payload})
 
 
 def main(argv=None):
@@ -272,7 +261,6 @@ def main(argv=None):
             raise SystemExit('expected Ultimate Customizer and Custom Cup')
         race_options(args.game, uc, args.out)
         custom_cup(args.game, cc, args.out)
-        extra_cups_art(args.game, uc, args.out)
     for folder in sorted(p for p in args.out.iterdir() if p.is_dir()):
         size = sum(f.stat().st_size for f in folder.rglob('*') if f.is_file())
         print(f'{folder.name}: {size / 1024:.0f} KB')

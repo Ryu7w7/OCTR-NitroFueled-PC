@@ -175,6 +175,7 @@ class ShippedTests(unittest.TestCase):
             self.skipTest('no race-options in this tree')
         m = fmt.validate_folder(folder)
         settings = {'widescreen_layout': 'off'}
+        self.assertIs(m['configuration']['extra-cups']['default'], False)
         on = fmt.resolve(m, settings, {'extra-cups': True})
         off = fmt.resolve(m, settings, {'extra-cups': False})
         self.assertEqual((on[0], off[0]), ('extra-cups', 'game-cups'))
@@ -189,3 +190,74 @@ class ShippedTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CupArtTests(unittest.TestCase):
+    """cup_art.py: the extra cups' pictures, drawn from the game (Prepare)."""
+
+    def test_tiling_round_trips_and_pads_to_eight_blocks(self):
+        import numpy as np
+        import cup_art
+        self.assertEqual(cup_art.tiled_shape(1288, 1080), (328, 272))
+        w, h = 40, 24
+        pw, ph = cup_art.tiled_shape(w, h)
+        grid = np.arange(pw * ph * 16, dtype=np.uint32).astype(np.uint8).reshape(ph, pw, 16)
+        self.assertTrue((cup_art.untile_blocks(cup_art.tile_blocks(grid, w, h), w, h) == grid).all())
+
+    def test_bc3_keeps_a_picture_close(self):
+        import numpy as np
+        import cup_art
+        y, x = np.mgrid[0:32, 0:48]
+        rgb = np.stack([x * 5, y * 7, (x + y) * 3], -1).astype(np.uint8)
+        back = cup_art.decode_bc3(cup_art.encode_bc3(rgb))
+        self.assertLess(np.abs(back.astype(int) - rgb).mean(), 4)
+        flat = np.full((8, 8, 3), (231, 247, 255), np.uint8)
+        self.assertLessEqual(np.abs(cup_art.decode_bc3(cup_art.encode_bc3(flat)).astype(int) - flat).max(), 4)
+
+    def test_every_cup_has_four_track_pictures(self):
+        import cup_art
+        self.assertEqual(len(cup_art.CUPS), 25)
+        self.assertTrue(all(len(names) == 4 for _, names in cup_art.CUPS))
+        self.assertEqual(len({ident for ident, _ in cup_art.CUPS}), 25)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'BB_TEST_GAME: a USA 1.21 game folder')
+    def test_the_pictures_drawn_from_the_game_are_the_author_s(self):
+        import cup_art
+        op, data = cup_art.draw(os.environ['BB_TEST_GAME'], log=lambda _: None)
+        # Ultimate Customizer 5.1.0's cupselect-imagenes.igz, byte for byte.
+        self.assertEqual(op['patched_sha256'], '77646aee024c3c66500879c17e233ff8c1e9f785184c92af2fd58a0b3a89bc2e')
+        with tempfile.TemporaryDirectory() as folder:
+            m = fmt.validate_folder(cup_art.package(Path(folder) / 'extra-cups-art', op, data))
+            self.assertEqual(m['id'], 'extra-cups-art')
+
+
+class ExtraCupsOptionTests(unittest.TestCase):
+    """The extra cups option is off by default and turns on only with the pictures prepared."""
+
+    def setUp(self):
+        self.port = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.port, ignore_errors=True)
+        self.mods = self.port / 'mods'
+        self.mods.mkdir()
+        self.patches = self.port / 'patches'
+        old = os.environ.get('BB_BUILTIN_MODS')
+        os.environ['BB_BUILTIN_MODS'] = str(mod_library.BUILTIN)
+        self.addCleanup(lambda: os.environ.__setitem__('BB_BUILTIN_MODS', old if old is not None else ''))
+        if not (mod_library.BUILTIN / 'race-options').is_dir():
+            self.skipTest('no race-options in this tree')
+
+    def test_off_by_default(self):
+        item = mod_library.scan(self.mods, self.patches)['entries'][mod_library.EXTRA_CUPS[0]]
+        self.assertEqual(item['option_values'], {'extra-cups': False})
+
+    def test_on_only_with_the_pictures(self):
+        ident = mod_library.EXTRA_CUPS[0]
+        item = mod_library.scan(self.mods, self.patches)['entries'][ident]
+        with self.assertRaisesRegex(ValueError, 'Prepare the extra cups art first'):
+            mod_library.configure(self.mods, self.patches, ident, item['sha256'], {'extra-cups': 'true'})
+        package(mod_library.generated_builtin(self.mods) / 'extra-cups-art', ident='extra-cups-art')
+        found = mod_library.scan(self.mods, self.patches)
+        self.assertTrue(found['entries']['extra-cups-art']['builtin'])
+        mod_library.configure(self.mods, self.patches, ident, item['sha256'], {'extra-cups': 'true'})
+        self.assertEqual(mod_library.scan(self.mods, self.patches)['entries'][ident]['option_values'],
+                         {'extra-cups': True})

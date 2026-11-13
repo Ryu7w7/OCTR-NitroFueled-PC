@@ -673,6 +673,7 @@ struct PatchInfo {
     std::string key, name, author, note, version;
     std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
+    bool mod_builtin = false;  // a package shipped with the launcher (scripts/builtin_mods)
     const char* ini_key = nullptr;
 };
 
@@ -2438,6 +2439,7 @@ std::vector<PatchInfo> LoadPatches(bool scan = true) {
             p.mod_source = get("ModSource");
             p.mod_description = get("ModDescription");
             p.mod_versions = get("ModVersions");
+            p.mod_builtin = get("ModBuiltin") == "1";
             // Only our generated package catalog declares configurable controls.
             if (file.filename() == L"OCTR-Mod-Library.xml" && !p.mod_hash.empty()) {
                 const size_t meta_end=xml.find("</Metadata>",close);
@@ -4307,6 +4309,8 @@ bool ModIsOn(const PatchInfo& p) {
 
 bool VisibleMod(const PatchInfo& p) {
     if (!p.title.empty() && p.title != Narrow(GameTitle())) return false;
+    // The extra cups' pictures come with Race and battle options' extra cups (Prepare, below).
+    if (p.key == "OCTR-Mod-Library.xml/Mod: extra-cups-art") return false;
     if (p.key.find("Online: custom Demonware key") != std::string::npos) return false;
     return !p.ini_key || std::strcmp(p.ini_key, "patch_pro_1080p") != 0;
 }
@@ -4329,7 +4333,7 @@ void ModHeading(const char* title) {
 
 void ModSection(const char* title, bool builtin) {
     int total = 0, on = 0;
-    for (const auto& p : g_app.patches) if (VisibleMod(p) && (p.ini_key != nullptr) == builtin) {
+    for (const auto& p : g_app.patches) if (VisibleMod(p) && (p.ini_key != nullptr || p.mod_builtin) == builtin) {
         ++total; if (ModIsOn(p)) ++on;
     }
     ModHeading(title); ImGui::SameLine(0, 12);
@@ -4490,6 +4494,74 @@ bool ModConfigureIcon() {
     return clicked;
 }
 
+// ---- Extra cups art (scripts/cup_art.py) ----
+// Race and battle options' extra cups need their pictures, which are not shipped (they are made of
+// the game's own track pictures): Prepare draws them from the player's game files into the
+// built-in extra-cups-art package (mod-state/builtin). The extra cups option is off until then.
+struct CupArtState {
+    std::future<Captured> pending;
+    std::string message;
+    bool failed = false, reload = false;  // reload: after ModsTab has drawn the list
+};
+CupArtState g_cup_art;
+
+bool CupArtReady() {
+    for (const auto& p : g_app.patches) if (p.key == "OCTR-Mod-Library.xml/Mod: extra-cups-art") return true;
+    return false;
+}
+
+void PrepareCupArt() {
+    App& a = g_app;
+    if (!a.python || g_cup_art.pending.valid()) return;
+    if (a.game_dir.empty() || !fs::is_regular_file(a.game_dir / L"eboot.bin")) {
+        g_cup_art.failed = true;
+        g_cup_art.message = T("Primero elige la carpeta del juego en Jugar.", "Choose the game folder in Play first.");
+        return;
+    }
+    const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+        Quote((a.root / L"scripts" / L"cup_art.py").wstring()) + L" --prepare " + Quote(a.root.wstring()) +
+        L" --game " + Quote(a.game_dir.wstring());
+    const auto exe = a.python->exe;
+    const auto root = a.root;
+    g_cup_art.failed = false;
+    g_cup_art.message.clear();
+    g_cup_art.pending = std::async(std::launch::async, [exe, cmd, root] { return RunCaptured(exe, cmd, root, 900000); });
+}
+
+void CupArtRow() {
+    App& a = g_app;
+    ImGui::Spacing();
+    const ImVec4 muted(.65f,.73f,.87f,1);
+    if (g_cup_art.pending.valid()) {
+        if (g_cup_art.pending.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ImGui::TextColored(muted, "%s", T("Preparando las imágenes de las copas extra (1-2 minutos)...",
+                                             "Preparing the extra cups' pictures (1-2 minutes)..."));
+            return;
+        }
+        const Captured r = g_cup_art.pending.get();
+        if (!r.output.empty()) AddLog(r.output);
+        g_cup_art.failed = !(r.started && r.code == 0);
+        g_cup_art.message = g_cup_art.failed
+            ? T("No se pudieron preparar las imágenes. Revisa el registro.", "Could not prepare the pictures. Check the log.")
+            : T("Imágenes listas: ya puedes activar las copas extra (rueda de opciones).",
+                "Pictures ready: you can turn the extra cups on (options wrench).");
+        g_cup_art.reload = true;
+    }
+    const bool ready = CupArtReady();
+    ImGui::AlignTextToFramePadding();
+    if (!g_cup_art.message.empty()) ImGui::TextColored(g_cup_art.failed ? kYellow : muted, "%s", g_cup_art.message.c_str());
+    else ImGui::TextColored(muted, "%s", ready
+        ? T("Imágenes de las copas extra: preparadas.", "Extra cups' pictures: prepared.")
+        : T("Copas extra: prepara sus imágenes antes de activarlas.", "Extra cups: prepare their pictures before turning them on."));
+    ImGui::SameLine(0, 10);
+    ImGui::BeginDisabled(a.game_running || !a.python);
+    if (ImGui::SmallButton(ready ? T("Volver a preparar", "Prepare again") : T("Preparar", "Prepare"))) PrepareCupArt();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", T("Dibuja las 25 imágenes con las fotos de pistas de tu juego (no se descargan).",
+                                  "Draws the 25 pictures from your game's track pictures (nothing is downloaded)."));
+    ImGui::EndDisabled();
+}
+
 bool ModCard(const PatchInfo& p) {
     const bool package = !PackagePatchId(p).empty();
     bool on = ModIsOn(p), remove = false;
@@ -4509,7 +4581,7 @@ bool ModCard(const PatchInfo& p) {
     const float right = ImGui::GetWindowContentRegionMax().x;
     static std::set<std::string> expanded;
     const bool details = expanded.count(p.key) != 0;
-    const float action_width = package ? (p.mod_options.empty()?76.0f:112.0f) : 32.0f;
+    const float action_width = package ? (p.mod_options.empty()?76.0f:112.0f) - (p.mod_builtin?36.0f:0.0f) : 32.0f;
     // A separate text child wraps long names/metadata without colliding with actions.
     ImGui::BeginChild("summary", ImVec2(std::max(80.0f,right-text_x-action_width-12),0), ImGuiChildFlags_AutoResizeY,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -4556,6 +4628,7 @@ bool ModCard(const PatchInfo& p) {
         if (!p.note.empty()) ImGui::TextWrapped("%s",p.note.c_str());
         ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"%s",p.key.c_str());
     }
+    if (PackagePatchId(p) == "battle-point-limit-selector") CupArtRow();
     ImGui::EndChild();
     const float end_y = ImGui::GetCursorPosY();
     ImGui::SetCursorPos(ImVec2(right-action_width,top));
@@ -4565,6 +4638,7 @@ bool ModCard(const PatchInfo& p) {
             if(ModConfigureIcon()){g_mod_configuration.mod=p;g_mod_configuration.open=true;g_mod_configuration.advanced=false;}
             ImGui::SameLine(0,4);
         }
+        if (!p.mod_builtin) {
         if (ImGui::Button("##remove",ImVec2(32,25))) remove=true;
         const ImVec2 q=ImGui::GetItemRectMin();
         const ImVec2 c{q.x+16,q.y+12};
@@ -4575,6 +4649,7 @@ bool ModCard(const PatchInfo& p) {
         d->AddLine({c.x-1,c.y-1},{c.x-1,c.y+4},ink);
         d->AddLine({c.x+2,c.y-1},{c.x+2,c.y+4},ink);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",T("Quitar: se conserva una copia y las partidas.","Remove: keeps a recoverable copy and saves."));
+        }
         ImGui::EndDisabled();
     }
     // Reserve the same top-right slot regardless of expansion or card height.
@@ -4640,7 +4715,7 @@ void ModsTab() {
     ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));
     ModSection(T("Mods incluidos","Built-in mods"),true);
     ImGui::Spacing();
-    for (const auto& p : a.patches) if (VisibleMod(p) && p.ini_key) ModCard(p);
+    for (const auto& p : a.patches) if (VisibleMod(p) && (p.ini_key || p.mod_builtin)) ModCard(p);
     ImGui::Dummy(ImVec2(0,14));
     const float left=ImGui::GetCursorPosX();
     const float right=ImGui::GetWindowContentRegionMax().x;
@@ -4680,7 +4755,7 @@ void ModsTab() {
     ImGui::EndGroup();
     ImGui::Spacing();
     std::string remove_id, remove_hash;
-    for (const auto& p : a.patches) if (VisibleMod(p) && !p.ini_key) {
+    for (const auto& p : a.patches) if (VisibleMod(p) && !p.ini_key && !p.mod_builtin) {
         if (ModCard(p)) { remove_id=PackagePatchId(p); remove_hash=p.mod_hash; }
     }
     ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0.015f,0.13f,0.32f,0.82f));
@@ -4714,6 +4789,10 @@ void ModsTab() {
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
     ImGui::PopStyleColor(2);
     // Reload only after rendering: the loop's references must remain valid.
+    if (g_cup_art.reload) {
+        g_cup_art.reload = false;
+        a.patches = LoadPatches(); ReadPatchConfig(a.patch_enabled, a.patch_disabled);
+    }
     if (!remove_id.empty() && a.python) {
         const bool valid_id = std::all_of(remove_id.begin(), remove_id.end(), [](unsigned char c) {
             return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
