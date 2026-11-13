@@ -196,6 +196,10 @@ add_dependencies(bbgpu host_shaders)
 target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
+if (WIN32)
+    # The experimental Direct3D 11 engine's menu (shim/bbport_d3d11.cpp).
+    target_sources(bbgpu PRIVATE third_party/imgui/backends/imgui_impl_dx11.cpp)
+endif()
 target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
 # Dear ImGui stays private to libbbgpu.so. The library is linked into bb-probe, so its exports are
 # in the global symbol scope; a Vulkan layer carrying its own Dear ImGui without -Bsymbolic
@@ -267,7 +271,7 @@ if (WIN32)
     target_include_directories(sacredfire PRIVATE .. ../src)
     # liblzma (MSYS2 mingw-w64-clang-x86_64-xz), static: the archive decoder (src/runtime_lzma.c)
     find_library(BB_LIBLZMA NAMES liblzma.a REQUIRED)
-    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 -pthread)
+    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 d3d11 dxgi d3dcompiler -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
     target_link_options(sacredfire PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")

@@ -21,6 +21,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "bbport_d3d11.h"
 #include "bbport_native_memory.h"
 #include "bbport_native_vk.h"
 #include "bbport_thread_cpu.h"
@@ -575,7 +576,9 @@ bool Decide() {
             return false;
         }
         const char* why = nullptr;
-        if (!BbNativeVk::DrawsAlone() || !BbNativeVk::Drawing()) {
+        if (BbD3d11::On()) {
+            // the Direct3D 11 engine: no native submissions to wait for (k stays 0)
+        } else if (!BbNativeVk::DrawsAlone() || !BbNativeVk::Drawing()) {
             why = "the native renderer does not draw alone (BB_VK_ALONE=1, BB_VK_SHOW=1)";
         } else if (!BbNativeVk::GpuTimeline()) {
             why = "no timeline semaphore";

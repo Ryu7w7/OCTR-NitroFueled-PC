@@ -3658,7 +3658,8 @@ void SettingsTab() {
         // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
         // shaders from the player's game the first time)
         static constexpr Choice kRenderer[] = {{"Vulkan (shadPS4)", "Vulkan (shadPS4)", "shadps4"},
-                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"}};
+                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"},
+                                               {"DirectX 11 (experimental)", "DirectX 11 (experimental)", "d3d11"}};
         if (GameChoiceCombo(T("Motor gráfico", "Graphics engine"), "renderer", kRenderer, "shadps4", 16.0f)) SaveGameIni();
         HelpMarker(T("Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la "
                      "emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara "

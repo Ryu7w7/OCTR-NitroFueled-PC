@@ -39,6 +39,7 @@ extern "C" void runtime_wait_report(double frames);
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_d3d11.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -241,7 +242,9 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
         port->buffer_labels[startIndex + i] = 0;
         port->SignalVoLabel();
 
-        presenter->RegisterVideoOutSurface(group, address);
+        if (!BbD3d11::On()) {
+            presenter->RegisterVideoOutSurface(group, address);
+        }
         LOG_INFO(Lib_VideoOut, "buffers[{}] = {:#x}", i + startIndex, address);
     }
 
@@ -379,10 +382,15 @@ static void PrintMemory() {
 
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-        presenter->SetHDR(hdr);
-        presenter->Present(frame);
-    });
+    if (BbD3d11::On()) {
+        const u64 address = req.index >= 0 ? u64(req.port->buffer_slots[req.index].address_left) : 0;
+        RunPresenter([address] { BbD3d11::Present(address); });
+    } else {
+        RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+            presenter->SetHDR(hdr);
+            presenter->Present(frame);
+        });
+    }
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
 
@@ -742,6 +750,10 @@ void VideoOutDriver::Flip(const Request& req) {
 }
 
 void VideoOutDriver::DrawBlankFrame() {
+    if (BbD3d11::On()) {
+        RunPresenter([] { BbD3d11::Present(0); });
+        return;
+    }
     RunPresenter([this] {
         const auto empty_frame = presenter->PrepareBlankFrame(true);
         presenter->Present(empty_frame, false, false);
@@ -749,6 +761,10 @@ void VideoOutDriver::DrawBlankFrame() {
 }
 
 void VideoOutDriver::DrawLastFrame() {
+    if (BbD3d11::On()) {
+        RunPresenter([] { BbD3d11::Present(0); });
+        return;
+    }
     RunPresenter([this] {
         const auto frame = presenter->PrepareLastFrame();
         if (frame != nullptr) {
@@ -784,8 +800,12 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
-    Vulkan::Frame* frame;
-    if (index == -1) {
+    Vulkan::Frame* frame = nullptr;
+    if (BbD3d11::On()) {
+        // The Direct3D 11 engine keeps no frames: Flip presents what it has. A request without a
+        // frame reads as no request, so this only says there is one; it is never used as a frame.
+        frame = reinterpret_cast<Vulkan::Frame*>(std::uintptr_t{1});
+    } else if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
     } else {
         const auto& buffer = port->buffer_slots[index];

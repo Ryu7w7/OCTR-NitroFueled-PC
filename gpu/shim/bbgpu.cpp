@@ -2,6 +2,7 @@
 #include "bbport_gnm_hooks.h"
 #include "bbport_engine_probe.h"
 #include "bbport_graphics_tab.h"
+#include "bbport_d3d11.h"
 #include "bbport_native_vk.h"
 #include "bbport_native_memory.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
@@ -355,6 +356,7 @@ extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
     BbGnmHooks::PatchImage(image, size);
     BbEngineProbe::PatchImage(image, size);
     BbNativeVk::PatchImage(image, size);
+    BbD3d11::PatchImage(image, size);
     BbGraphicsTab::PatchImage(image, size);
 }
 

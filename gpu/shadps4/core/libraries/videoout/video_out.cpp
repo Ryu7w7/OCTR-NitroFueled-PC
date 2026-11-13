@@ -12,6 +12,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_d3d11.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
@@ -362,7 +363,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
 s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(
     s32 handle, SceVideoOutDeviceCapabilityInfo* pDeviceCapabilityInfo) {
     pDeviceCapabilityInfo->capability = 0;
-    if (presenter->IsHDRSupported()) {
+    if (presenter && presenter->IsHDRSupported()) {
         auto& game_info = Common::ElfInfo::Instance();
         if (game_info.GetPSFAttributes().support_hdr) {
             pDeviceCapabilityInfo->capability |= ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ;
@@ -401,7 +402,10 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    presenter->GetPPSettingsRef().gamma = settings->gamma;
+    if (presenter) {
+        presenter->GetPPSettingsRef().gamma = settings->gamma;
+    }
+    BbD3d11::SetGamma(settings->gamma);
     return ORBIS_OK;
 }
 

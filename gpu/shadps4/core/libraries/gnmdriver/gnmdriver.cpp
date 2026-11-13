@@ -30,6 +30,8 @@
 #include "bbport_native_signals.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_d3d11.h"
+#include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern Frontend::WindowSDL* g_window;
@@ -630,6 +632,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndex(u32* cmdbuf, u32 size, u32 index_count, uintptr
     LOG_TRACE(Lib_GnmDriver, "called");
     BbEngineProbe::NoteDraw(true);
     BbNativeVk::OnDraw(true, index_count, index_addr);
+    BbD3d11::OnDraw(true, index_count, index_addr);
 
     if (cmdbuf && (size == 10) && (index_addr != 0) && (index_addr & 1) == 0 &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -652,6 +655,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndexAuto(u32* cmdbuf, u32 size, u32 index_count, u32
     LOG_TRACE(Lib_GnmDriver, "called");
     BbEngineProbe::NoteDraw(false);
     BbNativeVk::OnDraw(false, index_count, 0);
+    BbD3d11::OnDraw(false, index_count, 0);
 
     if (cmdbuf && (size == 7) &&
         (flags & 0x1ffffffe) == 0) { // no predication will be set in the packet
@@ -3175,8 +3179,12 @@ int PS4_SYSV_ABI Func_F916890425496553() {
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
-    presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
-    BbNativeVk::Attach(presenter->GetInstance());
+    if (BbD3d11::On()) {
+        BbD3d11::Start(g_window->GetWindowInfo().render_surface); // no Vulkan at all
+    } else {
+        presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+        BbNativeVk::Attach(presenter->GetInstance());
+    }
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {
