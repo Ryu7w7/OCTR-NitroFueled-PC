@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The extra cups' pictures, drawn from the player's own game: the built-in extra-cups-art mod.
+"""The Copas Adicionales' pictures, drawn from the player's own game: the built-in extra-cups-art mod.
 
-Ultimate Customizer's 25 extra cups (scripts/builtin_mods/race-options, option extra-cups) each
+Ultimate Customizer's 25 Copas Adicionales (scripts/builtin_mods/ultimate-customizer, option extra-cups) each
 have a picture in the cup menu: the game's 2x2 collage layout (the Wumpa Cup picture's, its gaps
 found by their colour) filled with the race select pictures of the cup's four tracks. The pictures
 are not in the repository (they are made of the game's images); "Prepare" in the launcher runs
@@ -13,7 +13,7 @@ mod-state/builtin (scripts/mod_library.py lists it as a built-in mod):
 
 The pictures are stored as the game stores its UI pictures (BC3, PS4 1D-thin tiled 4x4 blocks,
 bottom row first), as more named images in the Space Cup picture's file (update2.pak), the file
-race-options' CupSelect_materials names them in (cup_<id>).
+ultimate-customizer's CupSelect_materials names them in (cup_<id>).
 
 Algorithm and tables by Kyouko8 (Ultimate Customizer's generator: cupart.py, texlib.py, texfile.py,
 trackart.py), brought here unchanged so the pictures come out as the author's.
@@ -511,7 +511,7 @@ def draw(game_folder, previews=None, log=print):
         panels, gap = layout(template)
         pictures, extra = {}, []
         for n, (ident, names) in enumerate(CUPS, 1):
-            log(f'Extra cups art: {n}/{len(CUPS)} {ident}')
+            log(f'Copas Adicionales: {n}/{len(CUPS)} {ident}')
             for name in names:
                 if name not in pictures:
                     pictures[name] = display(game.find('textures/' + texture_of(levels, name) + '.igz')[2])
@@ -543,10 +543,10 @@ def package(folder, op, data):
     for path, blob in files.items():
         (staging / path).write_bytes(blob)
     manifest = {
-        'schemaVersion': 2, 'id': ID, 'name': 'Extra cups art (Ultimate Customizer)', 'version': VERSION,
+        'schemaVersion': 2, 'id': ID, 'name': 'Copas Adicionales pictures (Ultimate Customizer)', 'version': VERSION,
         'author': 'Kyouko8',
-        'description': "The pictures of the 25 extra cups: collages of each cup's four tracks, drawn from your "
-                       'game files by "Prepare". Used with Race and battle options\' extra cups.',
+        'description': "The pictures of the 25 Copas Adicionales: collages of each cup's four tracks, drawn from your "
+                       'game files by "Prepare". Used with Ultimate Customizer\'s Copas Adicionales.',
         'requiresCapabilities': ['archive-assets'], 'compatibility': {'online': 'allowed'},
         'operations': [op],
         'files': [{'file': p, 'sha256': hashlib.sha256(b).hexdigest(), 'bytes': len(b)} for p, b in sorted(files.items())]}
@@ -568,10 +568,10 @@ def prepare(port_root, game_folder, log=print):
     try:
         import numpy  # noqa: F401
     except ImportError:
-        raise ValueError('Preparing the extra cups art needs numpy in the launcher\'s Python') from None
+        raise ValueError('Preparing the Copas Adicionales pictures needs numpy in the launcher\'s Python') from None
     op, data = draw(game_folder, log=log)
     folder = package(target(port_root), op, data)
-    log(f'Extra cups art: ready ({len(data) // (1024 * 1024)} MB, {len(CUPS)} pictures)')
+    log(f'Copas Adicionales pictures: ready ({len(data) // (1024 * 1024)} MB, {len(CUPS)} pictures)')
     return folder
 
 
@@ -591,7 +591,7 @@ def main(argv=None):
                 args.out.write_bytes(data)
             print(json.dumps(op, indent=2))
     except (ValueError, OSError) as error:
-        print(f'Extra cups art: {error}', flush=True)
+        print(f'Copas Adicionales pictures: {error}', flush=True)
         return 1
     return 0
 

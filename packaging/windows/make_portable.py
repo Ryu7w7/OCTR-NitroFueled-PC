@@ -49,7 +49,7 @@ ICED_X86_URL = ('https://files.pythonhosted.org/packages/04/9e/'
                 'ab21c70472b605bbcaca5a181cfda56b0750b061f4a946192888142ec37c/'
                 f'iced_x86-{ICED_X86_VERSION}-cp38-abi3-win_amd64.whl')
 ICED_X86_SHA256 = '04e04a8cc49ca7d89448fb78e3bab4ae364cf1fc888c996540a791c9999077c1'
-# numpy: "Prepare" on Race and battle options draws the extra cups' pictures from the player's
+# numpy: "Prepare" on Ultimate Customizer draws the Copas Adicionales' pictures from the player's
 # game files (scripts/cup_art.py). The cp314 wheel matches the bundled Python. Pinned by SHA-256.
 NUMPY_VERSION = '2.4.3'
 NUMPY_URL = ('https://files.pythonhosted.org/packages/48/39/'

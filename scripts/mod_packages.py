@@ -114,15 +114,15 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
-        # The extra cups' pictures (built-in extra-cups-art) replace the Space Cup's texture: only
-        # with Ultimate Customizer's extra cups on.
+        # The Copas Adicionales' pictures (built-in extra-cups-art) replace the Space Cup's texture:
+        # only with Ultimate Customizer's Copas Adicionales on.
         uc_cups=UC in names and catalog['entries'].get(UC,{}).get('option_values',{}).get('extra-cups',False)
         if uc_cups and ART not in catalog['entries']:
-            raise ValueError('The extra cups need their pictures: press Prepare on Race and battle options, or turn the extra cups off')
+            raise ValueError('Copas Adicionales need their pictures: press Prepare on Ultimate Customizer, or turn Copas Adicionales off')
         if uc_cups and ART not in names:
-            raise ValueError('The extra cups need their pictures: turn Extra cups art on, or turn the extra cups off')
+            raise ValueError('Copas Adicionales need their pictures: turn their pictures on, or turn Copas Adicionales off')
         if ART in names and not uc_cups:
-            names.remove(ART);log('OCTR mods: '+ART+' is used only with the extra cups on')
+            names.remove(ART);log('OCTR mods: '+ART+' is used only with Copas Adicionales on')
         # The performance report's mods (scripts/perf_report.py): BB_MODS_ENABLED=0 below only
         # keeps loose mods out, so the packages in use are named here.
         if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)

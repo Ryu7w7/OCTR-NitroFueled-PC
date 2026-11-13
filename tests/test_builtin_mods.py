@@ -92,8 +92,8 @@ class SplitTests(unittest.TestCase):
 
     def test_the_cup_lines_go_to_their_own_patch_and_the_shared_code_stays_in_the_base(self):
         base, cups = mbm.split_patch(self.XML)
-        self.assertEqual(self.lines(base), ('Race and battle options', 'true', ['0x2738000', '0x168d7a5', '0x167c950']))
-        self.assertEqual(self.lines(cups), ('Extra cups', 'true', ['0x13de1ac', '0x167e750', '0x18d14c1']))
+        self.assertEqual(self.lines(base), ('Ultimate Customizer', 'true', ['0x2738000', '0x168d7a5', '0x167c950']))
+        self.assertEqual(self.lines(cups), ('Copas Adicionales', 'true', ['0x13de1ac', '0x167e750', '0x18d14c1']))
 
     def test_a_line_without_its_comment_stops_the_split(self):
         with self.assertRaisesRegex(ValueError, 'every line needs its comment'):
@@ -117,17 +117,17 @@ class LibraryTests(unittest.TestCase):
         return {m.get('Name'): m for m in root.iter('Metadata')}
 
     def test_a_built_in_mod_is_listed_on_by_default(self):
-        package(self.builtin / 'race-options')
+        package(self.builtin / 'ultimate-customizer')
         found = mod_library.scan(self.mods, self.patches)
         self.assertEqual(found['messages'], [])
         item = found['entries']['race']
-        self.assertEqual((item['source'], item['builtin']), ('builtin:race-options', True))
+        self.assertEqual((item['source'], item['builtin']), ('builtin:ultimate-customizer', True))
         meta = self.catalog()['Mod: race']
         self.assertEqual((meta.get('isEnabled'), meta.get('ModBuiltin')), ('true', '1'))
         fmt.validate_folder(mod_library.folder(self.mods, 'race'))
 
     def test_the_built_in_mod_wins_over_a_copy_in_the_mods_folder(self):
-        package(self.builtin / 'race-options')
+        package(self.builtin / 'ultimate-customizer')
         package(self.mods / 'race-5.1.0', version='9.0.0', delta=False)  # even a newer one
         found = mod_library.scan(self.mods, self.patches)
         item = found['entries']['race']
@@ -142,7 +142,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual((meta.get('isEnabled'), meta.get('ModBuiltin')), ('false', None))
 
     def test_a_built_in_mod_cannot_be_removed(self):
-        package(self.builtin / 'race-options')
+        package(self.builtin / 'ultimate-customizer')
         item = mod_library.scan(self.mods, self.patches)['entries']['race']
         with self.assertRaisesRegex(ValueError, 'cannot be removed'):
             mod_library.remove(self.mods, self.patches, 'race', item['sha256'])
@@ -170,17 +170,17 @@ class ShippedTests(unittest.TestCase):
                     self.assertTrue(op['payload'].endswith('.delta.json'), op['payload'])
 
     def test_extra_cups_switch_the_cup_files_and_patch(self):
-        folder = mod_library.BUILTIN / 'race-options'
+        folder = mod_library.BUILTIN / 'ultimate-customizer'
         if not folder.is_dir():
-            self.skipTest('no race-options in this tree')
+            self.skipTest('no ultimate-customizer in this tree')
         m = fmt.validate_folder(folder)
         settings = {'widescreen_layout': 'off'}
         self.assertIs(m['configuration']['extra-cups']['default'], False)
         on = fmt.resolve(m, settings, {'extra-cups': True})
         off = fmt.resolve(m, settings, {'extra-cups': False})
         self.assertEqual((on[0], off[0]), ('extra-cups', 'game-cups'))
-        self.assertEqual(on[1]['patches'], ['patches/race-options.xml', 'patches/extra-cups.xml'])
-        self.assertEqual(off[1]['patches'], ['patches/race-options.xml'])
+        self.assertEqual(on[1]['patches'], ['patches/ultimate-customizer.xml', 'patches/copas-adicionales.xml'])
+        self.assertEqual(off[1]['patches'], ['patches/ultimate-customizer.xml'])
         system = [o['payload'] for o in on[1]['operations'] if o['asset'] == mbm.SYSTEM]
         self.assertEqual(system, ['payloads/systemdata-battle-cups.delta.json'])
         system = [o['payload'] for o in off[1]['operations'] if o['asset'] == mbm.SYSTEM]
@@ -193,7 +193,7 @@ if __name__ == '__main__':
 
 
 class CupArtTests(unittest.TestCase):
-    """cup_art.py: the extra cups' pictures, drawn from the game (Prepare)."""
+    """cup_art.py: the Copas Adicionales' pictures, drawn from the game (Prepare)."""
 
     def test_tiling_round_trips_and_pads_to_eight_blocks(self):
         import numpy as np
@@ -232,7 +232,7 @@ class CupArtTests(unittest.TestCase):
 
 
 class ExtraCupsOptionTests(unittest.TestCase):
-    """The extra cups option is off by default and turns on only with the pictures prepared."""
+    """The Copas Adicionales option is off by default and turns on only with the pictures prepared."""
 
     def setUp(self):
         self.port = Path(tempfile.mkdtemp())
@@ -243,8 +243,8 @@ class ExtraCupsOptionTests(unittest.TestCase):
         old = os.environ.get('BB_BUILTIN_MODS')
         os.environ['BB_BUILTIN_MODS'] = str(mod_library.BUILTIN)
         self.addCleanup(lambda: os.environ.__setitem__('BB_BUILTIN_MODS', old if old is not None else ''))
-        if not (mod_library.BUILTIN / 'race-options').is_dir():
-            self.skipTest('no race-options in this tree')
+        if not (mod_library.BUILTIN / 'ultimate-customizer').is_dir():
+            self.skipTest('no ultimate-customizer in this tree')
 
     def test_off_by_default(self):
         item = mod_library.scan(self.mods, self.patches)['entries'][mod_library.EXTRA_CUPS[0]]
@@ -253,7 +253,7 @@ class ExtraCupsOptionTests(unittest.TestCase):
     def test_on_only_with_the_pictures(self):
         ident = mod_library.EXTRA_CUPS[0]
         item = mod_library.scan(self.mods, self.patches)['entries'][ident]
-        with self.assertRaisesRegex(ValueError, 'Prepare the extra cups art first'):
+        with self.assertRaisesRegex(ValueError, 'Prepare the Copas Adicionales pictures first'):
             mod_library.configure(self.mods, self.patches, ident, item['sha256'], {'extra-cups': 'true'})
         package(mod_library.generated_builtin(self.mods) / 'extra-cups-art', ident='extra-cups-art')
         found = mod_library.scan(self.mods, self.patches)

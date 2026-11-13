@@ -9,14 +9,15 @@ file. This rebuilds the folders from the authors' release ZIPs and the game:
 
     python tools/make_builtin_mods.py GAME_FOLDER ULTIMATE_CUSTOMIZER.zip CUSTOM_CUP.zip
 
-  race-options      Ultimate Customizer: laps up to 250, three-digit HUD and menus, the long race
-                    clock, battle points/time/lives, the random cup; with the "extra-cups" option
-                    (off by default) its 25 added cups and their stars.
+  ultimate-customizer  Ultimate Customizer (formerly Race and Battle Options): laps up to 250, three-digit HUD and menus, the long race
+                    clock, battle points/time/lives, the random cup; with the Copas Adicionales
+                    option ("extra-cups", off by default) its 25 new Arcade cups (8 easy,
+                    9 medium, 8 hard) and their stars.
   custom-cup        Custom Cup: four tracks of the player's choice, with the track thumbnails.
 
 The added cups' pictures (37 MB of collages of the game's own track pictures) are not kept: the
 launcher's "Prepare" draws them on the player's PC from the game files (scripts/cup_art.py), and
-the extra cups option can be turned on only then.
+Copas Adicionales can be turned on only then.
 
 Ultimate Customizer's systemData.igz holds both the battle values and the added cups; the
 battle-only copy is made here from the game's file and the author's three battle lists, so the
@@ -140,10 +141,10 @@ def split_patch(xml):
         h = re.sub(r'Note="[^"]*"', f'Note="{note}"', h, count=1)
         h = re.sub(r'isEnabled="[^"]*"', 'isEnabled="true"', h, count=1)
         return h + '<PatchList>' + ''.join(lines) + '\n        </PatchList>' + tail
-    return (make(base, 'Race and battle options',
+    return (make(base, 'Ultimate Customizer',
                  'Laps up to 3 digits in the menu and the HUD; race clock up to 999:59:99; long races without '
                  'running out of network memory; random cup with Square. Kyouko8 (Ultimate Customizer).'),
-            make(cups, 'Extra cups', 'The 25 added Arcade cups: their stars (rbo_cups.bin) and the cup menu. '
+            make(cups, 'Copas Adicionales', 'The 25 new Arcade cups: their stars (rbo_cups.bin) and the cup menu. '
                                      'Kyouko8 (Ultimate Customizer).'))
 
 
@@ -202,32 +203,33 @@ def race_options(game, uc, out):
     if stock is None:
         raise ValueError('Ultimate Customizer: no systemData.igz operation')
     base_xml, cups_xml = split_patch((folder / m['patches'][0]).read_text(encoding='utf-8'))
-    files['patches/race-options.xml'] = base_xml.encode('utf-8')
-    files['patches/extra-cups.xml'] = cups_xml.encode('utf-8')
+    files['patches/ultimate-customizer.xml'] = base_xml.encode('utf-8')
+    files['patches/copas-adicionales.xml'] = cups_xml.encode('utf-8')
     manifest = {
-        'schemaVersion': 2, 'id': m['id'], 'name': 'Race and battle options (Ultimate Customizer)',
+        'schemaVersion': 2, 'id': m['id'], 'name': 'Ultimate Customizer',
         'version': m['version'], 'author': m['author'],
-        'description': 'Built into the launcher, from Ultimate Customizer by Kyouko8.\n'
+        'description': 'Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n'
                        '- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to '
                        '999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n'
-                       '- Random cup: Square on the cup menu.\n- Extra cups (option): 25 more Arcade cups built '
-                       'around a character, with their stars. Their pictures need the extra cups art.',
+                       '- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups '
+                       '(8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws '
+                       'their pictures from your game first.',
         'requiresCapabilities': ['archive-assets', 'xml-patches', 'code-signatures', 'mod-options', 'variants'],
         'compatibility': {'online': 'allowed'},
         'conflicts': m.get('conflicts', []),
         'operations': base_ops,
-        'patches': ['patches/race-options.xml'],
+        'patches': ['patches/ultimate-customizer.xml'],
         'operationSets': sets,
         'configuration': {'extra-cups': {
-            'type': 'boolean', 'label': 'Extra cups', 'default': False,
-            'description': 'The 25 added Arcade cups (Coco Cup onward and the Tawna Cup), with their stars.'}},
+            'type': 'boolean', 'label': 'Copas Adicionales', 'default': False,
+            'description': '25 new Arcade cups (8 easy, 9 medium, 8 hard), with their stars. Prepare their pictures first.'}},
         'variants': [
             # The variant's patches are added to the base ones.
             {'id': 'extra-cups', 'whenOptions': {'extra-cups': [True]}, 'useOperations': ['cups'],
-             'patches': ['patches/extra-cups.xml']},
+             'patches': ['patches/copas-adicionales.xml']},
             {'id': 'game-cups', 'whenOptions': {'extra-cups': [False]}, 'useOperations': ['battle']}],
     }
-    write_package(out / 'race-options', manifest, files)
+    write_package(out / 'ultimate-customizer', manifest, files)
 
 
 def custom_cup(game, cc, out):
@@ -240,7 +242,7 @@ def custom_cup(game, cc, out):
     xml = (folder / m['patches'][0]).read_text(encoding='utf-8')
     files['patches/custom-cup.xml'] = re.sub(r'isEnabled="[^"]*"', 'isEnabled="true"', xml).encode('utf-8')
     manifest = {k: v for k, v in m.items() if k not in ('files', 'operations', 'patches')}
-    manifest.update(name='Custom cup', operations=ops, patches=['patches/custom-cup.xml'],
+    manifest.update(name='Custom Cup', operations=ops, patches=['patches/custom-cup.xml'],
                     description='Built into the launcher, from Custom Cup by Kyouko8.\n' + m['description'])
     write_package(out / 'custom-cup', manifest, files)
 

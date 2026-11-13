@@ -12,7 +12,7 @@ FILENAME='OCTR-Mod-Library.xml'
 # One wins over a copy of the same mod ID in the mods folder; they cannot be removed.
 BUILTIN=Path(__file__).resolve().parent/'builtin_mods'
 BUILTIN_PREFIX='builtin:'
-# Ultimate Customizer's extra cups option needs the pictures made by "Prepare" (scripts/cup_art.py).
+# Ultimate Customizer's Copas Adicionales option needs the pictures made by "Prepare" (scripts/cup_art.py).
 EXTRA_CUPS=('battle-point-limit-selector','extra-cups','extra-cups-art')
 def generated_builtin(root):
     """Built-in mods made on this PC from the game's files (scripts/cup_art.py: extra-cups-art)."""
@@ -288,6 +288,6 @@ def configure(root,patchdir,ident,expected_sha256,values):
         settings.setdefault('widescreen_layout','off')
         fmt.resolve(manifest,settings,converted)
         if ident==EXTRA_CUPS[0] and converted.get(EXTRA_CUPS[1]) and EXTRA_CUPS[2] not in catalog['entries']:
-            raise ValueError('Prepare the extra cups art first (Race and battle options: Prepare)')
+            raise ValueError('Prepare the Copas Adicionales pictures first (Ultimate Customizer: Prepare)')
         save(storage(root)/'options.json',ident,manifest,converted)
         return scan(root,patchdir)

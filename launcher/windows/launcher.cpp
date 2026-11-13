@@ -4309,7 +4309,7 @@ bool ModIsOn(const PatchInfo& p) {
 
 bool VisibleMod(const PatchInfo& p) {
     if (!p.title.empty() && p.title != Narrow(GameTitle())) return false;
-    // The extra cups' pictures come with Race and battle options' extra cups (Prepare, below).
+    // The Copas Adicionales' pictures come with Ultimate Customizer's Copas Adicionales (Prepare, below).
     if (p.key == "OCTR-Mod-Library.xml/Mod: extra-cups-art") return false;
     if (p.key.find("Online: custom Demonware key") != std::string::npos) return false;
     return !p.ini_key || std::strcmp(p.ini_key, "patch_pro_1080p") != 0;
@@ -4494,10 +4494,10 @@ bool ModConfigureIcon() {
     return clicked;
 }
 
-// ---- Extra cups art (scripts/cup_art.py) ----
-// Race and battle options' extra cups need their pictures, which are not shipped (they are made of
+// ---- Copas Adicionales pictures (scripts/cup_art.py) ----
+// Ultimate Customizer's Copas Adicionales need their pictures, which are not shipped (they are made of
 // the game's own track pictures): Prepare draws them from the player's game files into the
-// built-in extra-cups-art package (mod-state/builtin). The extra cups option is off until then.
+// built-in extra-cups-art package (mod-state/builtin). Copas Adicionales stay off until then.
 struct CupArtState {
     std::future<Captured> pending;
     std::string message;
@@ -4534,8 +4534,8 @@ void CupArtRow() {
     const ImVec4 muted(.65f,.73f,.87f,1);
     if (g_cup_art.pending.valid()) {
         if (g_cup_art.pending.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-            ImGui::TextColored(muted, "%s", T("Preparando las imágenes de las copas extra (1-2 minutos)...",
-                                             "Preparing the extra cups' pictures (1-2 minutes)..."));
+            ImGui::TextColored(muted, "%s", T("Preparando las imágenes de las Copas Adicionales (1-2 minutos)...",
+                                             "Preparing the Copas Adicionales' pictures (1-2 minutes)..."));
             return;
         }
         const Captured r = g_cup_art.pending.get();
@@ -4543,16 +4543,16 @@ void CupArtRow() {
         g_cup_art.failed = !(r.started && r.code == 0);
         g_cup_art.message = g_cup_art.failed
             ? T("No se pudieron preparar las imágenes. Revisa el registro.", "Could not prepare the pictures. Check the log.")
-            : T("Imágenes listas: ya puedes activar las copas extra (rueda de opciones).",
-                "Pictures ready: you can turn the extra cups on (options wrench).");
+            : T("Imágenes listas: ya puedes activar las Copas Adicionales (rueda de opciones).",
+                "Pictures ready: you can turn Copas Adicionales on (options wrench).");
         g_cup_art.reload = true;
     }
     const bool ready = CupArtReady();
     ImGui::AlignTextToFramePadding();
     if (!g_cup_art.message.empty()) ImGui::TextColored(g_cup_art.failed ? kYellow : muted, "%s", g_cup_art.message.c_str());
     else ImGui::TextColored(muted, "%s", ready
-        ? T("Imágenes de las copas extra: preparadas.", "Extra cups' pictures: prepared.")
-        : T("Copas extra: prepara sus imágenes antes de activarlas.", "Extra cups: prepare their pictures before turning them on."));
+        ? T("Imágenes de las Copas Adicionales: preparadas.", "Copas Adicionales pictures: prepared.")
+        : T("Copas Adicionales: prepara sus imágenes antes de activarlas.", "Copas Adicionales: prepare their pictures before turning them on."));
     ImGui::SameLine(0, 10);
     ImGui::BeginDisabled(a.game_running || !a.python);
     if (ImGui::SmallButton(ready ? T("Volver a preparar", "Prepare again") : T("Preparar", "Prepare"))) PrepareCupArt();

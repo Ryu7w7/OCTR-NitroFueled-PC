@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
   "id": "battle-point-limit-selector",
-  "name": "Race and battle options (Ultimate Customizer)",
+  "name": "Ultimate Customizer",
   "version": "5.1.0",
   "author": "Kyouko8",
-  "description": "Built into the launcher, from Ultimate Customizer by Kyouko8.\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n- Random cup: Square on the cup menu.\n- Extra cups (option): 25 more Arcade cups built around a character, with their stars. Their pictures need the extra cups art.",
+  "description": "Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups (8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws their pictures from your game first.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -85,7 +85,7 @@
     }
   ],
   "patches": [
-    "patches/race-options.xml"
+    "patches/ultimate-customizer.xml"
   ],
   "operationSets": {
     "battle": [
@@ -123,9 +123,9 @@
   "configuration": {
     "extra-cups": {
       "type": "boolean",
-      "label": "Extra cups",
+      "label": "Copas Adicionales",
       "default": false,
-      "description": "The 25 added Arcade cups (Coco Cup onward and the Tawna Cup), with their stars."
+      "description": "25 new Arcade cups (8 easy, 9 medium, 8 hard), with their stars. Prepare their pictures first."
     }
   },
   "variants": [
@@ -140,7 +140,7 @@
         "cups"
       ],
       "patches": [
-        "patches/extra-cups.xml"
+        "patches/copas-adicionales.xml"
       ]
     },
     {
@@ -162,14 +162,14 @@
       "bytes": 19
     },
     {
-      "file": "patches/extra-cups.xml",
-      "sha256": "9b78a0f142c95578678e13835455ef971317593cb09b4b21243bab280e62f922",
-      "bytes": 4263
+      "file": "patches/copas-adicionales.xml",
+      "sha256": "c1ace4738049fb574713986b0a63afd91b50a5c4ada41f0069f5db7ae6d31b2f",
+      "bytes": 4268
     },
     {
-      "file": "patches/race-options.xml",
-      "sha256": "01b02f581b2d4e25acc528d4de7cc76f8a199341720cfb8172d4a0351d9579c2",
-      "bytes": 7424
+      "file": "patches/ultimate-customizer.xml",
+      "sha256": "fe2fc05c57ecb154567c36f980b6bb006ff3d62fdbd9e472c3ed464790876c57",
+      "bytes": 7420
     },
     {
       "file": "payloads/cupselect-materiales.delta.json",
