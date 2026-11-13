@@ -3708,12 +3708,45 @@ class LauncherApp(Adw.Application):
         window.present()
 
 
+def option(name):
+    """The value of "--name value" or "--name=value" on the command line, "" when it is not there."""
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == name and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith(name + "="):
+            return arg[len(name) + 1:]
+    return ""
+
+
+def prepare():
+    """--prepare --base <folder> --update <folder> --out <folder>: merges the base game and its
+    update without a window, for a program that sets the game up (RecompLauncher). It prints
+    "progress 0.4 text" lines and exits with 0 when the merged folder is ready."""
+    sys.path.insert(0, str(PORT_DIR / "tools"))
+    import merge_update
+    base, update, out = option("--base"), option("--update"), option("--out")
+    if not (base and update and out):
+        print("Usage: --prepare --base <base game folder> --update <update folder> --out <new folder>")
+        return 2
+    try:
+        merge_update.main(["--progress", base, update, out])
+    except SystemExit as error:
+        if error.code not in (None, 0):
+            print(error.code)
+            return 1
+    return 0
+
+
 def play():
     """--play: the game with the saved settings, no window (Steam's shortcut, the Steam Deck's
     game mode). The game runs as a child while this process does what the window would: the
-    player's Discord status with invites and "Ask to Join", and server announcements."""
+    player's Discord status with invites and "Ask to Join", and server announcements.
+    --game <folder> plays the merged game in that folder instead of the saved one."""
     settings = load_settings()
     set_language(settings.get("ui_language", ""))
+    if option("--game"):
+        settings["game_dir"] = option("--game")
     if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
         print("SacredFire: choose the game folder in the launcher first", file=sys.stderr)
         return 1
@@ -3791,6 +3824,8 @@ def play():
 
 
 if __name__ == "__main__":
+    if "--prepare" in sys.argv[1:]:
+        sys.exit(prepare())
     if "--play" in sys.argv[1:]:
         sys.exit(play())
     sys.exit(LauncherApp().run([a for a in sys.argv if a != "--play"]))

@@ -343,6 +343,8 @@ def main():
     for source, target in (('bbport.default.ini', 'bbport.default.ini'), ('LEEME.txt', 'LEEME.txt')):
         write_text(folder / target, (PORTABLE / source).read_text(encoding='utf-8'))
     write_text(folder / 'LICENSE', (ROOT / 'LICENSE').read_text(encoding='utf-8'))
+    # RecompLauncher reads it from the top of the package, next to the launcher.
+    shutil.copy2(ROOT / 'recomplauncher.json', folder)
     (folder / 'licenses').mkdir(exist_ok=True)
     (folder / 'licenses' / 'THIRD-PARTY.txt').write_bytes(
         third_party(dlls, python, bool(dlss_files)).encode('utf-8'))
