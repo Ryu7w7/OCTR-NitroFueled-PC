@@ -45,5 +45,49 @@ int main() {
     assert(TakeUploadBatch().size() == 1);
     assert(TakeUploadBatch().size() == 1);
     assert(upload_queue.empty());
-    std::puts("PASS: bounded texture uploads, FIFO order and oversized textures");
+    // Animated textures keep their last frame, even when the next upload takes over 2 ms.
+    instance = reinterpret_cast<const Vulkan::Instance*>(1); // Get's cache path uses no device
+    static int retired = 0;
+    const std::uint32_t tsharp[8]{0, 1u << 20, 0, 8u << 28}; // linear R8, one pixel
+    const auto key = Fnv(reinterpret_cast<const u8*>(tsharp), 24);
+    auto frame = [] {
+        auto t = std::make_unique<Texture>();
+        t->image = reinterpret_cast<VkImage>(1);
+        t->ready.store(true);
+        t->stale.store(true);
+        return t;
+    };
+    BbNativeVk::Tex::textures[key] = frame();
+    Texture* previous = BbNativeVk::Tex::textures.at(key).get();
+    assert(Get(tsharp) == previous);
+    assert(upload_queue.size() == 1);
+    Texture* next = replacements.at(key).get();
+    assert(upload_queue.front().tex == next && !next->ready.load());
+    host.retire = [](Texture* t) { ++retired; delete t; };
+    for (int i = 0; i < 3; ++i) {
+        assert(Get(tsharp) == previous);
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    Evict(budget + 1, EvictAfter + 1);
+    assert(BbNativeVk::Tex::textures.at(key).get() == previous);
+    assert(retired == 0);
+    next->image = reinterpret_cast<VkImage>(1);
+    auto jobs = TakeUploadBatch();
+    Settle(jobs, true);
+    assert(Get(tsharp) == next);
+    assert(replacements.empty());
+    assert(retired == 1);
+    // A failed replacement leaves the displayed frame intact and permits another attempt.
+    replacements[key] = frame();
+    replacements.at(key)->broken.store(true);
+    assert(Get(tsharp) == next);
+    assert(replacements.empty());
+    assert(retired == 2);
+    // Leaving the menu must not pin an abandoned upload and its old frame forever.
+    replacements[key] = frame();
+    Evict(budget + 1, EvictAfter + 1);
+    assert(BbNativeVk::Tex::textures.empty() && replacements.empty());
+    assert(retired == 4);
+    instance = nullptr;
+    std::puts("PASS: bounded texture uploads and animated texture replacement");
 }
