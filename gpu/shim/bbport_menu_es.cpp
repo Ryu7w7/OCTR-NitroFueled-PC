@@ -224,6 +224,7 @@ const char* Spanish(const char* english) {
     {"Good luck!", "¡Suerte!"},
     {"Back in a moment", "Ya vuelvo"},
     {"Room", "Sala"},
+    {"Also during races", "También durante las carreras"},
     {"Ping counter in corner", "Contador de ping en la esquina"},
     {"You are not in an online room right now.", "Ahora mismo no estás en una sala online."},
     {"Round trip to each player in your online room, in ms. Players with an older version show no ping.", "Tiempo de ida y vuelta a cada jugador de tu sala online, en ms. Los jugadores con una versión anterior no muestran ping."},
