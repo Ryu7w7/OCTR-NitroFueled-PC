@@ -728,6 +728,23 @@ std::mutex upload_mutex;
 std::condition_variable upload_cv;
 std::vector<Job> upload_queue;
 
+/// Publish early textures before detiling a whole streaming burst on a slow CPU.
+std::vector<Job> TakeUploadBatch() {
+    constexpr u64 MaxBatchBytes = 4ull << 20;
+    std::unique_lock lk(upload_mutex);
+    upload_cv.wait(lk, [] { return !upload_queue.empty(); });
+    u64 size = 0;
+    std::size_t n = 0;
+    while (n < upload_queue.size() && (n == 0 || size + JobBytes(upload_queue[n]) <= MaxBatchBytes)) {
+        size += JobBytes(upload_queue[n]);
+        ++n;
+    }
+    std::vector<Job> jobs(std::make_move_iterator(upload_queue.begin()),
+                          std::make_move_iterator(upload_queue.begin() + n));
+    upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
+    return jobs;
+}
+
 /// Ends the jobs' waits: their textures are uploaded (submitted), or `broken`.
 void Realize(Job& job);
 
@@ -892,7 +909,7 @@ void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs)
     }
 }
 
-/// Uploads queued textures in batches of up to 64 MiB.
+/// Uploads small FIFO batches; a single larger texture is never split or skipped.
 void UploadThread() {
     BbCpu::Register("bb:NativeTexUpload");
     const vk::Device dev = instance->GetDevice();
@@ -913,20 +930,7 @@ void UploadThread() {
         return;
     }
     for (;;) {
-        std::vector<Job> jobs;
-        {
-            std::unique_lock lk(upload_mutex);
-            upload_cv.wait(lk, [] { return !upload_queue.empty(); });
-            u64 size = 0;
-            std::size_t n = 0;
-            while (n < upload_queue.size() && (n == 0 || size + JobBytes(upload_queue[n]) <= (64ull << 20))) {
-                size += JobBytes(upload_queue[n]);
-                ++n;
-            }
-            jobs.assign(std::make_move_iterator(upload_queue.begin()),
-                        std::make_move_iterator(upload_queue.begin() + n));
-            upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
-        }
+        std::vector<Job> jobs = TakeUploadBatch();
         for (Job& job : jobs) {
             Realize(job);
             Plan(job);

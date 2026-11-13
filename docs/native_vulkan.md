@@ -74,7 +74,11 @@ Also:
 - **Pipelines** compile on worker threads. A draw whose pipeline is not ready is left out, and
   the known pipelines are preloaded from the last run.
 - **Textures** are untiled and uploaded on their own thread. Guest writes to their pages make
-  them stale.
+  them stale. Upload batches are limited to 4 MiB of queued texture data (one larger texture
+  still uploads whole). The recorder waits until a texture's batch is submitted; smaller
+  batches keep an early texture from waiting for a whole 64 MiB streaming burst to be untiled.
+  This targets the texture waits within the recorder stalls reported in issue #224. Validation
+  on the affected Intel N100 is still needed; loading a single texture can still stall.
 - **Render targets** are our own images, keyed by guest address; their memory is watched too.
 - **Texture copies** (the engine's `kCopyTexture`) are deferred until something needs them:
   - copies whose destination is never read are never made;
