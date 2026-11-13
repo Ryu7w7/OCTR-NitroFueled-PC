@@ -323,6 +323,13 @@ endif()
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 if (NOT WIN32)
+    add_executable(native-texture-batch-test EXCLUDE_FROM_ALL
+        ../tests/test_native_texture_batch.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(native-texture-batch-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(native-texture-batch-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_native_texture_batch.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(native-texture-batch-test PRIVATE bbgpu)
     add_executable(native-shader-async-test EXCLUDE_FROM_ALL
         ../tests/test_native_shader_async.cpp ../tests/test_gpu_runtime_stubs.cpp)
     target_include_directories(native-shader-async-test PRIVATE shim shadps4 third_party/gcn/include)
