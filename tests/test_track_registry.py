@@ -13,6 +13,7 @@ import track_registry as tr
 from igz_merge import MASK, File
 
 trr.SIZES.update({
+    'CGuiOctaneAreaLevelListList': 0x28, 'CGuiOctaneLevelSelectDataListList': 0x28,
     'CGuiOctaneAreaLevelList': 0x28, 'CGuiOctaneLevelData': 0x20, 'CGuiOctaneLevelSelectDataList': 0x28,
     'CGuiOctaneLevelSelectData': 0x38, 'igGuiAnimationTag': 0x10, 'igStreamingChunkInfo': 0x40,
     'igGraphicsMaterial': 0x68, 'igMemoryCommandStream': 0x58, 'igGraphicsObjectSet': 0x28,
@@ -36,7 +37,8 @@ def named_file(b, named):
 
 
 def gui(pages=PAGES):
-    b = trr.Builder(['igObjectList', 'igNameList', 'CGuiOctaneAreaLevelList', 'CGuiOctaneLevelData'])
+    b = trr.Builder(['igObjectList', 'igNameList', 'CGuiOctaneAreaLevelListList', 'CGuiOctaneAreaLevelList',
+                     'CGuiOctaneLevelData'])
     named = []
     for area, _, maps in pages:
         levels = []
@@ -45,13 +47,18 @@ def gui(pages=PAGES):
             b.string(o + 0x10, m)
             levels.append(o)
         named.append((tr.AREA + str(area), b.lst('CGuiOctaneAreaLevelList', levels)))
+    # An area outside the menu's pages, as the game's Sony Stadium list.
+    unused = b.obj('CGuiOctaneLevelData')
+    b.string(unused + 0x10, 'Sony Stadium')
+    named.append((tr.AREA + '6', b.lst('CGuiOctaneAreaLevelList', [unused])))
+    named.insert(0, (tr.AREAS, b.lst('CGuiOctaneAreaLevelListList', [o for n, o in named if n != tr.AREA + '6'])))
     return named_file(b, named)
 
 
 def select(pages=PAGES, extra=False):
     """The track menu; `extra`: another mod's object in it (Custom Cup's thumbnails)."""
-    b = trr.Builder(['igObjectList', 'igNameList', 'CGuiOctaneLevelSelectDataList', 'CGuiOctaneLevelSelectData',
-                     'igGuiAnimationTag', 'CStandIn'])
+    b = trr.Builder(['igObjectList', 'igNameList', 'CGuiOctaneLevelSelectDataListList',
+                     'CGuiOctaneLevelSelectDataList', 'CGuiOctaneLevelSelectData', 'igGuiAnimationTag', 'CStandIn'])
     selected = b.obj('igGuiAnimationTag')
     deselected = b.obj('igGuiAnimationTag')
     named = [('AnimationTag_Selected', selected), ('AnimationTag_Deselected', deselected)]
@@ -66,7 +73,9 @@ def select(pages=PAGES, extra=False):
             records.append(o)
             named.append((f'{tr.POPULATOR}{page}_{len(records)}', o))
         named.append((tr.POPULATOR + page, b.lst('CGuiOctaneLevelSelectDataList', records)))
-    named.append((tr.POPULATOR + 'Empty', b.lst('CGuiOctaneLevelSelectDataList', [])))
+    pages = [o for n, o in named if n.startswith(tr.POPULATOR) and '_' not in n[len(tr.POPULATOR):]]
+    named.append((tr.POPULATOR + '7', b.lst('CGuiOctaneLevelSelectDataList', [])))  # unused, as the game's
+    named.insert(0, (tr.PAGE_LISTS, b.lst('CGuiOctaneLevelSelectDataListList', pages)))
     if extra:
         named.append(('CustomCup_Thumbnail', b.obj('CStandIn')))
     return named_file(b, named)
@@ -121,12 +130,34 @@ def materials(pictures=('PapusPyramid', 'CrashCove')):
     return named_file(b, named)
 
 
+def titles(lang='en', text='Bonus Tracks'):
+    """A menu language file with the page titles: the last page's and another one."""
+    b = trr.Builder(['igObjectList', 'igNameList', 'igLocalizedStringDataList', 'igLocalizedStringData'])
+    entries = []
+    for target, value in ((tr.POPULATOR + 'NSanityBeach', 'N. Sanity Beach Area'), (tr.TITLE_DONOR, text)):
+        e = b.obj('igLocalizedStringData')
+        b.string(e + 0x10, value)
+        b.handle(e + 0x18, target, 'Octane_LevelSelect_Proto')
+        b.handle(e + 0x20, tr.TITLE_FIELD, 'metafield', named=False, tag='RNEX')
+        entries.append(e)
+    strings = b.lst('igLocalizedStringDataList', entries)
+    names = b.lst('igNameList', ['igLocalizedStringDataList0'], names=True)
+    return b.build(b.lst('igObjectList', [strings]), names)
+
+
+def page_titles(blob):
+    z = File(blob)
+    lst = next(o for o, t in z.typed.items() if t == 'igLocalizedStringDataList')
+    return {z.handle(z.u32(o + 0x18))[0]: z.string_at(o + 0x10) for o in z.items(lst)}
+
+
 def game():
     menu = [('vsc', 'vsc/ui/menu.igz'), ('texture', 'textures/a.igz'),
             ('material_instances', 'materialinstances/ui/levelselect_materials.igz')]
     return {'loosedata/guisystemdata.igz': gui(), 'ui/Octane_LevelSelect_Proto.igz': select(),
             tr.CHUNKS: package([('igx_file', 'maps/octane/t111_crash_cove/t111_crash_cove_zoneinfo.igz')]),
-            tr.MATERIALS: materials(), tr.DOMAINS[0]: package(menu), tr.DOMAINS[1]: package(menu)}
+            tr.MATERIALS: materials(), tr.DOMAINS[0]: package(menu), tr.DOMAINS[1]: package(menu),
+            tr.LANGUAGE_FILE.format('en'): titles(), tr.LANGUAGE_FILE.format('mx'): titles('mx', 'Circuitos adicionales')}
 
 
 def page_maps(entries):
@@ -138,9 +169,9 @@ def chunks(blob):
 
 
 class TrackRegistryTests(unittest.TestCase):
-    def register(self, tracks, entries=None):
+    def register(self, tracks, entries=None, own_page=False):
         entries = dict(entries or game())
-        out = tr.register(entries, tracks, log=lambda _: None)
+        out = tr.register(entries, tracks, log=lambda _: None, own_page=own_page)
         for blob in out.values():
             self.assertEqual(File(blob).build(), blob)  # the files read back as they were written
         return entries, {**entries, **out}
@@ -235,6 +266,34 @@ class TrackRegistryTests(unittest.TestCase):
         entries = {k.upper(): v for k, v in game().items()}
         out = tr.register(entries, [tr.Track(SUZUKA)], log=lambda _: None)
         self.assertTrue(out and set(out) <= set(entries))
+
+
+    def test_an_own_page_after_the_last_holds_the_tracks_without_a_page(self):
+        before, after = self.register([tr.Track(SUZUKA), tr.Track(NBC, page=tr.AREA + '0')], own_page=True)
+        layout = page_maps(after)
+        self.assertEqual([p[:2] for p in layout[:-1]], [p[:2] for p in page_maps(before)])
+        self.assertEqual(layout[-1], (tr.OWN_AREA, tr.OWN_LIST, [SUZUKA]))
+        self.assertEqual(layout[0][2][-1], NBC)
+        # The game's unused lists are left alone.
+        self.assertEqual(tr.maps(File(after[tr.GUI]), tr.named(File(after[tr.GUI]))[tr.AREA + '6']), ['Sony Stadium'])
+        self.assertEqual(File(after[tr.SELECT]).items(tr.named(File(after[tr.SELECT]))[tr.POPULATOR + '7']), [])
+
+    def test_the_own_page_is_titled_in_each_menu_language(self):
+        before, after = self.register([tr.Track(SUZUKA)], own_page=True)
+        for lang, title in (('en', 'External Tracks'), ('mx', 'Pistas externas')):
+            path = tr.LANGUAGE_FILE.format(lang)
+            self.assertEqual(page_titles(after[path]), {**page_titles(before[path]), tr.OWN_LIST: title})
+
+    def test_tracks_all_with_a_page_add_no_page(self):
+        before, after = self.register([tr.Track(NBC, page=tr.AREA + '0')], own_page=True)
+        self.assertEqual(len(page_maps(after)), len(page_maps(before)))
+        self.assertEqual(after[tr.LANGUAGE_FILE.format('en')], before[tr.LANGUAGE_FILE.format('en')])
+
+    def test_an_own_page_needs_the_english_titles(self):
+        entries = game()
+        del entries[tr.LANGUAGE_FILE.format('en')]
+        with self.assertRaisesRegex(ValueError, 'Octane_LevelSelect_Proto_en.lng'):
+            tr.register(entries, [tr.Track(SUZUKA)], log=lambda _: None, own_page=True)
 
 
 @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'BB_TEST_GAME: a USA 1.21 game folder')

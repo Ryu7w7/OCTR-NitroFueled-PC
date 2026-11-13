@@ -120,7 +120,11 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         if catalog['messages'] and any(key.startswith(PREFIX) and key.removeprefix(PREFIX) not in catalog['entries'] for key in original.get('enabled',[])):
             raise ValueError('An enabled mod could not be validated; check the OCTR mod messages')
         if catalog['entries'] or catalog['messages']:environment['BB_MODS_ENABLED']='0'  # own validated selection
-        if not names:lock.__exit__(None,None,None);return Path(game),str(config)
+        # External content (scripts/content_package.py) goes through the same prepared session.
+        import content_package
+        content_root=Path(environment.get('BB_CONTENT_DIR',root.parent/content_package.FOLDER))
+        has_content=content_package.selection(content_root)['enabled'] and content_root.is_dir() and             any(p.suffix.casefold()=='.zip' or p.is_dir() for p in content_root.iterdir())
+        if not names and not has_content:lock.__exit__(None,None,None);return Path(game),str(config)
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
         plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
@@ -150,7 +154,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))
             for op,folder in plan['operations']:
                 if op['kind'].startswith('shader_'):apply_shader(under(user,op['target']),op,folder)
-        save_json(session/'launch.json',{'packages':names,'variants':plan['variants'],'writes':writes,
+        save_json(session/'launch.json',{'packages':names,'content':plan['content'],'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
         # Discord invites are written by the launcher beside its original config,
@@ -158,7 +162,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         environment['BB_LAUNCHER_CONFIG']=str(Path(config).resolve())
         environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PROGRESS_DIR=str(progress),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
         mod_file_paths.configure(environment)
-        log('OCTR mod session: '+', '.join(names)+' at '+str(plan['selection_settings'].get('output_res')))
+        log('OCTR mod session: '+', '.join(names+[c+' (external content)' for c in plan['content']] or ['no mods'])+' at '+str(plan['selection_settings'].get('output_res')))
         log('Mod session (settings, logs, shader cache): '+str(session)+'; saves and trophies: '+str(progress))
         ACTIVE=(session,state);atexit.register(lock.__exit__,None,None,None)
         return plan['game'],str(ini)

@@ -164,6 +164,14 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             added[name]=[path.as_posix() for path,_ in files]
             packages.append({'id':name,'files':[[p.as_posix(),sha(s)] for p,s in files]})
     effective.update(settings)
+    # External content (scripts/content_package.py): tracks added to the game, in an update
+    # archive the launcher builds (scripts/content_build.py).
+    import content_package
+    content_root=Path(environment.get('BB_CONTENT_DIR',Path(mod_root).parent/content_package.FOLDER))
+    content=content_package.selected(content_root,environment.get('BB_ONLINE',effective.get('online','0'))=='1',log)
+    if content:
+        whole3=[name for name in names for target in added.get(name,[]) if target.casefold()=='archives/update3.pak']
+        if whole3:raise ValueError(', '.join(whole3)+' ships a whole update3.pak: turn it off, or convert it to external content, to use external content')
     for name in names:
         raw=metadata(package_folder(mod_root,name))
         m=fmt.resolve(raw,base,saved_options.get(name))[1] if 'schemaVersion' in raw else raw
@@ -172,6 +180,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
+        'content':[[m['id'],m['version'],content_package.manifest_digest(m)] for m,_ in content]+([content_package.selection(content_root)['page']] if content else []),
+        'content_code':{n:sha(Path(__file__).with_name(n)) for n in ('content_build.py','content_package.py','track_registry.py','igz_merge.py','graphics_tab.py')} if content else None,
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]
     # New namespace: old full-game profiles must never be reused by this loader.
@@ -209,6 +219,12 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     sources.append((name,target,staged if staged.is_file() else whole_sources[target.casefold()],added[name]))
             merged=racer_registry.prepare(game,staging/'files',sources,log)
             if merged:save_json(staging/'registry.json',{'target':merged})
+            if content:
+                if under(staging/'files','archives/update3.pak').exists():raise ValueError('Racer mods and external content both need update3.pak')
+                import content_build
+                own=content_build.build(game,content_package.state(content_root),staging,content,operations,effective,log,
+                    own_page=content_package.selection(content_root)['page']=='own')
+                save_json(staging/'content.json',{'archives':[[t.as_posix(),str(s)] for t,s in own]})
             records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind'] in ('archive_asset','localized_strings')]
             save_json(staging/'archive-plan.json',records)
             from mod_overlays import compose
@@ -231,9 +247,11 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     registry=json.loads((cache/'registry.json').read_text())['target'].casefold() if (cache/'registry.json').exists() else None
     replacements=[(Path(target),source) for source,target in whole if target.casefold()!=registry]
     replacements.extend((p.relative_to(cache/'files'),p) for p in regular_tree(cache/'files'))
+    if (cache/'content.json').exists():
+        replacements.extend((Path(t),Path(s)) for t,s in json.loads((cache/'content.json').read_text())['archives'])
     from mod_overlays import file_map
     file_map(game,cache/'file-map.bin',cache/'directories',replacements)
     return {'profile':cache,'game':game,'archive_plan':cache/'archive-plan.json','file_map':cache/'file-map.bin','file_dirs':cache/'directories','settings':effective,'environment':overrides,'operations':operations,
-            'engine':runtime,'packages':names,'variants':chosen_variants,
+            'engine':runtime,'packages':names,'variants':chosen_variants,'content':[m['id'] for m,_ in content],
             'selection_settings':base,'automatic_settings':automatic_settings,
             'has_shaders':any(op['kind'].startswith('shader_') for op,_ in operations)}

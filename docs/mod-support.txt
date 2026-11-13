@@ -120,6 +120,26 @@ Legacy full-game profiles under mod-state/extensions/profiles are never reused.
 New state lives in extensions/overlays and contains mod data/metadata, not a game
 copy. Separate user saves/shader caches remain, and are not original game content.
 
+EXTERNAL CONTENT (TRACKS)
+Tracks added to the game, never replacing it, go in the custom_content folder beside
+the launcher (not in mods): ZIPs in the OCTR content format (scripts/content_package.py:
+octr-content.required, content.json, archives/<id>*.pak, files/<new game files>). A
+package cannot replace a game file or archive, ship update archives or executable
+patches, or change the registration files itself. The launcher builds one
+archives/update3.pak for the session (scripts/content_build.py): the game's track
+registration files with the enabled mods' entry changes applied (Custom Cup's track
+menu, ...), every enabled track registered in them (scripts/track_registry.py), the
+packages' own files, and the Options menu's Graphics tab. The tracks get a page of their
+own after the game's, "External Tracks", or go at the end of Bonus Tracks with
+"page": "bonus" in content-state/selection.json, which also turns packages, or all
+external content, off. Several tracks are on at once; a mod shipping a whole
+update3.pak cannot be on with external content.
+A classic track mod (its archives and a whole update3.pak) converts into a package:
+  python scripts/content_convert.py GAME_FOLDER MOD.zip OUTPUT_FOLDER --zip
+It keeps the track's archives and new files and leaves out, and names, its changes to
+game files every track uses. Formats worked out from Neo Bowser City (PanchoPewPew),
+Suzuka (CTRNFModding) and the Nitro Creator Handbook (venvs and collaborators).
+
 CURRENT VERIFICATION SCOPE
 Windows official OCTR v0.6 engine, current official source frontend. PAK/ZIP/
 folder imports, composition, conflict rejection, sparse overlays, hash validation,
@@ -130,6 +150,7 @@ game and official v0.6 engine, including its seven executable writes and the sto
 arbitrary character/track mods and all DPI/resolution combinations are not claimed.
 The HUD package and proprietary game resources are not included in this change.
 No arbitrary character/track mod is certified merely because it imports.
-No multiplayer asset syncing, hot reload or registry merger beyond racers is included.
+No multiplayer asset syncing or hot reload is included; registrations are merged for
+racers and built for external tracks only.
 This implementation is for OCTR; no separate Nitro Launcher product is required.
 Linux run.sh integration and equivalent EU package authoring are not yet claimed.

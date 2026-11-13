@@ -40,6 +40,19 @@ AREA = 'GuiSystemData_raceAreaLevelDataList_'
 POPULATOR = 'LevelList_listItemPopulator_levelData_'
 LEVEL_DATA, SELECT_DATA = 'CGuiOctaneLevelData', 'CGuiOctaneLevelSelectData'
 IMAGE = 'LevelImage_'
+# The menu's pages, in order: the area lists in guisystemdata.igz and, in the same order, the menu
+# lists in Octane_LevelSelect_Proto.igz (each page's title is that list's _categoryName text, in
+# ui/Octane_LevelSelect_Proto_<language>.lng). The external tracks' page goes after the last.
+AREAS = 'GuiSystemData_raceAreaLevelDataList'
+PAGE_LISTS = 'LevelList_listItemPopulator_levelData'
+OWN_AREA = AREA + 'External'
+OWN_LIST = POPULATOR + 'External'
+TITLE_FIELD = 'CGuiOctaneLevelSelectDataList::_categoryName'
+TITLE_DONOR = POPULATOR + '6'  # the last page, Bonus Tracks
+TITLES = {'en': 'External Tracks', 'es': 'Pistas externas', 'mx': 'Pistas externas', 'pt': 'Pistas externas',
+          'fr': 'Circuits externes', 'de': 'Externe Strecken', 'it': 'Piste esterne'}
+LANGUAGE_FILE = 'ui/Octane_LevelSelect_Proto_{}.lng'
+LANGUAGES = ('en', 'fr', 'mx', 'pt', 'es', 'de', 'it', 'ar')
 DONOR_IMAGE = 'LevelImage_PapusPyramid'  # a plain picture material: one texture, shared settings
 
 
@@ -73,20 +86,20 @@ def maps(z, lst):
 
 
 def pages(gui, select):
-    """[(area list name, populator list name, [maps])] of the race pages, in the menu's order:
-    each page's list in guisystemdata.igz and the menu list holding the same tracks."""
+    """[(area list name, menu list name, [maps])] of the race pages in the menu's order: the area
+    lists of guisystemdata.igz's GuiSystemData_raceAreaLevelDataList and, at the same position,
+    the menu lists of Octane_LevelSelect_Proto.igz's LevelList_listItemPopulator_levelData (the
+    game pairs them so: the Bonus Tracks area, _7, shows in the menu list _6)."""
     g, s = File(gui), File(select)
-    populators = {n: maps(s, o) for n, o in named(s).items()
-                  if n.startswith(POPULATOR) and s.typed[o] == 'CGuiOctaneLevelSelectDataList'}
-    out = []
-    for name, o in named(g).items():
-        if not name.startswith(AREA) or g.typed[o] != 'CGuiOctaneAreaLevelList':
-            continue
-        tracks = maps(g, o)
-        same = sorted(m.casefold() for m in tracks)  # the files differ in case (t504_October_Spooky)
-        match = [p for p, m in populators.items() if m and sorted(x.casefold() for x in m) == same]
-        out.append((name, match[0] if len(match) == 1 else None, tracks))
-    return sorted(out, key=lambda p: int(p[0][len(AREA):]))
+    areas, lists = named(g), named(s)
+    ginv = {o: n for n, o in areas.items()}
+    sinv = {o: n for n, o in lists.items()}
+    if AREAS not in areas or PAGE_LISTS not in lists:
+        raise ValueError('the track menu has no page lists')
+    pairs = list(zip(g.items(areas[AREAS]), s.items(lists[PAGE_LISTS])))
+    if len(g.items(areas[AREAS])) != len(s.items(lists[PAGE_LISTS])):
+        raise ValueError('the track menu and guisystemdata.igz have different pages')
+    return [(ginv.get(a), sinv.get(m), maps(g, a)) for a, m in pairs]
 
 
 def registered(gui):
@@ -161,7 +174,8 @@ def name_object(z, off, name):
 def add_level(gui, track, page):
     z = File(gui)
     lst = named(z)[page]
-    donor = z.items(lst)[0]
+    donor = (z.items(lst) or [next(o for n, l in named(z).items() if n.startswith(AREA)
+                                   and z.typed[l] == 'CGuiOctaneAreaLevelList' for o in z.items(l)[:1])])[0]
     new = clone(z, donor, {z.string_at(donor + 0x10): track.map})
     z.grow(lst, [new])
     return z.build()
@@ -229,17 +243,65 @@ def add_chunks(blob, files, before=None):
     return z.build()
 
 
+def new_list(z, donor, name, container):
+    """An empty list like `donor`, named `name`, added at the end of the list `container`."""
+    size = z.size(donor)
+    new = z.append(bytes(z.data[donor:donor + size]))
+    z.add_site('RVTB', new)
+    z.set_u32(new + 0xC, 0)
+    z.set_u32(new + 0x10, 0)
+    z.set_u64(new + 0x18, z.u64(new + 0x18) & ~0xFFFFFFFF)
+    z.set_u64(new + 0x20, 0)
+    z.add_site('ROFS', new + 0x20)  # the list's data, once it has some
+    name_object(z, new, name)
+    z.grow(container, [new])
+    return new
+
+
+def add_page(gui, select):
+    """The external tracks' page: an empty area list and menu list after the last page."""
+    g = File(gui)
+    areas = named(g)[AREAS]
+    new_list(g, g.items(areas)[-1], OWN_AREA, areas)
+    s = File(select)
+    lists = named(s)[PAGE_LISTS]
+    new_list(s, s.items(lists)[-1], OWN_LIST, lists)
+    return g.build(), s.build()
+
+
+def add_title(lng, text):
+    """The page's title in a menu language file: a copy of the last page's."""
+    z = File(lng)
+    lst = next(o for o, t in z.typed.items() if t == 'igLocalizedStringDataList')
+    donor = next((o for o in z.items(lst) if z.handle(z.u32(o + 0x18))[0] == TITLE_DONOR
+                  and z.handle(z.u32(o + 0x20))[0] == TITLE_FIELD), None)
+    if donor is None:
+        raise ValueError('the menu language file has no title for the last page')
+    new = clone(z, donor, {TITLE_DONOR: OWN_LIST, z.string_at(donor + 0x10): text})
+    z.grow(lst, [new])
+    return z.build()
+
+
 def lookup(entries, path):
     """The key of `path` in {logical path: bytes}, matched without case."""
     found = [k for k in entries if k.casefold() == path.casefold()]
     return found[0] if found else None
 
 
-def register(entries, tracks, log=print):
+def register(entries, tracks, log=print, own_page=False):
     """The tracks registered in the registration files of `entries` ({logical path: bytes}, the
-    newest copy of each file in FILES the game loads, other mods' changes included). Returns the
-    changed files {logical path: bytes}, under the keys `entries` has them."""
+    newest copy of each file in FILES the game loads, other mods' changes included). A track
+    without a page goes to the last page, or with own_page to a page of its own after it, titled
+    in each menu language file of `entries` (LANGUAGE_FILE). Returns the changed files
+    {logical path: bytes}, under the keys `entries` has them."""
     files = {}
+    if own_page and any(not t.page for t in tracks):
+        for lang in LANGUAGES:
+            key = lookup(entries, LANGUAGE_FILE.format(lang))
+            if key is not None:
+                files[LANGUAGE_FILE.format(lang)] = (key, entries[key])
+        if LANGUAGE_FILE.format('en') not in files:
+            raise ValueError('the game has no ' + LANGUAGE_FILE.format('en'))
     for path in FILES:
         key = lookup(entries, path)
         if key is None:
@@ -253,11 +315,18 @@ def register(entries, tracks, log=print):
         seen.add(track.map.casefold())
     if not tracks:
         return {}
-    layout = pages(files[GUI][1], files[SELECT][1])
-    races = [p for p in layout if p[1]]
     data = {path: blob for path, (_, blob) in files.items()}
+    last = None
+    if own_page and any(not t.page for t in tracks):
+        data[GUI], data[SELECT] = add_page(data[GUI], data[SELECT])
+        for lang in LANGUAGES:
+            path = LANGUAGE_FILE.format(lang)
+            if path in data:
+                data[path] = add_title(data[path], TITLES.get(lang, TITLES['en']))
+        last = (OWN_AREA, OWN_LIST)
+    races = [p for p in pages(data[GUI], data[SELECT]) if p[1]]
     for track in tracks:
-        page = next((p for p in races if p[0] == track.page), None) if track.page else races[-1]
+        page = next((p for p in races if p[0] == track.page), None) if track.page else (last or races[-1])
         if page is None:
             raise ValueError(f'{track.map}: no menu page {track.page}')
         data[GUI] = add_level(data[GUI], track, page[0])
