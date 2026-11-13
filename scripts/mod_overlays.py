@@ -85,9 +85,10 @@ def compose(game, out, records, base_patches):
                     raise ValueError('Duplicate mod archive entry: ' + op['asset'])
                 entries[op['index']] = payload_bytes(op, folder, archive.extract(entry))
             for index, changes in texts.items():
-                if index in entries:
-                    raise ValueError('Duplicate mod archive entry: ' + archive.files[index]['path'])
-                entries[index] = mod_strings.apply(archive.extract(archive.files[index]), changes)
+                # Over another package's version of the entry only for a built-in mod's (the
+                # packages' claims keep two community mods apart): scripts/builtin_coexist.py.
+                base = entries[index] if index in entries else archive.extract(archive.files[index])
+                entries[index] = mod_strings.apply(base, changes)
             guest = '/app0/archives/' + name
             for index in sorted(replaced_by_base(archive, made.get(guest), entries)):
                 raise ValueError('A mod replaces ' + archive.files[index]['path'] + ', which an OCTR '

@@ -92,6 +92,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     supported=title_id in ('CUSA13795','CUSA14876') and app_version=='01.21'
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
+    (state/'builtin-status.txt').unlink(missing_ok=True)  # this launch's, written below
     try:
         # BB_MOD_LIBRARY_DIR: where the library's patch file goes (run.sh: the data folder's
         # patches/, as the Linux package's own folder is read-only); the bundled patches/ otherwise.
@@ -137,7 +138,16 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         if not names and not has_content:lock.__exit__(None,None,None);return Path(game),str(config)
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
-        plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
+        plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log,
+            external=[item for item in selected if not item[0].startswith(PREFIX)])
+        # Built-ins a community mod made step aside (scripts/builtin_coexist.py): the launcher
+        # shows it on their cards.
+        coexist=plan['coexist']
+        import builtin_coexist
+        builtin_coexist.write_status(state/'builtin-status.txt',coexist)
+        names=[n for n in names if n not in coexist['frozen']]
+        if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)
+        else:environment.pop('BB_MOD_PACKAGES_USED',None)
         import struct
         file_count,=struct.unpack_from('<I',plan['file_map'].read_bytes(),8)
         if file_count and engine_features(nx.engine(port),plan['engine']).get('file_overlays')!=1:
@@ -164,7 +174,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))
             for op,folder in plan['operations']:
                 if op['kind'].startswith('shader_'):apply_shader(under(user,op['target']),op,folder)
-        save_json(session/'launch.json',{'packages':names,'content':plan['content'],'variants':plan['variants'],'writes':writes,
+        save_json(session/'launch.json',{'packages':names,'frozen':coexist['frozen'],'yielded':coexist['yielded'],'merged':coexist['merged'],'content':plan['content'],'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
         # Discord invites are written by the launcher beside its original config,

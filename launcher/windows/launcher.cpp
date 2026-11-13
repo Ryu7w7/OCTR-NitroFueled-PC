@@ -4562,6 +4562,49 @@ void CupArtRow() {
     ImGui::EndDisabled();
 }
 
+// ---- Built-ins next to community mods (scripts/builtin_coexist.py) ----
+// The last mod session's mod-state/builtin-status.txt: kind<TAB>built-in<TAB>text, one per line.
+// A built-in a community mod clashes with merges its change over the mod's, leaves the online
+// lobby menu to it, or is frozen for that session; the card says which.
+struct BuiltinStatusLine { std::string kind, id, text; };
+
+const std::vector<BuiltinStatusLine>& BuiltinStatus() {
+    static std::vector<BuiltinStatusLine> lines;
+    static double last = -10;
+    const double now = ImGui::GetTime();
+    if (now - last < 2.0) return lines;
+    last = now;
+    lines.clear();
+    std::stringstream ss(ReadText(g_app.root / L"mod-state" / L"builtin-status.txt"));
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+        if (b == std::string::npos) continue;
+        lines.push_back({line.substr(0, a), line.substr(a + 1, b - a - 1), line.substr(b + 1)});
+    }
+    return lines;
+}
+
+void BuiltinStatusRow(const std::string& id) {
+    const ImVec4 muted(.65f,.73f,.87f,1);
+    for (const auto& l : BuiltinStatus()) {
+        if (l.id != id) continue;
+        std::string text;
+        if (l.kind == "frozen")
+            text = std::string(T("Congelado en la última partida con mods: ", "Frozen in the last game with mods: ")) + l.text +
+                   T(". Vuelve solo al quitar ese mod.", ". It comes back by itself when that mod is off.");
+        else if (l.kind == "yielded")
+            text = std::string(T("Dejó a otro mod este archivo en la última partida: ", "Left this file to another mod in the last game: ")) + l.text;
+        else if (l.kind == "merged")
+            text = std::string(T("Fusionado con otro mod en la última partida: ", "Merged with another mod in the last game: ")) + l.text;
+        else continue;
+        ImGui::PushStyleColor(ImGuiCol_Text, l.kind == "frozen" ? kYellow : muted);
+        ImGui::TextWrapped("%s", text.c_str());
+        ImGui::PopStyleColor();
+    }
+}
+
 bool ModCard(const PatchInfo& p) {
     const bool package = !PackagePatchId(p).empty();
     bool on = ModIsOn(p), remove = false;
@@ -4628,6 +4671,7 @@ bool ModCard(const PatchInfo& p) {
         if (!p.note.empty()) ImGui::TextWrapped("%s",p.note.c_str());
         ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"%s",p.key.c_str());
     }
+    if (p.mod_builtin) BuiltinStatusRow(PackagePatchId(p));
     if (PackagePatchId(p) == "battle-point-limit-selector") CupArtRow();
     ImGui::EndChild();
     const float end_y = ImGui::GetCursorPosY();
