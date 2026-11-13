@@ -101,8 +101,8 @@ mean deployed to the production server or verified in every live multiplayer sce
 Automated evidence includes client C regressions, USA/EU native asset checks, widescreen
 integration checks, the Go server suite, focused race-detector checks, and Linux amd64,
 Linux arm64, and Windows amd64 server builds. The latest client build used `BB_SKIP_GPU=1`.
-Earlier server changes are tracked by PR #3; latest local edits are not evidence that the
-remote PR contains them. No production deployment or server restart was performed.
+Local implementation and validation do not imply deployment. No production deployment
+or server restart was performed.
 The final mixed-transition fix was built CPU-only as `dev-de9946858e11595fc02b` and
 confirmed in two-client testing. This does not establish timeout or larger-party coverage.
 
@@ -132,4 +132,3 @@ confirmed in two-client testing. This does not establish timeout or larger-party
 ## Reference
 
 See [RANKED_SYSTEM_ARCHITECTURE_SPEC.md](RANKED_SYSTEM_ARCHITECTURE_SPEC.md) for protocol and implementation details.
-Server PR: https://github.com/Ryu7w7/RyuNET-Demonware-CTR/pull/3
