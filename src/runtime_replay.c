@@ -1123,11 +1123,20 @@ int runtime_replay_list(RrListEntry *out, int max) {
     char dir[700], path[800];
     race_dir(dir, sizeof dir);
     DIR *d = opendir(dir);
-    int n = 0;
-    RrListEntry *all = d ? calloc(RR_LIST_MAX * 2, sizeof *all) : NULL;
-    for (struct dirent *e; all && n < RR_LIST_MAX * 2 && (e = readdir(d));) {
+    int n = 0, room = RR_LIST_MAX;
+    /* every race in the folder, then the newest: the folder's order is by name, so a cap while
+     * reading left out the newest once Time Trial bests and imports had filled it */
+    RrListEntry *all = d ? calloc((size_t)room, sizeof *all) : NULL;
+    for (struct dirent *e; all && (e = readdir(d));) {
         const size_t len = strlen(e->d_name);
         if (len < 5 || len >= sizeof all->file || strcmp(e->d_name + len - 4, ".crr")) continue;
+        if (n == room) {
+            RrListEntry *more = n < 100000 ? realloc(all, (size_t)room * 2 * sizeof *all) : NULL;
+            if (!more) break;
+            memset(more + room, 0, (size_t)room * sizeof *more);
+            all = more;
+            room *= 2;
+        }
         snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
         FILE *f = fopen(path, "rb");
         struct rr_header h;

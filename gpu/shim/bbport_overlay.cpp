@@ -831,10 +831,10 @@ void ReportTab() {
 // Spectator build: the races in RaceReplay (src/runtime_replay.c records them), newest first.
 void ReplaysTab() {
     static RrListEntry list[RR_LIST_MAX];
-    static int listed = -1;
+    static int listed = -1, page = 0;
     static double listed_at = -100.0;
     const double now = ImGui::GetTime();
-    if (listed < 0 || now - listed_at > 3.0) {
+    if (listed < 0 || now - listed_at > 10.0) {  // each race's file header is read: not every frame
         listed = runtime_replay_list(list, RR_LIST_MAX);
         listed_at = now;
     }
@@ -901,8 +901,33 @@ void ReplaysTab() {
         ImGui::TextDisabled("%s", BbSettings::MenuText("No races recorded yet.", "Записанных гонок пока нет."));
         return;
     }
+    // a page of RR_LIST_PAGE at a time, newest first, with the pages to go through
+    const int pages = (listed + RR_LIST_PAGE - 1) / RR_LIST_PAGE;
+    page = std::clamp(page, 0, pages - 1);
+    if (pages > 1) {
+        ImGui::BeginDisabled(page == 0);
+        if (ImGui::ArrowButton("##newer", ImGuiDir_Left)) --page;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Text(BbSettings::MenuText("Page %d / %d", "Стр. %d / %d"), page + 1, pages);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(page + 1 >= pages);
+        if (ImGui::ArrowButton("##older", ImGuiDir_Right)) ++page;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    ImGui::TextDisabled(BbSettings::MenuText("%d races, newest first", "Гонок: %d, новые сверху"), listed);
     if (ImGui::BeginTable("##replays", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
-        for (int i = 0; i < listed; ++i) {
+        ImGui::TableSetupColumn("");
+        ImGui::TableSetupColumn(BbSettings::MenuText("Track", "Трасса"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Player", "Игрок"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Place", "Место"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Date (UTC) and length", "Дата (UTC) и длительность"));
+        ImGui::TableSetupColumn("");
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        const int first = page * RR_LIST_PAGE, last = std::min(listed, first + RR_LIST_PAGE);
+        for (int i = first; i < last; ++i) {
             const RrListEntry& e = list[i];
             ImGui::PushID(i);
             ImGui::TableNextRow();
