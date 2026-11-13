@@ -279,6 +279,23 @@ class BuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'is a game archive'):
             self.build([shadow])
 
+    def test_shared_files_are_the_game_s_own_bytes(self):
+        # A game file the track needs loaded with it (in the game, only in another track's archive).
+        game_copy = 'maps/octane/t111_crash_cove/a.igz'
+        a = self.package('a', files={f'archives/{ID}.pak': b'x', 'shared/' + game_copy: b'a'}, image=False)
+        b = self.package('b', ident='t929_neo_bowser_city',
+                         files={'archives/t929_neo_bowser_city.pak': b'x', 'shared/' + game_copy: b'a'}, image=False)
+        _, update = self.build([a, b])  # two packages may carry the same copy
+        self.assertEqual(update[game_copy], b'a')
+        listed = {p for _, p in tr.chunk_entries(File(update[tr.CHUNKS]))[1]}
+        self.assertIn(game_copy, listed)  # loaded with the track
+        changed = self.package('c', files={f'archives/{ID}.pak': b'x', 'shared/' + game_copy: b'changed'}, image=False)
+        with self.assertRaisesRegex(ValueError, 'not an unchanged copy'):
+            self.build([changed])
+        new = self.package('d', files={f'archives/{ID}.pak': b'x', 'shared/maps/new.igz': b'n'}, image=False)
+        with self.assertRaisesRegex(ValueError, 'not a game file; put it in files/'):
+            self.build([new])
+
     def test_two_packages_cannot_share_a_file(self):
         a = self.package('a', files={f'archives/{ID}.pak': b'x', 'files/loosedata/shared.igz': b'x'}, image=False)
         b = self.package('b', ident='t929_neo_bowser_city',

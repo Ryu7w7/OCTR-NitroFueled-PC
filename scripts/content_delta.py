@@ -21,6 +21,7 @@ Reference mods used to work this out: Neo Bowser City (PanchoPewPew) and Suzuka 
 """
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -95,6 +96,16 @@ class Game:
         for archive in self._open.values():
             archive.f.close()
         self._open.clear()
+
+
+# Archives the game always has open: a file in one of them can be found at any time.
+ALWAYS_LOADED = re.compile(r'(update\d*|permanent.*|juicedomain_permanent)\.pak\Z', re.I)
+
+
+def streamed_only(game, logical):
+    """True when every game copy of a path is in an archive loaded only for a track or a menu."""
+    copies = game.copies.get(logical.casefold(), [])
+    return bool(copies) and not any(ALWAYS_LOADED.match(Path(p).name) for p, _ in copies)
 
 
 def classify(game, logical, data):

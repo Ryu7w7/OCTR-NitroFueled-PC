@@ -15,6 +15,7 @@ It is served through the mods' file redirection (scripts/mod_content.py), as a m
 update3.pak would be; a mod that ships a whole update3.pak cannot be on at the same time.
 """
 import contextlib
+import hashlib
 import io
 from pathlib import Path
 
@@ -111,6 +112,20 @@ def build(game, store, staging, packages, operations, settings, log=print, own_p
     for m, folder in packages:
         for logical, source in cp.game_files(m, folder):
             entries[logical] = Path(source).read_bytes()
+    # shared/: copies of game files the content needs loaded with it, only the game's own bytes.
+    shared = [(m, logical, source) for m, folder in packages for logical, source in cp.shared_files(m, folder)]
+    if shared:
+        import content_delta as cd
+        copies = cd.Game(game)
+        try:
+            for m, logical, source in shared:
+                data = Path(source).read_bytes()
+                if cd.is_registry(logical) or hashlib.sha256(data).hexdigest() not in copies.hashes(logical):
+                    raise ValueError(f'{m["id"]}: shared/{logical} is not an unchanged copy of the game\'s file')
+                if logical.casefold() not in {p.casefold() for p in entries}:
+                    entries[logical] = data
+        finally:
+            copies.close()
     files = []
     if settings.get('graphics_tab', '1') != '0':
         files = graphics_files(game, operations, staging, log)

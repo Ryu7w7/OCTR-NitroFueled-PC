@@ -161,7 +161,9 @@ BB_BUILTIN_MODS names another folder, or none when empty.
 EXTERNAL CONTENT (TRACKS)
 Tracks added to the game, never replacing it, go in the custom_content folder beside
 the launcher (not in mods): ZIPs in the OCTR content format (scripts/content_package.py:
-octr-content.required, content.json, archives/<id>*.pak, files/<new game files>). A
+octr-content.required, content.json, archives/<id>*.pak, files/<new game files>,
+shared/<unchanged copies of game files the track needs loaded with it, which the game keeps
+only in archives it loads for one track or menu: checked to be the game's bytes>). A
 package cannot replace a game file or archive, ship update archives or executable
 patches, or change the registration files itself. The launcher builds one
 archives/update3.pak for the session (scripts/content_build.py): the game's track

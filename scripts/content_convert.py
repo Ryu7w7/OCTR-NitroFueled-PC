@@ -111,11 +111,19 @@ def convert(game_folder, source, output, log=print):
             (dest / 'archives').mkdir(parents=True)
             for pak in own:
                 shutil.copy2(pak, dest / 'archives' / pak.name)
+            # Unchanged game files the mod carries that the game keeps only in archives it loads
+            # for one track or menu (Sewer Speedway's scripts and menu textures, for Neo Bowser
+            # City) stay, in shared/: the track needs them loaded with it.
             for logical, (kind, data) in entries.items():
                 if kind == cd.NEW:
-                    target = cp.under(dest / 'files', logical)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(data)
+                    folder_name = 'files'
+                elif kind == cd.FILLER and cd.streamed_only(game, logical):
+                    folder_name = 'shared'
+                else:
+                    continue
+                target = cp.under(dest / folder_name, logical)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
             for extra in folder.iterdir():
                 if extra.is_file() and extra.name.casefold().endswith(cp.EXTRAS):
                     shutil.copy2(extra, dest / extra.name)

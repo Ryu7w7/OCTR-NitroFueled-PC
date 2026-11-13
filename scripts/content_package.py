@@ -11,6 +11,10 @@ creators) with this layout:
     files/<logical path>         its own game files (zone info, menu picture texture, materials):
                                  paths the game does not have; they go in the generated update
                                  archive and stream with the track
+    shared/<logical path>        unchanged copies of game files the content needs loaded with it
+                                 (Neo Bowser City: Sewer Speedway's scripts and menu textures,
+                                 which the game keeps in archives it loads only for that track);
+                                 they must be the game's bytes, which the launcher checks
     README*, preview.png ...     text and pictures at the top, for people
 
 content.json (format 1):
@@ -150,13 +154,13 @@ def kind_of(path, ident):
         if re.match(r'update\d*\.pak\Z', name):
             raise ValueError(f'{path}: content packages cannot ship update archives')
         return 'archive'
-    if parts[0] == 'files' and len(parts) > 1:
+    if parts[0] in ('files', 'shared') and len(parts) > 1:
         if path.casefold().endswith(('.xml', '.pak', '.elf', '.prx', '.bin', '.dll', '.exe')):
             raise ValueError(f'{path}: not a game asset')
-        return 'file'
+        return 'file' if parts[0] == 'files' else 'shared'
     if len(parts) == 1 and (path.casefold().endswith(EXTRAS) or path.casefold().startswith('readme')):
         return 'extra'
-    raise ValueError(f'{path}: content packages hold archives/, files/ and text or pictures at the top')
+    raise ValueError(f'{path}: content packages hold archives/, files/, shared/ and text or pictures at the top')
 
 
 def stream_kind(logical):
@@ -389,6 +393,11 @@ def check_against_game(packages, index):
             kind = kind_of(record['file'], m['id'])
             if kind == 'extra':
                 continue
+            if kind == 'shared':  # a copy of a game file: checked byte for byte when built
+                key = record['file'].split('/', 1)[1].casefold()
+                if key not in index['paths']:
+                    raise ValueError(f'{m["id"]}: shared/{key} is not a game file; put it in files/')
+                continue
             if kind == 'archive':
                 name = record['file'].split('/', 1)[1].casefold()
                 if name in index['archives']:
@@ -415,10 +424,16 @@ def game_files(m, folder):
             for r in m['files'] if kind_of(r['file'], m['id']) == 'file']
 
 
+def shared_files(m, folder):
+    """[(logical path, source)] of the game files the package needs loaded with it (shared/)."""
+    return [(r['file'].split('/', 1)[1], Path(folder) / r['file'])
+            for r in m['files'] if kind_of(r['file'], m['id']) == 'shared']
+
+
 def track(m):
     """The track_registry.Track of a track package."""
     from track_registry import Track
-    files = [(stream_kind(p), p) for p, _ in game_files(m, '.')]
+    files = [(stream_kind(p), p) for p, _ in game_files(m, '.') + shared_files(m, '.')]
     return Track(m['map'], image=m.get('image'), texture=m.get('texture'), files=files)
 
 
