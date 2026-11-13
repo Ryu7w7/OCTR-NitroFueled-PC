@@ -295,7 +295,8 @@ def main():
     # No docs/ (v0.8.5): the mod guides are read on GitHub (the launcher's Mods tab links them).
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
-    for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts'):
+    # assets: the art the port puts into the game (scripts/ctr_tv_logo.py)
+    for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts', 'assets'):
         shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
     shutil.copy2(ROOT / 'tools' / 'gen_import_names.py', folder / 'tools')
     # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its

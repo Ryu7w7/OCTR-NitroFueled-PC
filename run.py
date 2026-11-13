@@ -44,6 +44,8 @@ sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
 import season_art  # noqa: E402
+import signed_in_name  # noqa: E402
+import ctr_tv_logo  # noqa: E402
 import track_names  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
@@ -1093,6 +1095,17 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('season_art.prepare', season_art.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"Title theme: {error}; the game's own")
+        # Online, the nickname bottom left of the menus' button bar, as the Xbox One game shows the
+        # gamertag (scripts/signed_in_name.py): one menu script's console switch, by archive patch.
+        try:
+            base_patches.update(startup_call('signed_in_name.prepare', signed_in_name.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f'Nickname in the menus: {error}; not shown')
+        # The port's own CTR TV logo (bbport.ini ctr_tv_logo, scripts/ctr_tv_logo.py), by archive patch.
+        try:
+            base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f"CTR TV logo: {error}; the game's own")
         # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE
         # (src/runtime_presence.c), and the tracks' own names go beside it (scripts/track_names.py).
         presence = Path(env.setdefault('BB_PRESENCE_FILE', str((out / 'presence' / 'presence.txt').resolve())))

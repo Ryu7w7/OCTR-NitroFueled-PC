@@ -127,6 +127,8 @@ struct Values {
     std::atomic<bool> chat_enabled{true};
     /// Also in public lobbies, with strangers: a choice of its own.
     std::atomic<bool> chat_public{true};
+    /// The room chat during the races too (a smaller box then); off, it waits for the end of the race.
+    std::atomic<bool> chat_in_race{true};
     std::atomic<int> notice_position{NoticeTopRight};
     /// SacredFire: frames per second the present thread lets through (0: no limit). The 60 FPS
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.

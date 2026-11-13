@@ -8790,11 +8790,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     if (direct_launch) {
+        // The EOS bridge too (#226): without the window, nothing started it, and a game launched from
+        // Steam or a shortcut went to the server directly on networks that only reach it through Epic.
+        EosBridgePoll();
         if (g_app.worker.joinable()) g_app.worker.join();
         PollJobs();
         if (GameReady()) {
             if (g_app.launcher.Flag("discord_rpc", true))
                 RegisterDiscordLaunch(DiscordAppId());
+            {   // its check and EOS login take a while on a blocked network: wait for its decision
+                const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+                std::string host;
+                INTERNET_PORT port = 0, local = 0;
+                SplitServer(server, host, port);
+                if (g_app.game.Flag("online", true)) EosBridgeRoute(server, port, local, 30000);
+            }
             StartGame();
             while (g_app.game_running) {
                 MSG msg;
@@ -8807,6 +8817,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 Sleep(50);
             }
             DiscordPresence::Shutdown();
+            EosBridgeStop();  // the game is over: the bridge ends with it
             if (g_app.worker.joinable()) g_app.worker.join();
             if (g_app.probe.joinable()) g_app.probe.join();
             CoUninitialize();

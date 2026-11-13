@@ -1,5 +1,6 @@
-/* The text chat of a room, never during a race: a private room's in the lobby and on the results, a public room's in the
- * lobby only (with its own option in the menu: there the others are strangers).
+/* The text chat of a room, from joining it to leaving it (v0.8.6: through the races too, unless the Room tab's "during
+ * races" is off, and through the kart customization), a private room's and a public room's (with its own option in the
+ * menu: there the others are strangers).
  *
  * Through the RyuNET server (GET and POST /ryunet/chat, signed, about once a second while in a room), not the game's
  * own traffic: the race code is not touched. Only the host knows who is in a private room: its polls carry the
@@ -52,7 +53,8 @@ static int nick_ok(const char *s) {
     return 1;
 }
 
-static int in_room(char host[24]) {
+/* The room the game shows now: a private room's host, or the public room in its lobby. */
+static int detect_room(char host[24]) {
     if (runtime_online_mode_room_on()) {
         runtime_room_mode_host_name(host);
         return nick_ok(host);
@@ -65,14 +67,81 @@ static int in_room(char host[24]) {
     return allowed;
 }
 
-int runtime_chat_available(void) {
-    char host[24];
-    if (!in_room(host) || !runtime_replay_chat_allowed()) return 0;
-    if (strcmp(host, PUBLIC_ROOM)) return 1;
+/* The chat stays in its room until the player leaves it (v0.8.6), not only while the game shows the room: through the
+ * races (a public room's lobby is not on screen then), the kart customization (a 3D level of its own) and any other
+ * screen. Left: when the players the game talked to are gone for LEFT_MS (the ping list, runtime_net_ping.h), when the
+ * server no longer lets this player in (REFUSALS answers), or, a player alone in a room, ALONE_MS after the room was
+ * last on screen. Another room on screen takes over at once. Decided by the worker, about once a second. */
+#define LEFT_MS 15000u
+#define ALONE_MS (10u * 60u * 1000u)
+#define REFUSALS 3
+static char current[24];            /* the chat's room now ("": none), what runtime_chat_available reads */
+static uint64_t last_seen_ms, peers_gone_ms;
+static int had_peers, refusals;
+static int in_race = 1;             /* the chat during the races too (Room tab) */
+
+static uint64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static int choose_room(char host[24]) {
+    const uint64_t now = now_ms();
+    PingPeer peers[PING_MAX_PEERS];
+    const int talking = runtime_net_ping_view(peers, PING_MAX_PEERS) > 0;
+    char shown[24] = "";
+    if (detect_room(shown)) {
+        snprintf(host, 24, "%s", shown);
+        last_seen_ms = now;
+        if (talking) had_peers = 1, peers_gone_ms = 0;
+        return 1;
+    }
+    host[0] = 0;
+    if (!room[0]) return 0;
+    if (!strcmp(room, PUBLIC_ROOM)) {
+        pthread_mutex_lock(&lock);
+        const int allowed = enabled && public_enabled;
+        pthread_mutex_unlock(&lock);
+        if (!allowed) return 0;
+    }
+    if (refusals >= REFUSALS) return 0;
+    if (talking) {
+        had_peers = 1, peers_gone_ms = 0;
+    } else if (had_peers) {
+        if (!peers_gone_ms) peers_gone_ms = now;
+        if (now - peers_gone_ms > LEFT_MS) return 0;
+    } else if (now - last_seen_ms > ALONE_MS) {
+        return 0;
+    }
+    snprintf(host, 24, "%s", room);
+    return 1;
+}
+
+/* the chat now, races included or not (runtime_replay_chat_allowed: no race, or this player finished it) */
+static int chat_now(void) {
     pthread_mutex_lock(&lock);
+    const int races = in_race;
+    pthread_mutex_unlock(&lock);
+    return races || runtime_replay_chat_allowed();
+}
+
+int runtime_chat_racing(void) { return !runtime_replay_chat_allowed(); }
+
+void runtime_chat_set_in_race(int on) {
+    pthread_mutex_lock(&lock);
+    in_race = on != 0;
+    pthread_mutex_unlock(&lock);
+}
+
+int runtime_chat_available(void) {
+    pthread_mutex_lock(&lock);
+    char host[24];
+    snprintf(host, sizeof host, "%s", current);
     const int joined = public_joined;
     pthread_mutex_unlock(&lock);
-    return joined;
+    if (!host[0] || !chat_now()) return 0;
+    return strcmp(host, PUBLIC_ROOM) ? 1 : joined;
 }
 
 /* What a request names: the host's room, or the public room the server has this player in. */
@@ -157,6 +226,7 @@ static void poll_room(const char *me) {
     char *reply = NULL;
     size_t size = 0;
     const int status = runtime_ryunet_transfer("GET", target, NULL, 0, &reply, &size, MAX_REPLY);
+    if (!public_room && status) refusals = status == 403 ? refusals + 1 : 0;   /* no longer in that room */
     if (public_room && status) {        /* (unreachable for a moment: as it was) */
         pthread_mutex_lock(&lock);
         const int was = public_joined;
@@ -182,7 +252,9 @@ static void leave_room(const char *host) {
     snprintf(room, sizeof room, "%s", host);
     since = 0;
     have_since = 0;
+    had_peers = refusals = 0, peers_gone_ms = 0, last_seen_ms = now_ms();
     pthread_mutex_lock(&lock);
+    snprintf(current, sizeof current, "%s", host);
     line_count = outbox_count = 0;
     public_joined = 0;
     status_now = RC_STATUS_OK;
@@ -194,16 +266,20 @@ static void *worker(void *unused) {
     (void)unused;
     for (;;) {
         char host[24] = "";
-        const int inside = in_room(host);
+        const int inside = choose_room(host);
         if (!inside) host[0] = 0;
-        if (strcasecmp(host, room)) leave_room(host);
+        if (strcasecmp(host, room)) {
+            if (room[0] || host[0]) printf("Room chat: %s%s\n", host[0] ? "in " : "left the room", host);
+            fflush(stdout);
+            leave_room(host);
+        }
         const char *me = runtime_np_get_online_name();
         pthread_mutex_lock(&lock);
         const int on = enabled;
         pthread_mutex_unlock(&lock);
-        /* during the race nothing is asked: what was said comes after it */
+        /* with the chat off during races, nothing is asked then: what was said comes after the race */
         const int guest = runtime_room_mode_following() || !strcmp(host, PUBLIC_ROOM);
-        if (inside && me && nick_ok(me) && runtime_replay_chat_allowed() && (on || !guest)) {
+        if (inside && me && nick_ok(me) && chat_now() && (on || !guest)) {
             flush_outbox(me);
             poll_room(me);
         }

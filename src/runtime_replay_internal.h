@@ -43,6 +43,16 @@ const char *rr_current_level(void);         /* the level loaded now, 0 none */
 uint32_t rr_world_id(void);
 /* Replaces the call at `site` (to `expected`) by a call to `target`, through a trampoline. 1 = done. */
 int rr_redirect_call(unsigned char *site, const unsigned char *expected, void (*target)(void));
+/* Points the handler registration `lea rcx, [rip + handler]` at USA `site` at `target` (EU: 0x10 lower). */
+int rr_redirect_lea(size_t site, size_t handler, void (*target)(void), void **original);
+void *rr_racer_of(void *kart);              /* the CRacer of a kart entity, 0 none */
+
+/* remote missiles and bombs drawn ahead, race timing log (runtime_item_lead.c) */
+void runtime_item_lead_install(int eu);
+void runtime_item_lead_tick(int racing);
+/* loading-screen tips from RyuNET (runtime_tips.c) */
+void runtime_tips_install(int eu);
+void runtime_tips_tick(void);
 
 /* the player (runtime_replay_play.c) */
 int runtime_replay_play_install(int eu);

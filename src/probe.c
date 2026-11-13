@@ -15,6 +15,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <signal.h>
+/* Laptops with two GPUs: the NVIDIA and AMD drivers run a program that exports these on the dedicated GPU
+ * (Optimus / PowerXpress). The Vulkan GPU itself is the port's choice (vk_instance.cpp: the dedicated one first,
+ * or the launcher's pick); these keep the drivers' power and display routing on the same side. */
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #else
 #include <sys/mman.h>
 #include <malloc.h>

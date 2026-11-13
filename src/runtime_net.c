@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
+#include <pthread.h>
 
 #define ORBIS_OK 0
 #define ORBIS_NET_ENETUNREACH ((int32_t)0x80410133)
@@ -379,6 +380,87 @@ static struct sockaddr_in addr_of(uint32_t ip, uint16_t port) {
     return a;
 }
 
+/* BB_NET_LAG_MS (tests only): every datagram this PC sends through net_sendto (the game's own to
+ * peers and the server, pings, tunnelled copies) leaves that many milliseconds later, from a thread
+ * of its own, in order. Two instances on one PC with 100 each play as with a 200 ms round trip. */
+#define LAG_SLOTS 4096
+#define LAG_DATA (2048 + 64)
+typedef struct {
+    uint64_t due;
+    SOCKET s;
+    int flags;
+    struct sockaddr_in to;
+    int len;
+    uint8_t data[LAG_DATA];
+} LagPacket;
+static struct {
+    int ms;
+    LagPacket *ring;
+    unsigned head, tail;  /* head: the next to send; tail: the next free */
+    pthread_mutex_t lock;
+    pthread_cond_t more;
+} lag = {.ms = -1, .lock = PTHREAD_MUTEX_INITIALIZER, .more = PTHREAD_COND_INITIALIZER};
+
+static void *lag_sender(void *unused) {
+    (void)unused;
+    for (;;) {
+        pthread_mutex_lock(&lag.lock);
+        while (lag.head == lag.tail) pthread_cond_wait(&lag.more, &lag.lock);
+        LagPacket *p = &lag.ring[lag.head % LAG_SLOTS];
+        const uint64_t now = now_ms();
+        if (p->due > now) {
+            pthread_mutex_unlock(&lag.lock);
+#ifdef _WIN32
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+            continue;
+        }
+        LagPacket out = *p;
+        lag.head++;
+        pthread_mutex_unlock(&lag.lock);
+        sendto(out.s, (const char *)out.data, out.len, out.flags, (const struct sockaddr *)&out.to, sizeof(out.to));
+    }
+    return NULL;
+}
+
+static int lag_ms(void) {
+    if (lag.ms < 0) {
+        const char *v = getenv("BB_NET_LAG_MS");
+        const int ms = v ? atoi(v) : 0;
+        pthread_t thread;
+        lag.ms = 0;
+        if (ms > 0 && ms <= 2000 && (lag.ring = calloc(LAG_SLOTS, sizeof(LagPacket))) &&
+            pthread_create(&thread, NULL, lag_sender, NULL) == 0) {
+            pthread_detach(thread);
+            lag.ms = ms;
+            printf("Net lag test: every datagram this PC sends leaves %d ms late (BB_NET_LAG_MS)\n", ms);
+            fflush(stdout);
+        }
+    }
+    return lag.ms;
+}
+
+/* A datagram sent late (BB_NET_LAG_MS): 1 when queued (a full queue drops it, as a network would). */
+static int lag_queue(SOCKET s, const void *msg, size_t len, int flags, const struct sockaddr_in *to) {
+    if (len > LAG_DATA) return 0;
+    pthread_mutex_lock(&lag.lock);
+    if (lag.tail - lag.head < LAG_SLOTS) {
+        LagPacket *p = &lag.ring[lag.tail % LAG_SLOTS];
+        p->due = now_ms() + (uint64_t)lag.ms;
+        p->s = s;
+        p->flags = flags;
+        p->to = *to;
+        p->len = (int)len;
+        memcpy(p->data, msg, len);
+        lag.tail++;
+        pthread_cond_signal(&lag.more);
+    }
+    pthread_mutex_unlock(&lag.lock);
+    return 1;
+}
+
 /* sendto, with the EOS bridge (runtime_net_bridge.h) in the way: what goes to the server's NAT
  * port goes to the bridge's local port, which carries it there. */
 static int net_sendto(SOCKET s, const void *msg, size_t len, int flags, const struct sockaddr_in *to) {
@@ -389,6 +471,7 @@ static int net_sendto(SOCKET s, const void *msg, size_t len, int flags, const st
         dst.sin_addr.s_addr = ip;
         dst.sin_port = htons(port);
     }
+    if (lag_ms() > 0 && lag_queue(s, msg, len, flags, &dst)) return (int)len;
     return sendto(s, (const char *)msg, (int)len, flags, (const struct sockaddr *)&dst, sizeof(dst));
 }
 
@@ -594,7 +677,7 @@ static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct s
                               tun_relay_name(relay), tun_relay_ping(relay));
         }
         const struct sockaddr_in via = addr_of(ip, port);
-        sendto(vs->s, (const char *)wrapped, (int)n, 0, (const struct sockaddr *)&via, sizeof(via));
+        net_sendto(vs->s, wrapped, n, 0, &via);
     }
 }
 
@@ -796,6 +879,21 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
     }
     note_game_peer(vs, to ? &sin : NULL);
     if (to && vs->tunnel) {
+        /* the game's own rate to its peers, every 10 s while it sends (not to the server) */
+        static uint64_t since;
+        static unsigned sent, bytes;
+        struct sockaddr_in server;
+        if (!(tunnel_server(&server) && from_server(&sin, &server))) {
+            const uint64_t now = now_ms();
+            if (!since) since = now;
+            sent++, bytes += (unsigned)len;
+            if (now - since >= 10000) {
+                printf("Net rate: %.1f datagrams a second to peers, %u bytes on average\n",
+                       sent * 1000.0 / (double)(now - since), sent ? bytes / sent : 0);
+                fflush(stdout);
+                since = now, sent = bytes = 0;
+            }
+        }
         peer_copies(vs, msg, len, &sin);
         ping_after_send(vs, &sin);
     }

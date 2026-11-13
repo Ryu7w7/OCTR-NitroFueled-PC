@@ -431,6 +431,7 @@ void PollFriends() {
         runtime_spectate_set_share(s.spectate_share);
         runtime_chat_set_enabled(s.chat_enabled);
         runtime_chat_set_public(s.chat_public);
+        runtime_chat_set_in_race(s.chat_in_race);
         runtime_chat_start();
         runtime_name_colors_start();
     }
@@ -647,15 +648,17 @@ void ChatLine(const RcLine& line) {
     ImGui::TextWrapped("%s", line.text);
 }
 
-/// The lines over the lobby and the results, with no menu open. T writes (HandleEvent).
+/// The lines over the lobby, the races and the results, with no menu open. T writes (HandleEvent). During a race the
+/// box keeps small and light: the last 4 lines, a fainter background.
 void ChatBox() {
     ChatRefresh();
-    constexpr int kShown = 6;
+    const bool racing = runtime_chat_racing() != 0;
+    const int kShown = racing ? 4 : 6;
     const ImGuiIO& io = ImGui::GetIO();
     const float em = ImGui::GetFontSize();
     const bool typing = chat_typing;
     ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : 0.40f);
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : racing ? 0.22f : 0.40f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
     if (!typing) {
@@ -705,9 +708,17 @@ void ChatSection() {
         Store(s.chat_public, open_rooms, true);
         runtime_chat_set_public(open_rooms);
     }
+    bool races = s.chat_in_race;
+    if (ImGui::Checkbox(BbSettings::MenuText("Also during races", "Также во время гонок"), &races)) {
+        Store(s.chat_in_race, races, true);
+        runtime_chat_set_in_race(races);
+    }
     if (!runtime_chat_available()) {
-        ImGui::TextDisabled("%s", BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race in private ones.",
-                                                       "Работает в комнатах: в лобби, а в приватных и после финиша."));
+        ImGui::TextDisabled("%s", s.chat_in_race
+            ? BbSettings::MenuText("It works in rooms, from joining one until you leave it.",
+                                   "Работает в комнатах: с момента входа и до выхода.")
+            : BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race.",
+                                   "Работает в комнатах: в лобби и после финиша."));
         return;
     }
     const bool fresh = ChatRefresh();

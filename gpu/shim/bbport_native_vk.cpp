@@ -1495,7 +1495,7 @@ void BindStage(bool vertex, const ShaderInfo& s, u64 ctx, u64 dev, StageRes& res
                 }
             }
         } else if (const Tex::Texture* tex = Tex::Get(tsharp)) {
-            // bound even while its upload is on the way: the recorder waits for it (StageSet)
+            // bound even while its upload is on the way: the recorder waits a moment for it (StageSet)
             if (!tex->ready.load(std::memory_order_acquire)) {
                 textures_not_ready.fetch_add(1, std::memory_order_relaxed);
             }
@@ -2707,6 +2707,27 @@ VkDescriptorSet AllocateKept(VkDescriptorSetLayout layout) {
     return VK_NULL_HANDLE;
 }
 
+/// Whether a texture's upload is done, waiting for it at most a moment (#224). On a slow PC (an
+/// Intel N100's integrated GPU) a texture first used mid-race took 130-190 ms to upload, and the
+/// recorder waited for it every time: the picture froze. Past the moment the draw samples nothing
+/// for now (a null view reads zeros: a brief pop-in instead of a freeze); its set is keyed on the
+/// null view, so the texture's own set is made once it is ready.
+std::atomic<u64> textures_skipped{0};
+bool TextureReady(const Tex::Texture* tex) {
+    if (tex->ready.load(std::memory_order_acquire)) {
+        return true;
+    }
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    while (std::chrono::steady_clock::now() < until) {
+        std::this_thread::yield();
+        if (tex->ready.load(std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    textures_skipped.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
 /// `t` is one of the pass's targets read in place (its feedback loop).
 bool InPlace(const Gpu::Pass& pass, const Target* t) {
     for (u32 c = 0; pass.feedback && c < 8; ++c) {
@@ -2765,8 +2786,7 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                     // filters across faces as the PS4 does (no seams on rough reflections)
                     if (const Tex::Texture* tex = res.slots[slot].texture; tex && tex->slices == 6) {
                         // its views are made on the upload thread: read once it is ready
-                        tex->ready.wait(false, std::memory_order_acquire);
-                        if (!tex->broken.load(std::memory_order_relaxed) && tex->view &&
+                        if (TextureReady(tex) && !tex->broken.load(std::memory_order_relaxed) && tex->view &&
                             tex->view != tex->view_array) {
                             ii.imageView = TextureView(*tex, false, res.view_swz[slot]);
                         }
@@ -2784,10 +2804,10 @@ vk::DescriptorSet StageSet(const ShaderInfo& s, const StageRes& res, const Targe
                     } else if (const Tex::Texture* tex = res.slots[slot].texture;
                                tex && (b.arrayed || tex->slices == 1)) {
                         // its upload is submitted before this draw's submission (a remade video
-                        // frame is often still on the way): never a draw on undefined data
-                        tex->ready.wait(false, std::memory_order_acquire);
+                        // frame is often still on the way): never a draw on undefined data. Not
+                        // ready after a moment: nothing sampled for now (TextureReady)
                         // a plain 2D binding takes only one-slice textures (view types must match)
-                        if (!tex->broken.load(std::memory_order_relaxed)) {
+                        if (TextureReady(tex) && !tex->broken.load(std::memory_order_relaxed)) {
                             ii.imageView = TextureView(*tex, b.arrayed, res.view_swz[slot]);
                         }
                     }
@@ -4376,7 +4396,7 @@ void Report() {
                     "waiting; not made: %llu unsupported, %llu unreadable, %llu failed; %llu made over "
                     "budget, %llu evicted, %llu made again after the game wrote them, %llu pages "
                     "watched; %llu samplers. Binds: %llu textures (%llu render targets, %llu unset "
-                    "slots, %llu without an image, %llu waited for their upload, %llu unreadable T#), %llu "
+                    "slots, %llu without an image, %llu still uploading (%llu drawn without it), %llu unreadable T#), %llu "
                     "samplers (%llu failed)\n",
                     (unsigned long long)tx.textures, tx.bytes / 1048576.0,
                     (unsigned long long)tx.uploads_done, (unsigned long long)tx.upload_batches,
@@ -4388,6 +4408,7 @@ void Report() {
                     (unsigned long long)texture_binds.load(), (unsigned long long)target_binds.load(),
                     (unsigned long long)unset_textures.load(), (unsigned long long)texture_misses.load(),
                     (unsigned long long)textures_not_ready.load(),
+                    (unsigned long long)textures_skipped.load(),
                     (unsigned long long)bad_tsharps.load(), (unsigned long long)sampler_binds.load(),
                     (unsigned long long)sampler_misses.load());
         std::printf("Native Vulkan: %zu vertex layouts; vertex streams %llu (%llu resident, %llu read "
