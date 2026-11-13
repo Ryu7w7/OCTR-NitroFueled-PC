@@ -3,7 +3,8 @@
 
 static char friends_csv[NP_FRIENDS_CSV_CAPACITY];
 static char current_host[24];
-static int frozen_race, left_room;
+static int frozen_race, left_room, connected_party;
+int runtime_online_party_active(void) { return connected_party; }
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
 void runtime_room_mode_left(void) { ++left_room; }
 void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", current_host); }
@@ -20,12 +21,17 @@ int main(void) {
     char sessions[] = "/tmp/ctr-session-test-XXXXXX";
     assert(mkdtemp(sessions));
     assert(!setenv("BB_SESSIONS_DIR", sessions, 1));
-    private_room_active(1); frozen_race = 1;
+    private_room_active(1); connected_party=1;
+    write_active_session("cusa13795-session-HostPlayer");
+    char session_path[512];snprintf(session_path,sizeof session_path,"%s/LocalPlayer.session",sessions);
+    remove_active_session();
+    assert(s_private_room && !left_room && !access(session_path,F_OK));
+    connected_party=0; frozen_race = 1;
     remove_active_session();
     assert(s_private_room && !left_room);
     frozen_race = 0;
     remove_active_session();
-    assert(!s_private_room && left_room == 1);
+    assert(!s_private_room && left_room == 1 && access(session_path,F_OK)==-1);
     assert(!rmdir(sessions));
     assert(!unsetenv("BB_SESSIONS_DIR"));
     assert(queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1000));

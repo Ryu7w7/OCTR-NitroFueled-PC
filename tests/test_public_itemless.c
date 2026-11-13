@@ -4,6 +4,10 @@
 #include <unistd.h>
 static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room;
 static int private_speed, private_cup, private_teams, modified_difficulty, selector_left_calls;
+static int party_guest=1;
+int runtime_room_mode_following(void) { return party_guest; }
+static int frozen_race;
+int runtime_room_mode_race_frozen(void) { return frozen_race; }
 static void *focus_test_button;
 static unsigned synthetic_signal;
 static int hof_opens;
@@ -27,8 +31,9 @@ static void ABI hof_focus_mock(void *project, void *list, int controller) {
 static int hof_legends;
 void runtime_online_mode_hof_legend(void *project) { assert(project); ++hof_legends; }
 void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
-static int timeout_attempts, timeout_ready=1;
-int runtime_online_mode_matchmaking_timeout(void) { ++timeout_attempts; return timeout_ready; }
+static int timeout_attempts, timeout_ready=1, timeout_route;
+int runtime_online_mode_matchmaking_cancel(int leave_room) { timeout_route=leave_room;++timeout_attempts;return timeout_ready; }
+int runtime_online_mode_matchmaking_timeout(void) { return runtime_online_mode_matchmaking_cancel(0); }
 static int new_sessions, hosted_sessions;
 void runtime_online_mode_new_session(void) { ++new_sessions; runtime_public_itemless_new_session(); }
 void runtime_room_mode_hosting(void) { ++hosted_sessions; }
@@ -121,6 +126,12 @@ static void test_full_lobby_confirmation(void) {
     snprintf(doc+n, sizeof doc-n, ",%016" PRIx64 "\"}", (uint64_t)17);
     assert(!confirmation(doc,42,1));
 }
+static int native_party_teardowns, native_keep_party, native_race_resets, native_lobby_closes;
+static void ABI native_close_lobby(int start_again) { assert(!start_again && native_keep_party==1 && native_race_resets);++native_lobby_closes; }
+static void ABI native_reset_session(void *self) { (void)self;assert(native_keep_party==1);++native_race_resets; }
+static void ABI native_stop_part(void *self) { (void)self; }
+static void ABI native_stop_party(void *self) { (void)self; ++native_party_teardowns; }
+static void ABI native_stop_session(void *self, int keep_party) { (void)self; native_keep_party=keep_party; }
 static void test_installed_hooks(const char *region) {
     size_t size=0x2af3000;
     unsigned char *im=mmap(NULL,size,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
@@ -140,12 +151,45 @@ static void test_installed_hooks(const char *region) {
     memcpy(im+0xa14550,"\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x89\xfb",14);
     memcpy(im+0xa14550+14,"\x5b\x41\x5c\x41\x5e\x41\x5f\x5d",8);
     jump(im+0xa14550+22,(void *)destroy_owner);
-    memcpy(im+0xa97a00,"\x55\x48\x89\xe5\x53\x50",6);
+    size_t stop_quit_site=0x104b8f9-(!strcmp(region,"1277df0") ? 0x10 : 0);
+    int32_t stop_relative=(int32_t)(0xa9ffd0-stop_quit_site-5);
+    im[stop_quit_site]=0xe8;memcpy(im+stop_quit_site+1,&stop_relative,4);
+    memcpy(im+0xa5b680,"\x55\x48\x89\xe5\x41\x56\x53\x48\x83\xec\x30\x4c\x8b\x35\x06\xba\xda\x01",18);
+    memcpy(im+0xa5b692,"\x48\x83\xc4\x30\x5b\x41\x5e\x5d\xb0\x01\xc3",11);
+    memcpy(im+0xa18210,"\x55\x48\x89\xe5\x53\x50\x48\x89\xfb\x83\x7b\x54\x0a\x0f\x84\x93\x00\x00\x00",19);
+    /* Both reset branches unwind the stolen prologue; quit does the same. */
+    memcpy(im+0xa18223,"\x58\x5b\x5d\xc3",4);
+    memcpy(im+0xa182b6,"\x58\x5b\x5d\xc3",4);
+    memcpy(im+0xa9ffd0,prefix,16);im[0xa9ffe0]=0x28;
+    memcpy(im+0xa9ffe1,"\x48\x83\xc4\x28\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d\xc3",15);
+    memcpy(im+0xaa06a0,"\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x48\x83\xec\x18",13);
+    const unsigned char stop_native[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0x48,0x8b,0x7b,0x58,0xe8,0xde,0xec,0x01,0x00,0x48,0x8b,0xbb,0x98,0x00,0x00,0x00,0xe8,0x52,0xba,0xf8,0xff,0x48,0x8b,0xbb,0x90,0x00,0x00,0x00,0x31,0xf6,0x48,0x83,0xc4,0x08,0x5b,0x5d,0xe9,0x9e,0xfd,0xf7,0xff};
+    memcpy(im+0xa97a00,stop_native,sizeof stop_native);
+    jump(im+0xab66f0,(void *)native_stop_part);
+    jump(im+0xa23470,(void *)native_stop_party);
+    jump(im+0xa177d0,(void *)native_stop_session);
+    jump(im+0xa18380,(void *)native_reset_session);
+    jump(im+0xa5d550,(void *)native_close_lobby);
+    unsigned char manager[0xa0]={0};
+    int before_teardown=native_party_teardowns;
+    ((void (ABI *)(void *))(im+0xa97a00))(manager);
+    assert(native_party_teardowns==before_teardown+1 && native_keep_party==0);
     memcpy(im+0xa9cbe0,"\x55\x48\x89\xe5\x53\x50",6);
     memcpy(im+0x24de10,prefix,16);im[0x24de20]=0x48;
     memcpy(im+0xa548e0,prefix,16);im[0xa548f0]=0x38;
     setenv("BB_ONLINE_MODE_HOOK",region,1);
     assert(runtime_public_itemless_start(im,size));
+    assert(im[stop_quit_site]==0xe8); /* Do not alter an unrelated native sync-stop wrapper. */
+    int resets=native_race_resets,closes=native_lobby_closes;
+    native_stop_matchmaking(manager);
+    assert(native_party_teardowns==before_teardown+1 && native_keep_party==1 && native_race_resets==resets+1 && native_lobby_closes==closes+1);
+    assert(!memcmp(im+0xa97a00,stop_native,sizeof stop_native));
+    unsigned char trace_party[0x80]={0};
+    ((void (ABI *)(void *))(im+0xa18210))(trace_party);
+    *(int *)(trace_party+0x54)=10;
+    ((void (ABI *)(void *))(im+0xa18210))(trace_party);
+    ((void (ABI *)(void *))(im+0xa9ffd0))(trace_party);
+    assert(((unsigned char (ABI *)(void *,void *,void *))(im+0xa5b680))(NULL,NULL,NULL)==1);
     assert(native_notice==(Notice)(im+0xa548e0));
     native_notice=show;
     runtime_public_itemless_select(0);
@@ -165,7 +209,9 @@ static void test_installed_hooks(const char *region) {
     munmap(im,size);
 }
 static void await_check(void);
+static void *party_return_expected_target;
 static void ABI forward_event(void *self, void *event) {
+    if (self==party_return_expected_target && self) assert(!menu_party_returned && matchmaking_search && search_mark);
     (void)self; (void)event; ++forwarded;
     if (self == focus_test_button && event && *(void **)((char *)event + 0x10))
         synthetic_signal = *(unsigned *)((char *)event + 0x18);
@@ -442,13 +488,27 @@ static void test_native_return_focus(void) {
     for (int selection = 0; selection < 3; ++selection) {
         online_return_button = selection;
         int before = forwarded;
+        matchmaking_search=searching=1;
+        const int saved_mode=selected,saved_ranked=ranked_selected;
         placeable_event(root, event);
+        assert(!matchmaking_search && !searching && selected==saved_mode && ranked_selected==saved_ranked);
         assert(forwarded == before + 1 && synthetic_signal == 0);
         assert(resolve_private_target((void **)(fields + 0xa0)) == children[selection]);
         assert(resolve_private_target((void **)(fields + 0xb8)) == children[selection]);
         assert(resolve_private_target((void **)(fields + 0xa8)) == hall);
         assert(handles == 4);
     }
+    void **saved_network=network_manager;network_manager=NULL;
+    root_meta[2]="Scripts.Graph.Octane_Lobby_Matchmaking_Root";
+    native_return_focus(root,0);assert(!menu_party_returned);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
+    menu_party_returned=1;native_return_focus(root,0);assert(!menu_party_returned);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    native_return_focus(root,0);assert(menu_party_returned && !search_mark);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_WaitingRoom_Root";
+    native_return_focus(root,0);assert(menu_party_returned && !search_mark);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_Main_Root";
+    network_manager=saved_network;
     online_return_button = 1;
     native_return_focus(ranked, 1);
     assert(resolve_private_target((void **)(fields + 0xa0)) == ranked);
@@ -762,7 +822,161 @@ static void ABI release_input_event(void *object) {
     --allocated_input_events; free(event);
 }
 
+static int entry_joins,entry_creates;
+static void ABI entry_join(void *self,uint64_t search,uint64_t room,const char *host,unsigned hn,const char *doc,unsigned dn) {
+    (void)search;(void)host;(void)hn;(void)doc;(void)dn;
+    __atomic_store_n((uint64_t *)((char *)self+0x958),room,__ATOMIC_RELAXED);
+    __atomic_add_fetch(&entry_joins,1,__ATOMIC_RELAXED);
+}
+static void ABI entry_create(void *self,uint64_t search,uint64_t room,uint64_t version,const char *host,unsigned hn,const char *doc,unsigned dn) {
+    (void)version;entry_join(self,search,room,host,hn,doc,dn);
+    __atomic_sub_fetch(&entry_joins,1,__ATOMIC_RELAXED);__atomic_add_fetch(&entry_creates,1,__ATOMIC_RELAXED);
+}
+static void *parallel_create(void *owner) {
+    for(int i=0;i<100;++i) created(owner,4,74,1,"",0,"{}",2);
+    return NULL;
+}
+static void test_cancelled_and_duplicate_lobby_entries(void) {
+    unsigned char owner[0x1000]={0};char doc[512];
+    Join old_join=native_join;Create old_create=native_create;
+    native_join=entry_join;native_create=entry_create;
+    runtime_public_itemless_reset();party_guest=0;selected=ranked_selected=0;
+    runtime_public_itemless_party_ready();
+    confirmation_doc(doc,sizeof doc,71,registration_nonce);
+    const int notices=dialogs;
+    created(owner,1,71,1,"",0,doc,(unsigned)strlen(doc));
+    joined(owner,1,71,"",0,"{}",2);
+    assert(!entry_creates && !entry_joins && dialogs==notices && !matchmaking_room);
+    matchmaking_search=1;
+    created(owner,2,72,1,"",0,"{}",2);created(owner,2,72,1,"",0,"{}",2);
+    assert(entry_creates==1);
+    runtime_public_itemless_reset();
+    created(owner,2,72,1,"",0,"{}",2);assert(entry_creates==1);
+    party_guest=1;runtime_public_itemless_party_ready();
+    joined(owner,3,73,"",0,"{}",2);joined(owner,3,73,"",0,"{}",2);
+    assert(entry_joins==1);
+    /* A guest may take over as host once; repeated create must not reopen map voting. */
+    created(owner,3,73,2,"",0,"{}",2);created(owner,3,73,2,"",0,"{}",2);
+    assert(entry_creates==2 && entry_joins==1);
+    runtime_public_itemless_reset();party_guest=0;matchmaking_search=1;
+    pthread_t workers[2];
+    for(int i=0;i<2;++i) assert(!pthread_create(&workers[i],NULL,parallel_create,owner));
+    for(int i=0;i<2;++i) assert(!pthread_join(workers[i],NULL));
+    assert(entry_creates==3);
+    party_guest=1;
+    runtime_public_itemless_reset();native_join=old_join;native_create=old_create;
+}
+
+static int party_returns;
+static void ABI return_party_mock(void *party) { assert(party); ++party_returns; }
+static void test_native_party_menu_return(void) {
+    unsigned char party[0x80]={0},session[0x20]={0},connection[0x120]={0};
+    void *party_value=party,*network_value=test_network;
+    void **saved_party=party_manager,**saved_network=network_manager;
+    void (ABI *saved_return)(void *)=native_party_return;
+    void (ABI *saved_stop)(void *)=native_stop_matchmaking;
+    int saved_guest=party_guest,old_stops=stopped,old_returns=party_returns;
+    party_manager=&party_value;network_manager=&network_value;
+    native_party_return=return_party_mock;native_stop_matchmaking=stop_matchmaking;
+    *(void **)(party+0x18)=session;*(void **)(session+0x10)=connection;
+    *(int *)(connection+0x118)=1;party[0x6c]=1;
+    party_guest=0;menu_party_returned=0;
+    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=99;
+    selected=ranked_selected=1;
+    struct SearchPoll *job=calloc(1,sizeof *job);
+    job->generation=session_generation;job->serial=search_poll_serial;
+    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");
+    void *(ABI *event_vtable[])(void *)={object_type};
+    void *(ABI *behavior_vtable[])(void *)={graph_type};
+    void *event_meta[3]={0,0,"igGuiEventProjectInputPressed"};
+    void *behavior_meta[3]={0,0,"igGuiVscBehavior"};
+    void *root_meta[3]={0,0,"Scripts.Graph.Octane_Lobby_Matchmaking_Root"};
+    void *behavior[5]={behavior_vtable,behavior_meta,0,0,root_meta};
+    void *items[]={behavior},*event[5]={event_vtable,event_meta,0,(void *)9,0};
+    unsigned char root[0xf0]={0},list[0x28]={0};
+    *(void **)(root+0xe8)=list;*(int *)(list+12)=1;*(void ***)(list+0x20)=items;
+    void (ABI *saved_event)(void *,void *)=native_placeable_event;
+    native_placeable_event=forward_event;party_return_expected_target=root;
+    placeable_event(root,event);
+    assert(party_returns==old_returns && stopped==old_stops && matchmaking_search);
+    /* Cancelling the dialog restores lobby focus without ending search. */
+    event_meta[2]="igGuiEventProjectGainFocus";event[3]=NULL;
+    placeable_event(root,event);
+    assert(party_returns==old_returns && stopped==old_stops && matchmaking_search);
+    /* Only the accepted exit's destination focus commits cancellation. */
+    party_return_expected_target=NULL;
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    placeable_event(root,event);
+    native_placeable_event=saved_event;
+    assert(party_returns==old_returns+1 && stopped==old_stops+1);
+    assert(*party_manager==party && party[0x6c] && selected && ranked_selected);
+    assert(!search_mark && !matchmaking_search && !search_server_active && !matchmaking_room);
+    strcpy(reply,"{\"state\":\"searching\",\"elapsed\":99,\"timeout\":180,\"range\":400,\"ranked\":true}");
+    search_poll(job);assert(!search_mark && !search_server_active);
+    int elapsed,timeout,range,ranked;
+    (void)runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
+    int polls=requests;update_search_clock();
+    assert(requests==polls && !search_poll_running);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns+1 && stopped==old_stops+1);
+    /* A new lobby can notify again; a follower never broadcasts a host return. */
+    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    *(int *)(connection+0x118)=2;party_guest=1;menu_party_returned=0;
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
+    int attempts=timeout_attempts;runtime_public_itemless_update();
+    assert(timeout_attempts==attempts && search_timeout_pending);
+    runtime_public_itemless_reset();
+    party_guest=saved_guest;party_manager=saved_party;network_manager=saved_network;
+    native_party_return=saved_return;native_stop_matchmaking=saved_stop;
+    stopped=old_stops;selected=ranked_selected=0;strcpy(reply,"ok");
+}
+
+static int native_race_party_returns;
+static unsigned char ABI race_party_return_mock(void *sender,void *message,void *context) {
+    assert(sender==(void *)1 && message==(void *)2 && context==(void *)3);
+    ++native_race_party_returns;return 1;
+}
+static void ABI menu_return_to_lobby_mock(void) { ++returned; }
+static void test_guest_menu_return_destination(void) {
+    unsigned char (ABI *saved_message)(void *,void *,void *)=native_party_return_trace;
+    void (ABI *saved_lobby)(void)=native_return_to_lobby;
+    void (ABI *saved_stop)(void *)=native_stop_matchmaking;
+    void **saved_network=network_manager,**saved_party=party_manager;
+    unsigned char party[0x80]={0};void *party_value=party;party_manager=&party_value;
+    party[0x6c]=1;
+    int old_ready=timeout_ready,old_attempts=timeout_attempts,old_stops=stopped,old_returns=returned;
+    void *network=test_network;network_manager=&network;
+    native_return_to_lobby=menu_return_to_lobby_mock;native_stop_matchmaking=stop_matchmaking;
+    native_party_return_trace=race_party_return_mock;
+    frozen_race=0;timeout_ready=1;
+    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
+    assert(timeout_attempts==old_attempts+1 && timeout_route==2 && !native_race_party_returns && returned==old_returns && !party[0x6c]);
+    /* After Waiting Room closes the matchmaking GUI, repeated returns must not reload. */
+    timeout_ready=0;menu_party_returned=1;
+    const int waiting_stops=stopped;
+    for (int i=0;i<2;++i) {
+        assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
+        assert(returned==old_returns && stopped==waiting_stops && !native_race_party_returns);
+    }
+    /* A new lobby lifecycle still permits the fallback. */
+    menu_party_returned=0;
+    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
+    assert(returned==old_returns+1 && !native_race_party_returns);
+    /* Private entry remains a real exit even when no public search ran. */
+    party[0x6c]=1;
+    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
+    assert(returned==old_returns+2 && !party[0x6c]);
+    frozen_race=1;
+    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
+    assert(native_race_party_returns==1 && timeout_attempts==old_attempts+5);
+    frozen_race=0;timeout_ready=old_ready;timeout_attempts=old_attempts;
+    stopped=old_stops;returned=old_returns;
+    native_party_return_trace=saved_message;native_return_to_lobby=saved_lobby;
+    native_stop_matchmaking=saved_stop;network_manager=saved_network;party_manager=saved_party;
+}
+
 static void test_timeout_preserves_party_and_mode(void) {
+    int saved_guest=party_guest;party_guest=0;
     const int before_stops=stopped,before_returns=returned,before_dialogs=dialogs;
     unsigned char party[0x80]={0};void *party_value=party;void **previous_party=party_manager;
     party_manager=&party_value;party[0x6c]=1;
@@ -776,10 +990,11 @@ static void test_timeout_preserves_party_and_mode(void) {
         assert(selected==mode && ranked_selected==ranked && *party_manager==party && party[0x6c]);
         assert(stopped==before_stops && returned==before_returns && dialogs==before_dialogs);
     }
-    selected=ranked_selected=0;party_manager=previous_party;
+    selected=ranked_selected=0;party_manager=previous_party;party_guest=saved_guest;
 }
 
 static void test_ranked_device_and_search_clock(void) {
+    int saved_guest=party_guest;party_guest=0;
     const char *device=ranked_device();
     assert(strlen(device)==64 && !strspn(device,"-"));
     assert(strspn(device,"0123456789abcdef")==64);
@@ -797,6 +1012,18 @@ static void test_ranked_device_and_search_clock(void) {
     assert(!matchmaking_search && !rejection[0]);
     ranked_selected=0;
     peers[3][0x2c]=1;assert(ranked_party_size()==4);
+    int saved_installed=installed;installed=1;
+    unsigned char active_session[0x20]={0},active_connection[0x120]={0};
+    *(void **)(party+0x18)=active_session;*(void **)(active_session+0x10)=active_connection;
+    *(int *)(active_connection+0x30)=1;
+    assert(runtime_online_party_active());
+    for (int i=0;i<4;++i) peers[i][0x2c]=1;
+    assert(ranked_party_size()==1 && runtime_online_party_active());
+    *(int *)(active_connection+0x30)=0;
+    assert(!runtime_online_party_active());
+    *(void **)(party+0x18)=NULL;
+    assert(!runtime_online_party_active());
+    installed=saved_installed;
     party_manager=saved;
     runtime_public_itemless_reset();
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=42;
@@ -824,10 +1051,13 @@ static void test_ranked_device_and_search_clock(void) {
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;search_poll_after=UINT64_MAX;
     update_search_clock();assert(search_timeout_pending && !rejection[0]);
     runtime_public_itemless_reset();rejection[0]=0;snprintf(reply,sizeof reply,"ok");
+    party_guest=saved_guest;
 }
 
 int main(void) {
     test_ranked_device_and_search_clock();
+    test_native_party_menu_return();
+    test_guest_menu_return_destination();
     native_deferred_event_create = allocate_input_event;
     native_deferred_event_release = release_input_event;
     test_hof_project_shortcut();
@@ -929,6 +1159,7 @@ int main(void) {
     assert(!confirmation("{\"nested\":{\"octr_itemless_v1\":\"1/42/1/0000000000000001\"}}",42,1));
     assert(!confirmation("{\"octr_itemless_v1\":\"1/42/1/0000000000000001\",\"octr_itemless_v1\":\"bad\"}",42,1));
     runtime_public_itemless_reset();
+    runtime_public_itemless_party_ready();
     assert(accept(owner,43,"{}",2) && !runtime_public_itemless_active());
     *(uint64_t *)(owner + 0x958) = 43;
     assert(runtime_public_match_active()); /* Normal party guests never need an Itemless token. */
@@ -946,6 +1177,7 @@ int main(void) {
     test_ranked_button_event();
     test_native_return_focus();
     test_timeout_preserves_party_and_mode();
+    test_cancelled_and_duplicate_lobby_entries();
     test_hof_native_ready();
     test_ranked_season_gate();
     test_hall_of_fame_button_event();

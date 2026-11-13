@@ -593,6 +593,11 @@ static void write_active_session(const char *session_id) {
 }
 
 static void remove_active_session(void) {
+    /* Race-lobby PSN cleanup must not erase a still-connected native party. */
+    if (runtime_online_party_active()) {
+        runtime_net_trace("remove_active_session: retained connected native party");
+        return;
+    }
     /* PSN session cleanup during loading does not leave the verified race's room. */
     if (!runtime_room_mode_race_frozen()) {
         private_room_active(0);

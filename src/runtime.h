@@ -132,6 +132,7 @@ int runtime_public_itemless_active(void);
 int runtime_public_itemless_lobby_mode(void);
 int runtime_public_match_active(void);
 int runtime_private_match_active(void);
+int runtime_online_party_active(void);
 /* 1 accepted, 0 rejected, -1 asynchronous check pending. */
 int runtime_private_party_check(void);
 void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *));
@@ -169,11 +170,13 @@ void runtime_online_mode_hof_cycle(void *placeable, int direction);
 void *runtime_online_mode_content(void *placeable);
 void runtime_public_itemless_reset(void);
 void runtime_public_itemless_new_session(void);
+void runtime_public_itemless_menu_return(void);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
 int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);
 void runtime_online_mode_matchmaking_update(unsigned char *root);
 int runtime_online_mode_matchmaking_timeout(void);
+int runtime_online_mode_matchmaking_cancel(int route); /* 0 search, 1 room leave, 2 host-closed/Waiting Room */
 int runtime_speed_mode_enabled(void);
 int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);

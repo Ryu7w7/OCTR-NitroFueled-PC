@@ -1660,8 +1660,12 @@ def _prepare(game, out, elf, bases):
     for domain_graph_index,entry in enumerate(domain_entries):
         if any(entry[0].lower().endswith('/octane_lobby_'+name+'_root.igz')
                for name in ('main','privategame','matchmaking')):
-            domain_replacements[domain_graph_index]=preserve_menu_party(
-                current_entry(domain_pak,domain_entries,domain_graph_index,None))
+            domain_replacements[domain_graph_index]=(public_root if
+                entry[0].lower().endswith('/octane_lobby_matchmaking_root.igz') else preserve_menu_party(
+                    current_entry(domain_pak,domain_entries,domain_graph_index,None)))
+    # The domain carries an older matchmaking graph/UI without native Waiting Room routing.
+    domain_public_index=next(i for i,e in enumerate(domain_entries) if e[0].lower()==PUBLIC_LOBBY_ENTRY)
+    domain_replacements[domain_public_index]=public_lobby
     domain_member_material_index = next(i for i, e in enumerate(domain_entries)
                                         if e[0].lower() == LOBBY_MEMBERS_MATERIALS_ENTRY)
     with domain_pak.open('rb') as f:

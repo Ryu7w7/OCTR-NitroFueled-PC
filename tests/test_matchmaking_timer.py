@@ -28,21 +28,35 @@ class MatchmakingTimerTests(unittest.TestCase):
                 methods=before.fixup('EXNM')
                 native=[before.strings[a] for a,b in struct.iter_unpack('<II',methods[3][:methods[1]*8])
                         if not b&0x80000000]
-                quits={o:before.u64(o+0x28) for o,k in before.objects()
-                       if k=='igVscCppActionNode' and native[before.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC'}
+                main='Scripts.Graph.Octane_Lobby_Main_Root' in before.strings
+                if main:self.assertEqual(source,preserve_menu_party(source))
+                stops=[o for o,k in before.objects() if k=='igVscCppActionNode' and native[before.u64(o+0x38)] in (
+                    'CNetworkNodes::stopMatchMaking_VSC','CNetworkNodes::disconnectAll_VSC',
+                    'CNetworkNodes::resetNetworSessionkManager_VSC')]
+                quits=[o for o,k in before.objects() if k=='igVscCppActionNode'
+                       and native[before.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC']
+                table=after.fixup('EXNM')
+                patched=[after.strings[a] for a,b in struct.iter_unpack('<II',table[3][:table[1]*8])
+                         if not b&0x80000000]
                 allowed=set()
                 for obj,kind in before.objects():
                     allowed.update(range(obj+8,obj+12))
-                    field=0x28 if kind=='igVscCppActionNode' else 0x30 if kind=='igVscEntryPointNode' else None
-                    if field is not None and before.u64(obj+field) in quits:
-                        self.assertEqual(after.u64(obj+field),quits[before.u64(obj+field)])
-                        allowed.update(range(obj+field,obj+field+8))
+                    if obj in stops and not main:
+                        self.assertEqual(patched[after.u64(obj+0x38)],'CNetworkNodes::resetNetworkSessionManager_VSC')
+                        self.assertEqual(after.u64(obj+0x28),before.u64(obj+0x28))
+                        allowed.update(range(obj+56,obj+64))
+                    if obj in quits and not main:
+                        self.assertEqual(patched[after.u64(obj+0x38)],'CNetworkNodes::setOnlineLobbyIsOpened_VSC')
+                        self.assertEqual(after.u32(obj+16),1)
+                        boolean=after.u64(after.u64(obj+32))
+                        self.assertEqual(after.data[boolean+14],0)
+                        self.assertEqual(after.u64(obj+0x28),before.u64(obj+0x28))
+                        allowed.update(range(obj+16,obj+40));allowed.update(range(obj+56,obj+64))
                     if kind=='igVscCppActionNode' and native[before.u64(obj+0x38)] in (
                             'CNetworkNodes::resetPartyManager_VSC','CNetworkNodes::resetNetworkSessionManager_VSC',
                             'CLoadMapNodes::quitToMainMenu2_VSC'):
                         size=before.sizes[before.u64(obj)]
                         self.assertEqual(after.data[obj+12:obj+size],before.data[obj+12:obj+size])
-                self.assertEqual(len(before.data),len(after.data))
                 self.assertTrue(all(a==b or i in allowed for i,(a,b) in enumerate(zip(before.data,after.data))))
                 tested.add(entry[0].lower().rsplit('/',1)[1])
         self.assertEqual(len(tested),4)
@@ -53,10 +67,30 @@ class MatchmakingTimerTests(unittest.TestCase):
         index=next(i for i,e in enumerate(entries) if e[0].lower().endswith('/octane_lobby_matchmaking_root.igz'))
         native=Igz(online_mode.current_entry(pak,entries,index,None))
         image=Igz(timeout_return(native.build()))
-        self.assertEqual(image.u32(0x7c08+12),2)
+        self.assertEqual(image.u32(0x7c08+12),4)
         array=image.u64(0x7c08+32)
         self.assertEqual(image.u64(array),0x7c38)
         event=image.u64(array+8)
+        leave_event=image.u64(array+16)
+        guest_event=image.u64(array+24)
+        guest_filters=image.u64(guest_event+0x18)
+        guest_signal=image.u64(image.u64(guest_filters+32))
+        self.assertEqual(image.u32(guest_signal+16),0x10002)
+        guest_assign=image.u64(guest_event+0x30)
+        self.assertEqual(image.u64(guest_assign+0x10),native.u64(0x8598+0x10))
+        self.assertEqual(image.u64(guest_assign+0x18),native.u64(0x8598+0x18))
+        self.assertNotEqual(image.u64(guest_assign+0x10),native.u64(0x3c30+0x10))
+        self.assertEqual(image.data[image.u64(guest_assign+0x10)+14],1)
+        waiting_menu=image.u64(guest_assign+0x20)
+        self.assertEqual(image.u64(waiting_menu+0x38),native.u64(0x70e0+0x38))
+        waiting_name=image.u64(image.u64(waiting_menu+32))
+        self.assertEqual(dict(image.objects())[waiting_name],'igVscConstStringAccessor')
+        self.assertEqual(image.string_at(waiting_name+16),'Octane_Lobby_WaitingRoom')
+        self.assertEqual(image.u64(waiting_menu+0x28),image.u64(image.u64(event+0x30)+0x20))
+        self.assertEqual(image.u64(leave_event+0x30),0x3c30)
+        leave_filters=image.u64(leave_event+0x18)
+        leave_signal=image.u64(image.u64(leave_filters+32))
+        self.assertEqual(image.u32(leave_signal+16),0x10001)
         filters=image.u64(event+0x18)
         signal=image.u64(image.u64(filters+32))
         self.assertEqual(image.u32(signal+16),0x10000)
@@ -65,8 +99,13 @@ class MatchmakingTimerTests(unittest.TestCase):
         self.assertEqual(image.u64(assign+0x10),native.u64(0x3c30+0x10))
         self.assertEqual(image.u64(assign+0x18),native.u64(0x3c30+0x18))
         stop=image.u64(assign+0x20)
-        self.assertEqual(image.u64(stop+0x38),native.u64(0x3d50+0x38))
-        asynchronous=image.u64(stop+0x28)
+        close_lobby=image.u64(stop+0x28)
+        table=image.fixup('EXNM')
+        methods=[image.strings[a] for a,b in struct.iter_unpack('<II',table[3][:table[1]*8]) if not b&0x80000000]
+        self.assertEqual(methods[image.u64(stop+0x38)],'CNetworkNodes::resetNetworkSessionManager_VSC')
+        self.assertEqual(methods[image.u64(close_lobby+0x38)],'CNetworkNodes::setOnlineLobbyIsOpened_VSC')
+        self.assertEqual(image.u64(close_lobby+32),native.u64(0x3dd0+32))
+        asynchronous=image.u64(close_lobby+0x28)
         self.assertEqual(image.u64(asynchronous+0x38),native.u64(0x3dd0+0x38))
         self.assertEqual(image.u64(asynchronous+0x28),0x3ea0)
         # Existing manual Back and explicit close retain their native party-leave behavior.

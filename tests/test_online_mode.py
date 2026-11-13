@@ -29,6 +29,44 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
+    def test_native_party_preserving_stop_and_return_sites(self):
+        elf, _, headers, *_ = parse_self((Path(os.environ['BB_TEST_GAME']) / 'eboot.bin').read_bytes())
+        def native(address, size):
+            segment = next(p for p in headers if p['type'] == 1 and
+                           p['vaddr'] <= address and address + size <= p['vaddr'] + p['filesz'])
+            offset = segment['offset'] + address - segment['vaddr']
+            return bytes(elf[offset:offset + size])
+        self.assertEqual(native(0x4081f0,4),bytes.fromhex('8b 47 30 c3'))
+        self.assertEqual(native(0xa18210, 19), bytes.fromhex('55 48 89 e5 53 50 48 89 fb 83 7b 54 0a 0f 84 93 00 00 00'))
+        self.assertEqual(native(0xa9ffd0, 17), bytes.fromhex('55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 28'))
+        self.assertEqual(native(0xa5b680, 18), bytes.fromhex('55 48 89 e5 41 56 53 48 83 ec 30 4c 8b 35 06 ba da 01'))
+        # Private close is a 24-byte native event, without input signal/controller fields.
+        close_at = 0x1afd354 if native(0x1afd354, 3)==bytes.fromhex('48 8d 3d') else 0x1afd334
+        close_type = native(close_at, 7)
+        self.assertEqual(close_at+7 + struct.unpack('<i', close_type[3:])[0], 0x2ae3190)
+        self.assertEqual(native(close_at+16, 6), bytes.fromhex('41 b9 18 00 00 00'))
+        # The enter-lobby dispatcher looks up the project using this registered menu field.
+        self.assertIn(bytes.fromhex('48 8b b8 f0 0d 00 00'), native(0xebb060, 0x100))
+        shift = 0 if native(0x115aa70,1)==b'\xe9' else 0x10
+        # The Back graph's named stopMatchMaking_VSC wrapper shuts down the party.
+        wrapper=0x115aa70-shift; jump=native(wrapper,5)
+        self.assertEqual(jump[0],0xe9)
+        self.assertEqual(wrapper+5+struct.unpack('<i',jump[1:])[0],0x104bab0-shift)
+        shutdown=0x104bab6-shift
+        self.assertEqual(native(shutdown,7),bytes.fromhex('31 ff be 01 00 00 00'))
+        call=native(shutdown+7,5)
+        self.assertEqual(shutdown+12+struct.unpack('<i',call[1:])[0],0xa17db0)
+        # Its asynchronous close callback resets the party: the observed live caller.
+        call=native(0xa181f8,5)
+        self.assertEqual(0xa181fd+struct.unpack('<i',call[1:])[0],0xa18210)
+        self.assertEqual(native(0xa97a19, 5), bytes.fromhex('e8 52 ba f8 ff'))
+        self.assertEqual(native(0xa97a25, 13), bytes.fromhex('31 f6 48 83 c4 08 5b 5d e9 9e fd f7 ff'))
+        # Quit with Party uses this same native party notification.
+        branch = native(0xfe66b2 - shift, 5)
+        self.assertEqual(branch[0], 0xe8)
+        self.assertEqual(0xfe66b2 - shift + 5 + struct.unpack('<i', branch[1:])[0], 0xaa06a0)
+
     def test_prepare_cache_reuses_output_and_invalidates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -685,6 +723,12 @@ class OnlineModeTests(unittest.TestCase):
                         domain_entries = iga.pak_entries(domain_pak)
                         domain_patch = next(p for p in patches if archive_patch.read(p)[1] ==
                                             '/app0/archives/juicedomain_onlinemenus.pak')
+                        for relative in (online_mode.PUBLIC_LOBBY_ENTRY,
+                                         online_mode.PACKAGE_PREFIX+'vsc/ui/octane_lobby_matchmaking/octane_lobby_matchmaking_root.igz'):
+                            source_index=next(i for i,e in enumerate(entries) if e[0].lower()==relative)
+                            domain_index=next(i for i,e in enumerate(domain_entries) if e[0].lower()==relative)
+                            self.assertEqual(online_mode.current_entry(domain_pak,domain_entries,domain_index,domain_patch),
+                                             online_mode.current_entry(pak,entries,source_index,online_patch))
                         quick_index = next(i for i, e in enumerate(domain_entries)
                                            if e[0].lower().removeprefix(online_mode.PACKAGE_PREFIX) ==
                                            QUICK_ICON_TEXTURE.lower())

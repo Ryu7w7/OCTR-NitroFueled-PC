@@ -112,6 +112,7 @@ static void **gui_manager, **race_finished_type, **local_racers_finished_type;
 static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
 static void *lobby_members_project, *hof_project, *ranked_score_project, *matchmaking_project;
+static int matchmaking_private_project;
 static uint64_t ranked_score_started;
 static int ranked_score_phase, ranked_score_finished;
 static void refresh_ranked_score(void);
@@ -159,7 +160,7 @@ static unsigned char pending_team_results[0x40];
 static int team_winner = -1, team_tiebreak;
 static EventHandler original_ranking_row_event, original_team_selector_event, original_team_count_event;
 static void **selector_changed_type;
-static void **gui_input_type, **gui_uninitialize_type;
+static void **gui_input_type, **gui_uninitialize_type, **private_lobby_close_type;
 static unsigned char **player_manager;
 typedef int (ABI *ControllerPlayer)(int);
 typedef unsigned char *(ABI *FindPlayer)(void *, int);
@@ -2563,26 +2564,40 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
         matchmaking_labels(items[i],active,elapsed,timeout,range,ranked,depth+1);
 }
 
-int runtime_online_mode_matchmaking_timeout(void) {
+int runtime_online_mode_matchmaking_cancel(int route) {
     void *project=handle_object(&matchmaking_project);
-    if (!project || !gui_input_type || !*gui_input_type) return 0;
-    unsigned char *event=create_gui_object(*gui_input_type,NULL,0);
+    void **type=matchmaking_private_project ? private_lobby_close_type : gui_input_type;
+    if (!project || !type || !*type || (matchmaking_private_project && route!=2)) return 0;
+    unsigned char *event=create_gui_object(*type,NULL,0);
     if (!event) return 0;
-    const int signal=0x10000,controller=1;
-    memcpy(event+0x18,&signal,4);memcpy(event+0x1c,&controller,4);
-    matchmaking_return_mode=selector_mode_index;
+    const int signal=route==2 ? 0x10002 : route ? 0x10001 : 0x10000,controller=1;
+    if (!matchmaking_private_project) {
+        memcpy(event+0x18,&signal,4);memcpy(event+0x1c,&controller,4);
+    }
+    if (route!=2) matchmaking_return_mode=selector_mode_index;
+    runtime_public_itemless_menu_return();
+    /* Native enter-lobby events target the registered menu after Private closes. */
+    if (matchmaking_private_project && race_manager && *race_manager)
+        set_string((unsigned char *)*race_manager+0xdf0,"Octane_Lobby_WaitingRoom");
     original_project_event(project,event);
     release_gui_animation_tag(event);
     assign_handle((unsigned char *)&matchmaking_project,NULL);
     return 1;
 }
 
+int runtime_online_mode_matchmaking_timeout(void) {
+    return runtime_online_mode_matchmaking_cancel(0);
+}
+
 void runtime_online_mode_matchmaking_update(unsigned char *root) {
+    const char *tag=root ? pointer_at(root,0x28) : NULL;
+    matchmaking_private_project=tag && !strcmp(tag,"OCTR_PRIVATE_LOBBY");
     void *project=root ? pointer_at(root,0x20) : NULL;
     if (project && handle_object(&matchmaking_project)!=project) {
         assign_handle((unsigned char *)&matchmaking_project,NULL);
         make_handle(&matchmaking_project,project);
     }
+    if (matchmaking_private_project) return;
     int elapsed=0,timeout=180,range=0,ranked=0;
     int active=runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
     matchmaking_labels(root,active,elapsed,timeout,range,ranked,0);
@@ -2612,6 +2627,7 @@ static void refresh_lobby_card(unsigned char *owner) {
             runtime_ranked_tier_name(mode, tier), mmr, "", 0, 0);
         return;
     }
+    if (tag && !strcmp(tag, "OCTR_PRIVATE_LOBBY")) runtime_online_mode_matchmaking_update(owner);
     if (battle_selected() || !runtime_online_mode_in_private()) return;
     if (!tag || strcmp(tag, "OCTR_PRIVATE_LOBBY")) return;
     const int cup_mode = runtime_online_mode_private_cup();
@@ -3011,6 +3027,7 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         base_event(self, event, owner);
         printf("Native Race Type selector initialized: %s\n", private_cup_selected ? "CUP" : "SINGLE");
     } else if (count == 3 && vtable[0](event) == *initialize_type) {
+        if (ranked_mode_select_root(owner)) runtime_public_itemless_menu_return();
         fprintf(stderr, "ModeSelect selector: ranked=%d private=%d\n",
             runtime_ranked_selected(), is_private());
         unsigned char *available, *items;
@@ -4128,6 +4145,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     original_team_count_event = (EventHandler)(image + (0x1293030 - shift));
     selector_changed_type = (void **)(image + 0x2ae4a38);
     gui_input_type = (void **)(image + 0x2a21d00);
+    private_lobby_close_type = (void **)(image + 0x2ae3190);
     gui_uninitialize_type = (void **)(image + 0x2a21ef0);
     player_manager = (unsigned char **)(image + 0x2ad1160);
     controller_player = (ControllerPlayer)(image + 0x97f160);

@@ -70,7 +70,10 @@ static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
 static uint64_t matchmaking_room;
 static unsigned char *matchmaking_owner;
-static int matchmaking_search;
+static int matchmaking_search, matchmaking_created;
+static int menu_party_returned = 1;
+static int ranked_party_size(void);
+static void (ABI *native_party_return)(void *);
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
 static int search_elapsed_base, search_timeout = 180, search_range, search_is_ranked;
 static int search_server_active, search_poll_running, search_timeout_pending;
@@ -98,6 +101,18 @@ static void **participants;
 static void **party_manager;
 static void (ABI *native_placeable_event)(void *, void *);
 static void (ABI *native_stop_matchmaking)(void *);
+static void (ABI *native_cancel_queue)(void *);
+static void (ABI *native_leave_race_session)(void *,int);
+static void (ABI *native_reset_race_session)(void *);
+static void (ABI *native_close_party_lobby)(int);
+static void ABI stop_search_keep_party(void *self) {
+    unsigned char *manager=self;
+    native_cancel_queue(*(void **)(manager+0x58));
+    void *session=*(void **)(manager+0x90);
+    native_leave_race_session(session,1);
+    native_reset_race_session(session);
+    native_close_party_lobby(0);
+}
 static void (ABI *native_return_to_lobby)(void);
 static uint64_t session_generation;
 static void (ABI *native_make_handle)(void **, void *);
@@ -145,7 +160,7 @@ static void reset_locked(void) {
     __atomic_add_fetch(&session_generation, 1, __ATOMIC_SEQ_CST);
     matchmaking_room = 0;
     matchmaking_owner = NULL;
-    matchmaking_search = 0;
+    matchmaking_search = matchmaking_created = 0;
     confirmed_room = 0;
     confirmed_itemless = confirmed_ranked = 0;
     room_owner = NULL;
@@ -167,6 +182,23 @@ void runtime_public_itemless_party_ready(void) {
     pthread_mutex_lock(&mode_lock);
     allow_party = registration_nonce != 0;
     pthread_mutex_unlock(&mode_lock);
+}
+/* Use the party notification sent by native Quit with Party, without reloading the host. */
+void runtime_public_itemless_menu_return(void) {
+    const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
+    runtime_public_itemless_reset();
+    if (runtime_room_mode_following()) runtime_public_itemless_party_ready();
+    if (!notify) return;
+    if (network_manager && *network_manager) native_stop_matchmaking(*network_manager);
+    unsigned char *party = party_manager ? *party_manager : NULL;
+    unsigned char *session = party ? *(void **)(party + 0x18) : NULL;
+    unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
+    int role = 0;
+    if (connection) memcpy(&role, connection + 0x118, sizeof role);
+    if (role == 1 && native_party_return) {
+        native_party_return(party);
+        printf("Online party: return notification queued; members=%d\n",ranked_party_size());
+    }
 }
 void runtime_public_itemless_select(int enabled) {
     runtime_public_itemless_reset();
@@ -250,9 +282,23 @@ static int ranked_party_size(void) {
     return total;
 }
 
+int runtime_online_party_active(void) {
+    unsigned char *party=party_manager ? *party_manager : NULL;
+    if (!installed || !party) return 0;
+    unsigned char *session=*(void **)(party+0x18);
+    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
+    int peers=0;
+    if (connection) memcpy(&peers,connection+0x30,sizeof peers);
+    return peers>0; /* Native hasActiveParty_VSC uses the transport count, not the race roster. */
+}
 static int ranked_entry_allowed(void) {
     if (!*ranked_device()) { notice("Cannot verify this device for Ranked. Check access to the OS device identifier."); return 0; }
-    if (ranked_party_size()>4) { notice("Ranked parties support at most 4 players. Reduce your party before entering Ranked."); return 0; }
+    const int players=ranked_party_size();
+    if (players>4) {
+        char message[192];
+        snprintf(message,sizeof message,"Your party has %d players. Ranked supports at most 4, regardless of device. Reduce the party or choose Public Matchmaking (up to 8).",players);
+        notice(message);return 0;
+    }
     return 1;
 }
 
@@ -291,6 +337,7 @@ static void *search_poll(void *arg) {
         if (valid) {
             search_timeout=timeout;search_range=range;search_policy_at=now;
             if (!strncmp(state,"\"searching\"",11) || !strncmp(state,"\"timed_out\"",11)) {
+                __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
                 search_server_active=1;search_mark=now;search_elapsed_base=elapsed;
                 search_is_ranked=ranked && !strncmp(ranked,"true",4);
             } else if (!strncmp(state,"\"matched\"",9)) {
@@ -325,7 +372,7 @@ static void update_search_clock(void) {
     int expired=search_mark && !matchmaking_room && (matchmaking_search || search_server_active) &&
         search_elapsed_base+(int)((now>=search_mark ? now-search_mark : 0)/1000)>=search_timeout;
     struct SearchPoll *job=NULL;
-    if (!expired && !search_timeout_pending && search_ui_at && now-search_ui_at<500 && !matchmaking_room && !search_poll_running && now>=search_poll_after) {
+    if (!__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST) && !expired && !search_timeout_pending && search_ui_at && now-search_ui_at<500 && !matchmaking_room && !search_poll_running && now>=search_poll_after) {
         const char *name=runtime_np_get_online_name();
         if (name && *name && (job=calloc(1,sizeof *job))) {
             job->generation=session_generation;job->serial=++search_poll_serial;
@@ -351,20 +398,26 @@ static void update_search_clock(void) {
 void runtime_public_itemless_update(void) {
     update_search_clock();
     pthread_mutex_lock(&mode_lock);
-    const int timed_out=search_timeout_pending;
+    const int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
+    const int leave_room=confirmed_ranked!=0;
     pthread_mutex_unlock(&mode_lock);
-    if (timed_out) {
-        if (runtime_online_mode_matchmaking_timeout()) {
+    if (ranked && ranked_party_size()>4) {
+        pthread_mutex_lock(&mode_lock);search_timeout_pending=2;pthread_mutex_unlock(&mode_lock);
+    }
+    pthread_mutex_lock(&mode_lock);
+    const int cancelled=search_timeout_pending;
+    pthread_mutex_unlock(&mode_lock);
+    if (cancelled) {
+        /* Followers wait for the host's native party notification instead of leaving independently. */
+        if (runtime_room_mode_following()) return;
+        if (runtime_online_mode_matchmaking_cancel(leave_room)) {
             runtime_public_itemless_reset();
             runtime_public_itemless_party_ready();
+            if (cancelled==2 && !runtime_room_mode_following())
+                notice("Ranked supports at most 4 party members. Ranked was cancelled because another player joined. Your party stays together; use Public Matchmaking for up to 8.");
         }
         return;
     }
-    pthread_mutex_lock(&mode_lock);
-    int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
-    pthread_mutex_unlock(&mode_lock);
-    if (ranked && ranked_party_size()>4)
-        reject_search("Ranked party exceeded 4 players. Matchmaking cancelled; reduce your party and search again.");
     char message[sizeof rejection];
     pthread_mutex_lock(&mode_lock);
     memcpy(message, rejection, sizeof message);
@@ -885,7 +938,20 @@ static void native_return_focus(void *node, int ancestors) {
         void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
         for (int i = 0; items && i < count; ++i) {
             const char *name = vsc_graph_name(items[i]);
+            if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root") ||
+                                      !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root"))) {
+                __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
+                return;
+            }
+            if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
+                                      !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
+                runtime_public_itemless_menu_return();
+                return;
+            }
             if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_Main_Root")) continue;
+            if (!ancestors) {
+                runtime_public_itemless_menu_return();
+            }
             typedef void *(ABI *GetType)(void *);
             void *meta = (*(GetType **)items[i])[0](items[i]);
             const char *names[] = {"Gui_Placeable_id_gto91nsu",
@@ -995,7 +1061,7 @@ static void ABI placeable_event(void *self, void *event) {
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
-                    if (confirm) ranked_selected = 0;
+                    if (confirm) { ranked_selected = 0; __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST); }
                     if (gain) runtime_online_mode_selector_left();
                 }
                 if (confirm && ranked_selected && !private_room && name &&
@@ -1086,6 +1152,7 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     pthread_mutex_unlock(&mode_lock);
     runtime_public_itemless_reset();
     pthread_mutex_lock(&mode_lock);
+    __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
     search_mark=previous_mark ? previous_mark : check_clock();
     search_elapsed_base=previous_mark ? previous_elapsed : 0;
     search_is_ranked=!!ranked_selected;
@@ -1152,13 +1219,24 @@ static int confirmation_mode(const char *confirmation_doc, const char *key, uint
 static int confirmation(const char *doc, uint64_t room, uint64_t token) {
     return confirmation_mode(doc, "octr_itemless_v1", room, token, 1);
 }
-static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsigned length) {
+static int accept_entry(void *owner, uint64_t room, const char *confirmation_doc, unsigned length, int entry) {
     if (!confirmation_doc || length > 65536 || strnlen(confirmation_doc, (size_t)length + 1) != length) {
         fprintf(stderr, "Public ITEMLESS: invalid confirmation length=%u room=%" PRIu64 "\n", length, room);
         return 0;
     }
+    const int party_guest=runtime_room_mode_following();
     pthread_mutex_lock(&mode_lock);
-    uint64_t token = searching ? request_nonce : allow_party ? registration_nonce : 0;
+    if (!searching && !matchmaking_search && !(allow_party && party_guest) &&
+        !(matchmaking_room==room && matchmaking_owner==owner)) {
+        pthread_mutex_unlock(&mode_lock);
+        return 0; /* A cancelled host search must not rejoin through its registration nonce. */
+    }
+    if (entry && matchmaking_room && (matchmaking_room!=room ||
+        (matchmaking_owner==owner && (entry==1 || matchmaking_created)))) {
+        pthread_mutex_unlock(&mode_lock);
+        return 0;
+    }
+    uint64_t token = searching ? request_nonce : allow_party && party_guest ? registration_nonce : 0;
     int wants_itemless = searching && selected;
     int wants_ranked = searching && ranked_selected;
     int itemless_advertised = runtime_json_field(confirmation_doc, "octr_itemless_v1") != NULL;
@@ -1179,9 +1257,11 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
         confirmed_itemless = confirmed_ranked = 0;
     }
     if (valid) {
+        __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
         matchmaking_room = room;
         matchmaking_owner = owner;
         matchmaking_search = 0;
+        if (entry==2) matchmaking_created=1;
     }
     pthread_mutex_unlock(&mode_lock);
     if (!valid) {
@@ -1191,19 +1271,14 @@ static int accept(void *owner, uint64_t room, const char *confirmation_doc, unsi
     return 1;
 }
 static void *ptr(const void *p, size_t offset) { void *v; memcpy(&v,(const char *)p+offset,8); return v; }
-static int replacement(uint64_t room) {
-    pthread_mutex_lock(&mode_lock);
-    int different = matchmaking_room && matchmaking_room != room;
-    pthread_mutex_unlock(&mode_lock);
-    return different;
+static int accept(void *owner, uint64_t room, const char *doc, unsigned length) {
+    return accept_entry(owner,room,doc,length,0);
 }
 static void ABI joined(void *self, uint64_t search, uint64_t room, const char *host, unsigned hn, const char *confirmation_doc, unsigned bn) {
-    if (replacement(room)) return;
-    if (accept(self, room, confirmation_doc, bn)) native_join(self, search, room, host, hn, confirmation_doc, bn);
+    if (accept_entry(self, room, confirmation_doc, bn,1)) native_join(self, search, room, host, hn, confirmation_doc, bn);
 }
 static void ABI created(void *self, uint64_t search, uint64_t room, uint64_t version, const char *host, unsigned hn, const char *confirmation_doc, unsigned bn) {
-    if (replacement(room)) return;
-    if (accept(self, room, confirmation_doc, bn)) native_create(self, search, room, version, host, hn, confirmation_doc, bn);
+    if (accept_entry(self, room, confirmation_doc, bn,2)) native_create(self, search, room, version, host, hn, confirmation_doc, bn);
 }
 static void ABI updated(void *self, uint64_t room, uint64_t version, const char *host, unsigned hn, const char *confirmation_doc, unsigned bn) {
     uint64_t current = 0;
@@ -1238,6 +1313,48 @@ static void ABI kicked(void *self, uint64_t room) {
     native_kicked(self, room);
 }
 
+static unsigned char *party_trace_image;
+static void (ABI *native_party_reset_trace)(void *);
+static void (ABI *native_party_quit_trace)(void *);
+static unsigned char (ABI *native_party_return_trace)(void *,void *,void *);
+static void party_trace(const char *action, void *self, void *caller) {
+    unsigned char *party=self;
+    int state=0,role=0,peers=0;
+    if (party) memcpy(&state,party+0x54,4);
+    unsigned char *session=party ? *(void **)(party+0x18) : NULL;
+    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
+    if (connection) { memcpy(&role,connection+0x118,4);memcpy(&peers,connection+0x30,4); }
+    uintptr_t address=(uintptr_t)caller,base=(uintptr_t)party_trace_image;
+    fprintf(stderr,"Party lifecycle: %s caller=0x%" PRIxPTR " state=%d role=%d transport_peers=%d roster=%d following=%d menu_returned=%d\n",
+            action,address>=base ? address-base : address,state,role,peers,ranked_party_size(),
+            runtime_room_mode_following(),__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST));
+}
+static void ABI traced_party_reset(void *self) {
+    party_trace("reset",self,__builtin_return_address(0));
+    native_party_reset_trace(self);
+}
+static void ABI traced_party_quit(void *self) {
+    party_trace("quit",self,__builtin_return_address(0));
+    native_party_quit_trace(self);
+}
+
+static unsigned char ABI received_party_return(void *sender,void *message,void *context) {
+    party_trace("receive-return",party_manager ? *party_manager : NULL,__builtin_return_address(0));
+    if (!runtime_room_mode_race_frozen()) {
+        unsigned char *party=party_manager ? *party_manager : NULL;
+        const int already_returned=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST) &&
+            (!party || !party[0x6c]);
+        if (party) party[0x6c]=0; /* Same private-lobby cleanup as the native receiver. */
+        /* In menus, close to native Waiting for Host; the race handler can load Start Screen. */
+        if (runtime_online_mode_matchmaking_cancel(2)) return 1;
+        runtime_public_itemless_menu_return();
+        /* A later host exit can reach a guest already in Waiting Room. */
+        if (!already_returned) native_return_to_lobby();
+        return 1;
+    }
+    return native_party_return_trace(sender,message,context);
+}
+
 static void jump(unsigned char *at, const void *target) { memcpy(at,"\xff\x25\0\0\0\0",6); memcpy(at+6,&target,8); }
 static int writable(void *p, size_t n) {
 #ifdef _WIN32
@@ -1252,6 +1369,7 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     if (!hook || !*hook) return 1;
     if (strcmp(hook,"1277e00") && strcmp(hook,"1277df0")) return 0;
     if (size<0x2af2608) return 0;
+    const size_t shift=!strcmp(hook,"1277df0") ? 0x10 : 0;
     const size_t sites[]={0xda300,0xd8fb0,0xda4f0,0xda7f0,0xa14550,0x24de10};
     const size_t stolen[]={17,17,17,17,14,17};
     const unsigned char destroy_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x89,0xfb};
@@ -1260,6 +1378,17 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     const size_t targets[]={0xa14890,0xa14910,0xa14e20,0xa148c0,0xa148a0,0xa148b0};
     const unsigned char ui_prefix[]={0x55,0x48,0x89,0xe5,0x53,0x50};
     if (memcmp(image+0xa97a00,ui_prefix,6) || memcmp(image+0xa9cbe0,ui_prefix,6)) return 0;
+    const unsigned char return_trace_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0x83,0xec,0x30,0x4c,0x8b,0x35,0x06,0xba,0xda,0x01};
+    if (memcmp(image+0xa5b680,return_trace_prefix,sizeof return_trace_prefix)) return 0;
+    const unsigned char reset_trace_prefix[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0x83,0x7b,0x54,0x0a,0x0f,0x84,0x93,0x00,0x00,0x00};
+    if (memcmp(image+0xa18210,reset_trace_prefix,sizeof reset_trace_prefix) ||
+        memcmp(image+0xa9ffd0,prefix,16) || image[0xa9ffe0]!=0x28) return 0;
+    const unsigned char stop_party_call[] = {0xe8,0x52,0xba,0xf8,0xff};
+    const unsigned char stop_tail[] = {0x31,0xf6,0x48,0x83,0xc4,0x08,0x5b,0x5d,0xe9,0x9e,0xfd,0xf7,0xff};
+    if (memcmp(image+0xa97a19,stop_party_call,sizeof stop_party_call) ||
+        memcmp(image+0xa97a25,stop_tail,sizeof stop_tail)) return 0;
+    const unsigned char party_return_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x18};
+    if (memcmp(image+0xaa06a0,party_return_prefix,sizeof party_return_prefix)) return 0;
     if (memcmp(image+sites[4],destroy_prefix,sizeof destroy_prefix)) return 0;
     if (memcmp(image+sites[5],prefix,16) || image[sites[5]+16]!=0x48) return 0;
     if (memcmp(image+0xa548e0,prefix,16) || image[0xa548f0]!=0x38) return 0;
@@ -1268,14 +1397,35 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     }
     for (int i=0;i<6;++i) if (ptr(image,slots[i])!=image+targets[i]) return 0;
 #ifdef _WIN32
-    unsigned char *stubs=VirtualAlloc(NULL,192,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    unsigned char *stubs=VirtualAlloc(NULL,384,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
 #else
-    unsigned char *stubs=mmap(NULL,192,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    unsigned char *stubs=mmap(NULL,384,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (stubs==MAP_FAILED) stubs=NULL;
 #endif
     if (!stubs) return 0;
+    if (!writable(image+0xa18210,19) || !writable(image+0xa9ffd0,17) || !writable(image+0xa5b680,18)) return 0;
     for (int i=0;i<6;++i) if (!writable(image+sites[i],stolen[i])) return 0;
     for (int i=0;i<6;++i) if (!writable(image+slots[i],8)) return 0;
+    /* The reset prologue contains a conditional branch; preserve both native destinations. */
+    memcpy(stubs+192,image+0xa18210,13);
+    memcpy(stubs+205,"\x75\x0e",2);
+    jump(stubs+207,image+0xa182b6);
+    jump(stubs+221,image+0xa18223);
+    memcpy(stubs+256,image+0xa9ffd0,17);
+    jump(stubs+273,image+0xa9ffe1);
+    native_party_reset_trace=(void (ABI *)(void *))(stubs+192);
+    native_party_quit_trace=(void (ABI *)(void *))(stubs+256);
+    memcpy(stubs+320,image+0xa5b680,11);
+    memcpy(stubs+331,"\x49\xbe",2);
+    void *guard_slot=image+0x2807098;
+    memcpy(stubs+333,&guard_slot,8);
+    memcpy(stubs+341,"\x4d\x8b\x36",3);
+    jump(stubs+344,image+0xa5b692);
+    native_party_return_trace=(unsigned char (ABI *)(void *,void *,void *))(stubs+320);
+    party_trace_image=image;
+    jump(image+0xa18210,(void *)traced_party_reset);
+    jump(image+0xa9ffd0,(void *)traced_party_quit);
+    jump(image+0xa5b680,(void *)received_party_return);
     void *handlers[]={(void *)start_search,(void *)register_client,(void *)cancel_search,(void *)leave_lobby,(void *)destroyed,(void *)placeable_event};
     void *events[]={(void *)joined,(void *)created,(void *)updated,(void *)merged,(void *)disbanded,(void *)kicked};
     native_destroy=(void (ABI *)(void *))(stubs+128);
@@ -1289,7 +1439,12 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     participants=(void **)(image+0x2ad1160);
     party_manager=(void **)(image+0x2acf700);
     native_placeable_event=(void (ABI *)(void *, void *))(stubs+160);
-    native_stop_matchmaking=(void (ABI *)(void *))(image+0xa97a00);
+    native_cancel_queue=(void (ABI *)(void *))(image+0xab66f0);
+    native_leave_race_session=(void (ABI *)(void *,int))(image+0xa177d0);
+    native_reset_race_session=(void (ABI *)(void *))(image+0xa18380);
+    native_close_party_lobby=(void (ABI *)(int))(image+0xa5d550);
+    native_stop_matchmaking=stop_search_keep_party;
+    native_party_return=(void (ABI *)(void *))(image+0xaa06a0);
     native_return_to_lobby=(void (ABI *)(void))(image+0xa9cbe0);
     native_notice=(Notice)(image+0xa548e0);
     for (int i=0;i<6;++i) {
@@ -1298,7 +1453,6 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         jump(image+sites[i],handlers[i]);
     }
     for (int i=0;i<6;++i) memcpy(image+slots[i],&events[i],8);
-    size_t shift=!strcmp(hook,"1277df0") ? 0x10 : 0;
     native_make_handle=(void (ABI *)(void **,void *))(image+0x14bea20-shift);
     native_resolve_handle=(void (ABI *)(void **))(image+0x149fca0-shift);
     native_hof_focus=(void (ABI *)(void *,void *,int))(image+0x24db60);

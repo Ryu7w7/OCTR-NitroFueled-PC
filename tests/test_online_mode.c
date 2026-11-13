@@ -67,6 +67,7 @@ int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
+void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_update(void) {}
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
 int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
@@ -330,13 +331,15 @@ static void *ABI get_sprite(void *row) {
 }
 static unsigned char hof_animation_tag[0x18], timeout_input[0x28];
 static void *timeout_project;
-static int timeout_events,timeout_releases;
+static int timeout_events,timeout_releases,timeout_signal=0x10000;
+static void *timeout_type;
+static unsigned char *timeout_menu_field;
 static int hof_animation_calls, hof_animation_releases;
 static void *score_animation_owner;
 static const char *score_animation_name;
 static int score_animation_calls;
 static void *ABI hof_animation_factory(void *type, void *allocator, int zero) {
-    if(type==(void *)44) { memset(timeout_input,0,sizeof timeout_input);return timeout_input; }
+    if(type==(void *)44 || type==(void *)45) { timeout_type=type;memset(timeout_input,0,sizeof timeout_input);return timeout_input; }
     assert(type == (void *)77 && !allocator && !zero);
     memset(hof_animation_tag, 0, sizeof hof_animation_tag);
     return hof_animation_tag;
@@ -454,8 +457,15 @@ static void (ABI *ready_handler)(void *, void *, void *);
 static int broadcast_routes, ready_project_events;
 static void ABI project_event_mock(void *self, void *event) {
     if(event==timeout_input) {
-        assert(self==timeout_project && *(int *)(timeout_input+0x18)==0x10000);
-        assert(*(int *)(timeout_input+0x1c)==1);++timeout_events;return;
+        assert(self==timeout_project);
+        if(timeout_type==(void *)45) {
+            assert(!strcmp(*(char **)timeout_menu_field,"Octane_Lobby_WaitingRoom"));
+            assert(!*(int *)(timeout_input+0x18) && !*(int *)(timeout_input+0x1c));
+        } else {
+            assert(*(int *)(timeout_input+0x18)==timeout_signal);
+            assert(*(int *)(timeout_input+0x1c)==1);
+        }
+        ++timeout_events;return;
     }
     if (self == ready_target && ready_handler) {
         ++ready_project_events; ready_handler(ready_behavior, event, ready_owner); return;
@@ -2160,6 +2170,7 @@ static void test_region(size_t shift) {
     assert(*(unsigned *)(native_selector_project + 0x44) == 0xff);
     /* Cancel never leaves private Single; ready Cancel still reaches native Unready. */
     put_pointer(image, 0x2a21d00, (void *)44);
+    put_pointer(image, 0x2ae3190, (void *)45);
     direct_stub(image + 0x9c32c0, selector_ready_find_mock);
     unsigned char selector_player[0x100] = {0}, selector_manager[0x18] = {0};
     put_pointer(selector_manager, 0x10, selector_player);
@@ -3473,6 +3484,35 @@ static void test_region(size_t shift) {
     assert(runtime_online_mode_matchmaking_timeout());
     assert(timeout_events==timeout_before+1 && timeout_releases==release_before+1);
     assert(!runtime_online_mode_matchmaking_timeout());
+    runtime_online_mode_matchmaking_update(search_root);
+    timeout_signal=0x10002;
+    assert(runtime_online_mode_matchmaking_cancel(2));
+    timeout_signal=0x10000;
+    unsigned char private_project[0x100]={0};
+    timeout_menu_field=manager+0xdf0;
+    for (int visit=0;visit<2;++visit) {
+        put_pointer(manager,0xdf0,make_string(NULL,"Octane_Lobby_PrivateGame"));
+        put_pointer(search_root,0x20,private_project);timeout_project=private_project;
+        put_pointer(search_root,0x28,"OCTR_PRIVATE_LOBBY");
+        runtime_online_mode_matchmaking_update(search_root);
+        assert(!runtime_online_mode_matchmaking_timeout());
+        assert(runtime_online_mode_matchmaking_cancel(2) && timeout_type==(void *)45);
+        assert(!runtime_online_mode_matchmaking_cancel(2));
+        free_string(NULL,*(char **)timeout_menu_field-16);
+        *(char **)timeout_menu_field=NULL;
+    }
+    for (int mode=0;mode<2;++mode) {
+        search_test_ranked=mode;
+        put_pointer(manager,0xdf0,make_string(NULL,"Octane_Lobby_WaitingRoom"));
+        put_pointer(search_root,0x20,search_project);timeout_project=search_project;
+        put_pointer(search_root,0x28,"OCTR_PUBLIC_LOBBY");
+        runtime_online_mode_matchmaking_update(search_root);timeout_signal=0x10002;
+        assert(runtime_online_mode_matchmaking_cancel(2) && timeout_type==(void *)44);
+        assert(!strcmp(*(char **)timeout_menu_field,"Octane_Lobby_WaitingRoom"));
+        free_string(NULL,*(char **)timeout_menu_field-16);
+        *(char **)timeout_menu_field=NULL;
+    }
+    timeout_signal=0x10000;timeout_menu_field=NULL;
     for(int i=0;i<3;++i) free_string(NULL,*(char **)(labels[i]+0x30)-16);
     free_string(NULL, *(char **)(private_settings + 0x10) - 16);
     munmap(image, size);

@@ -121,7 +121,9 @@ def timeout_return(blob):
     expected={0x7c38:'igGuiVscMessageEntryPointNode',0x7cd8:'igVscAccessorList',
               0x7140:'igVscConstEnumAccessor',0x3c30:'igVscAssignNode',
               0x3d50:'igVscCppActionNode',0x3dd0:'igVscCppActionNode',
-              0x3ea0:'igVscCppActionNode',0x7c08:'igVscEntryPointNodeList'}
+              0x3ea0:'igVscCppActionNode',0x7c08:'igVscEntryPointNodeList',
+              0x8598:'igVscAssignNode',0x70e0:'igVscCppActionNode',
+              0x7128:'igVscConstStringAccessor'}
     if any(kinds.get(o)!=kind for o,kind in expected.items()) or g.u64(0x3d50+0x28)!=0x3d90 or g.u32(0x7140+16)!=9:
         raise ValueError('unsupported native matchmaking timeout route')
     first_new=len(g.data)
@@ -149,11 +151,32 @@ def timeout_return(blob):
     event=clone(0x7c38);pointer(event+0x18,filters)
     assign=clone(0x3c30)
     stop=clone(0x3d50)
+    # Runtime cancels the queue first; this graph only releases the race session.
+    g.set_u64(stop+0x38,external(g,'CNetworkNodes::resetNetworkSessionManager_VSC','metafunction',False))
     asynchronous=clone(0x3dd0)
+    close_lobby=clone(0x3dd0)
+    g.set_u64(close_lobby+0x38,external(g,'CNetworkNodes::setOnlineLobbyIsOpened_VSC','metafunction',False))
     pointer(event+0x30,assign);pointer(assign+0x20,stop)
-    # Preserve the native Back destination and animation, skipping quitParty/disbandLobby.
-    pointer(stop+0x28,asynchronous);pointer(asynchronous+0x28,0x3ea0)
-    values(0x7c08,[0x7c38,event])
+    # Notify party guests, then use native Back without quitParty/disbandLobby.
+    pointer(stop+0x28,close_lobby);pointer(close_lobby+0x28,asynchronous)
+    pointer(asynchronous+0x28,0x3ea0)
+    leave_signal=clone(0x7140);g.set_u32(leave_signal+16,0x10001)
+    leave_filters=clone(0x7cd8);values(leave_filters,[leave_signal,0,0,0])
+    leave_event=clone(0x7c38);pointer(leave_event+0x18,leave_filters)
+    pointer(leave_event+0x30,0x3c30)
+    # Native host-closed notification returns followers to Waiting Room, not Mode Select.
+    guest_signal=clone(0x7140);g.set_u32(guest_signal+16,0x10002)
+    guest_filters=clone(0x7cd8);values(guest_filters,[guest_signal,0,0,0])
+    guest_event=clone(0x7c38);pointer(guest_event+0x18,guest_filters)
+    guest_assign=clone(0x8598)
+    # Native enter-lobby events target the registered menu, not the topmost project.
+    waiting_name=clone(0x7128);g.set_u64(waiting_name+16,g.string_index('Octane_Lobby_WaitingRoom'))
+    waiting_menu=clone(0x70e0)
+    waiting_pins=g.append(struct.pack('<Q',waiting_name));g.add_site('ROFS',waiting_pins)
+    pointer(waiting_menu+32,waiting_pins);pointer(waiting_menu+0x28,stop)
+    pointer(guest_assign+0x20,waiting_menu)
+    pointer(guest_event+0x30,guest_assign)
+    values(0x7c08,[0x7c38,event,leave_event,guest_event])
     counts=Counter(g.u64(at) for at in g.sites['ROFS'])
     for obj,kind in g.objects():
         count=counts[obj] if obj>=first_new else (g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
@@ -162,25 +185,37 @@ def timeout_return(blob):
 
 
 def preserve_menu_party(blob):
-    """Menu Back leaves its race lobby; explicit party/offline actions remain native."""
+    """Close the advertised lobby while retaining the party and native Back flow."""
     g=Igz(blob)
+    g.sites['RNEX']=g.read_list('RNEX',unpack_offsets)
     table=g.fixup('EXNM')
     methods=[g.strings[a] for a,b in struct.iter_unpack('<II',table[3][:table[1]*8]) if not b&0x80000000]
     objects=dict(g.objects())
-    quits={o:g.u64(o+0x28) for o,kind in objects.items()
-           if kind=='igVscCppActionNode' and methods[g.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC'}
-    if not quits:return blob
+    if 'Scripts.Graph.Octane_Lobby_Main_Root' in g.strings:
+        return blob  # Main's quitParty belongs to the explicit offline-exit flow.
+    stops=[o for o,kind in objects.items() if kind=='igVscCppActionNode' and methods[g.u64(o+0x38)] in (
+        'CNetworkNodes::stopMatchMaking_VSC','CNetworkNodes::disconnectAll_VSC',
+        'CNetworkNodes::resetNetworSessionkManager_VSC')]
+    quits=[o for o,kind in objects.items()
+           if kind=='igVscCppActionNode' and methods[g.u64(o+0x38)]=='CNetworkNodes::quitParty_VSC']
+    if not quits and not stops:return blob
     old_counts=Counter(g.u64(at) for at in g.sites['ROFS'])
-    changed=0
-    for obj,kind in objects.items():
-        field=0x28 if kind=='igVscCppActionNode' else 0x30 if kind=='igVscEntryPointNode' else None
-        if field is None or g.u64(obj+field) not in quits:continue
-        target=quits[g.u64(obj+field)]
-        if not target:raise ValueError('unsupported terminal menu party action')
-        g.set_u64(obj+field,target);changed+=1
-    if changed!=len(quits):raise ValueError('unsupported menu party navigation')
+    first_new=len(g.data)
+    source=next(o for o,kind in objects.items() if kind=='igVscConstBoolAccessor')
+    boolean=g.append(g.data[source:source+g.sizes[g.u64(source)]])
+    g.add_site('RVTB',boolean);g.data[boolean+14]=0
+    reset=external(g,'CNetworkNodes::resetNetworkSessionManager_VSC','metafunction',False)
+    for node in stops:g.set_u64(node+0x38,reset)
+    method=external(g,'CNetworkNodes::setOnlineLobbyIsOpened_VSC','metafunction',False)
+    for node in quits:
+        # Skipping quitParty alone leaves the host's lobby advertised to its guests.
+        pins=g.append(struct.pack('<Q',boolean));g.add_site('ROFS',pins)
+        g.set_u32(node+16,1);g.set_u32(node+20,1)
+        g.set_u64(node+24,(1<<56)|(1<<52)|8)
+        g.set_u64(node+32,pins);g.add_site('ROFS',node+32)
+        g.set_u64(node+0x38,method)
     counts=Counter(g.u64(at) for at in g.sites['ROFS'])
-    for obj,kind in objects.items():
-        count=(g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
+    for obj,kind in g.objects():
+        count=counts[obj] if obj>=first_new else (g.u32(obj+8)&0x7ffff)+counts[obj]-old_counts[obj]
         g.set_u32(obj+8,(g.u32(obj+8)&~0x7ffff)|count)
     return g.build()
