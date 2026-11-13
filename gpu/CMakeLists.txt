@@ -321,6 +321,9 @@ if (WIN32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(flip-timing-test EXCLUDE_FROM_ALL ../tests/test_flip_timing.cpp)
+target_compile_options(flip-timing-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(flip-timing-test PRIVATE ..)
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 if (NOT WIN32)
     add_executable(native-shader-async-test EXCLUDE_FROM_ALL
