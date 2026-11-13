@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
+#include "bbport_graphics_tab.h"
 
 #include <algorithm>
 #include <atomic>
@@ -70,6 +71,7 @@ bool initialized = false;
 std::atomic<bool> menu_open{false};
 // OpenMenu (a game thread): opened on the window thread.
 std::atomic<bool> open_request{false};
+bool quit_dialog_open = false; // guarded by imgui_mutex
 // SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
 std::atomic<bool> ultrawide_prompt{false};
 bool ultrawide_prompt_checked = false;
@@ -303,6 +305,7 @@ void SetOpen(bool value) {
     if (!value && dirty) {
         dirty = false;
         BbSettings::Save();
+        BbGraphicsTab::RequestRefresh();
     }
 }
 
@@ -1642,47 +1645,49 @@ void Menu() {
     // SacredFire: the scene resolution (render_res) replaces the 1080p Pro patch's checkbox; a
     // DLSS quality mode sets it instead (scripts/patches.py render_plan).
     const bool dlss_sized = s.temporal == BbSettings::TemporalDlss && s.dlss_quality > 0;
-    // SacredFire: ultrawide (the monitor's own size instead of 16:9); it replaces render_res.
     const bool ultrawide = s.ultrawide == 1;
-    if (BbSettings::UltrawideAvailable() || ultrawide) {
-        bool on = ultrawide;
-        char label[96];
-        std::snprintf(label, sizeof label, "%s (%dx%d)", BbSettings::MenuText("Ultrawide", "Ультраширокий"),
-                      s.display_w.load(), s.display_h.load());
-        if (ImGui::Checkbox(label, &on)) {
-            BbSettings::SetUltrawide(on);
-            dirty = true;
-            std::printf("Menu: ultrawide = %d (applies after the restart)\n", int(on));
+    const int ratio = std::clamp(s.aspect_ratio.load(), 0, BbSettings::AspectRatioCount - 1);
+    if (ImGui::BeginCombo(BbSettings::MenuText("Aspect ratio", "Соотношение сторон"), BbSettings::AspectRatioNames[ratio])) {
+        for (int i = 0; i < BbSettings::AspectRatioCount; ++i) {
+            if (ImGui::Selectable(BbSettings::AspectRatioNames[i], i == ratio)) {
+                s.SetAspectRatio(i);
+                dirty = true;
+            }
         }
-        Checkbox(BbSettings::MenuText("Ask about ultrawide at every start", "Спрашивать при каждом запуске"),
-                 s.ultrawide_ask);
-        Hint(BbSettings::MenuText(
-            "Draws the game at the monitor's size instead of 16:9 with black bars. Replaces the "
-            "internal resolution. Applies after restarting the game.",
-            "Игра рисуется в размере монитора вместо 16:9. Применяется после перезапуска игры."));
+        ImGui::EndCombo();
     }
+    Hint(BbSettings::MenuText("Changes the display layout. Restart to apply.",
+                              "Меняет формат изображения. Требуется перезапуск."));
     {
-        static const char* labels[] = {"854 x 480", "1280 x 720", "1920 x 1080",
-                                       "2560 x 1440 (PS4 Pro)", "2880 x 1620", "3840 x 2160 (4K)"};
+        static const char* labels[] = {"480p", "720p", "1080p", "1440p", "1620p", "2160p"};
         const int current = s.render_res;
         const char* preview =
             dlss_sized    ? BbSettings::MenuText("(DLSS quality decides)", "(решает качество DLSS)")
             : current >= 0 ? labels[current]
                            : BbSettings::MenuText("(game patches decide)", "(решают патчи)");
-        ImGui::BeginDisabled(dlss_sized || ultrawide);
+        char observed[32];
+        if (s.LiveGraphics() && s.native_scene_height > 0 && (!s.native_resolution_requested || dlss_sized)) {
+            std::snprintf(observed, sizeof(observed), "%dp", s.native_scene_height.load());
+            preview = observed;
+        }
+        ImGui::BeginDisabled((dlss_sized || ultrawide) && !s.LiveGraphics());
         if (ImGui::BeginCombo(BbSettings::MenuText("Internal resolution", "Внутреннее разрешение"),
                               preview)) {
             for (int r = 0; r < BbSettings::RenderResCount; ++r) {
                 if (ImGui::Selectable(labels[r], r == current)) {
-                    Store(s.render_res, r, r != current);
-                    std::printf("Menu: render_res = %d (applies after the restart)\n",
-                                BbSettings::RenderResHeights[r]);
+                    s.SetRenderResolution(r);
+                    dirty = true;
+                    std::printf("Menu: render_res = %d (%s)\n", BbSettings::RenderResHeights[r],
+                                s.LiveGraphics() ? "applies live" : "applies after the restart");
                 }
             }
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        Hint(BbSettings::MenuText(
+        if (s.LiveGraphics()) {
+            Hint(BbSettings::MenuText("Changes the 3D scene resolution immediately. The UI keeps its current size.",
+                                     "Разрешение 3D-сцены меняется сразу. Размер интерфейса сохраняется."));
+        } else Hint(BbSettings::MenuText(
             "The size the game draws its 3D scene at. Above 1080p it uses the game's PS4 Pro path "
             "and the picture is output at 4K; on a 1080p screen that smooths jagged edges. 4K needs "
             "a strong GPU.",
@@ -1731,8 +1736,8 @@ void Menu() {
         Hint(BbSettings::MenuText(
             "Auto keeps the internal resolution above. The others render at NVIDIA's share of the "
             "DLSS output: Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%, DLAA "
-            "100%. Applies after the restart.",
-            "Авто: внутреннее разрешение выше. Остальные: доля от вывода DLSS. После перезапуска."));
+            "100%. Quality changes apply live; changing DLSS output requires a restart.",
+            "Авто: внутреннее разрешение выше. Качество меняется сразу; вывод DLSS требует перезапуска."));
         if (quality > 0) {
             static constexpr const char* outputs[] = {"1920 x 1080", "3840 x 2160 (4K)"};
             const int output = s.dlss_output ? 1 : 0;
@@ -1767,18 +1772,24 @@ void Menu() {
     ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem(BbSettings::MenuText("Game", "Игра"))) {
-    MenuSection(BbSettings::MenuText("Game patches (restart required)", "Патчи игры (после перезапуска)"));
+    MenuSection(BbSettings::MenuText("Game patches", "Патчи игры"));
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         const auto& patch = BbSettings::GamePatches[g];
         if (std::strcmp(patch.key, "patch_pro_1080p") == 0) continue; // see Internal resolution
         const bool before = s.game_patches[g];
-        Checkbox(BbSettings::MenuText(patch.label, patch.label_ru), s.game_patches[g]);
+        if (g == 1) {
+            bool enabled = !before;
+            if (ImGui::Checkbox(BbSettings::MenuText("Motion blur", "Размытие в движении"), &enabled))
+                Store(s.game_patches[g], !enabled, true);
+        } else Checkbox(BbSettings::MenuText(patch.label, patch.label_ru), s.game_patches[g]);
         if (before != s.game_patches[g]) {
-            std::printf("Menu: %s = %d (applies after the restart)\n", patch.key, int(s.game_patches[g]));
+            std::printf("Menu: %s = %d (%s)\n", patch.key, int(s.game_patches[g]),
+                        s.LiveGraphics() && g < 2 ? "applies live" : "applies after the restart");
         }
     }
-    Hint(BbSettings::MenuText("From patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), applied to the executable at start.",
-                              "Из patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), применяются к исполняемому файлу при запуске."));
+    Hint(BbSettings::MenuText(s.LiveGraphics() ? "FPS Unlock and Motion Blur apply live. Other game patches require a restart." :
+                                                   "Game patch changes require a restart.",
+                              "FPS Unlock и размытие в движении применяются сразу. Другие патчи требуют перезапуска."));
 
     ImGui::EndTabItem();
     }
@@ -1906,7 +1917,7 @@ void Menu() {
     if (ImGui::BeginTabItem(BbSettings::MenuText("Performance", "Производительность"))) {
     MenuSection(BbSettings::MenuText("Performance", "Производительность"));
     {
-        static constexpr int limits[] = {0, 30, 60, 72, 90, 120, 144, 240};
+        const auto& limits = BbSettings::FpsLimits;
         const char* names[] = {BbSettings::MenuText("No limit", "Без ограничения"), "30", "60",
                                BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)"),
                                "90", "120", "144", "240"};
@@ -1949,17 +1960,8 @@ void Menu() {
     }
     ImGui::EndTabBar();
 
-    bool restart =
-        s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution ||
-        BbSettings::ResolutionNeedsRestart();
-    for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        restart |= s.effects[e] != s.startup_effects[e];
-    }
-    for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
-        restart |= s.game_patches[g] != s.startup_game_patches[g];
-    }
-    restart |= BbSettings::RenderSizeNeedsRestart();
+    const bool restart = s.GraphicsRestartRequired() || BbSettings::ResolutionNeedsRestart() ||
+                         BbSettings::RenderSizeNeedsRestart();
     if (restart) {
         ImGui::TextColored(kMenuYellow, "%s",
                            BbSettings::MenuText("Changes apply after restarting the game",
@@ -1977,31 +1979,32 @@ void Menu() {
     if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
         keep_open = false;
     }
-    // bbport 0.51 (issues 74, 116): leaving the game from the pad (this menu opens with L3+R3). A
-    // second press confirms; the window thread then closes like the window's own close button.
-    static bool quit_armed;
     ImGui::SameLine();
-
-    const char *quit_button_text = quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
-                                              : BbSettings::MenuText("Quit game", "Выйти из игры");
-
-    // keep a stable ID so changing the label preserves gamepad focus
-    const std::string quit_button_text_with_id = std::string(quit_button_text) + "###quit_game";
-
-    if (ImGui::Button(quit_button_text_with_id.c_str())) {
-        if (quit_armed) {
-            SDL_Event quit{};
-            quit.type = SDL_EVENT_QUIT;
-            SDL_PushEvent(&quit);
-        }
-        quit_armed = !quit_armed;
-    }
-    if (quit_armed && !ImGui::IsItemFocused() && !ImGui::IsItemHovered()) {
-        quit_armed = false;
+    const char* quit_title = BbSettings::MenuText("Exit game###confirm_quit", "Выход из игры###confirm_quit");
+    if (ImGui::Button(BbSettings::MenuText("Quit game###quit_game", "Выйти из игры###quit_game"))) {
+        quit_dialog_open = true;
+        ImGui::OpenPopup(quit_title);
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%s", BbSettings::MenuText("Settings are saved to bbport.ini",
                                              "Настройки сохраняются в bbport.ini"));
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal(quit_title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(BbSettings::MenuText("Are you sure you want to exit the game?", "Вы действительно хотите выйти из игры?"));
+        if (ImGui::Button(BbSettings::MenuText("Confirm", "Подтвердить"))) {
+            quit_dialog_open = false;
+            ImGui::CloseCurrentPopup();
+            QuitGame();
+        }
+        ImGui::SameLine();
+        const bool back = ImGui::Button(BbSettings::MenuText("Back", "Назад"));
+        ImGui::SetItemDefaultFocus();
+        if (back || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+            quit_dialog_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     ImGui::End();
     if (!keep_open) {
         SetOpen(false);
@@ -2551,7 +2554,7 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
+        if (down && !event.key.repeat && !quit_dialog_open &&
             (event.key.key == SDLK_INSERT || (menu_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
@@ -2594,7 +2597,7 @@ bool HandleEvent(const SDL_Event& event) {
         } else if (button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
             r3_down = down;
         }
-        if (down && l3_down && r3_down) {
+        if (down && l3_down && r3_down && !quit_dialog_open) {
             SetOpen(!is_open);
             return true;
         }

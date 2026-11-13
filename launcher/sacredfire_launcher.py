@@ -1540,8 +1540,13 @@ class LauncherWindow(Adw.ApplicationWindow):
     def restart_into(self, appimage):
         """The new AppImage starts in place of this launcher (the stable Steam link follows it)."""
         self.store()
-        subprocess.Popen([str(appimage)], env=host_environment(), start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen([str(appimage), "--updated"], cwd=str(appimage.parent),
+                             env=host_environment(), start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.update_banner.set_title(tr("Updated, but could not restart the launcher: {}").format(error))
+            return
         self.presence.shutdown()
         self.get_application().quit()
 
@@ -3701,7 +3706,9 @@ class LauncherWindow(Adw.ApplicationWindow):
 class LauncherApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID,
-                         flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+                         # The old instance still owns the application ID during update handoff.
+                         flags=(Gio.ApplicationFlags.NON_UNIQUE if "--updated" in sys.argv
+                                else Gio.ApplicationFlags.DEFAULT_FLAGS))
 
     def do_activate(self):
         window = self.get_active_window() or LauncherWindow(self)
@@ -3793,4 +3800,4 @@ def play():
 if __name__ == "__main__":
     if "--play" in sys.argv[1:]:
         sys.exit(play())
-    sys.exit(LauncherApp().run([a for a in sys.argv if a != "--play"]))
+    sys.exit(LauncherApp().run([a for a in sys.argv if a not in ("--play", "--updated")]))

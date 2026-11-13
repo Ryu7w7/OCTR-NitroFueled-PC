@@ -896,16 +896,18 @@ void runtime_restart(void) {
      * closed below, and an assertion there must not end the process (exit 23) before exec. */
     runtime_restarting = 1;
     __sync_synchronize();
-#ifdef _WIN32
-    /* SacredFire: run.py sets BB_RESTART_EXIT_CODE and starts the game again itself when it ends
-     * with that code (new patches, same console and log). The process ends at once, as exec
-     * replaces it on Linux: the GPU threads must not run its exit handlers. */
+    /* run.py and launch_lock.py retain the launch lock and rebuild settings on restart. */
     const char *restart_code=getenv("BB_RESTART_EXIT_CODE");
     if (restart_code && *restart_code) {
-        puts("Runtime: restarting (run.py starts the game again)");
+        puts("Runtime: restarting (the supervisor starts the game again)");
         fflush(NULL);
+#ifdef _WIN32
         TerminateProcess(GetCurrentProcess(),(UINT)atoi(restart_code));
+#else
+        _exit(atoi(restart_code));
+#endif
     }
+#ifdef _WIN32
     /* Otherwise BB_RESTART_COMMAND: the launch command line, started again (new patches). */
     const char *command=getenv("BB_RESTART_COMMAND");
     puts("Runtime: restarting through run.py");

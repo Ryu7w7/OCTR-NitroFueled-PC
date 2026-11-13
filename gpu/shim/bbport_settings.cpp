@@ -325,6 +325,8 @@ bool RenderSizeNeedsRestart() {
         (ultrawide && (v.ultrawide_w != v.startup_ultrawide_w || v.ultrawide_h != v.startup_ultrawide_h))) {
         return true;
     }
+    if (v.LiveGraphics())
+        return v.dlss_output != v.startup_dlss_output;
     if (ultrawide) {
         return false; // the monitor's size decides, not render_res
     }

@@ -124,6 +124,7 @@ public:
     ~PipelineCache();
 
     void WarmUp();
+    void CreateBlurVariant(vk::ShaderModule, u64 hash, std::span<const u32>);
     void Sync();
 
     bool LoadComputePipeline(Serialization::Archive& ar);
@@ -169,6 +170,7 @@ private:
     /// SacredFire: prepares the shipped shader recipe for this GPU (vk_pipeline_serialization.cpp).
     void PrebuildFromRecipe();
 
+    std::unordered_map<vk::ShaderModule, vk::UniqueShaderModule> blur_variants;
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);
     bool RefreshComputeKey();

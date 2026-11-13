@@ -17,5 +17,5 @@ void Init(const Vulkan::Instance& instance);
 /// format, not an integer one (the caller checks); a depth source a float destination.
 /// False: not done (nothing recorded).
 bool Copy(Gpu::Image& src, VkImageView src_view, vk::Offset2D from, Gpu::Image& dst,
-          vk::Rect2D rect);
+          vk::Rect2D rect, vk::Extent2D source_size = {});
 } // namespace BbNativeVk::Blit

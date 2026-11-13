@@ -16,6 +16,7 @@
 #include "common/assert.h"
 #include "bbport_toggles.h"
 #include "bbport_settings.h"
+#include "bbport_live_graphics.h"
 #include "bbport_heap_sites.h"
 #include "bbport_wait_trace.h"
 #include "bbport_native_signals.h"
@@ -853,10 +854,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // SacredFire: BB_FPS_LIMIT when set, else the in-game menu's limit, read every tick.
     const char* const limit_env = std::getenv("BB_FPS_LIMIT");
     const auto current_limit = [limit_env]() -> u32 {
-        if (limit_env && *limit_env) {
-            return EmulatorSettings.GetFrameLimit();
-        }
-        return u32(std::max(0, BbSettings::Get().fps_limit.load(std::memory_order_relaxed)));
+        const auto& settings = BbSettings::Get();
+        const u32 requested = limit_env && *limit_env ? EmulatorSettings.GetFrameLimit() :
+            u32(std::max(0, settings.fps_limit.load(std::memory_order_relaxed)));
+        return settings.LiveGraphics() ?
+            BbLiveGraphics::FrameLimit(requested, settings.game_patches[0]) : requested;
     };
     auto next_flip = std::chrono::steady_clock::now();
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
@@ -879,7 +881,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // bbport: with a frame limit or the uncapped presets a queued flip is presented as soon
         // as it arrives and its slot allows (no limit: at once), between vblanks, instead of on
         // the next vblank tick.
-        const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
+        const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank() ||
+                                     BbSettings::Get().LiveGraphics();
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 

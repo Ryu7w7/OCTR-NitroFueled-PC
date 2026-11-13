@@ -274,6 +274,14 @@ class ThemeTests(unittest.TestCase):
 
 
 class GamePatchTests(unittest.TestCase):
+    def test_blur_keeps_camera_call_for_live_shader_switching(self):
+        found = external_patches(ROOT / 'patches')
+        key = GAME_PATCH_KEYS['patch_no_motion_blur']
+        selected = lambda renderer: [patches.selection_key(k) for k, _, _ in
+            external_selection(found, None, {'renderer': renderer, 'patch_no_motion_blur': '1'})]
+        self.assertNotIn(key, selected('native'))
+        self.assertNotIn(key, selected('shadps4'))
+
     """The bundled CTR patches, chosen through bbport.ini patch_* keys (the in-game menu)."""
 
     def test_bundled_file_lists_every_menu_patch(self):

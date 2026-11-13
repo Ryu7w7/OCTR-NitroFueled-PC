@@ -508,6 +508,11 @@ def external_selection(found, config, ini=None):
     # With render_res the Pro mode follows it (run.py): 1080p runs the base PS4 path, so the
     # 1080p Pro patch is never needed (on the base path its flipped branch would take the Pro one).
     if render_plan(ini): enabled.discard(pro_1080p); disabled.add(pro_1080p)
+    # Both renderers switch blur shaders live; retain camera velocities for re-enabling it.
+    blur = GAME_PATCH_KEYS['patch_no_motion_blur']
+    if any(selection_key(key) == blur and meta.get('AppVer') == '01.21' for key, _, meta in found):
+        enabled.discard(blur)
+        disabled.add(blur)
     return [(key,path,meta) for key,path,meta in found
             if selection_key(key) in enabled
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
