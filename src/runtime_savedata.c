@@ -177,9 +177,11 @@ static int copy_tree(const char *from, const char *to) {
     if (!in) return -1;
     FILE *out=fopen(to,"wb");
     if (!out) { fclose(in); return -1; }
-    char buffer[65536]; size_t n; int ok=1;
-    while ((n=fread(buffer,1,sizeof(buffer),in))>0) if (fwrite(buffer,1,n,out)!=n) { ok=0; break; }
+    enum { CHUNK=65536 };
+    char *buffer=malloc(CHUNK); size_t n; int ok=buffer!=NULL;
+    while (ok && (n=fread(buffer,1,CHUNK,in))>0) if (fwrite(buffer,1,n,out)!=n) { ok=0; break; }
     ok=!ferror(in) && ok;
+    free(buffer);
     fclose(in);
     return !fclose(out) && ok ? 0 : -1;
 }
@@ -213,7 +215,7 @@ static int new_backup(int32_t user, const char *title, const char *dir, const ch
     for (int i=2;!stat(out,&st) && i<100;++i) snprintf(out,size,"%s/%s-%s%s-%d",base,dir,stamp,suffix,i);
     return make_dirs(out);
 }
-static void backup_save(int32_t user, const char *title, const char *dir, const char *host, const char *meta) {
+static void backup_save_here(int32_t user, const char *title, const char *dir, const char *host, const char *meta) {
     static char done[8][700]; static int count;
     for (int i=0;i<count;++i) if (!strcmp(done[i],host)) return;
     if (count<8) snprintf(done[count++],sizeof(done[0]),"%s",host);
@@ -228,7 +230,7 @@ static void backup_save(int32_t user, const char *title, const char *dir, const 
     if (!backup_base(user,title,base,sizeof(base))) prune_backups(base,dir);
 }
 /* A deleted save goes to the backups (moved: same disk), copied when it cannot be moved. */
-static int keep_deleted(int32_t user, const char *title, const char *dir, const char *host, const char *meta, char *to, size_t size) {
+static int keep_deleted_here(int32_t user, const char *title, const char *dir, const char *host, const char *meta, char *to, size_t size) {
     char data[900], info[900];
     if (new_backup(user,title,dir,"-deleted",to,size)) return -1;
     snprintf(data,sizeof(data),"%s/data",to);
@@ -239,6 +241,43 @@ static int keep_deleted(int32_t user, const char *title, const char *dir, const 
     char base[700];
     if (!backup_base(user,title,base,sizeof(base))) prune_backups(base,dir);
     return r;
+}
+
+/* The backups run on a thread of their own, with an ordinary stack: mount and delete come on the game's
+ * save threads (SL_SAVE_OPTIONS ... ask 64 KiB), and the copy's buffers and paths there killed v0.8.6 on
+ * Linux at the first save (the stack is mapped low with no guard page under it: nothing stopped the
+ * overflow, the process hung or crashed). The caller waits for it, holding the lock as before. */
+typedef struct {
+    int deleting;
+    int32_t user;
+    const char *title, *dir, *host, *meta;
+    char *to; size_t size;
+    int result;
+} BackupJob;
+static void *backup_job(void *argument) {
+    BackupJob *job=argument;
+    if (job->deleting) job->result=keep_deleted_here(job->user,job->title,job->dir,job->host,job->meta,job->to,job->size);
+    else backup_save_here(job->user,job->title,job->dir,job->host,job->meta);
+    return NULL;
+}
+static int run_backup_job(BackupJob *job) {
+    pthread_attr_t attr; pthread_t thread;
+    job->result=-1;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr,1024*1024);
+    const int e=pthread_create(&thread,&attr,backup_job,job);
+    pthread_attr_destroy(&attr);
+    if (e) { printf("Runtime: save data '%s' not backed up (no thread: %d)\n",job->dir,e); return -1; }
+    pthread_join(thread,NULL);
+    return 0;
+}
+static void backup_save(int32_t user, const char *title, const char *dir, const char *host, const char *meta) {
+    BackupJob job={0,user,title,dir,host,meta,NULL,0,0};
+    run_backup_job(&job);
+}
+static int keep_deleted(int32_t user, const char *title, const char *dir, const char *host, const char *meta, char *to, size_t size) {
+    BackupJob job={1,user,title,dir,host,meta,to,size,0};
+    return run_backup_job(&job) ? -1 : job.result;
 }
 
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
