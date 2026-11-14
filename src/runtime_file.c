@@ -888,7 +888,176 @@ static void touch_for_read(const void *buffer,uint64_t size) {
     for (; p<end; p+=4096)
         (void)*(volatile const unsigned char *)(p<(uintptr_t)buffer ? (uintptr_t)buffer : p);
 }
+/* BB_LEAK_DUMP=1 (diagnostics): when the game reports a memory block still allocated after a level
+   unloads ("NOTICE: *** <address> [<n> bytes] still allocated"), its bytes are printed, with what
+   each pointer-sized word points to: readable text, or an Alchemy object (its class, from the
+   game's igMetaObjects: name at +0x10, vtable at +0x38). For the first blocks of each report the
+   guest memory is searched for the words pointing into the block, with the class of the object
+   holding each (the nearest object start before it): what still uses memory about to be freed. */
+#define LEAK_IMAGE 0x800000000ull
+#define LEAK_IMAGE_END (0x800000000ull+0x50d96dcull)
+static int readable(uintptr_t p,size_t n) {
+#ifdef _WIN32
+    static __thread uintptr_t lo,hi; /* the last readable region: most lookups fall in it */
+    if (p>=lo && p+n<=hi) return 1;
+    MEMORY_BASIC_INFORMATION m;
+    if (!p || !VirtualQuery((const void *)p,&m,sizeof m) || m.State!=MEM_COMMIT) return 0;
+    if (m.Protect & (PAGE_NOACCESS|PAGE_GUARD)) return 0;
+    lo=(uintptr_t)m.BaseAddress; hi=lo+m.RegionSize;
+    return p+n <= hi;
+#else
+    (void)p; (void)n; return 0;
+#endif
+}
+static void leak_text(uintptr_t p,char *out,size_t size) {
+    out[0]=0;
+    if (!readable(p,64)) return;
+    const unsigned char *s=(const unsigned char *)p;
+    size_t n=0;
+    while (n+1<size && n<63 && s[n]>=0x20 && s[n]<0x7f) ++n;
+    if (n>=4 && s[n]==0) { memcpy(out,s,n); out[n]=0; }
+}
+typedef struct { uint64_t vtable; const char *name; } LeakClass;
+static LeakClass *leak_classes;
+static size_t leak_nclasses;
+static int leak_class_cmp(const void *a,const void *b) {
+    uint64_t x=((const LeakClass *)a)->vtable, y=((const LeakClass *)b)->vtable;
+    return x<y ? -1 : x>y;
+}
+/* The game's classes: every image slot holding an igMetaObject (a readable name, a vtable in the image). */
+static void leak_load_classes(void) {
+    static int done;
+    if (done) return;
+    done=1;
+    size_t cap=0;
+    for (uint64_t slot=LEAK_IMAGE; slot+8<=LEAK_IMAGE_END; slot+=8) {
+        if (!readable((uintptr_t)slot,8)) { slot|=0xfff; slot-=7; continue; }
+        uint64_t meta=*(const uint64_t *)(uintptr_t)slot;
+        if (meta<0x400000000ull || meta>=0x4000000000ull || (meta&7) || !readable((uintptr_t)meta,0x40)) continue;
+        uint64_t name=*(const uint64_t *)(uintptr_t)(meta+0x10), vt=*(const uint64_t *)(uintptr_t)(meta+0x38);
+        if (vt<LEAK_IMAGE || vt>=LEAK_IMAGE_END || (vt&7)) continue;
+        char text[64]; leak_text((uintptr_t)name,text,sizeof text);
+        if (!((text[0]>='A' && text[0]<='Z') || (text[0]>='a' && text[0]<='z'))) continue;
+        if (leak_nclasses==cap) {
+            cap=cap ? cap*2 : 1024;
+            LeakClass *grown=realloc(leak_classes,cap*sizeof *leak_classes);
+            if (!grown) break;
+            leak_classes=grown;
+        }
+        leak_classes[leak_nclasses].vtable=vt;
+        leak_classes[leak_nclasses++].name=(const char *)(uintptr_t)name;
+    }
+    if (leak_nclasses) qsort(leak_classes,leak_nclasses,sizeof *leak_classes,leak_class_cmp);
+    printf("Leak dump: %zu Alchemy classes known\n",leak_nclasses);
+}
+/* The class of an object whose first word is v (its vtable), or NULL. */
+static const char *leak_class(uint64_t v) {
+    if (v<LEAK_IMAGE || v>=LEAK_IMAGE_END) return NULL;
+    size_t lo=0, hi=leak_nclasses;
+    while (lo<hi) {
+        size_t mid=(lo+hi)/2;
+        if (leak_classes[mid].vtable==v) return leak_classes[mid].name;
+        if (leak_classes[mid].vtable<v) lo=mid+1; else hi=mid;
+    }
+    return NULL;
+}
+/* "Class+off @start" for the object holding address p (the nearest known vtable before it). */
+static void leak_owner(uintptr_t p,char *out,size_t size) {
+    out[0]=0;
+    uintptr_t q=p&~(uintptr_t)7;
+    for (int n=0; n<0x200 && q>=0x10000; q-=8, ++n) {
+        if (!readable(q,8)) return;
+        const char *c=leak_class(*(const uint64_t *)q);
+        if (c) { snprintf(out,size,"in %s+%#llx @%llx",c,(unsigned long long)(p-q),(unsigned long long)q); return; }
+    }
+}
+/* The words of the guest memory pointing into [base, base+bytes). */
+static void leak_refs(uintptr_t base,unsigned bytes) {
+#ifdef _WIN32
+    int hits=0;
+    uintptr_t p=(uintptr_t)0x400000000ull;
+    MEMORY_BASIC_INFORMATION m;
+    while (p<(uintptr_t)0x4000000000ull && VirtualQuery((const void *)p,&m,sizeof m)) {
+        uintptr_t lo=(uintptr_t)m.BaseAddress, hi=lo+m.RegionSize;
+        if (m.State==MEM_COMMIT && !(m.Protect&(PAGE_NOACCESS|PAGE_GUARD|PAGE_NOCACHE|PAGE_WRITECOMBINE)) &&
+            (m.Protect&(PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE))) {
+            for (const uint64_t *w=(const uint64_t *)lo; (uintptr_t)(w+1)<=hi; ++w) {
+                const uint64_t v=*w;
+                if (v-base>=bytes) continue;
+                if ((uintptr_t)w>=base && (uintptr_t)w<base+bytes) continue;
+                char owner[160]; leak_owner((uintptr_t)w,owner,sizeof owner);
+                printf("  ref from %llx -> +%#llx %s%s\n",(unsigned long long)(uintptr_t)w,(unsigned long long)(v-base),
+                       (uintptr_t)w>=LEAK_IMAGE && (uintptr_t)w<LEAK_IMAGE_END ? "(game image) " : "",owner);
+                if (++hits>=12) { printf("  ref: more not shown\n"); return; }
+            }
+        }
+        p=hi;
+    }
+    if (!hits) printf("  ref: none found\n");
+#else
+    (void)base; (void)bytes;
+#endif
+}
+/* At a fault (BB_LEAK_DUMP=1): 0x100 bytes of what each register points to, each word named. */
+void runtime_leak_registers(const char *const *names,const uint64_t *values,int count) {
+    leak_load_classes();
+    for (int r=0; r<count; ++r) {
+        const uintptr_t base=(uintptr_t)values[r];
+        if (base<0x400000000ull || base>=0x4000000000ull || (base>=LEAK_IMAGE && base<LEAK_IMAGE_END)) continue;
+        char o[200]; leak_owner(base,o,sizeof o);
+        fprintf(stderr,"  object at %s=%llx %s\n",names[r],(unsigned long long)base,o);
+        uintptr_t start=(base&~(uintptr_t)7)-0x40;
+        for (uintptr_t p=start; p<start+0x100; p+=8) {
+            if (!readable(p,8)) { fprintf(stderr,"    %llx unreadable\n",(unsigned long long)p); break; }
+            const uint64_t word=*(const uint64_t *)p;
+            char t[200]; t[0]=0;
+            const char *c=leak_class(word);
+            if (c) snprintf(t,sizeof t,"vtable of %s",c);
+            else if (word>=0x400000000ull && word<0x4000000000ull && readable((uintptr_t)word,8)) {
+                char s[64]; leak_text((uintptr_t)word,s,sizeof s);
+                if (s[0]) snprintf(t,sizeof t,"\"%s\"",s); else leak_owner((uintptr_t)word,t,sizeof t);
+            }
+            fprintf(stderr,"    %s%+4d %016llx %s\n",p==base ? ">" : " ",(int)(p-base),(unsigned long long)word,t);
+        }
+    }
+    fflush(stderr);
+}
+static void leak_dump(const char *text,uint64_t size) {
+    static int on=-1, searched;
+    if (on<0) { const char *e=getenv("BB_LEAK_DUMP"); on=e && e[0]=='1'; }
+    if (!on || size<20) return;
+    char line[256];
+    size_t n=size<sizeof line-1 ? (size_t)size : sizeof line-1;
+    memcpy(line,text,n); line[n]=0;
+    if (strstr(line,"block(s)") && strstr(line,"still allocated")) { searched=0; return; }
+    const char *at=strstr(line,"*** ");
+    if (!at || !strstr(line,"still allocated")) return;
+    unsigned long long address=0; unsigned bytes=0;
+    if (sscanf(at+4,"%llx [%u bytes]",&address,&bytes)!=2 || !bytes || bytes>4096) return;
+    uintptr_t base=(uintptr_t)address;
+    if (!readable(base,bytes)) { printf("Leak dump: %llx not readable\n",address); return; }
+    leak_load_classes();
+    const char *own=bytes>=8 ? leak_class(*(const uint64_t *)base) : NULL;
+    printf("Leak dump: %llx (%u bytes)%s%s\n",address,bytes,own ? " object " : "",own ? own : "");
+    for (unsigned off=0; off+8<=bytes; off+=8) {
+        uint64_t word; memcpy(&word,(const void *)(base+off),8);
+        char s[64]; leak_text((uintptr_t)word,s,sizeof s);
+        char o[200]; o[0]=0;
+        const char *c=leak_class(word);
+        if (c) snprintf(o,sizeof o,"vtable of %s",c);
+        else if (!s[0] && word>=0x10000 && readable((uintptr_t)word,8)) {
+            const uint64_t inner=*(const uint64_t *)(uintptr_t)word;
+            char s2[64]; leak_text((uintptr_t)inner,s2,sizeof s2);
+            if (s2[0]) snprintf(o,sizeof o,"-> \"%s\"",s2);
+            else leak_owner((uintptr_t)word,o,sizeof o);
+        }
+        printf("  +%02x %016llx %s%s%s%s\n",off,(unsigned long long)word,s[0] ? "\"" : "",s,s[0] ? "\" " : "",o);
+    }
+    if (searched<4) { ++searched; leak_refs(base,bytes); }
+    fflush(stdout);
+}
 static int64_t do_write(int fd,const void *buffer,uint64_t size) {
+    if (fd==1 || fd==2) leak_dump((const char *)buffer,size);
     /* SacredFire: the first write into each opened save file is logged (plan milestone d). */
     { File *sf=get(fd); if (sf && !sf->save_logged && !strncmp(sf->path,"/savedata",9)) { sf->save_logged=1; printf("Runtime: save write: %s (%llu bytes)\n",sf->path,(unsigned long long)size); } }
     int h=host_fd_written(fd);

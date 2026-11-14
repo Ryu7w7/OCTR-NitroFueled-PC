@@ -189,6 +189,7 @@ const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
 void runtime_trophy_configure(const char *title);
 void runtime_meta_dump_start(unsigned char *image, size_t size); /* BB_META_DUMP=1: field metadata (lab) */
+void runtime_leak_registers(const char *const *names, const uint64_t *values, int count); /* BB_LEAK_DUMP=1: a fault's objects */
 void runtime_trophy_badges(const char *json); /* the server's badges: OCTR's trophies (ctr_trophies.h) */
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
