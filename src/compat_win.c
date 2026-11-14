@@ -57,9 +57,36 @@ int compat_errno_from_win32(unsigned long error) {
     }
 }
 
-/* Positioned I/O on a synchronous handle moves the file pointer: it is restored afterwards.
- * A concurrent read() on the same descriptor would race, as with a shared offset anyway. */
+/* The descriptors' I/O locks: one of 64 recursive critical sections per descriptor. */
+#define FD_LOCKS 64
+static CRITICAL_SECTION fd_locks[FD_LOCKS];
+static INIT_ONCE fd_locks_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK fd_locks_init(PINIT_ONCE once, PVOID param, PVOID *context) {
+    (void)once; (void)param; (void)context;
+    for (int i = 0; i < FD_LOCKS; i++) InitializeCriticalSectionAndSpinCount(&fd_locks[i], 1000);
+    return TRUE;
+}
+static CRITICAL_SECTION *fd_lock_of(int fd) {
+    InitOnceExecuteOnce(&fd_locks_once, fd_locks_init, NULL, NULL);
+    return &fd_locks[(unsigned)fd % FD_LOCKS];
+}
+void compat_fd_lock(int fd) { EnterCriticalSection(fd_lock_of(fd)); }
+void compat_fd_unlock(int fd) { LeaveCriticalSection(fd_lock_of(fd)); }
+
+/* Positioned I/O on a synchronous handle moves the file pointer: it is restored afterwards, under
+ * the descriptor's lock, which the runtime's sequential read/write/lseek take as well (runtime_file.c).
+ * Without it a game thread's read() between the ReadFile and the restore read from the other
+ * thread's position: garbage, e.g. an LZMA header asking the game for gigabytes (issue #217). */
+static ssize_t positioned_locked(int fd, void *buffer, size_t size, int64_t offset, int write);
 static ssize_t positioned(int fd, void *buffer, size_t size, int64_t offset, int write) {
+    compat_fd_lock(fd);
+    const ssize_t r = positioned_locked(fd, buffer, size, offset, write);
+    const int saved_errno = errno;
+    compat_fd_unlock(fd);
+    errno = saved_errno;
+    return r;
+}
+static ssize_t positioned_locked(int fd, void *buffer, size_t size, int64_t offset, int write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
     if (offset < 0) { errno = EINVAL; return -1; }

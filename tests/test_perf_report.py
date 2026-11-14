@@ -112,6 +112,34 @@ class PerfReportTests(unittest.TestCase):
         self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
         self.assertNotIn('fault', self.collector().report({}))
 
+    def test_a_lost_gpu_device_says_why_without_addresses(self):
+        # vk_breadcrumbs.cpp's report: where it was noticed, the driver's words, the bad access,
+        # a buffer freed under the GPU, and the command it stopped in (hashes kept, addresses not)
+        c = perf_report.Collector()
+        c.feed("LOADING LEVEL: 'octane/t112_roos_tubes/t112_roos_tubes'\n"
+               'GPU fault info: VK_EXT_device_fault on, a device loss reports its cause\n'
+               'GPU breadcrumbs at device lost (submit): what each command stream finished\n'
+               '  stream 0 (gfx): 812 commands noted, the GPU started #700 and did not finish it\n'
+               '    #699 finished: Pass main\n'
+               '    #700 STUCK: DrawIndirect vs 00112233aabbccdd ps 44556677eeff0011, up to 4 draws, '
+               'stride 20, arguments at 0x10f6901f78 (guest memory now 1 2 3 4 5)\n'
+               'GPU fault info: Page fault (1 addresses, 1 vendor records)\n'
+               '  invalid read at GPU address 0x1234567000 (range 0x1234567000-0x1234567fff)\n'
+               '    inside buffer 0x1f2e3d (GPU 0x1234560000, 65536 bytes) destroyed 3.1 ms before this report\n')
+        fault = c.report({})['fault']
+        self.assertEqual(fault['kind'], 'gpu device lost')
+        self.assertEqual(fault['where'], 'submit')
+        self.assertEqual(fault['cause'], 'Page fault')
+        self.assertEqual(fault['gpu_access'], 'invalid read')
+        self.assertEqual(fault['freed'], 'buffer')
+        self.assertIn('vs 00112233aabbccdd ps 44556677eeff0011', fault['stuck'])
+        self.assertNotIn('0x10f6901f78', fault['stuck'])
+        self.assertNotIn('guest memory', fault['stuck'])
+        # the status line printed at startup is not a loss
+        quiet = perf_report.Collector()
+        quiet.feed('GPU fault info: VK_EXT_device_fault on, a device loss reports its cause\n')
+        self.assertNotIn('fault', quiet.report({}))
+
     def test_a_corrupt_free_the_game_survived_is_reported(self):
         c = perf_report.Collector()
         c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 000000106d171ef8, '
@@ -125,6 +153,36 @@ class PerfReportTests(unittest.TestCase):
         c.feed('Fault: read access to 0000000000000010 at guest offset 0x123456 (thread 7)\n')
         self.assertTrue(c.corrupt_free)
         self.assertEqual(c.fault['kind'], 'read access')
+
+    def test_a_corrupt_block_says_what_was_around_it(self):
+        # probe.c heap_summary: word kinds, never data, kept even when a crash follows
+        c = perf_report.Collector()
+        c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 1, r8=2, pool=3)\n'
+               'Runtime: corrupt block words (block-0x40..+0x18): 0 n41 b-30 img+2774cc0 txt ptr ? '
+               'Jose b+10 0 unread unread; callers: 0x14a290d 0x1518e5a\n')
+        heap = c.report({})['fault']['heap']
+        self.assertEqual(heap['words'][:4], ['0', 'n41', 'b-30', 'img+2774cc0'])
+        self.assertEqual(heap['words'][7], '?')  # not a kind: dropped
+        self.assertEqual(heap['callers'], ['0x14a290d', '0x1518e5a'])
+        c.feed('Fault: write access to 0000000000000020 at guest offset 0x1490000 (thread 7)\n')
+        self.assertEqual(c.report({})['fault']['heap'], heap)
+
+    def test_a_crash_names_its_callers_and_thread(self):
+        c = perf_report.Collector()
+        c.feed('Fault: write access to 0000000000000020 at guest offset 0x1490000 (thread 7)\n'
+               '  rax=0000000000000001 rbx=0000000000000002\n'
+               '  guest code addresses on the stack (callers, newest first): 0x14a290d@rsp+0x8 '
+               '0x1518e5a@rsp+0x40\n'
+               '  thread name: C:\\Users\\Some Player\n'
+               '  guest thread: MainThread\n'
+               'Fault: read access to 0000000000000010 at guest offset 0x99 (thread 1)\n'
+               '  guest code addresses on the stack (callers, newest first): 0x1@rsp+0x8\n'
+               '  guest thread: Other\n')
+        fault = c.report({})['fault']
+        self.assertEqual(fault['where'], 'guest offset 0x1490000')
+        self.assertEqual(fault['callers'], ['0x14a290d', '0x1518e5a'])
+        self.assertEqual(fault['thread'], 'MainThread')
+        self.assertNotIn('Some Player', json.dumps(fault))
 
     def test_mods_in_use(self):
         with tempfile.TemporaryDirectory() as folder:

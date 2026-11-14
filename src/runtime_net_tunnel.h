@@ -52,6 +52,8 @@ int tun_candidate(uint32_t ip, uint32_t server_ip);
  * its direct packets reach us). */
 int tun_on_send(uint32_t ip, uint16_t port, uint64_t now_ms, uint8_t *flags, int *relay);
 void tun_on_direct(uint32_t ip, uint16_t port, uint64_t now_ms);
+/* Both ways direct with this peer (its packets arrive, and it says ours do): no other path needed. */
+int tun_direct_ok(uint32_t ip, uint16_t port, uint64_t now_ms);
 void tun_on_tunnelled(uint32_t ip, uint16_t port, uint8_t flags, int via_relay, uint64_t now_ms);
 /* Keepalive due (keeps this socket's path to the server open): 1 once per interval. */
 int tun_keepalive_due(uint64_t now_ms);

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from archive_reader import Archive
-from archive_patch import read, write_entries_patch
+from archive_patch import MAX_ARCHIVE_OVERLAYS, read, write_entries_patch
 from mod_file_paths import resolve
 from widescreen_startup import IGZ
 
@@ -141,8 +141,8 @@ def build(game, output, base_patches):
         write_entries_patch(speed_target, game / 'archives' / name, guest,
                             speed_entries, current.get(guest))
         normal_view[guest], speed_view[guest] = normal_target, speed_target
-    if len(normal_view) > 32 or len(speed_view) > 32:
-        raise ValueError(f'Speed test exceeds the engine limit of 32 archive overlays: '
+    if len(normal_view) > MAX_ARCHIVE_OVERLAYS or len(speed_view) > MAX_ARCHIVE_OVERLAYS:
+        raise ValueError(f'Speed test exceeds the engine limit of {MAX_ARCHIVE_OVERLAYS} archive overlays: '
                          f'{len(normal_view)}/{len(speed_view)}')
     for guest in normal_view:
         normal_size, _, normal_ranges = read(normal_view[guest])

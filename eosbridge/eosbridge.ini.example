@@ -1,0 +1,15 @@
+# ryunet-bridge settings: copy to eosbridge.ini next to ryunet-bridge (the launcher's eos\ folder,
+# and the gateway's folder on the server) and fill in the ids of the Epic product
+# (dev.epicgames.com/portal: Product Settings > SDK Download & Credentials).
+#
+# The client's id needs the Connect and P2P permissions; Epic Account Services are not used:
+# players log in anonymously (Device ID).
+product_id =
+sandbox_id =
+deployment_id =
+client_id =
+client_secret =
+
+# Clients only: the gateway's product user id ("GATEWAY ID ..." in the gateway's output, the
+# first time it logs in; it stays the same while its data folder is kept).
+gateway_id =

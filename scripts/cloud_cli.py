@@ -65,9 +65,13 @@ class Account:
     def fetch(self, target, timeout=60):
         """A signed GET that answers bytes (a save's zip): by HTTPS on the name, else the port."""
         urls = []
-        if not self.host.replace('.', '').isdigit():
+        local = run.bridge_port(self.port)
+        if local:  # the EOS bridge (run.bridge_port): this network does not reach the server
+            urls.append(f'http://127.0.0.1:{local}{target}')
+        elif not self.host.replace('.', '').isdigit():
             urls.append(f'https://{self.host}{target}')
-        urls.append(f'http://{self.host}:{self.port}{target}')
+        if not local:
+            urls.append(f'http://{self.host}:{self.port}{target}')
         last = OSError('no answer')
         for url in urls:
             req = urllib.request.Request(url, headers={'X-RyuNET-Proof': run.proof_header(self.khash, 'GET', target),

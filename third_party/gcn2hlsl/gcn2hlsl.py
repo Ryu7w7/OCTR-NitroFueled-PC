@@ -18,6 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gcn  # noqa: E402
 
 
+# Direct3D 11 views have no channel order: the shader applies it (GCN2HLSL_D3D11=1). Vulkan's views
+# do, which takes fewer instructions (the note in store()).
+SWIZZLE_IN_SHADER = os.environ.get("GCN2HLSL_D3D11") == "1"
+# Direct3D 11: the entries a constant buffer read at a computed offset (bones) is declared with
+CB_COMPUTED_ENTRIES = 512
+
+
 class Unsupported(Exception):
     pass
 
@@ -60,6 +67,7 @@ class Translator:
         self.lane_spills = set()
         self.uses_quad = False
         self.uses_vin = False  # vertex inputs converted per the runtime vertex format (b13)
+        self.uses_swizzle = False
         # render scale (supersampling): pixel positions / texel coordinates are converted between
         # the game's 1080p units and the scaled render targets (b13 ctr_scale, ctr_tscale)
         self.uses_scale = False
@@ -955,10 +963,13 @@ class Translator:
         comps = [k for k in range(4) if (f["dmask"] >> k) & 1]
         dst = f["vdata"]
 
-        def store(expr, ncomp=4):
+        def store(expr, ncomp=4, swizzle=True):
             # the channel order (RT component swap + T# dst_sel) is the bound view's: the runtime
             # makes views in that order, as the PS4 sampler applies dst_sel for free (selecting
             # channels here took 3-5x the original's instructions)
+            if swizzle and SWIZZLE_IN_SHADER:
+                expr = f"ctr_swizzle({expr}, ctr_swz[{slot >> 2}][{slot & 3}])"
+                self.uses_swizzle = True
             self.emit(f"{{ float4 r_ = {expr};")
             for j, c in enumerate(comps):
                 self.emit(f"    {'if (ex) ' if self.exec_written else ''}{self.V(dst + j)} = asuint(r_.{'xyzw'[c]});")
@@ -982,12 +993,12 @@ class Translator:
             self.cube_bad.add(slot)
             c = f"float{dims}({', '.join(av(k) for k in range(dims))})"
             return store(f"float4(t{slot}.CalculateLevelOfDetail(sm{ss[1]}, {c}), "
-                         f"t{slot}.CalculateLevelOfDetailUnclamped(sm{ss[1]}, {c}), 0, 0)")
+                         f"t{slot}.CalculateLevelOfDetailUnclamped(sm{ss[1]}, {c}), 0, 0)", swizzle=False)
         if n == "image_get_resinfo":
             self.uses_scale = True
             self.textures[slot] = (dims, "load")
             self.cube_bad.add(slot)
-            return store(f"texinfo{slot}(int({self.V(a)}))")
+            return store(f"texinfo{slot}(int({self.V(a)}))", swizzle=False)
         if not (n.startswith("image_sample") or n.startswith("image_gather4")):
             raise Unsupported(n)
         ss = self.tags.get(f["ssamp"])
@@ -1057,13 +1068,13 @@ class Translator:
             ch = "Red" if not comps else ["Red", "Green", "Blue", "Alpha"][comps[0]]
             comps[:] = [0, 1, 2, 3]
             if cmp_ is not None:
-                return store(f"{tex}.GatherCmp{ch}({sm}, {coord}, {cmp_})")
-            return store(f"{tex}.Gather{ch}({sm}, {coord})")
+                return store(f"{tex}.GatherCmp{ch}({sm}, {coord}, {cmp_})", swizzle=False)
+            return store(f"{tex}.Gather{ch}({sm}, {coord})", swizzle=False)
         if cmp_ is not None:
             if lod is not None and lod != "0.0f":
                 raise Unsupported("compare with explicit lod")
             fn = "SampleCmpLevelZero" if lod is not None or self.kind != "ps" else "SampleCmp"
-            return store(f"{tex}.{fn}({sm}, {coord}, {cmp_}).xxxx")
+            return store(f"{tex}.{fn}({sm}, {coord}, {cmp_}).xxxx", swizzle=False)
         if grads is not None:
             gx = f"float{dims}({grads[0]}, {grads[1]}{', 0' if dims == 3 else ''})"
             gy = f"float{dims}({grads[2]}, {grads[3]}{', 0' if dims == 3 else ''})"
@@ -1246,17 +1257,30 @@ class Translator:
     def assemble(self, body):
         pin = self.ps_input_vgprs() if self.kind == "ps" else []  # sets uses_scale before the decls
         out = ["// translated from PS4 GCN by tools/gcn2hlsl.py", COMMON_HLSL]
+        text = "\n".join(body)
         for slot in sorted(self.cbuffers):
-            out.append(f"cbuffer CB{slot} : register(b{slot}) {{ uint4 cb{slot}[4096]; }};")
+            size = 4096
+            if SWIZZLE_IN_SHADER:
+                # Direct3D 11 (v0.8.8): each buffer as large as the shader reads, not 64 KB. fxc's
+                # optimizer took ~1 s a pixel shader over 4096 entries, ~0.1 s right sized; a
+                # vertex shader reading bones at a computed offset ~6 s, ~0.8 s at 512 entries
+                # (8 KB: the game binds up to ~3 KB; renderer.cpp logs a larger one).
+                used = [int(i) for i in re.findall(rf"\bcb{slot}\[(\d+)\]", text)]
+                size = CB_COMPUTED_ENTRIES if f"cbload{slot}(" in text else max(used, default=0) + 1
+            out.append(f"cbuffer CB{slot} : register(b{slot}) {{ uint4 cb{slot}[{size}]; }};")
             out.append(f"uint cbload{slot}(uint dw) {{ return cb{slot}[dw >> 2][dw & 3u]; }}")
         for slot, (dims, use) in sorted(self.textures.items()):
             ty = "TextureCube" if slot in self.cube_slots else "Texture2D" if dims == 2 else "Texture2DArray"
             out.append(f"{ty}<float4> t{slot} : register(t{slot});")
             if use == "load" or any("texinfo" in l for l in body):
                 pass
-        if self.uses_vin or self.uses_scale:
+        if self.uses_swizzle or self.uses_vin or self.uses_scale:
             out.append("cbuffer CTRSwizzle : register(b13) { uint4 ctr_swz[8]; uint4 ctr_vin[8]; "
                        "float4 ctr_scale; float4 ctr_tscale[8]; };")
+        if self.uses_swizzle:
+            out.append("float ctr_sel(float4 v, uint c) { return c == 0u ? 0.0f : c == 1u ? 1.0f : v[c - 2u]; }")
+            out.append("float4 ctr_swizzle(float4 v, uint s) { return s == 0u ? v : float4(ctr_sel(v, s & 7u), "
+                       "ctr_sel(v, (s >> 3) & 7u), ctr_sel(v, (s >> 6) & 7u), ctr_sel(v, (s >> 9) & 7u)); }")
         if self.uses_vin:
             out.append("uint ctr_in(float x, uint sem) { uint m = ctr_vin[sem >> 2][sem & 3u]; uint u = asuint(x); "
                        "return m == 1u ? asuint(float(u)) : m == 2u ? asuint(float(int(u))) : u; }")

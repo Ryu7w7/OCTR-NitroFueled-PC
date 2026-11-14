@@ -39,10 +39,19 @@ START_FAULT_CODE = 3  # a fault the game could not go on from (probe.c)
 START_FAULT_SECONDS = 45  # the title screen comes later than this
 START_FAULT_TRIES = 2
 UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
+# Windows could not give the game its memory (RAM plus the page file): the game's "Runtime: cannot
+# commit ... (error 1455)" line, after which it stops a moment later on a fault (code 3). The
+# launchers tell the player to enlarge the page file instead of "code 3".
+OUT_OF_MEMORY_CODE = 26
+OUT_OF_MEMORY = re.compile(r'^Runtime: cannot commit \d+ MiB of guest memory \(error (1455|1450|8)\)')
 
 sys.path.insert(0, str(PORT / 'scripts'))
 import archive_patch  # noqa: E402  (scripts/)
 import button_prompts  # noqa: E402
+import season_art  # noqa: E402
+import signed_in_name  # noqa: E402
+import ctr_tv_logo  # noqa: E402
+import track_names  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
 import online_mode  # noqa: E402
@@ -113,6 +122,46 @@ def isa_rewrite_wanted(missing, env):
     return bool(missing)
 
 
+class LogLimit:
+    """Keeps last_run.log small enough to send (a player's grew to about 100 MB). A line that keeps
+    coming (the same words, its numbers aside) is written its first SAME times, then one in EVERY with
+    its count; past MAX bytes, only the lines that say something went wrong; past twice that, nothing.
+    The console and the performance report still get every line."""
+    SAME, EVERY, MAX = 100, 1000, 10 << 20
+    SHAPE = re.compile(r'0x[0-9a-fA-F]+|\d+')
+    # what went wrong, not a count of it ("0 failed" in the renderer's statistics)
+    CRITICAL = re.compile(r'(?i)\b(crash|fatal|exception|corrupt|bailing|abort|assert|unhandled)|'
+                          r'(?<!\d )\b(error|errors|failed|fails)\b|^---')
+
+    def __init__(self, written=0):
+        self.seen = {}
+        self.written = written  # an in-game restart appends to the same file
+
+    def __call__(self, text):
+        kept = []
+        for line in text.splitlines(keepends=True):
+            shape = self.SHAPE.sub('#', line[:160])
+            count = self.seen.get(shape, 0) + 1
+            if shape in self.seen or len(self.seen) < 50000:
+                self.seen[shape] = count
+            if count == self.SAME + 1:
+                line = f'(log: the next line keeps coming; from here only one in {self.EVERY} is kept)\n' + line
+            elif count > self.SAME:
+                if count % self.EVERY:
+                    continue
+                line = f'(x{count}) {line}'
+            if self.written >= 2 * self.MAX or (self.written >= self.MAX and not self.CRITICAL.search(line)):
+                continue
+            kept.append(line)
+            self.written += len(line)
+            if self.written >= self.MAX > self.written - len(line):
+                kept.append(f'(log: over {self.MAX >> 20} MB; from here only the errors)\n')
+        return ''.join(kept)
+
+
+LOG_LIMIT = LogLimit()
+
+
 def emit(text):
     try:
         sys.stdout.write(text)
@@ -121,7 +170,7 @@ def emit(text):
         pass
     if LOG:
         try:
-            LOG.write(text)
+            LOG.write(LOG_LIMIT(text))
             LOG.flush()
         except Exception:
             pass
@@ -137,6 +186,8 @@ def emit(text):
             VULKAN_START['ready'] = True
         elif line.startswith('Vulkan: starting'):
             VULKAN_START['layers'] = line.partition('layers installed: ')[2].strip()
+        elif OUT_OF_MEMORY.match(line):
+            VULKAN_START['out_of_memory'] = True
 
 
 def say(message):
@@ -177,6 +228,78 @@ def retry_taken_range(code, tries):
     """Whether to start the game again because the PS4 address range was taken: it fails in an
     instant, before the window opens, and the next start usually finds the range free."""
     return code == RANGE_TAKEN_CODE and tries < RANGE_TAKEN_TRIES
+
+
+# tools/shaders/compile_d3d11.py VERSION (tests/test_d3d11_compile.py keeps them equal)
+D3D11_COMPILED_VERSION = '3'
+# The translation's (out/d3d11-shaders/hlsl/translated.txt): another one is translated again, its
+# DXBC removed. 2 (v0.8.8): constant buffers declared as large as the shader reads.
+D3D11_TRANSLATION_VERSION = '2'
+
+
+def d3d11_step(script, args, pattern, start, span):
+    """One step of prepare_d3d11_shaders: its "<word> N/M" lines move the launcher's progress bar
+    from start to start + span percent. Whether it ended well."""
+    command = [sys.executable, '-X', 'utf8', str(PORT / 'tools' / 'shaders' / script), *map(str, args)]
+    last = -1
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, encoding='utf-8', errors='replace', creationflags=no_console())
+    for line in process.stdout:
+        m = re.match(pattern + r' (\d+)/(\d+)', line)
+        if m:
+            percent = start + int(m[1]) * span // max(1, int(m[2]))
+            if percent != last:
+                last = percent
+                emit(f'@progress native-shaders {percent} Direct3D 11\n')
+        elif line.strip():
+            emit('  ' + line)
+    return process.wait() == 0
+
+
+D3D11_ORDER = PORT / 'tools' / 'shaders' / 'd3d11_order.txt'
+
+
+def prepare_d3d11_shaders(game, folder):
+    """The Direct3D 11 engine's shaders, the first time, before the game starts: the game's programs
+    translated to HLSL (tools/shaders/build_d3d11.py --translate-only, about 30 s), the shaders written
+    for the PC (tools/shaders/native_d3d11.py) and every translation compiled to DXBC
+    (tools/shaders/compile_d3d11.py, about 2-3 minutes since v0.8.8 declares the constant buffers
+    as large as each shader reads: up to 30 minutes before). Kept, so later starts compile nothing.
+    What fails here the game compiles again as it needs it (gpu/shim/d3d11/renderer.cpp, in the
+    order of tools/shaders/d3d11_order.txt, a draw waiting for its shader). A folder an older version
+    translated is translated again, one it compiled with other flags compiled again
+    (compile_d3d11.py --forget). "@progress native-shaders" lines (the same as the native
+    renderer's): the launchers show a progress window meanwhile."""
+    hlsl = folder / 'hlsl'
+    translated = (hlsl / 'shaders.idx').is_file()
+    try:
+        translated = translated and (hlsl / 'translated.txt').read_text().strip() == D3D11_TRANSLATION_VERSION
+    except OSError:
+        translated = False
+    if not translated and (hlsl / 'shaders.idx').is_file():  # an older translation: none of it is kept
+        for old in hlsl.glob('*.dxbc'):
+            old.unlink(missing_ok=True)
+        (hlsl / 'shaders.idx').unlink(missing_ok=True)
+    try:  # compile_d3d11.py VERSION: the flags the DXBC in the folder were compiled with
+        current = (hlsl / 'compiled.txt').read_text().strip() == D3D11_COMPILED_VERSION
+    except OSError:
+        current = False
+    if translated and not current:
+        run_python('tools/shaders/compile_d3d11.py', hlsl, '--forget', check=False)
+    if translated and all(s.with_suffix('.dxbc').is_file() for s in hlsl.glob('*.hlsl')):
+        return True
+    say('Direct3D 11: preparing its shaders from your game (only the first time, about 3 minutes)')
+    emit('@progress native-shaders 0 Direct3D 11\n')
+    ok = translated or (d3d11_step('build_d3d11.py', [game, folder, '--translate-only'], 'translated', 0, 20)
+                        and (hlsl / 'shaders.idx').is_file())
+    if ok and not translated:
+        run_python('tools/shaders/native_d3d11.py', hlsl, check=False)
+        run_python('tools/shaders/compile_d3d11.py', hlsl, '--forget', check=False)
+        (hlsl / 'translated.txt').write_text(D3D11_TRANSLATION_VERSION + '\n')
+    if ok:  # what fails here, the game compiles again
+        d3d11_step('compile_d3d11.py', [hlsl], 'compiled', 20, 80)
+    emit(f'@progress native-shaders done {"ok" if ok else "failed"}\n')
+    return ok
 
 
 def find_executable(name):
@@ -348,17 +471,42 @@ def key_hash(skey):
 # server takes them only within 5 minutes of its own clock: with the PC's clock off, every signed
 # request was refused ("nickname signature out of time") and the nickname read as taken.
 SERVER_CLOCK_OFFSET = 0
+# Something on the way (an ISP's cache, an antivirus web shield) kept the server's answers and gave
+# them back hours later: their Date made a right clock look hours off, and every signed request then
+# went with the wrong time. Each request sends a fresh token (X-RyuNET-Clock) and the server answers
+# with its time and that token (X-RyuNET-Time, its clock_stamp.go): a kept answer has an old one.
+CLOCK = threading.local()  # .token: the last one this thread sent
+SERVER_STAMPS = False      # the server sends X-RyuNET-Time: an answer without it is not its own
+
+
+def clock_headers():
+    """Headers for a request whose answer may set SERVER_CLOCK_OFFSET (note_server_clock)."""
+    CLOCK.token = secrets.token_hex(8)
+    return {'X-RyuNET-Clock': CLOCK.token, 'Cache-Control': 'no-cache'}
 
 
 def note_server_clock(reply):
-    """An answer of the RyuNET server (a urllib response or HTTPError): its Date header sets
-    SERVER_CLOCK_OFFSET."""
-    global SERVER_CLOCK_OFFSET
+    """An answer of the RyuNET server (a urllib response or HTTPError) sets SERVER_CLOCK_OFFSET:
+    its X-RyuNET-Time when it carries the token this thread just sent, else (a server older than
+    that) its Date, unless a cache says it kept the answer (Age)."""
+    global SERVER_CLOCK_OFFSET, SERVER_STAMPS
     import email.utils
-    try:
-        server = email.utils.parsedate_to_datetime(reply.headers.get('Date', '')).timestamp()
-    except (AttributeError, TypeError, ValueError, IndexError):
+    headers = getattr(reply, 'headers', None)
+    if headers is None:
         return
+    stamp = (headers.get('X-RyuNET-Time') or '').split()
+    if stamp:
+        SERVER_STAMPS = True
+        if len(stamp) != 2 or not stamp[0].isdigit() or stamp[1] != getattr(CLOCK, 'token', None):
+            return  # an answer kept on the way
+        server = int(stamp[0])
+    else:
+        if SERVER_STAMPS or headers.get('Age'):
+            return
+        try:
+            server = email.utils.parsedate_to_datetime(headers.get('Date', '')).timestamp()
+        except (AttributeError, TypeError, ValueError, IndexError):
+            return
     offset = round(server - time.time())
     # The header has whole seconds: a few seconds either way change nothing.
     SERVER_CLOCK_OFFSET = offset if abs(offset) > 5 else 0
@@ -392,6 +540,20 @@ def machine_header():
 MACHINE = None
 
 
+def bridge_port(port):
+    """With the EOS bridge (eosbridge/: the launcher runs it when this network does not reach the
+    server, and sets BB_ONLINE_BRIDGE="<udp>,<server port>:<local port>,..."): the port on
+    127.0.0.1 that carries this server port there. None without it."""
+    mapping = os.environ.get('BB_ONLINE_BRIDGE', '')
+    if not mapping or not os.environ.get('BB_ONLINE_SERVER_IP'):
+        return None
+    for part in mapping.split(',')[1:]:
+        server_port, _, local = part.partition(':')
+        if server_port.strip() == str(port) and local.strip().isdigit():
+            return int(local)
+    return None
+
+
 def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=None, session=None):
     """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
     By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
@@ -411,6 +573,10 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=No
 
     opener = urllib.request.build_opener(NoRedirect)
     def urls():
+        local = bridge_port(port)
+        if local:  # this network does not reach the server: the EOS bridge carries it
+            yield f'http://127.0.0.1:{local}{target}', False
+            return
         try:
             ipaddress.ip_address(host)
         except ValueError:  # a certificate can vouch for a name, never a bare address
@@ -430,6 +596,7 @@ def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=No
         request = urllib.request.Request(url, method=method,
                                          data=body if body is not None else (b'' if method == 'POST' else None),
                                          headers={**(headers(method, target) if headers else {}),
+                                                  **clock_headers(),
                                                   **({'X-RyuNET-Machine': machine_header()} if machine_header() else {}),
                                                   **({'Content-Type': 'application/json'} if body is not None else {})})
         try:
@@ -682,10 +849,10 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
-    # Every player loads the theme the server announces (bbport.ini theme= only applies offline),
-    # and the server's race-end countdown.
+    # Every player loads the theme the server announces (bbport.ini theme= only applies offline;
+    # christmas: the title screen's, scripts/season_art.py), and the server's race-end countdown.
     theme = announced.get('theme')
-    if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden'):
+    if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden', 'christmas'):
         env['BB_THEME'] = theme
         if theme != 'default':
             say(f'Season theme from the server: {theme}')
@@ -760,7 +927,8 @@ def finish_perf_report(env, config, data, version, title_id, code):
         report = PERF.report({
             'octr': version[:40],
             'edition': title_id,
-            'renderer': 'native' if env.get('BB_VK_NATIVE_ONLY') == '1' else 'shadps4',
+            'renderer': ('d3d11' if env.get('BB_D3D11') == '1' else
+                         'native' if env.get('BB_VK_NATIVE_ONLY') == '1' else 'shadps4'),
             'online': env.get('BB_ONLINE') == '1',
             'settings': perf_report.settings_of(config),
             'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
@@ -833,8 +1001,44 @@ def main():
         fail('Launch failed: ' + str(error))
 
 
+def remove_obsolete_files():
+    """Files an older package left that a newer one no longer carries (an update copies the new
+    package's files over the old ones and removes none): v0.8.5 builds Zydis into sacredfire.exe
+    (no bin/libzydis.dll) and ships iced-x86's modules as bytecode only, so its old sources go (Python
+    would keep importing a .py beside its .pyc, and its Code.py is what antivirus heuristics flagged)."""
+    stale = [PORT / 'bin' / 'libzydis.dll']
+    iced = PORT / 'python' / 'Lib' / 'site-packages' / 'iced_x86'
+    if (iced / 'Code.pyc').is_file():
+        stale += [p for p in iced.glob('*.py') if p.with_suffix('.pyc').is_file()]
+        stale += list(iced.glob('*.pyi'))
+    # v0.8.5's tidier folder: the third-party list in licenses\, the Steam artwork in art\, no docs\
+    # (only where the new places are there, so a source checkout keeps its own).
+    stale_folders = []
+    if (PORT / 'licenses' / 'THIRD-PARTY.txt').is_file():  # a v0.8.5+ package, not a source checkout
+        stale += [PORT / 'THIRD-PARTY.txt', PORT / 'tools' / 'merge_update.py']
+        stale_folders.append(PORT / 'docs')
+    if (PORT / 'art' / 'steamgrid').is_dir():
+        stale_folders.append(PORT / 'steamgrid')
+    removed = 0
+    for path in stale:
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            say(f'Could not remove the old {path.name}: {error}')
+    for folder in stale_folders:
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+            removed += 1
+    if removed:
+        say(f'Removed {removed} file(s) an older version left behind')
+
+
 def launch(args, restarted=False):
     env = os.environ
+    remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
@@ -893,6 +1097,7 @@ def launch(args, restarted=False):
         env.setdefault('BB_FRAME_LOG', str(logs / f'{stamp}.frames.csv'))
         env.setdefault('BB_READBACK_LOG', str(logs / f'{stamp}.readbacks.csv'))
         LOG = open(logs / f'{stamp}.log', 'w', encoding='utf-8', errors='replace')
+        LOG_LIMIT.SAME = LOG_LIMIT.MAX = float('inf')  # asked for everything
         say(f'Log: {logs / (stamp + ".log")}')
     else:
         user_name = env.get('BB_USER_NAME', env.get('BB_ONLINE_NAME', ''))
@@ -901,6 +1106,7 @@ def launch(args, restarted=False):
             LOG = open(data / log_name, 'a' if restarted else 'w', encoding='utf-8', errors='replace')
         except OSError:
             LOG = open(data / f'last_run_{os.getpid()}.log', 'w', encoding='utf-8', errors='replace')
+        LOG_LIMIT.written = LOG.tell()
     say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")}{" (restart)" if restarted else ""}')
 
     # BB_GAME_DIR: the merged CTR dump (update 1.21 copied over the base game).
@@ -1005,6 +1211,30 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('button_prompts.prepare', button_prompts.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f'Button prompts: {error}; PlayStation buttons')
+        # A seasonal title screen (bbport.ini title_theme, scripts/season_art.py): the start screen's
+        # background through archive patches, each keeping the ones before for the same archive.
+        try:
+            base_patches.update(startup_call('season_art.prepare', season_art.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f"Title theme: {error}; the game's own")
+        # Online, the nickname bottom left of the menus' button bar, as the Xbox One game shows the
+        # gamertag (scripts/signed_in_name.py): one menu script's console switch, by archive patch.
+        try:
+            base_patches.update(startup_call('signed_in_name.prepare', signed_in_name.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f'Nickname in the menus: {error}; not shown')
+        # The port's own CTR TV logo (bbport.ini ctr_tv_logo, scripts/ctr_tv_logo.py), by archive patch.
+        try:
+            base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f"CTR TV logo: {error}; the game's own")
+        # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE
+        # (src/runtime_presence.c), and the tracks' own names go beside it (scripts/track_names.py).
+        presence = Path(env.setdefault('BB_PRESENCE_FILE', str((out / 'presence' / 'presence.txt').resolve())))
+        try:
+            startup_call('track_names.prepare', track_names.prepare, game, presence.parent)
+        except (OSError, ValueError, KeyError) as error:
+            say(f'Track names for Discord: {error}')
         env.setdefault('BB_NEO', '0')
         # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),
@@ -1114,6 +1344,16 @@ def launch(args, restarted=False):
         # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
+        if ini_value(config, 'renderer') == 'd3d11':
+            env['BB_D3D11'] = '1'
+            shaders = out / 'd3d11-shaders' / 'hlsl'
+            prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
+            if (shaders / 'shaders.idx').is_file():
+                env.setdefault('BB_D3D11_SHADERS', str(shaders))
+                env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
+                say('Direct3D 11 (experimental)')
+            else:
+                say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')
         if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
             if not native_shaders.supported(title_id, app_version):
                 say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
@@ -1211,7 +1451,7 @@ def launch(args, restarted=False):
             except PermissionError as error:
                 blocked(probe, error)
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
-            VULKAN_START.update(window=0.0, ready=False)
+            VULKAN_START.update(window=0.0, ready=False, out_of_memory=False)
             reader.start()
             hung = watch_vulkan_start(process, env)
             code = process.wait()
@@ -1221,6 +1461,17 @@ def launch(args, restarted=False):
                 env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
                 continue
+            if code not in (0, RESTART_CODE) and VULKAN_START.get('out_of_memory'):
+                # no point starting again: the memory is still missing
+                say(f'--- the game ended with code {code}')
+                say('--- Windows ran out of memory for the game (error 1455: RAM plus the page file are too small). '
+                    'Enlarge the page file (System > Advanced system settings > Performance > Advanced > Virtual '
+                    'memory: "Automatically manage", or at least 8192 MB on C:), restart the PC, and close other '
+                    'programs and overlays before playing.')
+                finish_perf_report(env, config, data, version, title_id, code)
+                cloud_sync_game(env, config, progress_dir, title_id, True)
+                mod_packages.finish(code)
+                return OUT_OF_MEMORY_CODE
             if retry_taken_range(code, range_tries):
                 range_tries += 1
                 say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '

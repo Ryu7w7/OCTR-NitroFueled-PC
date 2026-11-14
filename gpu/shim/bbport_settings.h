@@ -127,6 +127,8 @@ struct Values {
     std::atomic<bool> chat_enabled{true};
     /// Also in public lobbies, with strangers: a choice of its own.
     std::atomic<bool> chat_public{true};
+    /// The room chat during the races too (a smaller box then); off, it waits for the end of the race.
+    std::atomic<bool> chat_in_race{true};
     std::atomic<int> notice_position{NoticeTopRight};
     /// SacredFire: frames per second the present thread lets through (0: no limit). The 60 FPS
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.
@@ -154,6 +156,9 @@ struct Values {
     /// SacredFire: the game's volume in percent, 0..200 (bbport.ini volume, the launcher's and
     /// the menu's slider). Applies at once (runtime_audio.c, bbgpu_audio_volume).
     std::atomic<int> volume{100};
+    /// SacredFire: the game's sound off, the volume kept (the menu's Mute, Ctrl+M anywhere). For
+    /// this session only: never saved, so the game never starts silent without saying why.
+    std::atomic<bool> muted{false};
     /// The settings menu's position (fraction of the screen), -1 until it is moved.
     std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.

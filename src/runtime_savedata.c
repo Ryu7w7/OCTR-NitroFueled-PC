@@ -148,6 +148,138 @@ static int remove_entry(const char *path, const struct stat *st, int flag, struc
 static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
 #endif
 
+/* Copies of the player's saves, outside every folder the game, the save search and the cloud sync see:
+ *   <user>/savedata_backups/<user id>/<title id>/<dir name>-<YYYYmmdd-HHMMSS>[-deleted]/{data,meta}
+ * One before the first writable mount of each save in a run, and a save the game deletes is moved
+ * there instead of removed. The newest BACKUPS of each save are kept. A player who finds their progress
+ * gone (reported after spectating, then closing the game) copies data/ back over <dir name>/. */
+#define BACKUPS 5
+static int copy_tree(const char *from, const char *to) {
+    struct stat st;
+    if (stat(from,&st)) return -1;
+    if (S_ISDIR(st.st_mode)) {
+        if (make_dirs(to)) return -1;
+        DIR *d=opendir(from);
+        if (!d) return -1;
+        int r=0;
+        for (struct dirent *e; (e=readdir(d));) {
+            size_t n=strlen(e->d_name);
+            if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..") || (n>6 && !strcmp(e->d_name+n-6,".bbtmp"))) continue;
+            char a[900], b[900];
+            snprintf(a,sizeof(a),"%s/%s",from,e->d_name);
+            snprintf(b,sizeof(b),"%s/%s",to,e->d_name);
+            if (copy_tree(a,b)) r=-1;
+        }
+        closedir(d);
+        return r;
+    }
+    FILE *in=fopen(from,"rb");
+    if (!in) return -1;
+    FILE *out=fopen(to,"wb");
+    if (!out) { fclose(in); return -1; }
+    enum { CHUNK=65536 };
+    char *buffer=malloc(CHUNK); size_t n; int ok=buffer!=NULL;
+    while (ok && (n=fread(buffer,1,CHUNK,in))>0) if (fwrite(buffer,1,n,out)!=n) { ok=0; break; }
+    ok=!ferror(in) && ok;
+    free(buffer);
+    fclose(in);
+    return !fclose(out) && ok ? 0 : -1;
+}
+static int backup_base(int32_t user, const char *title, char *out, size_t size) {
+    if (user>=2 && user<=4) return -1; /* guests: emptied at every start anyway */
+    snprintf(out,size,"%s/savedata_backups/%d/%s",runtime_file_progress_dir(),user,title && *title ? title : title_id);
+    return 0;
+}
+static int by_name(const void *a, const void *b) { return strcmp(*(char *const *)a,*(char *const *)b); }
+static void prune_backups(const char *base, const char *dir) {
+    char *names[64]; size_t count=0, n=strlen(dir);
+    DIR *d=opendir(base);
+    for (struct dirent *e; d && (e=readdir(d)) && count<64;)
+        if (!strncmp(e->d_name,dir,n) && e->d_name[n]=='-') names[count++]=strdup(e->d_name);
+    if (d) closedir(d);
+    qsort(names,count,sizeof(*names),by_name);
+    for (size_t i=0;i<count;++i) {
+        if (i+BACKUPS<count) { char path[900]; snprintf(path,sizeof(path),"%s/%s",base,names[i]); remove_tree(path); }
+        free(names[i]);
+    }
+}
+/* The folder for a new backup of <dir> (made), or -1. */
+static int new_backup(int32_t user, const char *title, const char *dir, const char *suffix, char *out, size_t size) {
+    char base[700];
+    if (backup_base(user,title,base,sizeof(base))) return -1;
+    char stamp[32]; time_t now=time(NULL);
+    const struct tm *tm=localtime(&now); /* callers hold lock */
+    if (!tm || !strftime(stamp,sizeof(stamp),"%Y%m%d-%H%M%S",tm)) snprintf(stamp,sizeof(stamp),"%lld",(long long)now);
+    snprintf(out,size,"%s/%s-%s%s",base,dir,stamp,suffix);
+    struct stat st;
+    for (int i=2;!stat(out,&st) && i<100;++i) snprintf(out,size,"%s/%s-%s%s-%d",base,dir,stamp,suffix,i);
+    return make_dirs(out);
+}
+static void backup_save_here(int32_t user, const char *title, const char *dir, const char *host, const char *meta) {
+    static char done[8][700]; static int count;
+    for (int i=0;i<count;++i) if (!strcmp(done[i],host)) return;
+    if (count<8) snprintf(done[count++],sizeof(done[0]),"%s",host);
+    char to[800], data[900], info[900];
+    if (new_backup(user,title,dir,"",to,sizeof(to))) return;
+    snprintf(data,sizeof(data),"%s/data",to);
+    snprintf(info,sizeof(info),"%s/meta",to);
+    int r=copy_tree(host,data);
+    copy_tree(meta,info);
+    printf("Runtime: save data '%s' %s %s\n",dir,r ? "NOT fully backed up to" : "backed up to",to);
+    char base[700];
+    if (!backup_base(user,title,base,sizeof(base))) prune_backups(base,dir);
+}
+/* A deleted save goes to the backups (moved: same disk), copied when it cannot be moved. */
+static int keep_deleted_here(int32_t user, const char *title, const char *dir, const char *host, const char *meta, char *to, size_t size) {
+    char data[900], info[900];
+    if (new_backup(user,title,dir,"-deleted",to,size)) return -1;
+    snprintf(data,sizeof(data),"%s/data",to);
+    snprintf(info,sizeof(info),"%s/meta",to);
+    int r=0;
+    if (rename(host,data)) { r=copy_tree(host,data); if (!r) remove_tree(host); }
+    if (!r && rename(meta,info)) { copy_tree(meta,info); remove_tree(meta); }
+    char base[700];
+    if (!backup_base(user,title,base,sizeof(base))) prune_backups(base,dir);
+    return r;
+}
+
+/* The backups run on a thread of their own, with an ordinary stack: mount and delete come on the game's
+ * save threads (SL_SAVE_OPTIONS ... ask 64 KiB), and the copy's buffers and paths there killed v0.8.6 on
+ * Linux at the first save (the stack is mapped low with no guard page under it: nothing stopped the
+ * overflow, the process hung or crashed). The caller waits for it, holding the lock as before. */
+typedef struct {
+    int deleting;
+    int32_t user;
+    const char *title, *dir, *host, *meta;
+    char *to; size_t size;
+    int result;
+} BackupJob;
+static void *backup_job(void *argument) {
+    BackupJob *job=argument;
+    if (job->deleting) job->result=keep_deleted_here(job->user,job->title,job->dir,job->host,job->meta,job->to,job->size);
+    else backup_save_here(job->user,job->title,job->dir,job->host,job->meta);
+    return NULL;
+}
+static int run_backup_job(BackupJob *job) {
+    pthread_attr_t attr; pthread_t thread;
+    job->result=-1;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr,1024*1024);
+    const int e=pthread_create(&thread,&attr,backup_job,job);
+    pthread_attr_destroy(&attr);
+    if (e) { printf("Runtime: save data '%s' not backed up (no thread: %d)\n",job->dir,e); return -1; }
+    pthread_join(thread,NULL);
+    return 0;
+}
+static void backup_save(int32_t user, const char *title, const char *dir, const char *host, const char *meta) {
+    BackupJob job={0,user,title,dir,host,meta,NULL,0,0};
+    run_backup_job(&job);
+}
+static int keep_deleted(int32_t user, const char *title, const char *dir, const char *host, const char *meta, char *to, size_t size) {
+    BackupJob job={1,user,title,dir,host,meta,to,size,0};
+    return run_backup_job(&job) ? -1 : job.result;
+}
+
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
@@ -172,6 +304,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
         if (!slots[i].used && slot<0) slot=i;
     }
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
+    if (exists && !(mode & MODE_RDONLY)) backup_save(user,title,dir->data,host,meta);
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
     slots[slot].used=1;
@@ -254,9 +387,16 @@ static ABI int32_t save_delete(const Delete *d) {
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
     struct stat st;
     if (stat(host,&st)) return ERR_NOT_FOUND;
-    remove_tree(host);
-    remove_tree(meta);
-    printf("Runtime: save data '%s' deleted\n",d->dir->data);
+    char kept[800];
+    pthread_mutex_lock(&lock);
+    if (keep_deleted(d->user,d->title ? d->title->data : NULL,d->dir->data,host,meta,kept,sizeof(kept))) {
+        remove_tree(host);
+        remove_tree(meta);
+        kept[0]=0;
+    }
+    pthread_mutex_unlock(&lock);
+    if (kept[0]) printf("Runtime: save data '%s' deleted by the game (kept in %s)\n",d->dir->data,kept);
+    else printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }
 /* SQL-LIKE pattern: % any run, _ one character. */

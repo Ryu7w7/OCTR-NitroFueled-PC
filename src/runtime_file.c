@@ -181,6 +181,36 @@ static void graphics_tab_archive(const char *guest,char *out,size_t size) {
     static int logged;
     if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) printf("Runtime: Graphics tab menus from %s\n",archive);
 }
+#ifdef _WIN32
+/* A host path of MAX_PATH or more is not found by the CRT's open/stat (ENOENT), unless it is in
+ * extended-length form: \\?\C:\... with backslashes only (v0.8.5). The files the Online menus
+ * need from the arcade archive (out/online-mode/cup-assets) and mod files pass the limit when
+ * the game folder is deep (C:\Users\<name>\Desktop\<unzipped>\<unzipped again>\...): the lobby
+ * waited forever for a texture it could not open. */
+static int long_host_path(char *path,size_t size) {
+    size_t n=strlen(path);
+    if (n<MAX_PATH-12 || !strncmp(path,"\\\\?\\",4) || !strncmp(path,"//?/",4)) return 0;
+    int unc=(path[0]=='\\' || path[0]=='/') && (path[1]=='\\' || path[1]=='/');
+    int drive=((path[0]|32)>='a' && (path[0]|32)<='z') && path[1]==':' && (path[2]=='\\' || path[2]=='/');
+    if (!unc && !drive) return 0;
+    const char *prefix=unc ? "\\\\?\\UNC" : "\\\\?\\";
+    char *copy=malloc(n+16);
+    if (!copy) return ENOMEM;
+    size_t k=strlen(prefix); memcpy(copy,prefix,k);
+    /* Extended-length paths are not normalized: one backslash between components, and the
+     * UNC form keeps a single one before the server name. */
+    for (const char *p=unc ? path+1 : path; *p; ++p) {
+        char c=*p=='/' ? '\\' : *p;
+        if (c=='\\' && k && copy[k-1]=='\\') continue;
+        copy[k++]=c;
+    }
+    copy[k]=0;
+    int e=k<size ? 0 : ENAMETOOLONG;
+    if (!e) memcpy(path,copy,k+1);
+    free(copy);
+    return e;
+}
+#endif
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
@@ -203,6 +233,9 @@ static int translate(const char *guest,char *out,size_t size) {
         if (redirected<0) result=-redirected;
     }
     if (!result) graphics_tab_archive(buffer,out,size);
+#ifdef _WIN32
+    if (!result) result=long_host_path(out,size);
+#endif
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;
@@ -348,7 +381,7 @@ static File *get(int fd) {
 }
 
 /* --- archive patches (see ArchivePatch) ----------------------------------------------------- */
-#define MAX_ARCHIVE_PATCHES 32 /* the widescreen layouts patch 13 archives (scripts/widescreen.py) */
+#define MAX_ARCHIVE_PATCHES 128 /* one per patched archive: widescreen layouts patch 13, a music or track mod can touch dozens */
 static ArchivePatch archive_patches[MAX_ARCHIVE_PATCHES];
 static int archive_patch_count;
 static ArchivePatch private_archive_patches[MAX_ARCHIVE_PATCHES];
@@ -843,9 +876,25 @@ static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t si
     }
     return (int64_t)total;
 }
+/* Windows: a descriptor's sequential I/O and seeks take its I/O lock, the one positioned I/O takes
+ * (compat_win.c): the game's read() and pread() on one archive from different threads. */
+#ifdef _WIN32
+#define FD_IO_LOCK(h) compat_fd_lock(h)
+#define FD_IO_UNLOCK(h) compat_fd_unlock(h)
+#else
+#define FD_IO_LOCK(h) ((void)0)
+#define FD_IO_UNLOCK(h) ((void)0)
+#endif
+static int64_t do_read_locked(int fd,int h,void *buffer,uint64_t size);
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    FD_IO_LOCK(h);
+    const int64_t r=do_read_locked(fd,h,buffer,size);
+    FD_IO_UNLOCK(h);
+    return r;
+}
+static int64_t do_read_locked(int fd,int h,void *buffer,uint64_t size) {
     runtime_memory_note_write((uintptr_t)buffer,size);
     touch_for_write(buffer,size);
     File *pf=get(fd);
@@ -1063,8 +1112,12 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
+    if (fd==1 || fd==2) runtime_load_guard_note(buffer,(size_t)size);
+    FD_IO_LOCK(h);
     ssize_t n=host_write(h,buffer,size);
-    if (n<0) return -errno;
+    const int write_errno=errno;
+    FD_IO_UNLOCK(h);
+    if (n<0) return -write_errno;
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);
     return n;
 }
@@ -1086,9 +1139,12 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
         return -EINVAL;
     }
     /* A patched archive ends where the game sees it end. */
+    FD_IO_LOCK(f->host);
     int64_t r=f->patch && whence==2 ? host_lseek(f->host,(int64_t)f->patch->virtual_size+offset,SEEK_SET)
                                     : host_lseek(f->host,offset,whence);
-    return r<0 ? -errno : r;
+    const int seek_errno=errno;
+    FD_IO_UNLOCK(f->host);
+    return r<0 ? -seek_errno : r;
 }
 static int64_t do_fstat(int fd,GuestStat *out) {
     if (save_trace()) { File *t=get(fd); if (t && save_path(t->path)) printf("Save trace: fstat(fd %d)\n",fd); }

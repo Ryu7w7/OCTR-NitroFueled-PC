@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cwctype>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -69,6 +70,8 @@ bool IsCtrTitle(const std::string& title) {
 }
 constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
+constexpr const char* kSiteUrl = "https://octr.ryu7w7.xyz/";
+constexpr const char* kPortRepoUrl = "https://github.com/Ryu7w7/OCTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
 constexpr std::uintmax_t kCompleteGameMinBytes = 10ull << 30;
 
@@ -143,6 +146,8 @@ const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
 // The game found no Vulkan 1.3 (GPU, driver or loader): UnsupportedVulkanExitCode in vk_platform.h.
 constexpr DWORD kUnsupportedGpuCode = 24;
+// Windows could not give the game its memory (error 1455): OUT_OF_MEMORY_CODE in run.py.
+constexpr DWORD kOutOfMemoryCode = 26;
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 // The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
@@ -509,10 +514,28 @@ Captured RunCaptured(const std::wstring& exe, const std::wstring& command_line, 
     si.hStdInput = nul;
     si.hStdOutput = write;
     si.hStdError = write;
+    // It inherits its output pipe and NUL, nothing else (v0.8.5): an inheritable handle of the
+    // launcher's (the EOS bridge's stdin, whose end stops the bridge) kept by a helper, or by a
+    // process the helper left running, would keep the bridge alive after the launcher closed.
+    HANDLE inherit[2] = {write, nul};
+    const DWORD inherit_count = nul != INVALID_HANDLE_VALUE ? 2 : 1;
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                                    inherit_count * sizeof(HANDLE), nullptr, nullptr);
+    STARTUPINFOEXW six{};
+    six.StartupInfo = si;
+    six.StartupInfo.cb = sizeof six;
+    six.lpAttributeList = attrs_ok ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = command_line;
-    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                   cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+                                   cwd.empty() ? nullptr : cwd.c_str(), &six.StartupInfo, &pi);
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
     CloseHandle(write);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
@@ -994,6 +1017,321 @@ void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& po
     port = INTERNET_PORT(std::atoi(digits.c_str()));
 }
 
+// ---- EOS bridge (eosbridge/eosbridge.c: eos\ryunet-bridge.exe) ----
+// Some networks never reach the RyuNET server (an ISP that filters its name or its address, ports
+// closed on the way). For them ryunet-bridge carries the traffic through Epic Online Services to a
+// gateway next to the server: it checks the server directly first and only when that fails logs
+// in to EOS, anonymously (no Epic account), and offers local ports for the server's. This
+// launcher's requests, run.py's and the game's (BB_ONLINE_BRIDGE) then go through them.
+// launcher.ini eos_bridge: auto (the check decides), on (always), off (never). The bridge lives as
+// long as its stdin is open: this launcher's end and run.py's (inherited), so a game still
+// running when the launcher closes keeps it.
+struct EosBridge {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::string wanted;  // "mode|server" it was started for; "" none
+    std::string host;    // the server's, and its HTTP port
+    INTERNET_PORT http_port = 0;
+    // starting, checking, direct, connecting, ready, lost, failed, missing (not installed), off
+    std::string state;
+    std::string detail, map, server_ip;
+    std::string peer_port;  // races through EOS P2P (BRIDGE PEERS): its UDP port, for BB_ONLINE_EOS
+    std::deque<std::string> lines;  // its latest log lines
+    HANDLE process = nullptr, input = nullptr;
+    std::thread reader;
+};
+EosBridge g_eos;
+
+fs::path EosBridgeDir() { return g_app.root / L"eos"; }
+
+bool EosBridgeInstalled() {
+    std::error_code ec;
+    const fs::path dir = EosBridgeDir();
+    // Its settings are built into ryunet-bridge.exe (an eosbridge.ini next to it overrides them).
+    return fs::is_regular_file(dir / L"ryunet-bridge.exe", ec) && fs::is_regular_file(dir / L"EOSSDK-Win64-Shipping.dll", ec);
+}
+
+std::string EosBridgeMode() {
+    const std::string mode = g_app.launcher.Get("eos_bridge", "auto");
+    return mode == "on" || mode == "off" ? mode : "auto";
+}
+
+std::string LowerAscii(std::string s) {
+    for (char& c : s) c = char(std::tolower((unsigned char)c));
+    return s;
+}
+
+void EosBridgeLine(const std::string& line) {
+    std::scoped_lock lock{g_eos.mutex};
+    if (line.rfind("BRIDGE ", 0) != 0) {
+        g_eos.lines.push_back(line);
+        while (g_eos.lines.size() > 40) g_eos.lines.pop_front();
+        return;
+    }
+    std::istringstream in(line.substr(7));
+    std::string word;
+    in >> word;
+    if (word == "CHECKING") g_eos.state = "checking";
+    else if (word == "DIRECT") g_eos.state = "direct";
+    else if (word == "CONNECTING") g_eos.state = "connecting";
+    else if (word == "LOST") g_eos.state = "lost";
+    else if (word == "PEERS") {
+        for (std::string field; in >> field;)
+            if (field.rfind("port=", 0) == 0) g_eos.peer_port = field.substr(5);
+    }
+    else if (word == "FAILED") {
+        g_eos.state = "failed";
+        std::getline(in, g_eos.detail);
+        g_eos.detail = Trim(g_eos.detail);
+    } else if (word == "READY") {
+        g_eos.state = "ready";
+        for (std::string field; in >> field;) {
+            if (field.rfind("ip=", 0) == 0) g_eos.server_ip = field.substr(3);
+            else if (field.rfind("map=", 0) == 0) g_eos.map = field.substr(4);
+        }
+    }
+    g_eos.changed.notify_all();
+}
+
+void EosBridgeStop() {
+    HANDLE process = nullptr, input = nullptr;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        process = std::exchange(g_eos.process, nullptr);
+        input = std::exchange(g_eos.input, nullptr);
+    }
+    if (process) {
+        TerminateProcess(process, 0);
+        CloseHandle(process);
+    }
+    if (input) CloseHandle(input);
+    if (g_eos.reader.joinable()) g_eos.reader.join();
+    std::scoped_lock lock{g_eos.mutex};
+    g_eos.wanted.clear();
+    g_eos.host.clear();
+    g_eos.state.clear();
+    g_eos.detail.clear();
+    g_eos.map.clear();
+    g_eos.server_ip.clear();
+    g_eos.peer_port.clear();
+    g_eos.changed.notify_all();
+}
+
+void AddLog(const std::string& line);
+
+/// This install's processes named name (bin\sacredfire.exe, eos\ryunet-bridge.exe): their ids.
+std::vector<DWORD> InstallProcesses(const wchar_t* name, const fs::path& exe) {
+    std::vector<DWORD> found;
+    const std::wstring wanted = fs::absolute(exe).lexically_normal().wstring();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return found;
+    PROCESSENTRY32W pe{sizeof pe};
+    for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, name) != 0) continue;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!process) continue;
+        wchar_t path[MAX_PATH * 4];
+        DWORD size = DWORD(std::size(path));
+        if (QueryFullProcessImageNameW(process, 0, path, &size) &&
+            _wcsicmp(fs::path(path).lexically_normal().c_str(), wanted.c_str()) == 0)
+            found.push_back(pe.th32ProcessID);
+        CloseHandle(process);
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+/// A bridge an earlier launcher left running (v0.8.5 report: one that outlived its launcher held
+/// the local ports, and the new one could not start). Ended once, before this launcher's first
+/// bridge, unless this install's game is still running: that one may be using it.
+void EosBridgeEndLeftovers() {
+    static bool done = false;
+    if (std::exchange(done, true)) return;
+    if (!InstallProcesses(L"sacredfire.exe", g_app.bin / L"sacredfire.exe").empty()) return;
+    for (DWORD id : InstallProcesses(L"ryunet-bridge.exe", EosBridgeDir() / L"ryunet-bridge.exe")) {
+        if (HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, id)) {
+            TerminateProcess(process, 0);
+            WaitForSingleObject(process, 2000);
+            CloseHandle(process);
+            AddLog("EOS bridge: ended one left running by an earlier launcher (process " + std::to_string(id) + ")");
+        }
+    }
+}
+
+void EosBridgeStart(const std::string& wanted, const std::string& mode, const std::string& server) {
+    EosBridgeStop();
+    EosBridgeEndLeftovers();
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(server, host, port);
+    auto set_state = [&](const char* state, const std::string& detail = {}) {
+        std::scoped_lock lock{g_eos.mutex};
+        g_eos.wanted = wanted;
+        g_eos.host = LowerAscii(host);
+        g_eos.http_port = port;
+        g_eos.state = state;
+        g_eos.detail = detail;
+        g_eos.changed.notify_all();
+    };
+    if (mode == "off") return set_state("off");
+    if (!EosBridgeInstalled()) return set_state("missing");
+    if (host.empty() || host.find_first_of(" \"") != std::string::npos) return set_state("failed", "server");
+
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE out_read = nullptr, out_write = nullptr, in_read = nullptr, in_write = nullptr;
+    if (!CreatePipe(&out_read, &out_write, &sa, 0)) return set_state("failed", "pipe");
+    if (!CreatePipe(&in_read, &in_write, &sa, 0)) {
+        CloseHandle(out_read);
+        CloseHandle(out_write);
+        return set_state("failed", "pipe");
+    }
+    SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
+    // The bridge inherits its two pipe ends and nothing else of the launcher's.
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    HANDLE inherit[2] = {in_read, out_write};
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit,
+                                                    nullptr, nullptr);
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in_read;
+    si.StartupInfo.hStdOutput = out_write;
+    si.StartupInfo.hStdError = out_write;
+    si.lpAttributeList = attrs_ok ? attrs : nullptr;
+    const fs::path exe = EosBridgeDir() / L"ryunet-bridge.exe";
+    std::wstring cmd = Quote(exe.wstring()) + L" --client --exit-on-eof --server " + Quote(Widen(host)) +
+                       L" --http-port " + std::to_wstring(port) + (mode == "on" ? L" --mode on" : L"");
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+                                   EosBridgeDir().c_str(), &si.StartupInfo, &pi);
+    const DWORD start_error = ok ? 0 : GetLastError();
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
+    CloseHandle(out_write);
+    CloseHandle(in_read);
+    if (!ok) {
+        CloseHandle(out_read);
+        CloseHandle(in_write);
+        return set_state("failed", "start " + std::to_string(start_error));
+    }
+    CloseHandle(pi.hThread);
+    // From now on run.py inherits the bridge's stdin: a game left running keeps the bridge.
+    SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    set_state("starting");
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        g_eos.process = pi.hProcess;
+        g_eos.input = in_write;
+        g_eos.lines.clear();
+    }
+    g_eos.reader = std::thread([out_read] {
+        std::string pending;
+        char buf[2048];
+        DWORD n = 0;
+        while (ReadFile(out_read, buf, sizeof buf, &n, nullptr) && n) {
+            pending.append(buf, n);
+            for (size_t nl; (nl = pending.find('\n')) != std::string::npos;) {
+                EosBridgeLine(Trim(pending.substr(0, nl)));
+                pending.erase(0, nl + 1);
+            }
+        }
+        CloseHandle(out_read);
+        std::scoped_lock lock{g_eos.mutex};
+        if (g_eos.state != "direct" && g_eos.state != "failed") {
+            g_eos.state = "failed";
+            if (g_eos.detail.empty()) g_eos.detail = "exited";
+        }
+        g_eos.changed.notify_all();
+    });
+}
+
+/// Starts, restarts or stops the bridge when the online settings change (each frame; not while
+/// the game runs, which may be using it).
+void EosBridgePoll() {
+    App& a = g_app;
+    if (a.game_running) return;
+    const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+    const std::string mode = EosBridgeMode();
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(server, host, port);
+    const bool local = host.empty() || host == "127.0.0.1" || LowerAscii(host) == "localhost";
+    const std::string want = a.game.Flag("online", true) && !local ? mode + "|" + server : "";
+    static std::string pending;
+    static ULONGLONG since = 0;
+    static bool first = true;
+    std::string current;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        current = g_eos.wanted;
+    }
+    if (want == current) {
+        pending = want;
+        first = false;
+        return;
+    }
+    if (want != pending) {  // settled for a moment first: the server box changes on every key
+        pending = want;
+        since = GetTickCount64();
+    }
+    if (!first && GetTickCount64() - since < 1500) return;
+    first = false;
+    if (want.empty()) EosBridgeStop();
+    else EosBridgeStart(want, mode, server);
+}
+
+/// Where a connection to this server's port goes: true with local, the bridge's port on
+/// 127.0.0.1, when the bridge carries the server. Waits up to wait_ms while the bridge for it is
+/// still checking or connecting (background threads only).
+bool EosBridgeRoute(const std::string& server, INTERNET_PORT server_port, INTERNET_PORT& local, int wait_ms) {
+    std::string host;
+    INTERNET_PORT http_port = 0;
+    SplitServer(server, host, http_port);
+    host = LowerAscii(host);
+    std::unique_lock lock{g_eos.mutex};
+    const auto deciding = [&] {
+        return g_eos.host == host &&
+               (g_eos.state == "starting" || g_eos.state == "checking" || g_eos.state == "connecting");
+    };
+    if (wait_ms > 0) g_eos.changed.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] { return !deciding(); });
+    if (g_eos.host != host || (g_eos.state != "ready" && g_eos.state != "lost")) return false;
+    std::istringstream in(g_eos.map);
+    std::string part;
+    std::getline(in, part, ',');  // the UDP port
+    while (std::getline(in, part, ',')) {
+        const size_t colon = part.find(':');
+        if (colon == std::string::npos || std::atoi(part.substr(0, colon).c_str()) != server_port) continue;
+        local = INTERNET_PORT(std::atoi(part.substr(colon + 1).c_str()));
+        return local != 0;
+    }
+    return false;
+}
+
+/// What the game needs to go through the bridge (BB_ONLINE_BRIDGE, BB_ONLINE_SERVER_IP), or
+/// empty strings when it goes to the server directly; peers, its port for races through EOS P2P
+/// (BB_ONLINE_EOS), in both cases.
+void EosBridgeGameEnv(const std::string& server, std::string& map, std::string& ip, std::string& peers, int wait_ms) {
+    map.clear();
+    ip.clear();
+    peers.clear();
+    INTERNET_PORT local = 0, port = 0;
+    std::string host;
+    SplitServer(server, host, port);
+    const bool bridged = EosBridgeRoute(server, port, local, wait_ms);
+    std::scoped_lock lock{g_eos.mutex};
+    if (g_eos.host != LowerAscii(host)) return;
+    if (bridged) {
+        map = g_eos.map;
+        ip = g_eos.server_ip;
+    }
+    if (g_eos.state == "direct" || bridged) peers = g_eos.peer_port;
+}
+
 /// What one server sees of the installation's key: HMAC-SHA256(key, host), as run.py sends it.
 /// Every server gets a different value, so none can reuse it on another to take a nickname.
 /// SHA-256 of msg (HMAC-SHA256 with key when there is one), in lower-case hex; "" on failure.
@@ -1044,17 +1382,64 @@ std::string ServerKeyHash(const std::string& host, const std::string& key = {}) 
 /// player's own nickname read as taken.
 std::atomic<long long> g_server_clock_offset{0};
 
-/// An answer of the RyuNET server: its Date header sets g_server_clock_offset.
-void NoteServerClock(HINTERNET req) {
-    SYSTEMTIME date{};
-    DWORD size = sizeof date;
-    FILETIME file{};
-    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
-                             &date, &size, WINHTTP_NO_HEADER_INDEX) ||
-        !SystemTimeToFileTime(&date, &file))
-        return;
-    const long long ticks = (static_cast<long long>(file.dwHighDateTime) << 32) | file.dwLowDateTime;
-    const long long server = (ticks - 116444736000000000LL) / 10000000LL;  // 100 ns since 1601 -> Unix
+/// Something on the way (an ISP's cache, an antivirus web shield) kept the server's answers and gave
+/// them back hours later: their Date made a right clock look hours off ("This PC's clock is 650 min
+/// off" with Windows' automatic time on), and every signed request then went with the wrong time.
+/// Each request sends a fresh token (X-RyuNET-Clock) and the server answers with its time and that
+/// token (X-RyuNET-Time, its clock_stamp.go): a kept answer has an old one. True once the server
+/// sent X-RyuNET-Time: an answer without it is not its own.
+std::atomic<bool> g_server_stamps{false};
+
+/// A fresh X-RyuNET-Clock token: 16 hex digits.
+std::string ClockToken() {
+    unsigned char raw[8];
+    if (BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};
+    static const char kHex[] = "0123456789abcdef";
+    std::string token;
+    for (const unsigned char b : raw) {
+        token += kHex[b >> 4];
+        token += kHex[b & 15];
+    }
+    return token;
+}
+
+/// The request headers for the server's time: the token, and no answer kept on the way.
+std::wstring ClockHeaders(const std::string& token) {
+    std::wstring headers = L"Cache-Control: no-cache\r\n";
+    if (!token.empty()) headers += L"X-RyuNET-Clock: " + Widen(token) + L"\r\n";
+    return headers;
+}
+
+/// An answer of the RyuNET server sets g_server_clock_offset: its X-RyuNET-Time when it carries
+/// the token sent with the request, else (a server older than that) its Date, unless a cache says
+/// it kept the answer (Age).
+void NoteServerClock(HINTERNET req, const std::string& token) {
+    long long server = 0;
+    wchar_t stamp[128] = L"";
+    DWORD stamp_size = sizeof stamp;
+    if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-RyuNET-Time", stamp, &stamp_size, WINHTTP_NO_HEADER_INDEX)) {
+        g_server_stamps = true;
+        long long at = 0;
+        wchar_t echoed[70] = L"";
+        if (token.empty() || swscanf(stamp, L"%lld %69ls", &at, echoed) != 2 || Widen(token) != echoed) return;
+        server = at;
+    } else {
+        DWORD age_size = 0;
+        if (g_server_stamps ||
+            WinHttpQueryHeaders(req, WINHTTP_QUERY_AGE, WINHTTP_HEADER_NAME_BY_INDEX, WINHTTP_NO_OUTPUT_BUFFER, &age_size,
+                                WINHTTP_NO_HEADER_INDEX) ||
+            GetLastError() != ERROR_WINHTTP_HEADER_NOT_FOUND)
+            return;
+        SYSTEMTIME date{};
+        DWORD size = sizeof date;
+        FILETIME file{};
+        if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
+                                 &date, &size, WINHTTP_NO_HEADER_INDEX) ||
+            !SystemTimeToFileTime(&date, &file))
+            return;
+        const long long ticks = (static_cast<long long>(file.dwHighDateTime) << 32) | file.dwLowDateTime;
+        server = (ticks - 116444736000000000LL) / 10000000LL;  // 100 ns since 1601 -> Unix
+    }
     const long long offset = server - static_cast<long long>(std::time(nullptr));
     // The header has whole seconds: a few seconds either way change nothing.
     g_server_clock_offset = offset > 5 || offset < -5 ? offset : 0;
@@ -1088,19 +1473,25 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
-    const std::string key_hash = ServerKeyHash(host, with_key);
+    const std::string key_hash = ServerKeyHash(host, with_key);  // by the server's name, whatever the route
+    // A network that does not reach the server: through the EOS bridge (EosBridgeRoute).
+    std::string connect_host = host;
+    INTERNET_PORT connect_port = port;
+    if (EosBridgeRoute(server, port, connect_port, 15000)) connect_host = "127.0.0.1";
+    else connect_port = port;
     std::string body;
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return body;
     WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), port, 0);
+    HINTERNET conn = WinHttpConnect(session, Widen(connect_host).c_str(), connect_port, 0);
     for (int attempt = 1; conn && attempt <= 2; ++attempt) {
         const long long offset = g_server_clock_offset.load();
         const std::string proof = ProofHeader(key_hash, Narrow(method).c_str(), Narrow(path));
         HINTERNET req = WinHttpOpenRequest(conn, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                            WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        std::wstring headers;
+        const std::string token = ClockToken();
+        std::wstring headers = ClockHeaders(token);
         if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\n";
         if (register_key && !key_hash.empty()) headers += L"X-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
         if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
@@ -1112,7 +1503,7 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
                                       DWORD(form.size()), DWORD(form.size()), 0) &&
             WinHttpReceiveResponse(req, nullptr)) {
             answered = true;
-            NoteServerClock(req);
+            NoteServerClock(req, token);
             DWORD avail = 0;
             while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
                 std::string chunk(avail, '\0');
@@ -1601,6 +1992,9 @@ std::string GameLanguage() {
     return DefaultGameLanguage();
 }
 
+/// Where the game writes what the player does (BB_PRESENCE_FILE) and run.py the tracks' names.
+fs::path PresenceFolder() { return g_app.root / L"out" / L"presence"; }
+
 void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
@@ -1618,6 +2012,16 @@ void StartGame() {
         a.log.clear();
         a.last_status.clear();
     }
+    {
+        // The EOS bridge, when this network reaches the server only through it.
+        std::string map, ip, peers;
+        if (a.game.Flag("online", true))
+            EosBridgeGameEnv(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), map, ip, peers, 8000);
+        SetEnv(L"BB_ONLINE_BRIDGE", map);
+        SetEnv(L"BB_ONLINE_SERVER_IP", ip);
+        SetEnv(L"BB_ONLINE_EOS", peers);  // races through EOS P2P with peers that have no direct path
+        if (!map.empty()) AddLog("Online through Epic Online Services: this network does not reach the server directly");
+    }
     SetEnv(L"BB_GAME_DIR", PathText(a.game_dir));
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
@@ -1627,6 +2031,21 @@ void StartGame() {
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
+    // Discord presence: the game writes what the player does there (src/runtime_presence.c), and
+    // run.py the tracks' own names beside it (scripts/track_names.py).
+    {
+        std::error_code ec;
+        fs::create_directories(PresenceFolder(), ec);
+        fs::remove(PresenceFolder() / L"presence.txt", ec);
+        SetEnv(L"BB_PRESENCE_FILE", PathText(PresenceFolder() / L"presence.txt"));
+    }
+    if (a.launcher.Flag("hdr", false)) {  // off: BB_HDR as set outside
+        SetEnv(L"BB_HDR", "1");
+        const std::string peak = a.launcher.Get("hdr_peak", "0");
+        if (peak != "0") SetEnv(L"BB_HDR_PEAK", peak);
+        const std::string gain = a.launcher.Get("hdr_gain", "1");
+        if (gain != "1") SetEnv(L"BB_HDR_GAIN", gain);
+    }
     SetEnv(L"BB_DLC", a.launcher.Flag("dlc", true) ? "1" : "0");
     SetEnv(L"BB_DLC_DISABLED", a.launcher.Get("dlc_disabled"));
     SetEnv(L"BB_FULLSCREEN", "");  // bbport.ini's fullscreen= (the menu switch) decides
@@ -1711,6 +2130,125 @@ std::string DiscordAppId() {
     return id.empty() ? kDiscordAppId : id;
 }
 
+/// What the game says the player does (src/runtime_presence.c, presence.txt), read every two seconds.
+struct GameFacts {
+    bool known = false;
+    int game = 0, race = 0;  // EGameMode (Story 1, Arcade 8, OnlinePlay 16), EOctaneRaceModes
+    std::string level, room;
+    bool lobby = false, itemless = false, speed = false;
+};
+
+GameFacts ReadGameFacts() {
+    static GameFacts facts;
+    static ULONGLONG read_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (read_at && now - read_at < 2000) return facts;
+    read_at = now;
+    GameFacts f;
+    std::istringstream in(ReadText(PresenceFolder() / L"presence.txt"));
+    for (std::string line; std::getline(in, line);) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq), value = Trim(line.substr(eq + 1));
+        f.known = true;
+        if (key == "game") f.game = std::atoi(value.c_str());
+        else if (key == "race") f.race = std::atoi(value.c_str());
+        else if (key == "level") f.level = value;
+        else if (key == "room") f.room = value;
+        else if (key == "lobby") f.lobby = value == "1";
+        else if (key == "itemless") f.itemless = value == "1";
+        else if (key == "speed") f.speed = value == "1";
+    }
+    facts = f;
+    return facts;
+}
+
+/// A level's own name in the launcher's language (track_names.txt from scripts/track_names.py: the
+/// game's zone infos), "" for menus and levels without one.
+std::string ZoneName(const std::string& level) {
+    static std::map<std::string, std::map<std::string, std::string>> names;
+    static ULONGLONG loaded_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!loaded_at || (names.empty() && now - loaded_at > 10000)) {  // run.py writes it at the start
+        loaded_at = now;
+        names.clear();
+        std::istringstream in(ReadText(PresenceFolder() / L"track_names.txt"));
+        for (std::string line; std::getline(in, line);) {
+            const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+            if (b == std::string::npos) continue;
+            names[line.substr(0, a)][line.substr(a + 1, b - a - 1)] = Trim(line.substr(b + 1));
+        }
+    }
+    std::string zone = Lower(level);
+    const size_t slash = zone.find_last_of("/\\");
+    if (slash != std::string::npos) zone = zone.substr(slash + 1);
+    const std::string locale = g_active_locale == "es" || g_active_locale == "fr" || g_active_locale == "pt_BR"
+                                   ? g_active_locale : "en";
+    // the zone, else its leading parts (h100_hub_chunk_... is the Adventure hub, h100_hub)
+    for (std::string key = zone; !key.empty();) {
+        const auto it = names.find(key);
+        if (it != names.end()) {
+            const auto name = it->second.find(locale);
+            if (name != it->second.end()) return name->second;
+            const auto en = it->second.find("en");
+            return en != it->second.end() ? en->second : std::string();
+        }
+        const size_t cut = key.find_last_of('_');
+        if (cut == std::string::npos) break;
+        key = key.substr(0, cut);
+    }
+    return "";
+}
+
+/// The race mode's name (EOctaneRaceModes), "" for none or the Adventure hub.
+std::string RaceModeName(int race) {
+    switch (race) {
+    case 1: return T("Carrera", "Race");
+    case 2: return T("Contrarreloj", "Time Trial");
+    case 3: return T("Carrera por la reliquia", "Relic Race");
+    case 4: return T("Carrera contra el jefe", "Boss Race");
+    case 5: return T("Desafío CTR", "CTR Challenge");
+    case 6: return T("Carrera de copa", "Cup Race");
+    case 8: return T("Desafío de cristales", "Crystal Challenge");
+    case 9: return T("Batalla", "Battle");
+    case 10: return T("Batalla: captura la bandera", "Battle: Capture the Flag");
+    case 11: return T("Batalla: último kart en pie", "Battle: Last Kart Driving");
+    case 12: return T("Batalla: roba el tocino", "Battle: Steal the Bacon");
+    case 13: return T("Batalla: atrapa cristales", "Battle: Crystal Grab");
+    case 15: return T("Carrera de anillos", "Ring Race");
+    default: return "";
+    }
+}
+
+/// From what the game says: what the player does and where (the presence's first line), and the
+/// kind of online match ("" offline); false when the game said nothing yet.
+bool DescribePlay(std::string& doing, std::string& match) {
+    const GameFacts f = ReadGameFacts();
+    if (!f.known) return false;
+    const std::string place = ZoneName(f.level);
+    std::string mode = RaceModeName(f.race);
+    if (f.itemless) mode += T(" sin objetos", " (itemless)");
+    if (f.speed) mode += " (Speed)";
+    const bool online = f.game == 16 || !f.room.empty();
+    match = f.room == "private" ? T("Sala privada", "Private room")
+            : online           ? T("Partida pública", "Public match")
+                               : "";
+    if (place.empty()) {  // menus, an online lobby, a level without a name
+        if (f.lobby && f.room == "private") doing = T("En una sala privada online", "In a private online room");
+        else if (f.lobby || f.room == "public") doing = T("Buscando partida online", "Looking for an online match");
+        else doing = online ? T("En los menús online", "In the online menus") : T("En los menús", "In the menus");
+        if (f.lobby || f.room == "public") match.clear();  // the first line says it
+        return true;
+    }
+    if (f.game == 1) {  // Adventure: the hub, or a race of it
+        doing = std::string(T("Modo aventura", "Adventure Mode")) +
+                (f.race == 7 || mode.empty() ? ": " + place : " · " + mode + ": " + place);
+        return true;
+    }
+    doing = mode.empty() ? place : mode + ": " + place;
+    return true;
+}
+
 /// Shows the game in the player's Discord status while it runs (launcher.ini discord_rpc,
 /// on by default). Called every frame; DiscordPresence only talks to Discord on a change.
 void UpdateDiscord() {
@@ -1728,10 +2266,17 @@ void UpdateDiscord() {
         return;
     }
     DiscordPresence::Activity activity;
+    // what the player does (the mode, the track) when the game told it (src/runtime_presence.c)
+    // first line: what and where; second: the nickname (and the online match's kind)
+    std::string doing, match;
+    const bool described = DescribePlay(doing, match);
+    activity.large_text = "Crash Team Racing Nitro-Fueled";
     if (a.game.Flag("online", true)) {
-        activity.details = T("Jugando online", "Playing online");
+        activity.details = described ? doing : T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
         if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
+        if (described && !match.empty())
+            activity.state += activity.state.empty() ? match : std::string(" · ") + match;
         // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
         // whoever accepts; their launcher adds us as a friend and starts their game.
         const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
@@ -1749,11 +2294,11 @@ void UpdateDiscord() {
             }
         }
     } else {
-        activity.details = T("Jugando sin conexión", "Playing offline");
+        activity.details = described ? doing : T("Jugando sin conexión", "Playing offline");
+        if (described) activity.state = T("Sin conexión", "Offline");
     }
     activity.start = started;
     activity.large_image = "logo";
-    activity.large_text = "Crash Team Racing Nitro-Fueled";
     DiscordPresence::Update(enabled, app_id, &activity);
 }
 
@@ -2836,6 +3381,20 @@ void PlayTab() {
                                        "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
             ImGui::PopStyleColor();
         }
+        else if (a.exit_code == kOutOfMemoryCode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", T("El juego se quedó sin memoria: Windows no pudo darle la que necesita (error 1455, la RAM más el "
+                                       "archivo de paginación no alcanzan). Agranda el archivo de paginación: busca \"Ajustar la "
+                                       "apariencia y rendimiento de Windows\" > Opciones avanzadas > Memoria virtual > Cambiar, marca "
+                                       "\"Administrar automáticamente\" o pon al menos 8192 MB en C:, y reinicia el PC. Antes de jugar, "
+                                       "cierra los programas y overlays que no uses.",
+                                       "The game ran out of memory: Windows could not give it what it needs (error 1455, RAM plus the "
+                                       "page file are not enough). Enlarge the page file: search \"Adjust the appearance and "
+                                       "performance of Windows\" > Advanced > Virtual memory > Change, tick \"Automatically manage\" "
+                                       "or set at least 8192 MB on C:, and restart the PC. Before playing, close the programs and "
+                                       "overlays you don't use."));
+            ImGui::PopStyleColor();
+        }
         else ImGui::TextColored(kRed, T("El juego se cerró con un error (código %lu). Mira el registro abajo o en last_run.log.",
                                         "The game ended with an error (code %lu). See the log below or last_run.log."),
                                 (unsigned long)a.exit_code);
@@ -2888,6 +3447,17 @@ std::string GameTemporal() {
         if (value == known) return value;
     if (game.Flag("fsr3", false)) return "fsr3";
     return game.Flag("fsr1", true) ? "fsr1" : "off";
+}
+
+/// DLSS's files: the bridge and NVIDIA's DLL in bin\ (packaging/windows/make_portable.py --dlss-sdk).
+/// Without them the game renders without DLSS (#219: the launcher said nothing).
+bool DlssFilesPresent() {
+    static const bool present = [] {
+        std::error_code ec;
+        return fs::is_regular_file(g_app.root / L"bin" / L"sacredfire_dlss.dll", ec) &&
+               fs::is_regular_file(g_app.root / L"bin" / L"nvngx_dlss.dll", ec);
+    }();
+    return present;
 }
 
 /// v0.7.4: FSR 4's model files (the fsr4_shaders folder next to the launcher, where sacredfire.exe
@@ -3096,7 +3666,8 @@ void SettingsTab() {
         // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
         // shaders from the player's game the first time)
         static constexpr Choice kRenderer[] = {{"Vulkan (shadPS4)", "Vulkan (shadPS4)", "shadps4"},
-                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"}};
+                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"},
+                                               {"DirectX 11 (experimental)", "DirectX 11 (experimental)", "d3d11"}};
         if (GameChoiceCombo(T("Motor gráfico", "Graphics engine"), "renderer", kRenderer, "shadps4", 16.0f)) SaveGameIni();
         HelpMarker(T("Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la "
                      "emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara "
@@ -3161,12 +3732,16 @@ void SettingsTab() {
                                                    {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
                                                    {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"},
                                                    {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"}};
+        // the native engine has DLSS of its own (gpu/shim/bbport_native_vk_dlss.cpp); FSR 3 and
+        // FSR 4 live in shadPS4's rasterizer only
         static constexpr Choice kTemporalNative[] = {{"Desactivado", "Off", "off"},
-                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"}};
+                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"},
+                                                     {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
         const bool native = a.game.Get("renderer") == "native";
         const bool fsr4 = Fsr4FilesPresent();
         const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
-                                                     temporal == "off" ? "off" : "fsr1", 16.0f)
+                                                     temporal == "off" || temporal == "dlss" ? temporal.c_str() : "fsr1",
+                                                     16.0f)
                                    : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
                                                      temporal.c_str(), 16.0f);
         if (picked) {
@@ -3174,9 +3749,17 @@ void SettingsTab() {
             a.game.Erase("fsr3");
             SaveGameIni();
         }
-        if (native && (temporal == "fsr3" || temporal == "dlss" || temporal == "fsr4")) {
-            ImGui::TextColored(kGrey, "%s", T("FSR 3, FSR 4 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
-                                              "FSR 3, FSR 4 and DLSS do not work with the native engine: FSR 1 is used."));
+        if (native && (temporal == "fsr3" || temporal == "fsr4")) {
+            ImGui::TextColored(kGrey, "%s", T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
+                                              "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "dlss" && !DlssFilesPresent()) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
+            ImGui::TextColored(kGrey, "%s", T("DLSS necesita sacredfire_dlss.dll y nvngx_dlss.dll en la carpeta bin, "
+                                              "que no están en esta copia. Mientras falten, el juego no usa DLSS.",
+                                              "DLSS needs sacredfire_dlss.dll and nvngx_dlss.dll in the bin folder, "
+                                              "which this copy does not have. While they are missing, the game does "
+                                              "not use DLSS."));
+            ImGui::PopTextWrapPos();
         } else if (temporal == "fsr4" && !fsr4) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
             ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
@@ -3196,6 +3779,34 @@ void SettingsTab() {
                      "rebuild detail over several frames from the game's depth and motion, and smooth edges even at the "
                      "same resolution. DLSS needs an NVIDIA RTX card and FSR 4 a GPU with INT8 support and its files "
                      "(FSR 3 runs otherwise). Experimental: switch to FSR 1 if you see trails or shimmering."));
+    }
+    LauncherFlag("hdr", T("HDR del juego", "The game's HDR"), false,
+                 T("La salida HDR propia del juego (HDR10). Activa también el HDR de Windows y apaga el "
+                   "RTX HDR para este juego. Experimental.",
+                   "The game's own HDR output (HDR10). Also turn on Windows HDR and turn off RTX HDR for "
+                   "this game. Experimental."));
+    if (a.launcher.Flag("hdr", false)) {
+        static constexpr Choice kHdrPeak[] = {{"Como el juego", "As the game", "0"},
+                                              {"400 nits", "400 nits", "400"},
+                                              {"450 nits", "450 nits", "450"},
+                                              {"600 nits", "600 nits", "600"},
+                                              {"800 nits", "800 nits", "800"},
+                                              {"1000 nits", "1000 nits", "1000"}};
+        ChoiceCombo(T("Brillo máximo HDR", "HDR peak brightness"), "hdr_peak", kHdrPeak, "0");
+        HelpMarker(T("El brillo máximo de tu pantalla (el de la calibración HDR de Windows): las partes "
+                     "más brillantes del juego se ajustan a él en vez de quemarse.",
+                     "Your display's peak brightness (from the Windows HDR calibration): the game's "
+                     "brightest parts are fitted to it instead of clipping."));
+        static constexpr Choice kHdrGain[] = {{"60%", "60%", "0.6"},   {"70%", "70%", "0.7"},
+                                              {"80%", "80%", "0.8"},   {"90%", "90%", "0.9"},
+                                              {"100% (el juego)", "100% (the game)", "1"},
+                                              {"115%", "115%", "1.15"}, {"130%", "130%", "1.3"}};
+        ChoiceCombo(T("Blanco de referencia HDR", "HDR paper white"), "hdr_gain", kHdrGain, "1");
+        HelpMarker(T("Cuánto brillan los blancos normales (menús, textos, cielo) frente a lo que el juego "
+                     "pone. Bájalo si los menús se ven quemados; los brillos fuertes siguen limitados al "
+                     "brillo máximo.",
+                     "How bright ordinary whites (menus, text, sky) are against what the game puts out. "
+                     "Lower it if menus look blown out; strong highlights stay within the peak brightness."));
     }
     if (temporal == "dlss") {
         static constexpr Choice kQuality[] = {
@@ -3657,6 +4268,62 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
+/// The EOS bridge's setting (settings) or what it is doing (!settings) (EosBridge).
+void EosBridgeSection(bool settings) {
+    App& a = g_app;
+    std::string state, detail;
+    bool peers = false;
+    {
+        std::scoped_lock lock{g_eos.mutex};
+        state = g_eos.state;
+        detail = g_eos.detail;
+        peers = !g_eos.peer_port.empty();
+    }
+    if (settings) {
+        const char* labels[] = {T("Automática", "Automatic"), T("Siempre", "Always"), T("Nunca", "Never")};
+        const char* values[] = {"auto", "on", "off"};
+        const std::string mode = EosBridgeMode();
+        int current = mode == "on" ? 1 : mode == "off" ? 2 : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        if (ImGui::Combo(T("Conexión por Epic Online Services", "Connection through Epic Online Services"), &current, labels, 3)) {
+            a.launcher.Set("eos_bridge", values[current]);
+            SaveLauncher();
+        }
+        HelpMarker(T("Si tu red no llega al servidor (algunos proveedores de internet lo bloquean), el juego se conecta a "
+                     "través de los servidores de Epic Games, sin cuenta de Epic y sin abrir puertos. Con NAT estricta, "
+                     "las carreras también van por Epic. Automática: solo cuando hace falta. Siempre: también cuando la "
+                     "conexión directa funciona (para probar).",
+                     "If your network does not reach the server (some internet providers block it), the game connects "
+                     "through Epic Games' servers, with no Epic account and no ports to open. With strict NAT, races go "
+                     "through Epic too. Automatic: only when needed. Always: even when the direct connection works (for "
+                     "testing)."));
+        return;
+    }
+    if (state == "starting" || state == "checking")
+        ImGui::TextColored(kGrey, "%s", T("Comprobando la conexión con el servidor...", "Checking the connection to the server..."));
+    else if (state == "direct")
+        ImGui::TextColored(kGreen, "%s", peers ? T("Conexión directa con el servidor. Las carreras con quien no tenga camino directo "
+                                                   "(NAT estricta) van por Epic Online Services.",
+                                                   "Direct connection to the server. Races with players there is no direct path to "
+                                                   "(strict NAT) go through Epic Online Services.")
+                                               : T("Conexión directa con el servidor.", "Direct connection to the server."));
+    else if (state == "connecting")
+        ImGui::TextColored(kGrey, "%s", T("Tu red no llega al servidor: conectando por Epic Online Services...",
+                                          "Your network does not reach the server: connecting through Epic Online Services..."));
+    else if (state == "ready")
+        ImGui::TextColored(kGreen, "%s", T("Conectado por Epic Online Services: tu red no llega al servidor directamente.",
+                                           "Connected through Epic Online Services: your network does not reach the server directly."));
+    else if (state == "lost")
+        ImGui::TextColored(kYellow, "%s", T("Se perdió la conexión con Epic Online Services; reconectando...",
+                                            "The connection through Epic Online Services was lost; reconnecting..."));
+    else if (state == "failed")
+        ImGui::TextColored(kRed, T("No se pudo conectar por Epic Online Services (%s).", "Could not connect through Epic Online Services (%s)."),
+                           detail.empty() ? "?" : detail.c_str());
+    else if (state == "missing")
+        ImGui::TextColored(kGrey, "%s", T("La conexión por Epic no está en esta instalación (falta la carpeta eos).",
+                                          "The connection through Epic is not in this installation (the eos folder is missing)."));
+}
+
 void NatTypeSection(const std::string& server) {
     bool running, done;
     NatCheck::Result result;
@@ -3809,24 +4476,29 @@ void StartWebLogin() {
 }
 
 /// POST of a JSON body to the server's HTTPS (443, its nginx), signed with this installation's key.
-std::string HttpsPostJson(const std::string& host, const std::wstring& path, const std::string& json) {
+/// bridge_port: the EOS bridge's local port for the server's HTTP port instead (EosBridgeRoute),
+/// plain HTTP to 127.0.0.1: EOS P2P is encrypted up to the gateway on the server's machine.
+std::string HttpsPostJson(const std::string& host, const std::wstring& path, const std::string& json,
+                          INTERNET_PORT bridge_port = 0) {
     std::string body;
-    const std::string key_hash = ServerKeyHash(host);
+    const std::string key_hash = ServerKeyHash(host);  // by the server's name, whatever the route
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return body;
     WinHttpSetTimeouts(session, 10000, 10000, 10000, 15000);
-    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET conn = bridge_port ? WinHttpConnect(session, L"127.0.0.1", bridge_port, 0)
+                                 : WinHttpConnect(session, Widen(host).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES, bridge_port ? 0 : WINHTTP_FLAG_SECURE)
                          : nullptr;
-    std::wstring headers = L"Content-Type: application/json\r\n";
+    const std::string token = ClockToken();
+    std::wstring headers = L"Content-Type: application/json\r\n" + ClockHeaders(token);
     const std::string proof = ProofHeader(key_hash, "POST", Narrow(path));
     if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\nX-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
     if (req && WinHttpSendRequest(req, headers.c_str(), DWORD(-1), const_cast<char*>(json.data()), DWORD(json.size()),
                                   DWORD(json.size()), 0) &&
         WinHttpReceiveResponse(req, nullptr)) {
-        NoteServerClock(req);
+        NoteServerClock(req, token);
         DWORD avail = 0;
         while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
             std::string chunk(avail, '\0');
@@ -3854,7 +4526,8 @@ std::string JsonEscape(const std::string& s) {
 void StartPasswordLogin(const std::string& nick, const std::string& password) {
     std::string host;
     INTERNET_PORT port = 0;
-    SplitServer(Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    SplitServer(server, host, port);
     {
         std::scoped_lock lock{g_account.mutex};
         if (g_account.busy) return;
@@ -3862,8 +4535,11 @@ void StartPasswordLogin(const std::string& nick, const std::string& password) {
         g_account.error = false;
         g_account.message.clear();
     }
-    std::thread([host, nick, password] {
-        if (host.find_first_not_of("0123456789.") == std::string::npos) {
+    std::thread([server, host, port, nick, password] {
+        // A network that does not reach the server: the EOS bridge carries the login too.
+        INTERNET_PORT bridge_port = 0;
+        if (!EosBridgeRoute(server, port, bridge_port, 15000)) bridge_port = 0;
+        if (!bridge_port && host.find_first_not_of("0123456789.") == std::string::npos) {
             AccountResult(true, T("La contraseña solo viaja por HTTPS, que necesita el nombre del servidor (no su IP): "
                                   "usa Iniciar sesión / Crear cuenta.",
                                   "The password only travels by HTTPS, which needs the server's name (not its IP): use "
@@ -3871,7 +4547,8 @@ void StartPasswordLogin(const std::string& nick, const std::string& password) {
             return;
         }
         const std::string body = HttpsPostJson(host, L"/ryunet/account/login",
-                                               "{\"nick\":\"" + JsonEscape(nick) + "\",\"password\":\"" + JsonEscape(password) + "\"}");
+                                               "{\"nick\":\"" + JsonEscape(nick) + "\",\"password\":\"" + JsonEscape(password) + "\"}",
+                                               bridge_port);
         const std::string status = JsonField(body, "status"), error = JsonField(body, "error");
         if (status == "ok") {
             const std::string account = JsonField(body, "nick");
@@ -3912,17 +4589,6 @@ bool SignedIn() {
     return !NickProblem(CurrentNick()) && info.status == "yours" && info.linked;
 }
 
-/// The server plays only accounts: a typed nickname is not enough.
-void AccountRequiredNote(const NickCheck::Result& info) {
-    if (!info.account_required) return;
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(kYellow, "%s", T("Este servidor no permite jugar online solo con un apodo: es obligatorio iniciar sesión "
-                                        "o crear tu cuenta (con Discord, o con tu apodo y contraseña).",
-                                        "This server does not allow playing online with just a nickname: you must log in or "
-                                        "create your account (with Discord, or with your nickname and password)."));
-    ImGui::PopTextWrapPos();
-}
-
 void AccountSection() {
     App& a = g_app;
     const NickCheck::Result info = NickInfo();
@@ -3935,10 +4601,23 @@ void AccountSection() {
         message = g_account.message;
         code = g_account.code;
     }
+    bool discord_busy;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        discord_busy = g_discord_link.busy;
+    }
     const std::string nick = CurrentNick();
-    const bool signed_in = SignedIn();
-    if (signed_in) {
-        ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada: %s", "Logged in: %s"), nick).c_str());
+    if (SignedIn()) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Sesión iniciada como %s", "Logged in as %s"), nick).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Mi cuenta en la web", "My account on the web"))) {
+            std::string host;
+            INTERNET_PORT port = 0;
+            SplitServer(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
+            // The test servers (an address) serve the site on :8094 over HTTP; a named one by HTTPS.
+            const bool address = host.find_first_not_of("0123456789.") == std::string::npos;
+            OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
+        }
         ImGui::SameLine();
         static ULONGLONG out_armed = 0;
         const bool armed = out_armed && GetTickCount64() - out_armed < 5000;
@@ -3957,31 +4636,40 @@ void AccountSection() {
                                       "monedas y logros siguen en el servidor.",
                                       "This PC stops playing with your account until you log in again. Your account, "
                                       "coins and trophies stay on the server."));
-        ImGui::SameLine();
-        if (ImGui::SmallButton(T("Mi cuenta en la web", "My account on the web"))) {
-            std::string host;
-            INTERNET_PORT port = 0;
-            SplitServer(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")), host, port);
-            // The test servers (an address) serve the site on :8094 over HTTP; a named one by HTTPS.
-            const bool address = host.find_first_not_of("0123456789.") == std::string::npos;
-            OpenInShell(fs::path(Widen(address ? "http://" + host + ":8094/cuenta/" : "https://" + host + "/cuenta/")));
-        }
     } else {
-        if (!NickProblem(nick) && info.status == "yours") {
-            // A typed nickname of this PC's, not an account yet: logging in on the site with Discord keeps it.
-            ImGui::TextColored(info.account_required ? kYellow : kGrey, "%s",
-                               Format(T("Juegas como %s sin cuenta.", "You play as %s without an account."), nick).c_str());
-        }
-        AccountRequiredNote(info);
-        ImGui::TextWrapped("%s", T("Inicia sesión con tu cuenta, o créala en la web: se vincula a tu Discord y lleva una "
-                                   "contraseña por si pierdes Discord. Tu apodo, monedas, amigos, logros y partidas guardadas "
-                                   "te siguen a cualquier PC.",
-                                   "Log in with your account, or create it on the web: it is linked to your Discord and has a "
-                                   "password in case you lose Discord. Your nickname, coins, friends, trophies and saves "
-                                   "follow you to any PC."));
+        // Where the player stands, in one line.
+        ImGui::PushTextWrapPos(0.0f);
+        if (info.account_required)
+            ImGui::TextColored(kYellow, "%s", T("Para jugar online en este servidor tienes que iniciar sesión.",
+                                                "You need to log in to play online on this server."));
+        else if (!NickProblem(nick) && info.status == "yours")
+            ImGui::TextColored(kGrey, "%s", Format(T("Juegas como %s sin cuenta: inicia sesión para no perder tu apodo.",
+                                                     "You play as %s without an account: log in to keep your nickname."),
+                                                   nick).c_str());
+        else
+            ImGui::TextColored(kGrey, "%s", T("Inicia sesión para jugar online con tu cuenta.", "Log in to play online with your account."));
+        ImGui::PopTextWrapPos();
+
+        // The ways in, side by side.
         ImGui::BeginDisabled(busy);
         if (ImGui::Button(T("Iniciar sesión / Crear cuenta", "Log in / Create account"))) StartWebLogin();
         ImGui::EndDisabled();
+        HelpMarker(T("Abre la web del servidor: entras con Discord (o creas tu cuenta) y autorizas este PC. Tu apodo, "
+                     "monedas, amigos, logros y partidas guardadas te siguen a cualquier PC.",
+                     "Opens the server's site: you log in with Discord (or create your account) and authorize this PC. "
+                     "Your nickname, coins, friends, trophies and saves follow you to any PC."));
+        if (DiscordLinkAvailable()) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(discord_busy);
+            if (ImGui::Button(T("Entrar con Discord", "Log in with Discord"))) StartDiscordLink(DiscordLinkMode::Recover);
+            ImGui::EndDisabled();
+            HelpMarker(T("Si tu cuenta ya está vinculada a Discord: lo autorizas en el navegador y este PC juega con ella, "
+                         "sin escribir nada (también tras reinstalar o en otro PC).",
+                         "If your account is already linked to Discord: authorize it in the browser and this PC plays "
+                         "with it, nothing to type (also after reinstalling or on another PC)."));
+        }
+        DiscordLinkStatusLines();
+
         if (busy && !code.empty()) {
             ImGui::SameLine();
             if (ImGui::SmallButton(T("Cancelar", "Cancel"))) {
@@ -4015,7 +4703,23 @@ void AccountSection() {
                 ImGui::SameLine();
                 if (ImGui::SmallButton(T("Copiar enlace", "Copy link"))) ImGui::SetClipboardText(url.c_str());
             }
+            bool through_epic = false;
+            {
+                std::scoped_lock lock{g_eos.mutex};
+                through_epic = g_eos.state == "ready" || g_eos.state == "lost";
+            }
+            if (through_epic) {  // the site is on the server this network does not reach
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextColored(kYellow, "%s", T("Tu red no llega al servidor, así que la web puede no abrir: abre el enlace en el "
+                                                    "móvil (con datos móviles), o usa Entrar con Discord o el apodo y contraseña, "
+                                                    "que pasan por Epic Online Services.",
+                                                    "Your network does not reach the server, so the site may not open: open the link on "
+                                                    "your phone (on mobile data), or use Log in with Discord or the nickname and "
+                                                    "password, which go through Epic Online Services."));
+                ImGui::PopTextWrapPos();
+            }
         }
+
         static char login_nick[24] = "", login_password[132] = "";
         if (ImGui::TreeNode(T("Entrar con apodo y contraseña", "Log in with nickname and password"))) {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
@@ -4029,6 +4733,8 @@ void AccountSection() {
                 std::memset(login_password, 0, sizeof login_password);
             }
             ImGui::EndDisabled();
+            HelpMarker(T("La contraseña de tu cuenta (la pones en la web, en Mi cuenta).",
+                         "Your account's password (you set it on the site, in My account)."));
             ImGui::TreePop();
         }
     }
@@ -4081,19 +4787,29 @@ void OnlineTab() {
         }
         HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
                      "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
-        NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
+        EosBridgeSection(false);  // its state, one line
+        if (ImGui::TreeNode(T("Conexión: tipo de NAT y Epic Online Services", "Connection: NAT type and Epic Online Services"))) {
+            NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
+            EosBridgeSection(true);
+            ImGui::TreePop();
+        }
         ImGui::EndDisabled();
     }
 
-    ImGui::SeparatorText(T("Jugador", "Player"));
+    ImGui::SeparatorText(T("Cuenta", "Account"));
     {
         ImGui::BeginDisabled(!a.game.Flag("online", true));
 
         AccountSection();
+        // Without an account: a nickname typed here, which Link with Discord turns into one (the
+        // way in when the site does not open on this network).
+        const bool required = NickInfo().account_required;
         if (SignedIn()) {
             if (a.game.Flag("online", true)) DiscordAccountSection();
-        } else if (ImGui::TreeNode(T("Escribir el apodo a mano (servidores sin cuentas)", "Type the nickname by hand (servers without accounts)"))) {
-            AccountRequiredNote(NickInfo());
+        } else if (ImGui::TreeNode(required ? T("Crear la cuenta desde aquí: elige un apodo y vincúlalo con Discord",
+                                                "Create the account from here: pick a nickname and link it with Discord")
+                                            : T("Jugar sin cuenta: escribir el apodo a mano",
+                                                "Play without an account: type the nickname by hand"))) {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
             // A nickname linked to this player's Discord account is their identity: it is changed by
             // unlinking it first (DiscordAccountSection), not by typing over it.
@@ -4114,7 +4830,6 @@ void OnlineTab() {
                                "on the server (coins, Pit Stop items), so do not use someone else's."));
             if (const char* problem = NickProblem(CurrentNick())) {
                 ImGui::TextColored(kYellow, "%s", problem);
-                if (a.game.Flag("online", true)) DiscordRecoverOffer();
             } else if (a.game.Flag("online", true)) {
                 NickAvailabilityLine();
                 DiscordAccountSection();
@@ -4123,6 +4838,12 @@ void OnlineTab() {
             ImGui::TreePop();
         }
 
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SeparatorText(T("Progreso online", "Online progress"));
+    {
+        ImGui::BeginDisabled(!a.game.Flag("online", true));
         // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
         // the names of the old Friends field (online_friends) get friend requests once.
         ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
@@ -5069,10 +5790,18 @@ void ContentTab() {
     ImGui::Spacing();
     const char* guide=T("Lee el formato de los paquetes","Read the package format");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
-    if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-support.txt");
+    if (ImGui::TextLink(guide)) {
+        std::error_code ec;
+        const fs::path local=a.root/L"docs"/L"mod-support.txt";
+        OpenInShell(fs::is_regular_file(local,ec) ? local
+                    : fs::path(L"https://github.com/Ryu7w7/OCTR-NitroFueled-PC/blob/main/docs/mod-support.txt"));
+    }
     const char* gamebanana=T("Buscar pistas en GameBanana","Find tracks on GameBanana");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
     if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
+    const char* editor=T("CTR Track Editor (crear pistas)","CTR Track Editor (make tracks)");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(editor).x)*.5f));
+    if (ImGui::TextLink(editor)) OpenInShell(L"https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor");
     const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
@@ -5148,15 +5877,22 @@ void ModsTab() {
     ImGui::Spacing();
     const char* guide=T("Lee la guía de empaquetado","Read the packaging guide");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
-    if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-packaging.html");
+    // v0.8.5 packages carry no docs\ (a folder that has one, from an older version, still opens it)
+    if (ImGui::TextLink(guide)) {
+        std::error_code ec;
+        const fs::path local=a.root/L"docs"/L"mod-packaging.html";
+        OpenInShell(fs::is_regular_file(local,ec) ? local
+                    : fs::path(L"https://github.com/Ryu7w7/OCTR-NitroFueled-PC/tree/main/docs"));
+    }
     // The game's page on GameBanana, where the community shares its mods.
     const char* gamebanana=T("Buscar mods en GameBanana","Find mods on GameBanana");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
     if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
-    // The modding community's Discord server: help making and packaging mods.
+    // CTR Track Editor: makes new tracks (exported as OCTR mods; External content converts them).
     const char* editor=T("CTR Track Editor (crear pistas)","CTR Track Editor (make tracks)");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(editor).x)*.5f));
     if (ImGui::TextLink(editor)) OpenInShell(L"https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor");
+    // The modding community's Discord server: help making and packaging mods.
     const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
@@ -6707,7 +7443,8 @@ bool AddToSteam(std::string& out_msg) {
     }
 
     fs::path assets_dir;
-    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid"}) {
+    for (const auto& candidate : {a.root / L"art" / L"steamgrid", a.root / L"steamgrid",
+                                  a.root / L"packaging" / L"windows" / L"steamgrid"}) {
         if (fs::is_directory(candidate, ec)) {
             assets_dir = candidate;
             break;
@@ -7884,9 +8621,7 @@ void ToolsTab() {
                              "bridge (MIT). NVIDIA, DLSS and GeForce RTX are trademarks of NVIDIA Corporation."));
     ImGui::PopTextWrapPos();
     {
-        std::error_code ec;
-        const bool dlss = fs::is_regular_file(a.root / L"bin" / L"sacredfire_dlss.dll", ec) &&
-                          fs::is_regular_file(a.root / L"bin" / L"nvngx_dlss.dll", ec);
+        const bool dlss = DlssFilesPresent();
         ImGui::TextColored(kGrey, "%s", dlss ? T("DLSS: archivos presentes (necesita una tarjeta NVIDIA RTX)",
                                                  "DLSS: files present (needs an NVIDIA RTX card)")
                                              : T("DLSS: archivos no incluidos (se usa FSR 3)",
@@ -7897,7 +8632,16 @@ void ToolsTab() {
                                             : T("FSR 4: archivos no incluidos (carpeta fsr4_shaders)",
                                                 "FSR 4: files not included (fsr4_shaders folder)"));
     }
-    ImGui::TextLinkOpenURL(kRepoUrl, kRepoUrl);
+    ImGui::Spacing();
+    ImGui::TextColored(kGrey, "%s", T("Página oficial:", "Official site:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kSiteUrl)) OpenInShell(fs::path(Widen(kSiteUrl)));
+    ImGui::TextColored(kGrey, "%s", T("Código fuente:", "Source code:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kPortRepoUrl)) OpenInShell(fs::path(Widen(kPortRepoUrl)));
+    ImGui::TextColored(kGrey, "%s", T("Proyecto original:", "Original project:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kRepoUrl)) OpenInShell(fs::path(Widen(kRepoUrl)));
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());
 }
 
@@ -8112,6 +8856,7 @@ void Frame() {
     App& a = g_app;
     PollJobs();
     PollUpdate();
+    EosBridgePoll();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -8161,6 +8906,18 @@ void Frame() {
         }
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
     }
+    // The official page and the source, always in sight (v0.8.8)
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + 6.0f, ImGui::GetWindowHeight() - 64.0f));
+    ImGui::SetCursorPosX(18.0f);
+    ImGui::PushStyleColor(ImGuiCol_TextLink, ImVec4(0.55f, 0.88f, 1.0f, 1.0f));
+    if (ImGui::TextLink(T("Web oficial", "Official site"))) OpenInShell(fs::path(Widen(kSiteUrl)));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kSiteUrl);
+    ImGui::SameLine(0.0f, 6.0f);
+    ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.5f), "•");
+    ImGui::SameLine(0.0f, 6.0f);
+    if (ImGui::TextLink("GitHub")) OpenInShell(fs::path(Widen(kPortRepoUrl)));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kPortRepoUrl);
+    ImGui::PopStyleColor();
     ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 38.0f));
     ImGui::SetCursorPosX(18.0f);
     ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.84f), "CTR  •  %s", a.version.c_str());
@@ -8340,15 +9097,30 @@ bool CreateDevice(HWND hwnd) {
     sd.OutputWindow = hwnd;
     sd.SampleDesc.Count = 1;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
     D3D_FEATURE_LEVEL level;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
-                                               &sd, &g_swapchain, &g_device, &level, &g_context);
-    if (hr == DXGI_ERROR_UNSUPPORTED)
-        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 2, D3D11_SDK_VERSION, &sd,
-                                           &g_swapchain, &g_device, &level, &g_context);
+    // The flip model (v0.8.8): DWM shows our buffer itself instead of copying it, which presents
+    // with less latency and without the stutter of the old blit model when the window moves or
+    // resizes. Windows 10 has FLIP_DISCARD, 8.1 FLIP_SEQUENTIAL; the blit model stays the last
+    // resort.
+    HRESULT hr = E_FAIL;
+    for (const DXGI_SWAP_EFFECT effect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                                          DXGI_SWAP_EFFECT_DISCARD}) {
+        sd.SwapEffect = effect;
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2,
+                                           D3D11_SDK_VERSION, &sd, &g_swapchain, &g_device, &level, &g_context);
+        if (hr == DXGI_ERROR_UNSUPPORTED)
+            hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 2,
+                                               D3D11_SDK_VERSION, &sd, &g_swapchain, &g_device, &level, &g_context);
+        if (hr == S_OK) break;
+    }
     if (hr != S_OK) return false;
+    // One frame queued at most: what is drawn is what the mouse did a frame ago, not three.
+    IDXGIDevice1* dxgi = nullptr;
+    if (SUCCEEDED(g_device->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
+        dxgi->SetMaximumFrameLatency(1);
+        dxgi->Release();
+    }
     CreateRenderTarget();
     return true;
 }
@@ -8363,11 +9135,83 @@ void CleanupDevice() {
     g_device = nullptr;
 }
 
+// Frame pacing (v0.8.8). While the launcher is in use (input in the last second, an item held,
+// text being typed, an animation that asked for it) frames come at the display's rate; otherwise
+// it draws a few frames a second, enough for background work's progress, and nothing while it
+// is minimized or hidden. It used to draw 60 frames a second all the time, the game's included.
+double g_active_until = 0.0;
+bool g_sizing = false;   // inside the move/resize loop: WM_SIZE draws the frame itself
+bool g_in_frame = false; // RenderFrame is running (a WM_SIZE it causes must not start another)
+
+double NowSeconds() {
+    static const double period = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1.0 / double(f.QuadPart);
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return double(c.QuadPart) * period;
+}
+
+/// Full frame rate for the next `seconds` (an animation or a transition in progress).
+void KeepAnimating(double seconds) { g_active_until = std::max(g_active_until, NowSeconds() + seconds); }
+
+/// Milliseconds to wait for input before the next frame; 0 draws it at once (vsync paces it).
+DWORD FrameWait(HWND hwnd) {
+    if (IsIconic(hwnd)) return 250;
+    if (NowSeconds() < g_active_until) return 0;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput || ImGui::IsAnyItemActive()) return 0;
+    return GetForegroundWindow() == hwnd ? 50 : 250;
+}
+
+void RenderFrame() {
+    if (g_in_frame || !g_swapchain) return;
+    g_in_frame = true;
+    ImGuiIO& io = ImGui::GetIO();
+    if (g_resize_w && g_resize_h) {
+        CleanupRenderTarget();
+        g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
+        g_resize_w = g_resize_h = 0;
+        CreateRenderTarget();
+    }
+    // The controller drives the launcher only while it is the window in front: XInput is
+    // read whatever window has the focus, so playing moved the launcher's menus too.
+    if (GetForegroundWindow() == g_app.hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    // The controller sends no window messages: a button or stick read this frame is input too.
+    if (io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) {
+        for (int key = ImGuiKey_GamepadStart; key <= ImGuiKey_GamepadRStickDown; ++key) {
+            if (ImGui::IsKeyDown(ImGuiKey(key))) {
+                KeepAnimating(1.0);
+                break;
+            }
+        }
+    }
+    Frame();
+    ImGui::Render();
+    const float clear[4] = {0.08f, 0.08f, 0.10f, 1.0f};
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    g_context->ClearRenderTargetView(g_rtv, clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
+    g_in_frame = false;
+}
+
 } // namespace
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // Input, focus and size changes: full frame rate for a second (FrameWait).
+    if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+        msg == WM_MOUSELEAVE || msg == WM_NCMOUSEMOVE || msg == WM_SETFOCUS || msg == WM_KILLFOCUS ||
+        msg == WM_ACTIVATE || msg == WM_SIZE || msg == WM_DPICHANGED || msg == WM_DROPFILES)
+        KeepAnimating(1.0);
     if (msg == WM_NCHITTEST) {
         POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd, &pt);
@@ -8439,6 +9283,15 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         if (wparam == SIZE_MINIMIZED) return 0;
         g_resize_w = LOWORD(lparam);
         g_resize_h = HIWORD(lparam);
+        // Dragging a border runs Windows' own loop, not ours: the frame is drawn here, so the
+        // content follows the border instead of freezing or stretching until it is let go.
+        if (g_sizing) RenderFrame();
+        return 0;
+    case WM_ENTERSIZEMOVE:
+        g_sizing = true;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        g_sizing = false;
         return 0;
     case WM_SYSCOMMAND:
         if ((wparam & 0xfff0) == SC_KEYMENU) return 0;
@@ -8544,11 +9397,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     if (direct_launch) {
+        // The EOS bridge too (#226): without the window, nothing started it, and a game launched from
+        // Steam or a shortcut went to the server directly on networks that only reach it through Epic.
+        EosBridgePoll();
         if (g_app.worker.joinable()) g_app.worker.join();
         PollJobs();
         if (GameReady()) {
             if (g_app.launcher.Flag("discord_rpc", true))
                 RegisterDiscordLaunch(DiscordAppId());
+            {   // its check and EOS login take a while on a blocked network: wait for its decision
+                const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+                std::string host;
+                INTERNET_PORT port = 0, local = 0;
+                SplitServer(server, host, port);
+                if (g_app.game.Flag("online", true)) EosBridgeRoute(server, port, local, 30000);
+            }
             StartGame();
             while (g_app.game_running) {
                 MSG msg;
@@ -8561,6 +9424,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 Sleep(50);
             }
             DiscordPresence::Shutdown();
+            EosBridgeStop();  // the game is over: the bridge ends with it
             if (g_app.worker.joinable()) g_app.worker.join();
             if (g_app.probe.joinable()) g_app.probe.join();
             CoUninitialize();
@@ -8667,8 +9531,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     bool done = false;
     while (!done) {
         MSG msg;
-        // Idle while minimized or not in front: wait for input or 100 ms (background work).
-        if (IsIconic(hwnd)) MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
+        // Idle when nothing moves: wait for input, or a few frames a second for background work.
+        if (const DWORD wait = FrameWait(hwnd))
+            MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -8685,28 +9550,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             continue;
         }
         g_occluded = false;
-        if (g_resize_w && g_resize_h) {
-            CleanupRenderTarget();
-            g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
-            g_resize_w = g_resize_h = 0;
-            CreateRenderTarget();
-        }
-        // The controller drives the launcher only while it is the window in front: XInput is
-        // read whatever window has the focus, so playing moved the launcher's menus too.
-        if (GetForegroundWindow() == hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        Frame();
-        ImGui::Render();
-        const float clear[4] = {0.08f, 0.08f, 0.10f, 1.0f};
-        g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-        g_context->ClearRenderTargetView(g_rtv, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
+        RenderFrame();
     }
 
+    // The bridge first (v0.8.5): the waits below for background work (a network check, an update)
+    // could hold the closed launcher's process, and with it a bridge nobody uses any more.
+    if (g_app.game_running) {  // the game may go through the bridge: it ends with run.py
+        std::scoped_lock lock{g_eos.mutex};
+        if (g_eos.input) CloseHandle(std::exchange(g_eos.input, nullptr));
+        if (g_eos.process) CloseHandle(std::exchange(g_eos.process, nullptr));
+    }
+    if (g_eos.reader.joinable()) {
+        if (g_app.game_running) g_eos.reader.detach();
+        else EosBridgeStop();
+    }
     DiscordPresence::Shutdown();
     if (g_update.worker.joinable()) {  // a download stops; an install in progress finishes
         g_update.progress.cancel = true;

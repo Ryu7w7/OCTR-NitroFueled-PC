@@ -992,6 +992,45 @@ static void ABI spawn_cup_ai(unsigned char *manager) {
     original_spawn_cup_ai(manager);
 }
 
+/* Guest 0xff89c0 makes a remote kart from its RacerNetInfos (+0x10 spawn slot, +0x20 the driver's
+ * hero data, refcounted at +8). The hero is looked up once, when the infos are registered (0xff8870:
+ * the manager's +0x38 list, entry +0x10 = slot, +0x28 = hero). A guest keeps the session between a
+ * private CUP's tracks: the host's infos for an AI stay registered from track 1, the old AI drivers
+ * are released at the track change, and the infos are never looked up again, so on track 2 the hero
+ * is NULL: the game logs "SDN: RID:7 HID:7 -> INVALID!" and reads it (guest 0xc20a76, code 3).
+ * Look it up again here, as 0xff8870 does (by then the new track's AI driver is loaded); with no
+ * driver at all, skip that kart (the caller handles NULL) rather than crash. */
+typedef void *(ABI *SpawnNetKart)(unsigned char *manager, unsigned char *infos);
+static SpawnNetKart original_spawn_net_kart;
+
+static void *ABI spawn_net_kart(unsigned char *manager, unsigned char *infos) {
+    unsigned char *hero = infos ? pointer_at(infos, 0x20) : NULL;
+    if (manager && infos && (!hero || !pointer_at(hero, 0x10))) {
+        int slot = -1, count = 0;
+        memcpy(&slot, infos + 0x10, 4);
+        unsigned char *list = pointer_at(manager, 0x38);
+        if (list) memcpy(&count, list + 12, 4);
+        void **entries = list ? pointer_at(list, 0x20) : NULL;
+        unsigned char *found = NULL;
+        for (int i = 0; entries && i < count && i < 64; ++i) {
+            int id;
+            if (!entries[i]) continue;
+            memcpy(&id, (unsigned char *)entries[i] + 0x10, 4);
+            if (id == slot) { found = pointer_at(entries[i], 0x28); break; }
+        }
+        if (found && pointer_at(found, 0x10) && !hero) {
+            __atomic_fetch_add((int *)(found + 8), 1, __ATOMIC_SEQ_CST);
+            memcpy(infos + 0x20, &found, sizeof found);
+            hero = found;
+        }
+        const int usable = hero && pointer_at(hero, 0x10);
+        printf("Native net kart: slot %d came with no driver; %s\n", slot,
+               usable ? "found it among the loaded drivers" : "none loaded, kart skipped");
+        if (!usable) return NULL;
+    }
+    return original_spawn_net_kart(manager, infos);
+}
+
 static struct CupTotal racer_identity(unsigned char *racer) {
     struct CupTotal result = {0};
     unsigned char *player = handle_object((void **)(racer + 0x10));
@@ -2574,8 +2613,19 @@ static void name_color_changed(unsigned char *placeable) {
     memcpy(placeable + 12, &flags, 4);
 }
 
+/* BB_NAME_COLORS=0: no nickname is colored and no GUI tree is walked (to rule them out in a test). */
+static int name_colors_off(void) {
+    static int off = -1;
+    if (off < 0) {
+        const char *v = getenv("BB_NAME_COLORS");
+        off = v && v[0] == '0';
+        if (off) puts("Native Online: nickname colors off (BB_NAME_COLORS=0)");
+    }
+    return off;
+}
+
 static void colored_name(unsigned char *placeable, int allowed) {
-    if (!placeable) return;
+    if (!placeable || name_colors_off()) return;
     const char *text = (const char *)pointer_at(placeable, 0x30);
     float rgb[3];
     const int colored = allowed && text && runtime_name_color(text, rgb);
@@ -2675,7 +2725,7 @@ static uint64_t monotonic_ms(void) {
  * composition) passes its events through cup_project_event: the lobby's members, the pause
  * menu's racers, the results. Each project's tree is walked at most every 150 ms. */
 static void name_color_project(unsigned char *project) {
-    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    unsigned char *root = project && !name_colors_off() ? pointer_at(project, 0x10) : NULL;
     if (!root) return;
     static struct { unsigned char *root; uint64_t at; } roots[32];
     static unsigned next_root;
@@ -3541,6 +3591,27 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         puts("Native Online: racers from mods this game lacks are shown as Crash");
     } else {
         puts("Native Online: racer receiver not recognized; mod racers are not replaced");
+    }
+    /* spawn_net_kart: found through its one caller's call (guest 0xa67db1), prologue checked. */
+    static const unsigned char net_kart_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
+    unsigned char *net_kart = NULL;
+    if (image[0xa67db1] == 0xe8) {
+        int32_t rel;
+        memcpy(&rel, image + 0xa67db2, 4);
+        net_kart = image + 0xa67db6 + rel;
+    }
+    if (net_kart && !memcmp(net_kart, net_kart_prefix, sizeof net_kart_prefix) &&
+        !memcmp(net_kart + 0x18, "\x49\x89\xf6\x49\x89\xfc", 6)) {
+        unsigned char stub[sizeof net_kart_prefix + 14];
+        memcpy(stub, net_kart_prefix, sizeof net_kart_prefix);
+        jump_to(stub + sizeof net_kart_prefix, net_kart + sizeof net_kart_prefix);
+        original_spawn_net_kart = (SpawnNetKart)(trampoline + 3584);
+        jump_to(jump, (void *)spawn_net_kart);
+        if (write_code(trampoline + 3584, stub, sizeof stub) && write_code(net_kart, jump, sizeof jump))
+            puts("Native Online: remote karts with no driver data are looked up again, not a crash");
+    } else {
+        puts("Native Online: remote kart spawner not recognized; driverless karts are not guarded");
     }
     puts("Native Online mode: NORMAL / ITEMLESS / BATTLE selector installed");
     return 1;

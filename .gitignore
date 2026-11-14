@@ -60,3 +60,5 @@ gpu/shim/bbport_gnm_table.inc
 /CUSA13795*/
 *.pkg
 
+# The EOS bridge's settings: the Epic product's ids (eosbridge/eosbridge.ini.example)
+/eosbridge/eosbridge.ini

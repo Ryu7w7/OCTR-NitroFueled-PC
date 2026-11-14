@@ -174,7 +174,7 @@ def render_patches(settings):
 # EOctaneHiddenObjectGameplayModes: eOOGM_None 0, eOOGM_SpookyGhost 1, eOOGM_GoldenWumpa 2 (the
 # game itself swaps golden Wumpa for ghosts on Twilight Tour). BB_THEME (run.py: the season the
 # online server announces) or bbport.ini theme= picks it.
-THEME_VALUES={'default':0,'halloween':1,'golden':2}
+THEME_VALUES={'default':0,'halloween':1,'golden':2,'christmas':0}  # christmas: the title screen's (season_art.py)
 THEME_SIGNATURE='49 8b 87 30 01 00 00 4c 89 ef 8b 70 18 e8'
 
 

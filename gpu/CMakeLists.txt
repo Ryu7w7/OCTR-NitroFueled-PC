@@ -83,7 +83,18 @@ if (NOT miniz_FOUND)
     unset(CMAKE_POLICY_VERSION_MINIMUM)
     add_library(miniz::miniz ALIAS miniz)
 endif()
-find_package(Zydis REQUIRED)
+# Zydis: on Windows built in from its single-file release (third_party/zydis-amalgamated): MSYS2
+# has it only as libzydis.dll, which antivirus heuristics flagged (a disassembler DLL next to a
+# game reads as a cheat tool). Elsewhere the system's.
+if(WIN32)
+    add_library(zydis_builtin STATIC third_party/zydis-amalgamated/src/Zydis.c)
+    target_include_directories(zydis_builtin PUBLIC third_party/zydis-amalgamated/include
+                               PRIVATE third_party/zydis-amalgamated/include/Zydis)
+    target_compile_definitions(zydis_builtin PUBLIC ZYDIS_STATIC_BUILD ZYCORE_STATIC_BUILD)
+    add_library(Zydis::Zydis ALIAS zydis_builtin)
+else()
+    find_package(Zydis REQUIRED)
+endif()
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)
@@ -185,6 +196,10 @@ add_dependencies(bbgpu host_shaders)
 target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
+if (WIN32)
+    # The experimental Direct3D 11 engine's menu (shim/bbport_d3d11.cpp).
+    target_sources(bbgpu PRIVATE third_party/imgui/backends/imgui_impl_dx11.cpp)
+endif()
 target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
 # Dear ImGui stays private to libbbgpu.so. The library is linked into bb-probe, so its exports are
 # in the global symbol scope; a Vulkan layer carrying its own Dear ImGui without -Bsymbolic
@@ -256,7 +271,7 @@ if (WIN32)
     target_include_directories(sacredfire PRIVATE .. ../src)
     # liblzma (MSYS2 mingw-w64-clang-x86_64-xz), static: the archive decoder (src/runtime_lzma.c)
     find_library(BB_LIBLZMA NAMES liblzma.a REQUIRED)
-    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 -pthread)
+    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 d3d11 dxgi d3dcompiler -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
     target_link_options(sacredfire PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
@@ -310,8 +325,18 @@ if (WIN32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(flip-timing-test EXCLUDE_FROM_ALL ../tests/test_flip_timing.cpp)
+target_compile_options(flip-timing-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(flip-timing-test PRIVATE ..)
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 if (NOT WIN32)
+    add_executable(native-texture-batch-test EXCLUDE_FROM_ALL
+        ../tests/test_native_texture_batch.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(native-texture-batch-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(native-texture-batch-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_native_texture_batch.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(native-texture-batch-test PRIVATE bbgpu)
     add_executable(native-shader-async-test EXCLUDE_FROM_ALL
         ../tests/test_native_shader_async.cpp ../tests/test_gpu_runtime_stubs.cpp)
     target_include_directories(native-shader-async-test PRIVATE shim shadps4 third_party/gcn/include)

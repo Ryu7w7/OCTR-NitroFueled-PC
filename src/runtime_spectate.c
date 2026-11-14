@@ -2,10 +2,11 @@
  *
  * While a sharing player (bbport.ini spectate_share=1, in-game menu > Friends > Options) races, their game asks
  * every 2 s whether a friend wants to watch and sends nothing else. With a viewer, the race goes to the RyuNET
- * server from its first frame, as it is recorded (POST /ryunet/spectate/live, about twice a second; the answer
- * says how many friends watch: SPECTATOR (n)). Spectate (Friends) follows a friend: their live race plays a few
- * seconds behind (GET /ryunet/spectate/live, new frames as they come), and each next race of theirs loads by
- * itself until Stop spectating. Finished races are not sent or downloaded. */
+ * server from its first frame, as it is recorded (POST /ryunet/spectate/live, about ten times a second while a
+ * friend watches; the answer says how many: SPECTATOR (n)). Spectate (Friends) follows a friend: their live race
+ * plays under a second behind (GET /ryunet/spectate/live with wait=: the server answers when the next frames
+ * come), and each next race of theirs loads by itself until Stop spectating. Finished races are not sent or
+ * downloaded. */
 #include "runtime_spectate.h"
 #include "runtime.h"
 #include "runtime_http.h"
@@ -52,6 +53,9 @@ static void set_state(int value, const char *who) {
 #define LIVE_MAX_FRAMES 600         /* at most 10 s of frames per request */
 #define LIVE_ASK_TURNS 4            /* nobody watching: whether somebody does, about every 2 s */
 #define LIVE_QUIET_SECONDS 15       /* with no viewer this long the sending stops (a viewer's map load may hide them) */
+#define LIVE_TURN_MS 500            /* the worker's turn */
+#define LIVE_FAST_TURN_MS 100       /* its turn while a friend watches this player's race */
+#define LIVE_WAIT_MS 2500           /* a viewer's ask waits this long on the server for the next frames (v0.8.5 servers) */
 static uint32_t live_sent_race, live_sent;
 static int live_sent_end, live_backoff, live_ask_in;
 static time_t live_wanted_at;       /* the last answer with a viewer */
@@ -151,11 +155,12 @@ static void share_live(void) {
     fflush(stdout);
 }
 
-/* GET of the friend's live race from frame `from`: 200 with the stream, 404 none, 0 unreachable */
-static int live_get(const char *who, uint32_t race, uint32_t from, char **data, size_t *size) {
+/* GET of the friend's live race from frame `from`: 200 with the stream, 404 none, 0 unreachable. wait (ms): the
+ * server holds the ask until it has frames after `from` (older servers answer at once, as before). */
+static int live_get(const char *who, uint32_t race, uint32_t from, unsigned wait, char **data, size_t *size) {
     const char *me = runtime_np_get_online_name();
-    char target[160];
-    if (race) snprintf(target, sizeof target, "/ryunet/spectate/live?name=%s&host=%s&from=%u&race=%u", me, who, from, race);
+    char target[176];
+    if (race) snprintf(target, sizeof target, "/ryunet/spectate/live?name=%s&host=%s&from=%u&race=%u&wait=%u", me, who, from, race, wait);
     else snprintf(target, sizeof target, "/ryunet/spectate/live?name=%s&host=%s&from=0", me, who);
     const int status = runtime_ryunet_transfer("GET", target, NULL, 0, data, size, MAX_RACE_BYTES);
     if (status == 200 && (*size < 24 + LIVE_HEADER || memcmp(*data, "RRLIVE1", 8))) return 0;
@@ -167,7 +172,7 @@ static int live_get(const char *who, uint32_t race, uint32_t from, char **data, 
 static int watch_live(const char *who, int only_new) {
     char *data = NULL;
     size_t size = 0;
-    const int status = only_new && seen_race ? live_get(who, seen_race, seen_frames, &data, &size) : live_get(who, 0, 0, &data, &size);
+    const int status = only_new && seen_race ? live_get(who, seen_race, seen_frames, 0, &data, &size) : live_get(who, 0, 0, 0, &data, &size);
     if (status != 200) {
         free(data);
         return status;
@@ -204,31 +209,34 @@ static int watch_live(const char *who, int only_new) {
     return 200;
 }
 
-/* While watching live: the new frames */
-static void follow_live(void) {
+/* While watching live: the new frames (1 when some came: the next ask goes at once) */
+static int follow_live(void) {
     char who[32];
+    int got = 0;
     pthread_mutex_lock(&lock);
     snprintf(who, sizeof who, "%s", live_host);
     pthread_mutex_unlock(&lock);
-    if (!who[0]) return;
+    if (!who[0]) return 0;
     const uint32_t have = runtime_replay_live_count();
     if (!have) {                            /* the viewer left the replay */
         pthread_mutex_lock(&lock);
         live_host[0] = 0;
         pthread_mutex_unlock(&lock);
-        return;
+        return 0;
     }
     char *data = NULL;
     size_t size = 0;
-    const int status = live_get(who, live_race, have, &data, &size);
+    const int status = live_get(who, live_race, have, LIVE_WAIT_MS, &data, &size);
     if (status == 200) {
         const uint8_t *d = (const uint8_t *)data;
         struct rr_header header;
         memcpy(&header, d + 24, LIVE_HEADER);
         const uint32_t race = get32(d + 8), frames = get32(d + 12), from = get32(d + 16), ended = get32(d + 20);
         if (race == live_race) seen_frames = frames;
-        if (race == live_race && from == have && frames >= have)
+        if (race == live_race && from == have && frames >= have) {
             runtime_replay_live_append(&header, d + 24 + LIVE_HEADER, size - 24 - LIVE_HEADER, frames, (int)ended);
+            got = frames > have;
+        }
         else if (race != live_race)         /* the friend's next race: this one is over */
             runtime_replay_live_append(&header, NULL, 0, have, 1);
         if (ended || race != live_race) {
@@ -243,6 +251,7 @@ static void follow_live(void) {
         pthread_mutex_unlock(&lock);
     }
     free(data);
+    return got;
 }
 
 /* Following (Spectate on): about every second, the friend's next live race; it starts by itself from the
@@ -278,13 +287,16 @@ static void follow_next(void) {
 
 static void *worker(void *unused) {
     (void)unused;
+    int fresh = 0;                           /* follow_live got frames: ask again at once (the server waits) */
     for (unsigned turn = 0;; turn++) {
         char who[32] = "";
         pthread_mutex_lock(&lock);
-        if (!watch_name[0]) {
+        /* a friend watches this player's race: its frames go about ten times a second */
+        const int watched = share && viewers > 0 && time(NULL) - viewers_at < 5;
+        if (!watch_name[0] && !fresh) {
             struct timespec until;
             clock_gettime(CLOCK_REALTIME, &until);
-            until.tv_nsec += 500000000L;
+            until.tv_nsec += (watched ? LIVE_FAST_TURN_MS : LIVE_TURN_MS) * 1000000L;
             if (until.tv_nsec >= 1000000000L) until.tv_sec++, until.tv_nsec -= 1000000000L;
             pthread_cond_timedwait(&wake, &lock, &until);
         }
@@ -318,7 +330,7 @@ static void *worker(void *unused) {
         } else if (turn % 2 == 0) {
             follow_next();
         }
-        follow_live();
+        fresh = follow_live();
         if (sharing) {
             share_live();
         }

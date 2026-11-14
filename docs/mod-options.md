@@ -1,6 +1,6 @@
 # Configurable mods
 
-The Windows Mods page shows a wrench for format-2 packages declaring
+The Windows and Linux Mods pages show a wrench for format-2 packages declaring
 `configuration`. Other packages keep their existing controls. The dialog supports
 dropdowns and checkboxes, Save, Cancel, and Reset to defaults. Close the game before
 editing, and restart it to apply saved choices.
@@ -9,8 +9,8 @@ settings** section. It is still validated, saved, and applied when that section
 is closed. Omit the field (or use `false`) for a normal option.
 
 Boolean options may instead declare `"row": "Classic", "column": "Drift Meter"`.
-The Windows dialog places these cells in one compact table, preserving declaration
-order for rows and columns. Every cell must be unique; both labels are required,
+The Windows and Linux dialogs place these cells in one compact table, preserving
+declaration order for rows and columns. Every cell must be unique; both labels are required,
 plain text, at most 80 characters. A grid cell cannot also declare advanced=true.
 No custom UI code or external library is used.
 
@@ -111,18 +111,18 @@ submitted values. If the package changed, reload before editing again. Standard
 signature, archive checksum, edition, online, and conflict checks still apply to
 the selected variant. This feature does not establish compatibility by itself.
 
-The Windows dialog opens immediately from the existing library catalog; opening
-the wrench does not rescan or extract packages. Use Reload after adding/replacing
+The Windows and Linux dialogs open immediately from the existing library catalog;
+opening the wrench does not rescan or extract packages. Use Reload after adding/replacing
 files manually. Save runs in the background, shows progress, and closes the dialog
 only after the backend confirms success. Failed saves keep the draft and show the
-reason. The dialog stays centered and within the launcher window, with room for
-the checkbox grid. The game must still be closed before saving.
+reason. The Windows and Linux launchers show a confirmation after saving. The Windows dialog stays
+centered and within the launcher window, with room for the checkbox grid. The Linux
+dialog uses libadwaita's adaptive presentation within the launcher, following its
+light or dark appearance and adapting to the available space. The game must still
+be closed before saving.
 
 Repeated declarative manifest and path-syntax checks are cached only within one
 Python process, with bounded caches keyed by complete content. Payload inventory,
 payload hashes, XML, source-package identity, and launch/session checks still run;
 the cache does not establish that a file on disk is unchanged. Option-only variant
 coverage still rejects both overlapping choices and missing choices.
-
-This change adds Windows UI and shared Python package support. A configuration
-editor in the Linux launcher is not included.

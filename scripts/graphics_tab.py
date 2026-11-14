@@ -28,6 +28,8 @@ import sys
 import zlib
 from pathlib import Path
 
+from mod_components import long_path
+
 # Searched newest first: the first archive that has a file wins.
 ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak',
             'juicedomain_onlinemenus.pak')
@@ -450,9 +452,15 @@ def build(game, dest, dump, *, asset_transform=None):
                 logical = archive.logical(i)
                 low = logical.lower()
                 if any(d in low for d in DUMP):
-                    target = dump / name / logical
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(i))
+                    # Diagnostics only: in the extended-length form (a deep game folder passes
+                    # Windows' 260 characters here: v0.8.4 turned the Graphics tab off for it),
+                    # and a copy that still cannot be written turns nothing off.
+                    try:
+                        target = long_path(dump / name / logical)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(archive.read(i))
+                    except OSError as error:
+                        print(f'Graphics tab: diagnostic copy of {logical} not written ({error})')
                 if (low in CHANGES or low in OPTIONAL or low in WIDGET_RESOURCES) and low not in found:
                     found[low] = (archive, i, name)
         # Each edition ships a different language set; the graph/scripts and English are required.

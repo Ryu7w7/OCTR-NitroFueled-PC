@@ -354,5 +354,11 @@
  "Could not restore: {}": "Impossibile ripristinare: {}",
  "Save restored. The one you had is in {}.": "Salvataggio ripristinato. Quello che avevi è in {}.",
  "This server does not allow playing online with just a nickname: you must log in or create your account (with Discord, or with your nickname and password).": "Questo server non permette di giocare online solo con un nick: devi accedere o creare il tuo account (con Discord, o con nick e password).",
- "You play as {} without an account.": "Giochi come {} senza account."
+ "You play as {} without an account.": "Giochi come {} senza account.",
+ "Configure mod": "Configura mod",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "Chiudi il gioco prima di salvare la configurazione. Le modifiche verranno applicate al prossimo avvio del gioco.",
+ "Advanced settings": "Impostazioni avanzate",
+ "Reset to defaults": "Ripristina valori predefiniti",
+ "Saving...": "Salvataggio...",
+ "Mod options saved. Applied when you start the game.": "Opzioni della mod salvate. Verranno applicate all’avvio del gioco."
 }

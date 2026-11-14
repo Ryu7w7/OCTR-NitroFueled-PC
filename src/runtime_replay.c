@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* Native race replays (spectator build): the recorder.
  *
  * Every frame of a race, every racer (player, online players, AI): where it is, how it moves, its inputs
@@ -11,6 +12,7 @@
  * code_extension). Battle modes and the adventure hub are not recorded. */
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
+#include "runtime_replay_list.h"
 #include "runtime.h"
 
 #include <dirent.h>
@@ -652,6 +654,7 @@ static void save(void) {
     }
     printf("Replay: saved %s (%u frames, %u KB, %s)\n", name, rr.header.frames, (rr.header.packed + (unsigned)sizeof rr.header) / 1024,
            rr.header.track);
+    if (best > 0.0f) runtime_ttrun_saved(path);   /* a Time Trial personal best: for the leaderboards (runtime_ttrun.c) */
     for (int n = oldest, left = total + 1 - RR_KEEP_AUTO; best <= 0.0f && n >= 0 && n <= newest && left > 0; n++) {
         snprintf(path, sizeof path, "%s/A%05d.crr", dir, n);
         if (!remove(path)) left--;
@@ -972,6 +975,28 @@ int rr_redirect_call(unsigned char *site, const unsigned char *expected, void (*
     return t && rel32(site, 0xe8, t);
 }
 
+/* Points the `lea rcx, [rip + handler]` at USA `site` (which must name USA `handler`; EU 1.21: both 0x10
+ * lower) at `target`, through a trampoline: the game registers `target` where it registered `handler`.
+ * *original = the game's handler. 1 = done. */
+int rr_redirect_lea(size_t site, size_t handler, void (*target)(void), void **original) {
+    for (size_t shift = 0; shift <= 0x10; shift += 0x10) {
+        unsigned char *at = G(site - shift);
+        int32_t d;
+        memcpy(&d, at + 3, 4);
+        if (memcmp(at, "\x48\x8d\x0d", 3) || at + 7 + d != G(handler - shift)) continue;
+        unsigned char *t = trampoline(target);
+        const int64_t to = t ? t - (at + 7) : 0;
+        if (!t || to < INT32_MIN || to > INT32_MAX || !writable(at, 7)) return 0;
+        const int32_t v = (int32_t)to;
+        memcpy(at + 3, &v, 4);
+        *original = G(handler - shift);
+        return 1;
+    }
+    return 0;
+}
+
+void *rr_racer_of(void *kart) { return racer_of(kart); }
+
 static int hook_entry(size_t usa, void (*stub)(void), void **cont) {
     unsigned char *at = function_at(usa, 1), *t = at ? trampoline(stub) : NULL;
     if (!t) return 0;
@@ -1068,11 +1093,14 @@ int runtime_replay_start(unsigned char *base, size_t size) {
                 (t = trampoline(runtime_replay_stub_power_event)) && rel32(event_at, 0xe9, t);
     }
     if (player && ai_t && !items) printf("Native Replay: the item hooks are not there: items in replays are the game's own\n");
+    runtime_item_lead_install(eu);
+    runtime_tips_install(eu);
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
     printf("Native Replay: races are recorded (%d of 4 item sites)%s (%s)\n", sites,
            player && ai_t ? ", replays play from the menu's Replays tab" : ", the player could not be installed", eu ? "EU" : "USA");
+    runtime_ttrun_backfill();   /* the Time Trials recorded before: to the leaderboards (runtime_ttrun.c) */
     return 1;
 }
 
@@ -1095,11 +1123,20 @@ int runtime_replay_list(RrListEntry *out, int max) {
     char dir[700], path[800];
     race_dir(dir, sizeof dir);
     DIR *d = opendir(dir);
-    int n = 0;
-    RrListEntry *all = d ? calloc(RR_LIST_MAX * 2, sizeof *all) : NULL;
-    for (struct dirent *e; all && n < RR_LIST_MAX * 2 && (e = readdir(d));) {
+    int n = 0, room = RR_LIST_MAX;
+    /* every race in the folder, then the newest: the folder's order is by name, so a cap while
+     * reading left out the newest once Time Trial bests and imports had filled it */
+    RrListEntry *all = d ? calloc((size_t)room, sizeof *all) : NULL;
+    for (struct dirent *e; all && (e = readdir(d));) {
         const size_t len = strlen(e->d_name);
         if (len < 5 || len >= sizeof all->file || strcmp(e->d_name + len - 4, ".crr")) continue;
+        if (n == room) {
+            RrListEntry *more = n < 100000 ? realloc(all, (size_t)room * 2 * sizeof *all) : NULL;
+            if (!more) break;
+            memset(more + room, 0, (size_t)room * sizeof *more);
+            all = more;
+            room *= 2;
+        }
         snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
         FILE *f = fopen(path, "rb");
         struct rr_header h;

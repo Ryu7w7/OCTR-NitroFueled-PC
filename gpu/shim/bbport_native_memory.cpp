@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport lab: BbMem (see bbport_native_memory.h).
 #include "bbport_native_memory.h"
+#include "bbport_d3d11.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -59,7 +60,7 @@ const VideoCore::PageOwner owner{&OnWriteFault, &MappedNow};
 bool NativeOnly() {
     static const bool on = [] {
         const char* env = std::getenv("BB_VK_NATIVE_ONLY");
-        return env && env[0] == '1';
+        return (env && env[0] == '1') || BbD3d11::On(); // no Rasterizer there either
     }();
     return on;
 }

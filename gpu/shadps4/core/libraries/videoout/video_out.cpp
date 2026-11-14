@@ -12,6 +12,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_d3d11.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
@@ -348,11 +349,17 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    // bbport: the Direct3D 11 engine copies the buffer now, as the game submits the frame (it has
+    // drawn it all as the engine recorded it). At the end of pipe interrupt the game may already
+    // be drawing a later frame there: copied then, a black or half drawn picture flashed.
+    const u32 snapshot = BbD3d11::On() && buf_id < port->buffer_slots.size()
+                             ? BbD3d11::Snapshot(port->buffer_slots[buf_id].address_left)
+                             : 0;
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
             ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
-            const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
+            const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true, snapshot);
             ASSERT_MSG(result, "EOP flip submission failed");
         });
 
@@ -362,7 +369,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
 s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(
     s32 handle, SceVideoOutDeviceCapabilityInfo* pDeviceCapabilityInfo) {
     pDeviceCapabilityInfo->capability = 0;
-    if (presenter->IsHDRSupported()) {
+    if (presenter && presenter->IsHDRSupported()) {
         auto& game_info = Common::ElfInfo::Instance();
         if (game_info.GetPSFAttributes().support_hdr) {
             pDeviceCapabilityInfo->capability |= ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ;
@@ -401,7 +408,10 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    presenter->GetPPSettingsRef().gamma = settings->gamma;
+    if (presenter) {
+        presenter->GetPPSettingsRef().gamma = settings->gamma;
+    }
+    BbD3d11::SetGamma(settings->gamma);
     return ORBIS_OK;
 }
 

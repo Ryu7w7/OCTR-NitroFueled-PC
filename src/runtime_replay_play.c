@@ -46,6 +46,7 @@ typedef void ABI make_handle_fn(void *slot, void *object);
 typedef void *ABI pool_new_fn(void *pool);
 typedef void ABI send_message_fn(void *message, void *target, void *sender);
 typedef void *ABI player_kart_fn(void *kart_manager, int player, int one);
+typedef void ABI node_flags_fn(void *node, uint32_t mask, int set);  /* a render node's flags (bit 2: hidden) */
 typedef void ABI void0_fn(void);
 typedef char *ABI string_fn(void *pool, const char *text);
 typedef void ABI string_release_fn(void *pool, char *header);
@@ -82,9 +83,10 @@ static struct {
     active_camera_fn *active_camera;
     camera_refresh_fn *camera_refresh;
     make_handle_fn *make_handle;
-    pool_new_fn *ghost_look_end_new;
+    pool_new_fn *ghost_look_end_new, *ghost_look_start_new;
     send_message_fn *send_message;
     player_kart_fn *player_kart;
+    node_flags_fn *node_flags;
     void0_fn *despawn_items, *load_next_map;
     string_fn *string;
     string_release_fn *string_release;
@@ -129,6 +131,7 @@ static struct {
     int kart_slot[RR_RACERS];   /* each racer's kart slot in the replay's race (0 the player's), -1 none */
     void *ghost[RR_RACERS];
     uint8_t attached[RR_RACERS];
+    void *ghost_look[RR_RACERS];  /* the kart that got the ghost look (Time Trial ghosts), 0 none */
     uint32_t fed[RR_RACERS];
     int32_t accolade_player;
     int rewound;
@@ -205,10 +208,12 @@ static int items_restore;            /* drive cleared the track: the recent item
 static void *string_pool(void) { return rr_ptr(D_STRING_POOL); }
 
 static float ghost_time(const struct rr_frame *f) { return f->time - P.header.go_time + RACE_START; }
-/* live: the play time stays this far behind the newest frame. It grows by 1 s (up to 6 s) each time the stream
- * ran dry (a sender with a slow or uneven connection), and comes back down by 0.5 s after 90 s without that. */
-#define LIVE_DELAY 2.0f
-#define LIVE_DELAY_MAX 6.0f
+/* live: the play time stays this far behind the newest frame (frames come about ten times a second and the
+ * server hands them on as they come). It grows by 0.5 s (up to 3 s) each time the stream ran dry (a sender
+ * with a slow or uneven connection), and comes back down by 0.25 s after 30 s without that. */
+#define LIVE_DELAY 0.6f
+#define LIVE_DELAY_MAX 3.0f
+#define LIVE_DELAY_STEP 0.5f
 static float live_delay = LIVE_DELAY, live_smooth;
 static uint32_t frames_now(void) { return __atomic_load_n(&P.count, __ATOMIC_ACQUIRE); }
 /* the last play time there is: live, a little behind the newest frame until the race is over */
@@ -454,6 +459,7 @@ static void drop_ghosts(void) {
         if (P.ghost[i]) game.release(P.ghost[i]);
         P.ghost[i] = 0;
         P.attached[i] = 0;
+        P.ghost_look[i] = 0;
     }
 }
 
@@ -811,7 +817,12 @@ static void unghost(void) {
     P.unghost_frames = 0;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = P.attached[i] ? kart_of_racer(i) : 0;
-        void *message = kart ? game.ghost_look_end_new(0) : 0;
+        /* A replay plays as a Single Race, where karts have no ghost look. In a Time Trial the others were
+         * ghosts: they get the look once (a second Start would add its effects twice). */
+        const int ghost = P.header.mode == 2 && i != P.player_slot;
+        if (ghost && P.ghost_look[i] == kart) continue;
+        void *message = kart ? (ghost ? game.ghost_look_start_new : game.ghost_look_end_new)(0) : 0;
+        if (ghost) P.ghost_look[i] = kart;
         if (!message) continue;
         game.send_message(message, kart, kart);
         game.release(message);
@@ -886,12 +897,15 @@ static void read_buttons(float dt) {
     const int was_buffering = P.buffering;
     P.buffering = P.live && !P.paused && !P.scrubbing && P.time >= end;
     if (P.buffering && !was_buffering && P.started && live_delay < LIVE_DELAY_MAX) {
-        live_delay += 1.0f;
-        printf("Replay: the live stream ran dry: now %.0f s behind\n", live_delay);
+        live_delay = live_delay + LIVE_DELAY_STEP < LIVE_DELAY_MAX ? live_delay + LIVE_DELAY_STEP : LIVE_DELAY_MAX;
+        printf("Replay: the live stream ran dry: now %.1f s behind\n", live_delay);
         fflush(stdout);
     }
     live_smooth = P.buffering ? 0.0f : live_smooth + dt;
-    if (live_smooth > 90.0f && live_delay > LIVE_DELAY) live_delay -= 0.5f, live_smooth = 0.0f;
+    if (live_smooth > 30.0f && live_delay > LIVE_DELAY) {
+        live_delay = live_delay - 0.25f > LIVE_DELAY ? live_delay - 0.25f : LIVE_DELAY;
+        live_smooth = 0.0f;
+    }
     /* live, past the point (the delay just grew): it waits there, it does not jump back */
     if (P.time > end) P.time = live_open() && before > end && !P.scrubbing ? before : end;
     if (frame) RR_AT(frame, 0x2c, float) = HELD(S_LEFT) || ended() ? 1.0f : forward ? SCRUB : P.paused ? 0.000001f : SPEEDS[P.speed];
@@ -1444,6 +1458,7 @@ void ABI runtime_replay_level_start(void *manager) {
             P.camera = P.target = P.kart = 0;
             P.time = 0.0f;
             memset(P.attached, 0, sizeof P.attached);
+            memset(P.ghost_look, 0, sizeof P.ghost_look);
             memset(P.fed, 0, sizeof P.fed);
             puts("Replay: the race restarted: the replay starts again");
         } else {
@@ -2302,6 +2317,82 @@ static void skip_intro(void) {
     }
 }
 
+/* Invisibility, seen from the player's own seat (v0.8.6): while the local kart is invisible (the
+ * Invisibility item), its kart and driver take the Time Trial ghost look on this screen, instead of
+ * showing only the wheels. Only the look: the item, the other players' view (they still see nothing),
+ * hits and collisions stay as they are.
+ *   invisible: CKartEffectsComponent (meta global 0x2ac5438) +0x48 goes from -1 to 1 and +0xf8 from 1
+ *              to 0 for the item's whole time, a second one used meanwhile included (found by diffing
+ *              the kart's components around three uses, 2026-11-12)
+ *   look:      the game's own CKartStartTemporaryGhostMessage / CKartEndTemporaryGhostMessage (replays
+ *              give Time Trial ghosts the same), sent to this kart only; nothing goes over the network
+ *   kept:      the kart controller's _isGhost (+0x260: a ghost takes no damage) is put back as it was
+ *              every frame of the look, so the item plays as before.
+ * BB_INVISIBLE_LOOK=0 turns it off. Not while a replay plays (its ghosts have their own look). */
+#define D_KART_EFFECTS_META 0x2ac5438
+static struct {
+    void *kart;     /* the kart that has the look, 0 none */
+    uint8_t ghost;  /* its _isGhost before the look */
+    int setting;
+} IL = {.setting = -1};
+
+/* The item hides the kart and its driver (0xe26410 -> 0xbd40d0: the entity's render node, entity
+ * +0xb0 -> +0x28, flag 2 at +0x20); the wheels are entities of their own and stay. Shown again on this
+ * screen only, through the node's own flag setter (0x349530), which changes nothing but the flag. */
+static void invisible_look_show(void *entity) {
+    void *render = entity ? RR_AT(entity, 0xb0, void *) : 0;
+    void *node = render ? RR_AT(render, 0x28, void *) : 0;
+    if (node && (RR_AT(node, 0x20, uint8_t) & 2)) game.node_flags(node, 2, 0);
+}
+
+static void invisible_look_message(void *kart, int start) {
+    void *message = (start ? game.ghost_look_start_new : game.ghost_look_end_new)(0);
+    if (!message) return;
+    game.send_message(message, kart, kart);
+    game.release(message);
+}
+
+static void invisible_look(int racing_now) {
+    if (IL.setting < 0) {
+        const char *s = getenv("BB_INVISIBLE_LOOK");
+        IL.setting = !(s && *s == '0');
+        if (!IL.setting) puts("Invisibility look: off (BB_INVISIBLE_LOOK=0)");
+    }
+    if (!IL.setting) return;
+    void *kart = 0;
+    if (racing_now && !runtime_replay_playing()) {
+        int id = -1;
+        local_controller(&id);
+        char *karts = rr_ptr(RR_D_KART_MANAGER);
+        kart = id >= 0 && karts ? game.player_kart(karts, id, 1) : 0;
+    }
+    void *effects = kart ? rr_component(kart, D_KART_EFFECTS_META) : 0;
+    const int invisible = effects && RR_AT(effects, 0x48, int32_t) == 1 && RR_AT(effects, 0xf8, uint8_t) == 0;
+    if (IL.kart && (IL.kart != kart || !invisible)) {
+        /* the look ends with the item; a kart gone (race over, level left) takes it with it */
+        if (IL.kart == kart) {
+            invisible_look_message(kart, 0);
+            void *move = rr_component(kart, RR_D_KART_CONTROLLER_META);
+            if (move) RR_AT(move, 0x260, uint8_t) = IL.ghost;
+            puts("Invisibility look: off (the item ended)");
+        }
+        IL.kart = 0;
+    }
+    if (!kart || !invisible) return;
+    void *move = rr_component(kart, RR_D_KART_CONTROLLER_META);
+    if (!IL.kart) {
+        IL.ghost = move ? RR_AT(move, 0x260, uint8_t) : 0;
+        invisible_look_message(kart, 1);
+        IL.kart = kart;
+        puts("Invisibility look: on (the Time Trial ghost look on this screen only)");
+    }
+    if (move && RR_AT(move, 0x260, uint8_t) != IL.ghost) RR_AT(move, 0x260, uint8_t) = IL.ghost;
+    /* the kart and its driver (CKartComponent, meta global 0x2ac44e0: +0x30 the driver's handle) */
+    invisible_look_show(kart);
+    void *kart_part = rr_component(kart, 0x2ac44e0);
+    invisible_look_show(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0);
+}
+
 static int racing;                              /* the last frame: a kart and a race clock */
 int runtime_replay_chat_allowed(void) {
     return !__atomic_load_n(&racing, __ATOMIC_RELAXED) || runtime_replay_local_finished();
@@ -2313,6 +2404,10 @@ void ABI runtime_replay_tick(void) {
     skip_intro();
     __atomic_store_n(&racing, rr_kart_of(0, 0) && race_timer(), __ATOMIC_RELAXED);
     runtime_online_mode_note_frame();
+    runtime_presence_tick();
+    invisible_look(racing);
+    runtime_item_lead_tick(racing && !runtime_replay_playing());
+    runtime_tips_tick();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
@@ -2455,8 +2550,10 @@ int runtime_replay_play_install(int eu) {
     game.camera_refresh = fn(0xc8ade0, 0, eu);
     game.make_handle = fn(0x14bea20, 1, eu);
     game.ghost_look_end_new = fn(0x112da10, 1, eu);
+    game.ghost_look_start_new = fn(0x112d8b0, 1, eu);
     game.send_message = fn(0xd32160, 0, eu);
     game.player_kart = fn(0xe50f70, 0, eu);
+    game.node_flags = fn(0x349530, 0, eu);
     game.despawn_items = fn(0x1056bb0, 1, eu);
     game.string = fn(0x1574080, 1, eu);
     game.string_release = fn(0x1518e30, 1, eu);
@@ -2486,7 +2583,7 @@ int runtime_replay_play_install(int eu) {
     void *const check[] = {game.ghost_new, game.move_key_new, game.input_key_new, game.list_reserve, game.list_set_count,
                            game.ghost_reset, game.ghost_attach, game.ghost_update, game.ai_load, game.ai_count, game.racer_of,
                            game.camera_instance, game.active_camera, game.camera_refresh, game.make_handle,
-                           game.ghost_look_end_new, game.send_message, game.player_kart, game.despawn_items, game.string,
+                           game.ghost_look_end_new, game.ghost_look_start_new, game.send_message, game.player_kart, game.despawn_items, game.string,
                            game.string_release, game.release, game.set_next_race_mode, game.set_next_map, game.load_next_map,
                            game.apply_choice, game.apply_player_count, game.enter_customization, game.zone_by_name,
                            game.decal_find, game.set_text, game.hud_set_lap, game.find_driver, game.spawn_placeable, game.hud_style_next};
@@ -2516,19 +2613,34 @@ int runtime_replay_play_install(int eu) {
  * players are ready" (the followed race loads once the online menus are left). That is the session, not the level:
  * octane_onlinelobby is also where a race or a replay left outside the online mode comes back to.
  * What stops it goes to the log when it changes. */
+/* The title screen and the lobby: menus, never a race. Giving the player's own character back after a
+ * replay (give_back) has the game load that character's kart there, in the player's kart slot: it is
+ * the menu's, not a race's (the second replay was refused "the player has a kart" until a restart). */
+static int has_word(const char *text, const char *word) {
+    const size_t n = strlen(word);
+    for (; *text; text++)
+        if (!strncasecmp(text, word, n)) return 1;
+    return 0;
+}
+static int menu_level(void) {
+    const char *level = rr_current_level();
+    return level && (has_word(level, "octane_startscreen") || has_word(level, "octane_onlinelobby"));
+}
+
+static const char *start_blocked;              /* runtime_replay_can_start's last "why" */
+const char *runtime_replay_blocked_reason(void) { return __atomic_load_n(&start_blocked, __ATOMIC_RELAXED); }
 int runtime_replay_can_start(void) {
-    static const char *told;
     PingPeer peers[PING_MAX_PEERS];
     const char *why = P.pending || P.step != STEP_NONE ? "a replay is on"
                       : !rr_game(0) ? "the game is not up"
-                      : rr_kart_of(0, 0) ? "the player has a kart"
+                      : rr_kart_of(0, 0) && !menu_level() ? "the player has a kart"
                       : race_timer() ? "a race clock is on"
                       : runtime_online_mode_lobby_open() ? "an online lobby is on screen"
                       : runtime_public_match_active() ? "a public match"
                       : runtime_private_match_active() || runtime_online_mode_room_on() ? "a private room"
                       : runtime_net_ping_view(peers, PING_MAX_PEERS) > 0 ? "players in the room"
                                                                          : 0;
-    if (__atomic_exchange_n(&told, why, __ATOMIC_RELAXED) != why) {
+    if (__atomic_exchange_n(&start_blocked, why, __ATOMIC_RELAXED) != why) {
         const char *level = rr_current_level();
         printf("Replay: %s%s (level %s)\n", why ? "cannot start now: " : "can start", why ? why : "", level ? level : "-");
         fflush(stdout);

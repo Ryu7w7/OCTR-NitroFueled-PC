@@ -59,6 +59,7 @@ const Vulkan::Instance* instance = nullptr;
 bool anisotropy = false, mirror_clamp = false;
 
 std::unordered_map<u64, std::unique_ptr<Texture>> textures; // FNV-1a of the T#'s first 6 dwords
+std::unordered_map<u64, std::unique_ptr<Texture>> replacements;
 Host host{}; // none: textures are kept as first made
 
 // Watched textures by guest base, and the page manager's watch on each of their pages (one for
@@ -728,6 +729,23 @@ std::mutex upload_mutex;
 std::condition_variable upload_cv;
 std::vector<Job> upload_queue;
 
+/// Publish early textures before detiling a whole streaming burst on a slow CPU.
+std::vector<Job> TakeUploadBatch() {
+    constexpr u64 MaxBatchBytes = 4ull << 20;
+    std::unique_lock lk(upload_mutex);
+    upload_cv.wait(lk, [] { return !upload_queue.empty(); });
+    u64 size = 0;
+    std::size_t n = 0;
+    while (n < upload_queue.size() && (n == 0 || size + JobBytes(upload_queue[n]) <= MaxBatchBytes)) {
+        size += JobBytes(upload_queue[n]);
+        ++n;
+    }
+    std::vector<Job> jobs(std::make_move_iterator(upload_queue.begin()),
+                          std::make_move_iterator(upload_queue.begin() + n));
+    upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
+    return jobs;
+}
+
 /// Ends the jobs' waits: their textures are uploaded (submitted), or `broken`.
 void Realize(Job& job);
 
@@ -892,7 +910,7 @@ void SubmitBatch(vk::CommandPool pool, UploadSlot& slot, std::vector<Job>& jobs)
     }
 }
 
-/// Uploads queued textures in batches of up to 64 MiB.
+/// Uploads small FIFO batches; a single larger texture is never split or skipped.
 void UploadThread() {
     BbCpu::Register("bb:NativeTexUpload");
     const vk::Device dev = instance->GetDevice();
@@ -913,20 +931,7 @@ void UploadThread() {
         return;
     }
     for (;;) {
-        std::vector<Job> jobs;
-        {
-            std::unique_lock lk(upload_mutex);
-            upload_cv.wait(lk, [] { return !upload_queue.empty(); });
-            u64 size = 0;
-            std::size_t n = 0;
-            while (n < upload_queue.size() && (n == 0 || size + JobBytes(upload_queue[n]) <= (64ull << 20))) {
-                size += JobBytes(upload_queue[n]);
-                ++n;
-            }
-            jobs.assign(std::make_move_iterator(upload_queue.begin()),
-                        std::make_move_iterator(upload_queue.begin() + n));
-            upload_queue.erase(upload_queue.begin(), upload_queue.begin() + n);
-        }
+        std::vector<Job> jobs = TakeUploadBatch();
         for (Job& job : jobs) {
             Realize(job);
             Plan(job);
@@ -1053,10 +1058,9 @@ void UnwatchTargetLocked(std::atomic<bool>* written) {
     AnyWatched();
 }
 
-/// Takes the texture out of `textures` and retires it (its memory goes once the GPU is done).
-void Retire(std::unordered_map<u64, std::unique_ptr<Texture>>::iterator it) {
-    Texture* t = it->second.release();
-    textures.erase(it);
+/// Retires a texture after the draws captured before it (and then the GPU) are done.
+void Retire(std::unique_ptr<Texture> texture) {
+    Texture* t = texture.release();
     {
         std::lock_guard lk(watch_mutex);
         Unwatch(t);
@@ -1075,7 +1079,9 @@ void Retire(std::unordered_map<u64, std::unique_ptr<Texture>>::iterator it) {
 void Evict(u64 need, u64 now) {
     std::vector<std::pair<u64, u64>> old; // last use, key
     for (const auto& [key, t] : textures) {
-        if (t->image && t->ready.load(std::memory_order_acquire) && t->last_used + EvictAfter < now) {
+        const auto next = replacements.find(key);
+        if (t->ready.load(std::memory_order_acquire) && t->image && t->last_used + EvictAfter < now &&
+            (next == replacements.end() || next->second->ready.load(std::memory_order_acquire))) {
             old.emplace_back(t->last_used, key);
         }
     }
@@ -1084,7 +1090,12 @@ void Evict(u64 need, u64 now) {
         if (total_bytes.load() + need <= budget) {
             break;
         }
-        Retire(textures.find(key));
+        if (const auto next = replacements.find(key); next != replacements.end()) {
+            Retire(std::move(next->second));
+            replacements.erase(next);
+        }
+        Retire(std::move(textures.at(key)));
+        textures.erase(key);
         evicted.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -1401,6 +1412,22 @@ const Texture* Get(const std::uint32_t* tsharp) {
     }
     const u64 key = Fnv(reinterpret_cast<const u8*>(tsharp), 24);
     const u64 now = host.serial ? host.serial() : 0;
+    if (const auto it = replacements.find(key); it != replacements.end()) {
+        auto& current = textures.at(key);
+        current->last_used = now;
+        if (!it->second->ready.load(std::memory_order_acquire)) {
+            return current.get(); // keep the last video frame visible while the next one uploads
+        }
+        auto next = std::move(it->second);
+        replacements.erase(it);
+        if (next->broken.load(std::memory_order_relaxed)) {
+            Retire(std::move(next));
+            return current.get();
+        }
+        Retire(std::move(current));
+        current = std::move(next);
+        return current.get();
+    }
     bool remade_now = false;
     if (const auto it = textures.find(key); it != textures.end()) {
         Texture* found = it->second.get();
@@ -1412,19 +1439,19 @@ const Texture* Get(const std::uint32_t* tsharp) {
         if (!found->stale.load(std::memory_order_acquire)) {
             return found->image && !found->broken.load(std::memory_order_relaxed) ? found : nullptr;
         }
-        Retire(it);
         remade.fetch_add(1, std::memory_order_relaxed);
         remade_now = true;
     }
     // an empty entry remembers a texture that could not be made
-    Texture& tex = *(textures[key] = std::make_unique<Texture>());
+    auto& cache = remade_now ? replacements : textures;
+    Texture& tex = *(cache[key] = std::make_unique<Texture>());
     tex.last_used = now;
     const TSharp t = Decode(tsharp);
     Layout l{};
-    auto unmade = [&tex] {
+    auto unmade = [&]() -> const Texture* {
         tex.broken.store(true, std::memory_order_relaxed);
         tex.ready.store(true, std::memory_order_release);
-        return nullptr;
+        return remade_now ? textures.at(key).get() : nullptr;
     };
     if (!GetLayout(t, &l)) {
         unsupported.fetch_add(1, std::memory_order_relaxed);
@@ -1454,7 +1481,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
     if (total_bytes.load() + bytes > budget) {
         if (!host.retire) {
             over_budget.fetch_add(1, std::memory_order_relaxed);
-            textures.erase(key); // tried again once memory is free
+            cache.erase(key); // tried again once memory is free
             return nullptr;
         }
         Evict(bytes, now);
@@ -1515,7 +1542,7 @@ const Texture* Get(const std::uint32_t* tsharp) {
         upload_queue.push_back(std::move(job));
     }
     upload_cv.notify_one();
-    return &tex;
+    return remade_now ? textures.at(key).get() : &tex;
 }
 
 VkSampler Sampler(const std::uint32_t ss[4], bool compare, bool depth) {
@@ -1589,7 +1616,7 @@ Stats GetStats() {
         std::lock_guard lk(watch_mutex);
         pages = page_watches.size();
     }
-    return Stats{textures.size(),          total_bytes.load(),   uploads_done.load(),
+    return Stats{textures.size() + replacements.size(), total_bytes.load(), uploads_done.load(),
                  uploads_pending.load(),   upload_batches.load(), unsupported.load(),
                  unreadable.load(),        over_budget.load(),   failed.load(),
                  samplers.size(),          evicted.load(),        remade.load(),

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
+#include "bbport_overlay_d3d11.h"
+#ifdef _WIN32
+#include <imgui_impl_dx11.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -431,6 +435,7 @@ void PollFriends() {
         runtime_spectate_set_share(s.spectate_share);
         runtime_chat_set_enabled(s.chat_enabled);
         runtime_chat_set_public(s.chat_public);
+        runtime_chat_set_in_race(s.chat_in_race);
         runtime_chat_start();
         runtime_name_colors_start();
     }
@@ -647,15 +652,17 @@ void ChatLine(const RcLine& line) {
     ImGui::TextWrapped("%s", line.text);
 }
 
-/// The lines over the lobby and the results, with no menu open. T writes (HandleEvent).
+/// The lines over the lobby, the races and the results, with no menu open. T writes (HandleEvent). During a race the
+/// box keeps small and light: the last 4 lines, a fainter background.
 void ChatBox() {
     ChatRefresh();
-    constexpr int kShown = 6;
+    const bool racing = runtime_chat_racing() != 0;
+    const int kShown = racing ? 4 : 6;
     const ImGuiIO& io = ImGui::GetIO();
     const float em = ImGui::GetFontSize();
     const bool typing = chat_typing;
     ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : 0.40f);
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : racing ? 0.22f : 0.40f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
     if (!typing) {
@@ -705,9 +712,17 @@ void ChatSection() {
         Store(s.chat_public, open_rooms, true);
         runtime_chat_set_public(open_rooms);
     }
+    bool races = s.chat_in_race;
+    if (ImGui::Checkbox(BbSettings::MenuText("Also during races", "Также во время гонок"), &races)) {
+        Store(s.chat_in_race, races, true);
+        runtime_chat_set_in_race(races);
+    }
     if (!runtime_chat_available()) {
-        ImGui::TextDisabled("%s", BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race in private ones.",
-                                                       "Работает в комнатах: в лобби, а в приватных и после финиша."));
+        ImGui::TextDisabled("%s", s.chat_in_race
+            ? BbSettings::MenuText("It works in rooms, from joining one until you leave it.",
+                                   "Работает в комнатах: с момента входа и до выхода.")
+            : BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race.",
+                                   "Работает в комнатах: в лобби и после финиша."));
         return;
     }
     const bool fresh = ChatRefresh();
@@ -820,10 +835,10 @@ void ReportTab() {
 // Spectator build: the races in RaceReplay (src/runtime_replay.c records them), newest first.
 void ReplaysTab() {
     static RrListEntry list[RR_LIST_MAX];
-    static int listed = -1;
+    static int listed = -1, page = 0;
     static double listed_at = -100.0;
     const double now = ImGui::GetTime();
-    if (listed < 0 || now - listed_at > 3.0) {
+    if (listed < 0 || now - listed_at > 10.0) {  // each race's file header is read: not every frame
         listed = runtime_replay_list(list, RR_LIST_MAX);
         listed_at = now;
     }
@@ -836,8 +851,22 @@ void ReplaysTab() {
     if (runtime_replay_playing()) {
         ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("A replay is on.", "Идёт повтор."));
     } else if (!can_start) {
-        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("Replays start from the menus, not during a race.",
-                                                                   "Повторы запускаются из меню, не во время гонки."));
+        // What holds the button, in the player's words (runtime_replay_can_start logs the same).
+        const char* why = runtime_replay_blocked_reason();
+        const bool online = why && (!std::strcmp(why, "an online lobby is on screen") || !std::strcmp(why, "a public match") ||
+                                     !std::strcmp(why, "a private room") || !std::strcmp(why, "players in the room"));
+        const bool loading = why && !std::strcmp(why, "the game is not up");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kMenuYellow, "%s",
+                           online    ? BbSettings::MenuText("Replays start outside the online mode: leave the room or lobby "
+                                                            "(back to the main menu) and try again.",
+                                                            "Повторы запускаются вне онлайна: выйдите из комнаты в главное меню.")
+                           : loading ? BbSettings::MenuText("The game is still loading: try again in a moment.",
+                                                            "Игра ещё загружается.")
+                                     : BbSettings::MenuText("Replays start from the menus, not during a race.",
+                                                            "Повторы запускаются из меню, не во время гонки."));
+        if (why) ImGui::TextDisabled("(%s)", why);
+        ImGui::PopTextWrapPos();
     }
     // managing them: the shared "replays" folder next to bbport.ini (export copies a race there, import takes the
     // races put there), and deleting one (asked twice)
@@ -876,8 +905,33 @@ void ReplaysTab() {
         ImGui::TextDisabled("%s", BbSettings::MenuText("No races recorded yet.", "Записанных гонок пока нет."));
         return;
     }
+    // a page of RR_LIST_PAGE at a time, newest first, with the pages to go through
+    const int pages = (listed + RR_LIST_PAGE - 1) / RR_LIST_PAGE;
+    page = std::clamp(page, 0, pages - 1);
+    if (pages > 1) {
+        ImGui::BeginDisabled(page == 0);
+        if (ImGui::ArrowButton("##newer", ImGuiDir_Left)) --page;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Text(BbSettings::MenuText("Page %d / %d", "Стр. %d / %d"), page + 1, pages);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(page + 1 >= pages);
+        if (ImGui::ArrowButton("##older", ImGuiDir_Right)) ++page;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    ImGui::TextDisabled(BbSettings::MenuText("%d races, newest first", "Гонок: %d, новые сверху"), listed);
     if (ImGui::BeginTable("##replays", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
-        for (int i = 0; i < listed; ++i) {
+        ImGui::TableSetupColumn("");
+        ImGui::TableSetupColumn(BbSettings::MenuText("Track", "Трасса"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Player", "Игрок"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Place", "Место"));
+        ImGui::TableSetupColumn(BbSettings::MenuText("Date (UTC) and length", "Дата (UTC) и длительность"));
+        ImGui::TableSetupColumn("");
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        const int first = page * RR_LIST_PAGE, last = std::min(listed, first + RR_LIST_PAGE);
+        for (int i = first; i < last; ++i) {
             const RrListEntry& e = list[i];
             ImGui::PushID(i);
             ImGui::TableNextRow();
@@ -1518,6 +1572,12 @@ void Menu() {
                                   "rounded off. Applies at once.",
                                   "100% — уровень, на котором сведена игра; выше самые громкие пики "
                                   "сглаживаются. Сразу."));
+        bool muted = s.muted;
+        if (ImGui::Checkbox(BbSettings::MenuText("Mute (Ctrl+M)", "Без звука (Ctrl+M)"), &muted)) s.muted = muted;
+        Hint(BbSettings::MenuText("The game's sound off, the volume above kept. Ctrl+M switches it from anywhere, "
+                                  "the menu closed too. Back on when the game starts again.",
+                                  "Звук игры выключен, громкость сохраняется. Ctrl+M переключает в любой момент, "
+                                  "и при закрытом меню. Включается снова при следующем запуске."));
     }
 
     MenuSection(BbSettings::MenuText("Other", "Прочее"));
@@ -1975,6 +2035,19 @@ void FpsCounter() {
     ImGui::End();
 }
 
+/// While the sound is muted: a small reminder in the top left corner (Ctrl+M brings it back).
+void MutedBadge() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad, viewport->WorkPos.y + pad), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##muted", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(BbSettings::MenuText("Sound muted (Ctrl+M)", "Звук выключен (Ctrl+M)"));
+    ImGui::End();
+}
+
 /// show_ping: the players in the online room and their round trip, in the top right corner under
 /// the FPS counter; nothing outside a room.
 void PingCounter() {
@@ -2393,11 +2466,8 @@ void SetTextPrompt(bool active, const std::string& prompt, const std::string& te
     prompt_active = active;
 }
 
-void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
-    std::scoped_lock lock{imgui_mutex};
-    if (initialized) {
-        return;
-    }
+/// The ImGui context, whichever backend draws it (holds imgui_mutex).
+static void MakeContext() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -2413,6 +2483,14 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+}
+
+void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
+    std::scoped_lock lock{imgui_mutex};
+    if (initialized) {
+        return;
+    }
+    MakeContext();
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -2448,6 +2526,23 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     initialized = true;
     std::printf("Overlay: menu ready (Insert or L3+R3)\n");
 }
+
+#ifdef _WIN32
+void InitD3d11(void* device, void* context) {
+    std::scoped_lock lock{imgui_mutex};
+    if (initialized) {
+        return;
+    }
+    MakeContext();
+    if (!ImGui_ImplDX11_Init(static_cast<ID3D11Device*>(device), static_cast<ID3D11DeviceContext*>(context))) {
+        std::printf("Overlay: ImGui Direct3D 11 backend init failed\n");
+        ImGui::DestroyContext();
+        return;
+    }
+    initialized = true;
+    std::printf("Overlay: menu ready (Insert or L3+R3)\n");
+}
+#endif
 
 void UpdateTextInput(SDL_Window* window) {
     if (open_request.exchange(false)) {
@@ -2485,6 +2580,14 @@ bool HandleEvent(const SDL_Event& event) {
         if (down && !event.key.repeat &&
             (event.key.key == SDLK_INSERT || (menu_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
+            return true;
+        }
+        if (down && !event.key.repeat && !typing && event.key.key == SDLK_M && (event.key.mod & SDL_KMOD_CTRL)) {
+            auto& s = BbSettings::Get();
+            const bool muted = !s.muted.load();
+            s.muted = muted;
+            std::printf("Sound: %s (Ctrl+M)\n", muted ? "muted" : "on");
+            std::fflush(stdout);
             return true;
         }
         if (down && !event.key.repeat && !is_open && !typing && event.key.key == SDLK_T && ChatShowing()) {
@@ -2587,6 +2690,7 @@ bool Visible() {
         notice = !notices.empty();
     }
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+                           BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
                            runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
 }
@@ -2656,8 +2760,9 @@ bool CapturesInput() {
     return menu_open || prompt_active || ultrawide_prompt || ChatHoldsKeyboard();
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
-    // Present interval for the FPS readout (measured also while nothing is drawn).
+/// The time since the last picture, for the FPS readout and the performance diagnostic
+/// (measured also while nothing is drawn), in ms.
+static float NotePresent() {
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
@@ -2665,15 +2770,16 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
     BbPerf::Frame(ms); // the performance diagnostic (bbport_perf.h)
-    if (!Visible()) {
-        return;
-    }
-    std::scoped_lock lock{imgui_mutex};
+    return ms;
+}
+
+/// What the menu draws in this picture, whichever backend draws it (holds imgui_mutex).
+static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame)()) {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(float(extent.width), float(extent.height));
+    io.DisplaySize = ImVec2(float(width), float(height));
     io.DeltaTime = ms > 0.0f && ms < 1000.0f ? ms / 1000.0f : 1.0f / 60.0f;
     // UI scale follows the display height (1080p = 1).
-    const float scale = std::max(float(extent.height) / 1080.0f, 0.75f);
+    const float scale = std::max(float(height) / 1080.0f, 0.75f);
     if (std::abs(scale - base_scale) > 0.01f) {
         ImGuiStyle& style = ImGui::GetStyle();
         style.ScaleAllSizes(scale / base_scale);
@@ -2681,13 +2787,16 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         base_scale = scale;
     }
 
-    ImGui_ImplVulkan_NewFrame();
+    backend_new_frame();
     ImGui::NewFrame();
     if (menu_open) {
         Menu();
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (BbSettings::Get().muted && !menu_open) {
+        MutedBadge();
     }
     corner_ping_height = 0.0f;
     if (BbSettings::Get().show_ping && !menu_open && InOnlineRoom()) {
@@ -2720,6 +2829,15 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         UltrawidePrompt();
     }
     ImGui::Render();
+}
+
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+    const float ms = NotePresent();
+    if (!Visible()) {
+        return;
+    }
+    std::scoped_lock lock{imgui_mutex};
+    BuildFrame(extent.width, extent.height, ms, ImGui_ImplVulkan_NewFrame);
 
     const vk::RenderingAttachmentInfo attachment{
         .imageView = view,
@@ -2740,5 +2858,17 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     cmdbuf.endRendering();
 }
+
+#ifdef _WIN32
+void RenderD3d11(std::uint32_t width, std::uint32_t height) {
+    const float ms = NotePresent();
+    if (!Visible() || !initialized) {
+        return;
+    }
+    std::scoped_lock lock{imgui_mutex};
+    BuildFrame(width, height, ms, ImGui_ImplDX11_NewFrame);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+}
+#endif
 
 } // namespace BbOverlay

@@ -459,5 +459,11 @@
  "Could not restore: {}": "No se pudo restaurar: {}",
  "Save restored. The one you had is in {}.": "Partida restaurada. La que tenías quedó en {}.",
  "This server does not allow playing online with just a nickname: you must log in or create your account (with Discord, or with your nickname and password).": "Este servidor no permite jugar online solo con un apodo: es obligatorio iniciar sesión o crear tu cuenta (con Discord, o con tu apodo y contraseña).",
- "You play as {} without an account.": "Juegas como {} sin cuenta."
+ "You play as {} without an account.": "Juegas como {} sin cuenta.",
+ "Configure mod": "Configurar mod",
+ "Close the game before saving configuration. Changes apply the next time you start the game.": "Cierra el juego antes de guardar la configuración. Los cambios se aplicarán la próxima vez que lo inicies.",
+ "Advanced settings": "Opciones avanzadas",
+ "Reset to defaults": "Restablecer valores predeterminados",
+ "Saving...": "Guardando...",
+ "Mod options saved. Applied when you start the game.": "Opciones del mod guardadas. Se aplicarán al iniciar el juego."
 }

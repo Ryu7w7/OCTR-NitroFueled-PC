@@ -168,6 +168,14 @@ int tun_on_send(uint32_t ip, uint16_t port, uint64_t now_ms, uint8_t *flags, int
     return route;
 }
 
+int tun_direct_ok(uint32_t ip, uint16_t port, uint64_t now_ms) {
+    take();
+    TunPeer *p = peer_for(ip, port, now_ms, 0);
+    const int ok = p && direct_fresh(p, now_ms) && p->peer_ok;
+    give();
+    return ok;
+}
+
 void tun_on_direct(uint32_t ip, uint16_t port, uint64_t now_ms) {
     take();
     TunPeer *p = peer_for(ip, port, now_ms, 0);

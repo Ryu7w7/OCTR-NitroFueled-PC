@@ -11,6 +11,12 @@ namespace BbSettings {
 const char* Spanish(const char* english) {
     static const std::unordered_map<std::string_view, const char*> table = {
     {"CTR Nitro-Fueled PC  ·  Insert / L3+R3###bbport_settings", "CTR Nitro-Fueled PC  ·  Insert / L3+R3###bbport_settings"},
+    {"Mute (Ctrl+M)", "Silenciar (Ctrl+M)"},
+    {"The game's sound off, the volume above kept. Ctrl+M switches it from anywhere, the menu closed too. Back on "
+     "when the game starts again.",
+     "Quita el sonido del juego sin tocar el volumen de arriba. Ctrl+M lo cambia en cualquier momento, también con "
+     "el menú cerrado. Vuelve al iniciar el juego otra vez."},
+    {"Sound muted (Ctrl+M)", "Silenciado (Ctrl+M)"},
     {"%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f ms)"},
     {"Off", "Desactivado"},
     {"Output resolution", "Pantalla"},
@@ -218,6 +224,7 @@ const char* Spanish(const char* english) {
     {"Good luck!", "¡Suerte!"},
     {"Back in a moment", "Ya vuelvo"},
     {"Room", "Sala"},
+    {"Also during races", "También durante las carreras"},
     {"Ping counter in corner", "Contador de ping en la esquina"},
     {"You are not in an online room right now.", "Ahora mismo no estás en una sala online."},
     {"Round trip to each player in your online room, in ms. Players with an older version show no ping.", "Tiempo de ida y vuelta a cada jugador de tu sala online, en ms. Los jugadores con una versión anterior no muestran ping."},
@@ -253,6 +260,14 @@ const char* Spanish(const char* english) {
     {"Replays start from the menus, not during a race.", "Los replays se inician desde los menús, no durante una carrera."},
     {"No races recorded yet.", "Aún no hay carreras grabadas."},
     {"Watch", "Ver"},
+    {"Page %d / %d", "Página %d / %d"},
+    {"%d races, newest first", "%d carreras, las más nuevas primero"},
+    {"Track", "Pista"},
+    {"Place", "Puesto"},
+    {"Date (UTC) and length", "Fecha (UTC) y duración"},
+    {"Replays start outside the online mode: leave the room or lobby (back to the main menu) and try again.",
+     "Las repeticiones se ven fuera del modo online: sal de la sala o del lobby (al menú principal) y vuelve a intentarlo."},
+    {"The game is still loading: try again in a moment.", "El juego todavía está cargando: inténtalo en un momento."},
     {"Import", "Importar"},
     {"Export", "Exportar"},
     {"Delete", "Borrar"},
