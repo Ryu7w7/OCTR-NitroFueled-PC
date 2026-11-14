@@ -30,7 +30,7 @@ class CliTests(unittest.TestCase):
         lines = [line.split('\t') for line in content_cli.listing(self.port)]
         self.assertEqual(lines[0], ['selection', '0', 'bonus'])
         self.assertEqual(lines[1], ['package', ID, '1', 'track', 'Suzuka', '0.7.2', 'CTRNFModding', 'offline-only',
-                                    'suzuka.zip', f'octane/{ID}/{ID}', 'Suzuka by CTRNFModding'])
+                                    'suzuka.zip', f'octane/{ID}/{ID}', 'Suzuka by CTRNFModding', ''])  # no compatibility known
         self.assertEqual(lines[2][:3], ['package', 't929_neo_bowser_city', '0'])
         self.assertEqual(lines[2][7], 'private')
         self.assertEqual([line[0] for line in lines[3:]], ['message'])

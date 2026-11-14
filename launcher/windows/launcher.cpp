@@ -5495,6 +5495,7 @@ bool ModActionIcon(const char* id, const char* tooltip, bool folder, float size)
 struct ContentPackage {
     std::string id, type, name, version, author, online, source, map, credits;
     bool on = true;
+    std::string compat;  // scripts/content_compat.py: "full|partial;<1 tried in game>;issue=n,...", or ""
 };
 struct ContentState {
     std::future<Captured> listing, action;
@@ -5544,9 +5545,47 @@ void ReadContentListing(const Captured& r) {
         }
         if (f[0] == "selection" && f.size() >= 3) { c.enabled = f[1] == "1"; c.page = f[2]; }
         else if (f[0] == "package" && f.size() >= 11)
-            c.packages.push_back({f[1], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[2] == "1"});
+            c.packages.push_back({f[1], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[2] == "1",
+                                  f.size() >= 12 ? f[11] : std::string()});
         else if (f[0] == "message" && f.size() >= 2) c.messages.push_back(f[1]);
     }
+}
+
+// What a package's compatibility (scripts/content_compat.py) means, for its card.
+std::string CompatibilityText(const std::string& compat) {
+    if (compat.empty()) return std::string();
+    const size_t a = compat.find(';');
+    const size_t b = a == std::string::npos ? std::string::npos : compat.find(';', a + 1);
+    const std::string level = compat.substr(0, a);
+    const bool tested = a != std::string::npos && compat.substr(a + 1, b - a - 1) == "1";
+    std::string text;
+    if (level == "full")
+        text = tested ? T("Compatibilidad completa: probada en el juego.", "Full compatibility: tried in game.")
+                      : T("Compatibilidad completa: no se encontró nada que la afecte (sin probar en el juego).",
+                          "Full compatibility: nothing found that affects it (not tried in game).");
+    else
+        text = std::string(T("Compatibilidad parcial: se juega, pero puede cerrar el juego o dejar memoria sin liberar al cargar la pista siguiente",
+                             "Partial compatibility: it plays, but it can crash the game or leave memory allocated when the next track loads")) +
+               (tested ? T(" (probada en el juego).", " (tried in game).") : ".");
+    std::string issues = b == std::string::npos ? std::string() : compat.substr(b + 1);
+    std::string why;
+    size_t at = 0;
+    while (at < issues.size()) {
+        size_t comma = issues.find(',', at);
+        if (comma == std::string::npos) comma = issues.size();
+        const std::string item = issues.substr(at, comma - at);
+        const size_t eq = item.find('=');
+        const std::string key = item.substr(0, eq), n = eq == std::string::npos ? std::string() : item.substr(eq + 1);
+        std::string part;
+        if (key == "game_scripts") part = n + T(" scripts del juego modificados", " changed game scripts");
+        else if (key == "game_menus") part = n + T(" menús del juego modificados", " changed game menus");
+        else if (key == "game_data") part = n + T(" datos del juego modificados", " changed game data files");
+        else if (key == "other_tool") part = T("hecha con otra herramienta (no CTR Track Editor)", "made with another tool (not CTR Track Editor)");
+        if (!part.empty()) why += (why.empty() ? "" : ", ") + part;
+        at = comma + 1;
+    }
+    if (!why.empty()) text += std::string(T(" Trae: ", " It has: ")) + why + ".";
+    return text;
 }
 
 void SaveContentSelection() {
@@ -5679,7 +5718,8 @@ void ContentTab() {
         card.mod_description = kind + " " + p.id + ". " +
             (p.online == "private" ? T("Sin conexión y en salas privadas.", "Offline and in private rooms.")
                                    : T("Solo sin conexión.", "Offline only.")) +
-            (p.credits.empty() ? std::string() : "\n" + p.credits);
+            (p.credits.empty() ? std::string() : "\n" + p.credits) +
+            (p.compat.empty() ? std::string() : "\n" + CompatibilityText(p.compat));
         cards.push_back(std::move(card));
     }
     int on = 0;
@@ -5698,6 +5738,13 @@ void ContentTab() {
                                "Keep in mind that some tracks can be more demanding on graphics and need more computing power "
                                "than the game can offer: playing one of them can affect performance. "
                                "Use it with care and at your own risk."));
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", T("Algunas pistas no funcionan como se esperaría: se juegan, pero pueden cerrar el juego al cargar la "
+                               "pista siguiente. Cada paquete indica su compatibilidad (completa o parcial). Las pistas creadas "
+                               "con CTR Track Editor para Nitro-Fueled v0.6 en adelante se probaron y funcionan correctamente.",
+                               "Some tracks don't work as expected: they play, but can crash the game when the next track "
+                               "loads. Each package shows its compatibility (full or partial). Tracks made with CTR Track "
+                               "Editor for Nitro-Fueled v0.6 and later were tried and work correctly."));
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0,14));
     const float left=ImGui::GetCursorPosX();

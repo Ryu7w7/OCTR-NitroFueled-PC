@@ -196,6 +196,13 @@ leaves 35 674 blocks allocated). The game's map files match both. The fixed file
 appended to the track's archive; nothing else in it changes. Convert again a track
 converted before this fix. Check or fix an archive by hand with
   python scripts/track_editor.py counts ARCHIVE.pak [--fix]
+Each converted package states its compatibility (scripts/content_compat.py), shown on its
+card. Partial: the track plays, but the next level can crash or memory stays allocated;
+found when its own archive carries changed copies of the game's scripts (vsc/), menus
+(ui/) or other game data, or its counts were kept by another tool than CTR Track Editor
+(Suzuka 0.7.2 and Neo Bowser City 1.2.0, both tried in game). Full: none of that (changed
+textures, sounds and models are the track's own look). Tracks made with CTR Track Editor
+for Nitro-Fueled 0.6 and later were tried in game with full compatibility.
 
 TRACKS MADE WITH CTR TRACK EDITOR
 CTR Track Editor (https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor) makes new

@@ -6,6 +6,7 @@
         fields separated by tabs (tabs and line breaks in texts become spaces):
           selection  <1|0 all external content on>  <page: own|bonus>
           package    <id> <1|0 on> <type> <name> <version> <author> <online> <source> <map> <credits>
+                     <compatibility: "full|partial;<1|0 tried in game>;issue=n,..." or empty>
           message    <text>                         a package that could not be read
     python scripts/content_cli.py PORTABLE_ROOT remove ID
         Moves the package's ZIP or folder to content-state/removed (nothing is deleted).
@@ -23,6 +24,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import content_compat  # noqa: E402
 import content_package as cp  # noqa: E402
 
 
@@ -44,7 +46,7 @@ def listing(root):
         m = record['manifest']
         fields = [ident, '0' if ident in choice['disabled'] else '1', m['type'], name_of(m), m['version'],
                   m['author'], m.get('online', 'offline-only'), record['source'], m.get('map', ''),
-                  m.get('credits', '')]
+                  m.get('credits', ''), content_compat.field(content_compat.of_manifest(m))]
         lines.append('package\t' + '\t'.join(clean(f) for f in fields))
     lines += ['message\t' + clean(message) for message in result['messages']]
     return lines

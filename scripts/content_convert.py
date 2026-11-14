@@ -29,6 +29,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import content_compat
 import content_delta as cd
 import content_package as cp
 import track_editor as te
@@ -116,9 +117,19 @@ def convert(game_folder, source, output, log=print):
                 raise ValueError(f'{dest} already exists')
             (dest / 'archives').mkdir(parents=True)
             fixed = 0
+            rules = []
             for pak in own:
                 shutil.copy2(pak, dest / 'archives' / pak.name)
+                with_maps = Archive(pak)
+                try:
+                    maps = te.map_files(with_maps)
+                finally:
+                    with_maps.f.close()
+                if maps:
+                    rules.append(te.rule_of(maps.values()))
                 fixed += sum(te.fix_archive(dest / 'archives' / pak.name).values())
+            compat = content_compat.assess(game, own, rules[0] if rules else te.ALL,
+                                           meta.get('id'), meta.get('version'))
             # Unchanged game files the mod carries that the game keeps only in archives it loads
             # for one track or menu (Sewer Speedway's scripts and menu textures, for Neo Bowser
             # City) stay, in shared/: the track needs them loaded with it.
@@ -162,6 +173,7 @@ def convert(game_folder, source, output, log=print):
                                   'source': Path(source).name, 'left_out': dropped}
             if fixed:
                 m['convertedFrom']['fixed_reference_counts'] = fixed
+            m['convertedFrom']['compatibility'] = compat
             m['files'] = []
             for path in sorted(p for p in dest.rglob('*') if p.is_file() and p.name not in (cp.MARKER, cp.MANIFEST)):
                 with path.open('rb') as f:
@@ -173,7 +185,9 @@ def convert(game_folder, source, output, log=print):
             cp.read_folder(dest)
             log(f'{ident}: {m["name"]["en"]} {m["version"]} by {m["author"]}'
                 + (f'; left out {len(dropped)} changes to game files' if dropped else '')
-                + (f'; fixed the reference counts of {fixed} map objects' if fixed else ''))
+                + (f'; fixed the reference counts of {fixed} map objects' if fixed else '')
+                + f'; compatibility {compat["level"]}' + (' (tried in game)' if compat['tested'] else '')
+                + (': ' + ', '.join(f'{k} {v}' for k, v in compat['issues'].items()) if compat['issues'] else ''))
             return dest, dropped
     finally:
         game.close()
