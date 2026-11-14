@@ -307,7 +307,8 @@ bool TemporalUpscaler::ReducedScene(const VideoCore::Image& color) const {
 }
 
 bool TemporalUpscaler::RasterScaling() const {
-    return !scaled_session && scene_targets.Reduced() && !done_this_frame;
+    return (!scaled_session || BbSettings::Get().shad_live_graphics) &&
+           scene_targets.Reduced() && !done_this_frame;
 }
 
 bool TemporalUpscaler::OnFrameStart() {
@@ -364,7 +365,7 @@ bool TemporalUpscaler::OnFrameStart() {
     if (applied_upscaler != upscaler) fsr4_failed = false; // retry after a menu change
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
-    if (!scaled_session) {
+    if (!scaled_session && !settings.shad_live_graphics) {
         scene_targets.SetSize(SceneResolution::ForPreset(active ? preset : 0,
                                                         {target_width, target_height}));
         render_width = scene_targets.Size().width;

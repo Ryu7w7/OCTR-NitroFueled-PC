@@ -10,10 +10,57 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import graphics_tab
+import quit_confirmation
 from igz_file import Igz
 from prepare import parse_self
+
+
+class GraphicsCacheTests(unittest.TestCase):
+    def test_cache_tracks_helpers_and_archive_changes_without_manual_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game, out = root / 'game', root / 'out'
+            archive = game / 'archives/update.pak'
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b'original')
+            made = []
+
+            def build(game, dest, dump):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b'generated')
+                made.append(dest)
+
+            def invoke():
+                with mock.patch.object(sys, 'argv', ['graphics_tab', str(game), '--out', str(out)]), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    graphics_tab.main()
+
+            with mock.patch.object(graphics_tab, 'build', side_effect=build):
+                invoke()
+                first = made[-1]
+                invoke()
+                self.assertEqual(len(made), 1)
+                read = Path.read_bytes
+                def changed(path):
+                    data = read(path)
+                    return data + b'\n# changed helper' if path.name == 'quit_confirmation.py' else data
+                with mock.patch.object(Path, 'read_bytes', changed):
+                    invoke()
+                self.assertEqual(len(made), 2)
+                self.assertNotEqual(first, made[-1])
+                self.assertFalse(first.exists())
+                # Same-size replacements must invalidate the old archive fingerprint.
+                archive.write_bytes(b'replaced')
+                invoke()
+                self.assertEqual(len(made), 3)
+                current = made[-1]
+            archive.write_bytes(b'another!')
+            with mock.patch.object(graphics_tab, 'build', side_effect=ValueError('failed build')):
+                invoke()
+            self.assertTrue(current.is_file())
 
 
 class GraphicsTabTests(unittest.TestCase):
@@ -74,6 +121,26 @@ PYTHON=prepare_test
             online_name = graphics_tab.QUIT_LEVEL[0][:-1].decode()
             self.assertEqual(sum(main.string_at(s) == quit_name for s in main.sites['RSTT']), 1)
             self.assertGreaterEqual(sum(main.string_at(s) == online_name for s in main.sites['RSTT']), 1)
+            dialog_name = f'vsc/common/ui/octane_buttons/{quit_confirmation.NAME.lower()}.igz'
+            self.assertIn(dialog_name, files)
+            self.assertNotIn(quit_confirmation.SOURCE, files)
+            dialog = Igz(files[dialog_name])
+            for table, kind in dialog.objects():
+                if kind == 'igNameList':
+                    start = dialog.u64(table + 32)
+                    for i in range(dialog.u32(table + 12)):
+                        entry = start + i * 16
+                        self.assertEqual(dialog.u32(entry + 8), graphics_tab.fnv1a(dialog.string_at(entry)))
+            self.assertEqual(dialog.u64(0x1d78 + 0x18), 0x1028)
+            self.assertEqual(dialog.u64(0x1d78 + 0x20), 0x1028)
+            self.assertEqual(dialog.u64(0x1b28 + 0x30), 0x17f8)
+            self.assertEqual(dialog.u64(0x840), 0x5e0)
+            self.assertEqual(dialog.u64(0x848), 0x610)
+            self.assertEqual(dialog.u64(0x1bc0 + 0x30), 0x1bf8)  # Native control restoration.
+            for at, text in ((0x960, 'Quit game'), (0xa38, 'Are you sure you want to quit the game?'),
+                             (0xb10, 'Confirm'), (0xbe8, 'Back')):
+                self.assertEqual(dialog.types[dialog.u64(at)], 'igVscConstStringAccessor')
+                self.assertEqual(dialog.string_at(at + 0x10), text)
             for language, label in graphics_tab.LABELS.items():
                 key = f'ui/octane_options_menu_{language}.lng'
                 if key not in files:
