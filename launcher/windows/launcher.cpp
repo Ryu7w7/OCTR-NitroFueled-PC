@@ -4969,6 +4969,15 @@ void ContentTab() {
     ModHeading(T("General","General"));
     ImGui::Spacing();
     ModCard(master);
+    // The tracks are made by the community: some ask more of the GPU and CPU than the game's own.
+    ImGui::PushStyleColor(ImGuiCol_Text,kYellow);
+    ImGui::TextWrapped("%s", T("Ten en cuenta que algunas pistas pueden ser más exigentes a nivel gráfico y requerir más cómputo "
+                               "del que el juego puede ofrecer: al jugar alguna de ellas, el rendimiento puede verse afectado. "
+                               "Úsalo con precaución y bajo tu propio riesgo.",
+                               "Keep in mind that some tracks can be more demanding on graphics and need more computing power "
+                               "than the game can offer: playing one of them can affect performance. "
+                               "Use it with care and at your own risk."));
+    ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0,14));
     const float left=ImGui::GetCursorPosX();
     const float right=ImGui::GetWindowContentRegionMax().x;
