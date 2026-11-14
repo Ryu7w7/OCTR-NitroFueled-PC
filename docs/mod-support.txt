@@ -185,6 +185,25 @@ A classic track mod (its archives and a whole update3.pak) converts into a packa
 It keeps the track's archives and new files and leaves out, and names, its changes to
 game files every track uses. Formats worked out from Neo Bowser City (PanchoPewPew),
 Suzuka (CTRNFModding) and the Nitro Creator Handbook (venvs and collaborators).
+The conversion also fixes the reference counts of the track's map files (maps/*.igz:
+each object's count, the u32 at +0x08, made equal to the pointers to it, as in every game
+map file). Tracks saved by CTR Track Editor before v0.5 have them wrong (Backrooms, Suzuka
+and Neo Bowser City: 7 000 to 12 600 objects each): such a track plays, but the next
+level loaded after it crashes the game (guest offset 0x14a94e9, igStreamingChunkManager).
+The fixed files are appended to the track's archive; nothing else in it changes. Convert
+again a track converted before this fix. Check or fix an archive by hand with
+  python scripts/track_editor.py counts ARCHIVE.pak [--fix]
+
+TRACKS MADE WITH CTR TRACK EDITOR
+CTR Track Editor (https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor) makes new
+tracks. Use its OCTR mod export, then Convert track mod: the export writes nothing to the
+game folder. Its "Install in the game" (and CTR Track Installer) writes into the game's own
+archives instead (t9xx_*.pak, update3.pak, update.pak and update2.pak changed in place,
+*.ctrmod.json records): mods and external content are then made against changed game
+files, and folders sharing those files through hard links (the base game, the update)
+change too. The launcher names such a game folder in the log at each modded launch, and
+refuses to convert a track against it (scripts/track_editor.py traces GAME_FOLDER):
+restore the game folder from a backup.
 
 CURRENT VERIFICATION SCOPE
 Windows official OCTR v0.6 engine, current official source frontend. PAK/ZIP/

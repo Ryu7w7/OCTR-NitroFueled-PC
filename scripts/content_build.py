@@ -103,7 +103,12 @@ def build(game, store, staging, packages, operations, settings, log=print, own_p
     for the file redirection, or [] when there is nothing to add."""
     if not packages:
         return []
-    cp.check_against_game(packages, cp.game_index(game, store))
+    try:
+        cp.check_against_game(packages, cp.game_index(game, store))
+    except ValueError as error:
+        import track_editor
+        installed = track_editor.notice(game)
+        raise ValueError(f'{error}. {installed}' if installed else str(error)) from None
     titles = [tr.LANGUAGE_FILE.format(lang) for lang in tr.LANGUAGES]
     base = effective(game, tr.FILES, operations, optional=titles)
     tracks = [cp.track(m) for m, _ in packages if m['type'] == 'track']

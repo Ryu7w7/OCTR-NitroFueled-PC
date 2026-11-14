@@ -5008,9 +5008,13 @@ void ContentTab() {
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete.\n"
-                                  "Se dejan fuera sus cambios a archivos que usan todas las pistas.",
+                                  "Se dejan fuera sus cambios a archivos que usan todas las pistas.\n"
+                                  "Las pistas de CTR Track Editor anteriores a la 0.5 se corrigen al convertir\n"
+                                  "(sus contadores de referencias cerraban el juego al cargar la pista siguiente).",
                                   "A classic track mod (its .pak files and a whole update3.pak) becomes a package.\n"
-                                  "Its changes to files every track uses are left out."));
+                                  "Its changes to files every track uses are left out.\n"
+                                  "Tracks from CTR Track Editor before 0.5 are fixed when converted\n"
+                                  "(their reference counts crashed the game loading the next track)."));
     ImGui::SameLine();
     if (ImGui::Button(T("Añadir carpeta","Add folder"),ImVec2(folder_width,icon_size)))
         if (const auto folder=PickFolder(a.hwnd,L"Add a content package folder",fs::path())) ImportContent({*folder});
@@ -5049,6 +5053,10 @@ void ContentTab() {
                "Use the buttons above to add .zip packages or a package's folder."));
     centered(T("Se copian a la carpeta custom_content junto al launcher.","They're copied into the custom_content folder next to the launcher."));
     centered(T("¿Un mod de pista clásico? Usa Convertir mod de pista.","A classic track mod? Use Convert track mod."));
+    centered(T("¿Haces pistas con CTR Track Editor? Expórtalas como mod OCTR y conviértelas aquí; "
+               "no uses «Instalar en el juego», que cambia los archivos del juego.",
+               "Making tracks with CTR Track Editor? Export them as an OCTR mod and convert them here; "
+               "don't use \"Install in the game\", which changes the game's files."));
     ImGui::Spacing();
     const char* guide=T("Lee el formato de los paquetes","Read the package format");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
@@ -5137,6 +5145,9 @@ void ModsTab() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
     if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
     // The modding community's Discord server: help making and packaging mods.
+    const char* editor=T("CTR Track Editor (crear pistas)","CTR Track Editor (make tracks)");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(editor).x)*.5f));
+    if (ImGui::TextLink(editor)) OpenInShell(L"https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor");
     const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");

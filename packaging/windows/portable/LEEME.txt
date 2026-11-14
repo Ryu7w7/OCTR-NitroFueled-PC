@@ -95,6 +95,12 @@ PROBLEMAS COMUNES
 - Pantalla negra con sonido: actualiza drivers Vulkan de tu GPU.
 - El launcher no abre: necesita Direct3D 11 (cualquier GPU actual);
   usa "Jugar sin launcher.bat".
+- Se cierra al cargar la pista que sigue a una pista nueva: es una pista
+  de CTR Track Editor anterior a la 0.5. Conviertela en Contenido externo
+  ("Convertir mod de pista"): se corrige al convertir.
+- Pistas hechas con CTR Track Editor: exportalas como mod OCTR. No uses
+  "Instalar en el juego": cambia los archivos del juego (y los de las
+  carpetas enlazadas). Si ya lo usaste, restaura el juego desde un backup.
 
 Fallos y dudas: https://github.com/GetLostIn/CTR-NitroFueled-PC/issues
 (adjunta last_run.log).

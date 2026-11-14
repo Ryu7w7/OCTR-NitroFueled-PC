@@ -6,7 +6,9 @@ A classic track mod is a ZIP or folder with the track's own archives (archives/t
 its flybys) and a whole update3.pak with the track's registration and its own files in it. The
 conversion keeps:
 
-  - the track's own archives, as they are;
+  - the track's own archives, with the reference counts of their map files fixed (tracks saved
+    by CTR Track Editor before v0.5 have them wrong, and the game crashes loading the next level:
+    scripts/track_editor.py);
   - the files of update3.pak the game does not have (zone info, picture texture, materials);
   - from the registration files: the track's map, and its picture material and texture when it
     put one in LevelSelect_materials.
@@ -29,7 +31,7 @@ from pathlib import Path
 
 import content_delta as cd
 import content_package as cp
-import track_registry as tr
+import track_editor as te
 import track_registry as tr
 from graphics_tab import Archive
 from igz_merge import File
@@ -89,6 +91,9 @@ def find_track(game, entries):
 def convert(game_folder, source, output, log=print):
     """The package folder written in `output` (a new folder named after the track id). Returns
     (package folder, [global changes left out])."""
+    installed = te.notice(game_folder)
+    if installed:
+        raise ValueError(installed)
     game = cd.Game(game_folder)
     try:
         with tempfile.TemporaryDirectory() as work:
@@ -110,8 +115,10 @@ def convert(game_folder, source, output, log=print):
             if dest.exists():
                 raise ValueError(f'{dest} already exists')
             (dest / 'archives').mkdir(parents=True)
+            fixed = 0
             for pak in own:
                 shutil.copy2(pak, dest / 'archives' / pak.name)
+                fixed += sum(te.fix_archive(dest / 'archives' / pak.name).values())
             # Unchanged game files the mod carries that the game keeps only in archives it loads
             # for one track or menu (Sewer Speedway's scripts and menu textures, for Neo Bowser
             # City) stay, in shared/: the track needs them loaded with it.
@@ -153,6 +160,8 @@ def convert(game_folder, source, output, log=print):
                             + (f', without {len(dropped)} changes to game files.' if dropped else '.'))
             m['convertedFrom'] = {'id': meta.get('id'), 'version': meta.get('version'), 'author': meta.get('author'),
                                   'source': Path(source).name, 'left_out': dropped}
+            if fixed:
+                m['convertedFrom']['fixed_reference_counts'] = fixed
             m['files'] = []
             for path in sorted(p for p in dest.rglob('*') if p.is_file() and p.name not in (cp.MARKER, cp.MANIFEST)):
                 with path.open('rb') as f:
@@ -163,7 +172,8 @@ def convert(game_folder, source, output, log=print):
             (dest / cp.MANIFEST).write_text(json.dumps(m, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
             cp.read_folder(dest)
             log(f'{ident}: {m["name"]["en"]} {m["version"]} by {m["author"]}'
-                + (f'; left out {len(dropped)} changes to game files' if dropped else ''))
+                + (f'; left out {len(dropped)} changes to game files' if dropped else '')
+                + (f'; fixed the reference counts of {fixed} map objects' if fixed else ''))
             return dest, dropped
     finally:
         game.close()

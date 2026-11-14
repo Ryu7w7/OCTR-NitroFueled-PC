@@ -99,6 +99,9 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         library=Path(environment.get('BB_MOD_LIBRARY_DIR') or Path(port)/'patches')
         catalog=scan(root,library)
         for message in catalog['messages']:log('OCTR mods: '+message)
+        import track_editor
+        installed=track_editor.notice(game)  # a game changed by a track editor's install
+        if installed:log('OCTR mods: '+installed)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
         if not supported:
             # Every package ships a mods folder: a game the packages cannot target (EU 1.00, no
