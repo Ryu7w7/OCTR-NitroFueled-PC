@@ -7,6 +7,8 @@
           selection  <1|0 all external content on>  <page: own|bonus>
           package    <id> <1|0 on> <type> <name> <version> <author> <online> <source> <map> <credits>
                      <compatibility: "full|partial;<1|0 tried in game>;issue=n,..." or empty>
+          clash      <id> <id> <n>                  two packages with n files of the same name and
+                                                    different contents (content_compat.clashes)
           message    <text>                         a package that could not be read
     python scripts/content_cli.py PORTABLE_ROOT remove ID
         Moves the package's ZIP or folder to content-state/removed (nothing is deleted).
@@ -48,7 +50,15 @@ def listing(root):
                   m['author'], m.get('online', 'offline-only'), record['source'], m.get('map', ''),
                   m.get('credits', ''), content_compat.field(content_compat.of_manifest(m))]
         lines.append('package\t' + '\t'.join(clean(f) for f in fields))
-    lines += ['message\t' + clean(message) for message in result['messages']]
+    packages = [(r['manifest'], r['folder']) for _, r in sorted(result['packages'].items())]
+    messages = list(result['messages'])
+    try:
+        found = content_compat.clashes(packages, cp.state(folder) / 'archive-hashes.json')
+    except (ValueError, OSError) as error:
+        found = {}
+        messages.append('comparing the packages: %s' % error)
+    lines += ['clash\t%s\t%s\t%d' % (a, b, n) for (a, b), n in sorted(found.items())]
+    lines += ['message\t' + clean(message) for message in messages]
     return lines
 
 

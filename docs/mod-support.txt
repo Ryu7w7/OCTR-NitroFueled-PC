@@ -198,6 +198,11 @@ leaves 35 674 blocks allocated). The game's map files match both. The fixed file
 appended to the track's archive; nothing else in it changes. Convert again a track
 converted before this fix. Check or fix an archive by hand with
   python scripts/track_editor.py counts ARCHIVE.pak [--fix]
+Packages whose archives hold files of one name with different contents clash: the game
+keeps one version for all, so a track can show another one's textures (CTR Track Editor saves
+the game textures a track changes under their own names). The listing names each pair
+(content_compat.clashes, hashes kept in content-state/archive-hashes.json) and the launcher
+warns when both are on.
 Each converted package states its compatibility (scripts/content_compat.py), shown on its
 card. Partial: the track plays, but the next level can crash or memory stays allocated;
 found when its own archive carries changed copies of the game's scripts (vsc/), menus

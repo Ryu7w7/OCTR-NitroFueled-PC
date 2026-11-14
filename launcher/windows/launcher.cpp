@@ -5501,6 +5501,9 @@ struct ContentState {
     std::future<Captured> listing, action;
     std::vector<ContentPackage> packages;
     std::vector<std::string> messages;
+    // scripts/content_compat.py clashes: two packages with n files of one name and different contents
+    struct Clash { std::string a, b; int n; };
+    std::vector<Clash> clashes;
     std::string page = "own", notice;
     bool enabled = true, loaded = false, failed = false, converting = false;
 };
@@ -5531,6 +5534,7 @@ void ReadContentListing(const Captured& r) {
     if (c.failed) { if (!r.output.empty()) AddLog(r.output); return; }
     c.packages.clear();
     c.messages.clear();
+    c.clashes.clear();
     std::stringstream ss(r.output);
     std::string line;
     while (std::getline(ss, line)) {
@@ -5547,8 +5551,34 @@ void ReadContentListing(const Captured& r) {
         else if (f[0] == "package" && f.size() >= 11)
             c.packages.push_back({f[1], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[2] == "1",
                                   f.size() >= 12 ? f[11] : std::string()});
+        else if (f[0] == "clash" && f.size() >= 4) c.clashes.push_back({f[1], f[2], std::atoi(f[3].c_str())});
         else if (f[0] == "message" && f.size() >= 2) c.messages.push_back(f[1]);
     }
+}
+
+bool ContentPackageOn(const std::string& id) {
+    if (!g_content.enabled) return false;
+    for (const auto& p : g_content.packages) if (p.id == id) return p.on;
+    return false;
+}
+
+// The packages that are on and share files of one name with different contents with `id` (also
+// on): the game keeps one version for both, so a track can show another one's textures.
+std::string ClashText(const std::string& id) {
+    if (!ContentPackageOn(id)) return std::string();
+    std::string with;
+    for (const auto& k : g_content.clashes) {
+        const std::string other = k.a == id ? k.b : k.b == id ? k.a : std::string();
+        if (other.empty() || !ContentPackageOn(other)) continue;
+        std::string name = other;
+        for (const auto& p : g_content.packages) if (p.id == other) name = p.name;
+        with += (with.empty() ? "" : ", ") + name + " (" + std::to_string(k.n) + ")";
+    }
+    if (with.empty()) return std::string();
+    return std::string(T("Comparte texturas del juego con el mismo nombre y distinto contenido con: ",
+                         "Shares game textures of the same name and different contents with: ")) + with +
+           T(". Activadas juntas, el juego usa una sola versión y esta pista puede verse con las texturas de otra.",
+             ". On together, the game uses one version and this track can show another one's textures.");
 }
 
 // What a package's compatibility (scripts/content_compat.py) means, for its card.
@@ -5720,6 +5750,8 @@ void ContentTab() {
                                    : T("Solo sin conexión.", "Offline only.")) +
             (p.credits.empty() ? std::string() : "\n" + p.credits) +
             (p.compat.empty() ? std::string() : "\n" + CompatibilityText(p.compat));
+        const std::string clash = ClashText(p.id);
+        if (!clash.empty()) card.mod_description += "\n" + clash;
         cards.push_back(std::move(card));
     }
     int on = 0;
@@ -5815,6 +5847,20 @@ void ContentTab() {
                                                      : T("Quitando el paquete...", "Removing the package..."));
     if (c.failed) ImGui::TextColored(kYellow, "%s", T("No se pudo leer custom_content. Revisa el registro.", "Could not read custom_content. Check the log."));
     for (const auto& m : c.messages) ImGui::TextColored(kYellow, "%s", m.c_str());
+    bool clashing = false;
+    for (const auto& k : c.clashes) clashing |= ContentPackageOn(k.a) && ContentPackageOn(k.b);
+    if (clashing) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
+        ImGui::TextWrapped("%s", T("Algunas pistas activadas traen texturas del juego modificadas con su nombre original, "
+                                   "y el juego usa una sola versión para todas: una pista puede verse con las texturas de otra "
+                                   "(por ejemplo, la carretera). Cada paquete afectado lo indica. Si una se ve mal, juégala con "
+                                   "las otras desactivadas, o vuelve a exportarla con texturas de nombre propio.",
+                                   "Some tracks that are on carry changed game textures under their original names, and the "
+                                   "game uses one version for all of them: a track can show another one's textures (its road, "
+                                   "say). Each package concerned says so. If one looks wrong, play it with the others off, or "
+                                   "export it again with textures of its own names."));
+        ImGui::PopStyleColor();
+    }
     std::string remove;
     for (const auto& card : cards) if (ModCard(card)) remove = card.content_id;
     ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0.015f,0.13f,0.32f,0.82f));

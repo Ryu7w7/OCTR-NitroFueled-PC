@@ -81,6 +81,70 @@ def of_manifest(m):
     return found
 
 
+def clashes(packages, cache=None):
+    """{(id, id): n} of the pairs of packages whose archives hold n files of the same name with
+    different contents. The game keeps one of them for both (the one it finds first): CTR Track
+    Editor saves the game textures a track changes under their own names, so with several of its
+    tracks on, every track can show another one's road. `packages` is [(manifest, folder)];
+    `cache` a JSON file keeping the hashes, by archive (its sha256 in the manifest)."""
+    import json
+    import content_package as cp
+    known = {}
+    if cache is not None and Path(cache).is_file():
+        try:
+            known = json.loads(Path(cache).read_text(encoding='utf-8'))
+        except ValueError:
+            known = {}
+    sums = {r['file']: r['sha256'] for m, _ in packages for r in m['files']}
+    where = {}  # id -> {logical: (archive file, its sha256, index, size)}
+    for m, folder in packages:
+        mine = where.setdefault(m['id'], {})
+        for target, source in cp.archives(m, folder):
+            archive = Archive(Path(source))
+            try:
+                for i in range(len(archive.names)):
+                    mine.setdefault(archive.logical(i).casefold(),
+                                    (Path(source), sums.get(target), i, archive.infos[i][2]))
+            finally:
+                archive.f.close()
+    seen = Counter(n for names in where.values() for n in names)
+    shared = {n for n, k in seen.items() if k > 1}
+    if not shared:
+        return {}
+    # Hash what has to be: files of a shared name, of one size in more than one package.
+    sizes = {}
+    for ident, names in where.items():
+        for n in shared & names.keys():
+            sizes.setdefault(n, set()).add(names[n][3])
+    need = {}
+    for ident, names in where.items():
+        for n in shared & names.keys():
+            source, digest, i, size = names[n]
+            if len(sizes[n]) == 1 and (known.get(digest) or {}).get(n) is None:
+                need.setdefault(source, []).append((n, i, digest))
+    changed = False
+    for source, wanted in need.items():
+        archive = Archive(source)
+        try:
+            for n, i, digest in wanted:
+                known.setdefault(digest, {})[n] = hashlib.sha256(archive.read(i)).hexdigest()[:16]
+                changed = True
+        finally:
+            archive.f.close()
+    if changed and cache is not None:
+        Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        Path(cache).write_text(json.dumps(known), encoding='utf-8')
+    result = Counter()
+    idents = sorted(where)
+    for a_i, a in enumerate(idents):
+        for b in idents[a_i + 1:]:
+            for n in shared & where[a].keys() & where[b].keys():
+                x, y = where[a][n], where[b][n]
+                if x[3] != y[3] or (known.get(x[1]) or {}).get(n) != (known.get(y[1]) or {}).get(n):
+                    result[(a, b)] += 1
+    return dict(result)
+
+
 def field(compat):
     """One listing field: "level;tested;issue=n,..." or "" (scripts/content_cli.py)."""
     if not compat:

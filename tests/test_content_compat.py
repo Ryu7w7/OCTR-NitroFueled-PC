@@ -53,6 +53,24 @@ class CompatTests(unittest.TestCase):
         self.assertEqual(cc.assess(self.game, [track], te.ALL, 'ctr-editor-backrooms', '1.5.1')['level'], cc.FULL)
         self.assertTrue(cc.assess(self.game, [self.track({})], te.ALL, 'nbc', '1.2.0')['tested'])
 
+    def test_packages_with_one_file_name_and_different_contents_clash(self):
+        def package(ident, entries):
+            folder = self.dir / ident / 'archives'
+            folder.mkdir(parents=True)
+            path = pak(folder / f'{ident}.pak', entries)
+            m = {'id': ident, 'files': [{'file': f'archives/{ident}.pak', 'sha256': ident + '-sum'}]}
+            return m, self.dir / ident
+        road = 'textures/road.igz'
+        a = package('t901_a', {road: b'road of a', 'textures/same.igz': b'same', 'maps/a.igz': b'a'})
+        b = package('t902_b', {road: b'road of b', 'textures/same.igz': b'same', 'maps/b.igz': b'b'})
+        c = package('t903_c', {road: b'road of a', 'maps/c.igz': b'c'})
+        cache = self.dir / 'hashes.json'
+        expected = {('t901_a', 't902_b'): 1, ('t902_b', 't903_c'): 1}
+        self.assertEqual(cc.clashes([a, b, c], cache), expected)
+        self.assertTrue(cache.is_file())
+        self.assertEqual(cc.clashes([a, b, c], cache), expected)  # from the cache
+        self.assertEqual(cc.clashes([a, c], cache), {})
+
     def test_listing_field(self):
         self.assertEqual(cc.field(None), '')
         self.assertEqual(cc.field({'level': 'partial', 'tested': True, 'issues': {'game_scripts': 2}}),
