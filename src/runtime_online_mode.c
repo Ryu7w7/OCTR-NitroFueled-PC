@@ -2613,8 +2613,19 @@ static void name_color_changed(unsigned char *placeable) {
     memcpy(placeable + 12, &flags, 4);
 }
 
+/* BB_NAME_COLORS=0: no nickname is colored and no GUI tree is walked (to rule them out in a test). */
+static int name_colors_off(void) {
+    static int off = -1;
+    if (off < 0) {
+        const char *v = getenv("BB_NAME_COLORS");
+        off = v && v[0] == '0';
+        if (off) puts("Native Online: nickname colors off (BB_NAME_COLORS=0)");
+    }
+    return off;
+}
+
 static void colored_name(unsigned char *placeable, int allowed) {
-    if (!placeable) return;
+    if (!placeable || name_colors_off()) return;
     const char *text = (const char *)pointer_at(placeable, 0x30);
     float rgb[3];
     const int colored = allowed && text && runtime_name_color(text, rgb);
@@ -2714,7 +2725,7 @@ static uint64_t monotonic_ms(void) {
  * composition) passes its events through cup_project_event: the lobby's members, the pause
  * menu's racers, the results. Each project's tree is walked at most every 150 ms. */
 static void name_color_project(unsigned char *project) {
-    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    unsigned char *root = project && !name_colors_off() ? pointer_at(project, 0x10) : NULL;
     if (!root) return;
     static struct { unsigned char *root; uint64_t at; } roots[32];
     static unsigned next_root;

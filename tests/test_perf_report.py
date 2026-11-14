@@ -154,6 +154,36 @@ class PerfReportTests(unittest.TestCase):
         self.assertTrue(c.corrupt_free)
         self.assertEqual(c.fault['kind'], 'read access')
 
+    def test_a_corrupt_block_says_what_was_around_it(self):
+        # probe.c heap_summary: word kinds, never data, kept even when a crash follows
+        c = perf_report.Collector()
+        c.feed('Runtime: bailing corrupt free at guest offset 0x1590e5d (block 1, r8=2, pool=3)\n'
+               'Runtime: corrupt block words (block-0x40..+0x18): 0 n41 b-30 img+2774cc0 txt ptr ? '
+               'Jose b+10 0 unread unread; callers: 0x14a290d 0x1518e5a\n')
+        heap = c.report({})['fault']['heap']
+        self.assertEqual(heap['words'][:4], ['0', 'n41', 'b-30', 'img+2774cc0'])
+        self.assertEqual(heap['words'][7], '?')  # not a kind: dropped
+        self.assertEqual(heap['callers'], ['0x14a290d', '0x1518e5a'])
+        c.feed('Fault: write access to 0000000000000020 at guest offset 0x1490000 (thread 7)\n')
+        self.assertEqual(c.report({})['fault']['heap'], heap)
+
+    def test_a_crash_names_its_callers_and_thread(self):
+        c = perf_report.Collector()
+        c.feed('Fault: write access to 0000000000000020 at guest offset 0x1490000 (thread 7)\n'
+               '  rax=0000000000000001 rbx=0000000000000002\n'
+               '  guest code addresses on the stack (callers, newest first): 0x14a290d@rsp+0x8 '
+               '0x1518e5a@rsp+0x40\n'
+               '  thread name: C:\\Users\\Some Player\n'
+               '  guest thread: MainThread\n'
+               'Fault: read access to 0000000000000010 at guest offset 0x99 (thread 1)\n'
+               '  guest code addresses on the stack (callers, newest first): 0x1@rsp+0x8\n'
+               '  guest thread: Other\n')
+        fault = c.report({})['fault']
+        self.assertEqual(fault['where'], 'guest offset 0x1490000')
+        self.assertEqual(fault['callers'], ['0x14a290d', '0x1518e5a'])
+        self.assertEqual(fault['thread'], 'MainThread')
+        self.assertNotIn('Some Player', json.dumps(fault))
+
     def test_mods_in_use(self):
         with tempfile.TemporaryDirectory() as folder:
             mods = Path(folder) / 'mods'

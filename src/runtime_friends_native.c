@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "runtime_friends.h"
 #include <stdio.h>
+#include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -36,6 +37,11 @@ static void ABI friends_update(unsigned char *self) {
 int runtime_friends_native_start(unsigned char *image, size_t size) {
     /* USA/EU 1.21: CPS4FriendManager inherits CFriendManager::update (+0xc0).
      * Its dirty flags are the same ones the native user-change handler sets. */
+    const char *live = getenv("BB_FRIENDS_LIVE");
+    if (live && live[0] == '0') { /* to rule it out in a test */
+        puts("Friends live refresh: off (BB_FRIENDS_LIVE=0)");
+        return 1;
+    }
     if (size < 0x2ac2e98 ||
         memcmp(image + 0xab55b0, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x89\xfb\x80\x7b\x50\x00", 18) ||
         memcmp(image + 0xab5a56, "\xc6\x44\x07\x50\x01\xc7\x44\x87\x58\x00\x00\x00\x00\xc6\x44\x07\x78\x01", 18) ||
