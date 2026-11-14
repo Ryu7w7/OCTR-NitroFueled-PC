@@ -186,12 +186,15 @@ It keeps the track's archives and new files and leaves out, and names, its chang
 game files every track uses. Formats worked out from Neo Bowser City (PanchoPewPew),
 Suzuka (CTRNFModding) and the Nitro Creator Handbook (venvs and collaborators).
 The conversion also fixes the reference counts of the track's map files (maps/*.igz:
-each object's count, the u32 at +0x08, made equal to the pointers to it, as in every game
-map file). Tracks saved by CTR Track Editor before v0.5 have them wrong (Backrooms, Suzuka
-and Neo Bowser City: 7 000 to 12 600 objects each): such a track plays, but the next
-level loaded after it crashes the game (guest offset 0x14a94e9, igStreamingChunkManager).
-The fixed files are appended to the track's archive; nothing else in it changes. Convert
-again a track converted before this fix. Check or fix an archive by hand with
+each object's count, the u32 at +0x08). Wrong counts let a track play, but the next level
+loaded after it crashes the game (guest offset 0x14a94e9, igStreamingChunkManager), or the
+track's memory stays allocated and the game can hang on the loading screen. A track keeps
+the convention most of its own counts follow, made exact: every pointer to the object (CTR
+Track Editor's rule; Backrooms and Suzuka had 12 600 wrong) or only the pointers from what
+the file reaches from its root lists (Neo Bowser City: 531 wrong; the editor's rule there
+leaves 35 674 blocks allocated). The game's map files match both. The fixed files are
+appended to the track's archive; nothing else in it changes. Convert again a track
+converted before this fix. Check or fix an archive by hand with
   python scripts/track_editor.py counts ARCHIVE.pak [--fix]
 
 TRACKS MADE WITH CTR TRACK EDITOR

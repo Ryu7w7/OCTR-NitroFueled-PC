@@ -15,6 +15,7 @@ from igz_merge import File
 from test_racer_registry import SIZES, Builder
 
 SIZES.setdefault('CSharedUnlock', 0x10)
+SIZES.setdefault('igNameList', 0x28)
 
 
 def map_file(counts):
@@ -26,6 +27,19 @@ def map_file(counts):
     for o, n in zip((lst, shared, single), counts):
         struct.pack_into('<I', b.data, o + 8, n)
     return b.build(), (lst, shared, single)
+
+
+def reached_file(shared_count, single_count):
+    """An IGZ whose root list holds the shared object and a single one, and whose loose list (nothing
+    reaches it, as Neo Bowser City's spline points) holds the shared object twice more."""
+    b = Builder(['igObjectList', 'igNameList', 'CSharedUnlock'])
+    shared, single = b.obj('CSharedUnlock'), b.obj('CSharedUnlock')
+    root = b.lst('igObjectList', [shared, single])
+    names = b.lst('igNameList', ['Shared', 'Single'], names=True)
+    b.lst('igObjectList', [shared, shared])
+    struct.pack_into('<I', b.data, shared + 8, shared_count)
+    struct.pack_into('<I', b.data, single + 8, single_count)
+    return b.build(root, names), (shared, single)
 
 
 def counts(blob, objects):
@@ -50,6 +64,16 @@ class CountTests(unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertEqual(te.fix_counts(fixed), (fixed, 0))
 
+    def test_a_track_keeping_counts_of_reached_pointers_keeps_that_rule(self):
+        # the shared object's count, 1, is the pointers from reached places, not all 3
+        blob, objects = reached_file(1, 5)
+        self.assertEqual(te.rule_of([blob]), te.REACHED)
+        fixed, n = te.fix_counts(blob)
+        self.assertEqual((counts(fixed, objects), n), ([1, 1], 1))
+        # the same file under the editor's rule (the track's other files decide)
+        fixed, n = te.fix_counts(blob, te.ALL)
+        self.assertEqual(counts(fixed, objects), [3, 1])
+
     def test_files_that_are_not_igz_are_left_alone(self):
         self.assertEqual(te.fix_counts(b'not an igz'), (b'not an igz', 0))
 
@@ -63,7 +87,7 @@ class CountTests(unittest.TestCase):
         pak = root / 't901_x.pak'
         write_archive(pak, [('t/' + p, p, i << 8, d) for i, (p, d) in enumerate(entries.items())],
                       SimpleNamespace(flags=0))
-        self.assertEqual(te.wrong_counts(pak), {'maps/octane/t901_x/t901_x_art.igz': 2})
+        self.assertEqual(te.wrong_counts(pak), ({'maps/octane/t901_x/t901_x_art.igz': 2}, te.ALL))
         size = pak.stat().st_size
         self.assertEqual(te.fix_archive(pak), {'maps/octane/t901_x/t901_x_art.igz': 2})
         after = read(pak)
