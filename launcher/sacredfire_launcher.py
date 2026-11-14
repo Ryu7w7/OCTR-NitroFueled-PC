@@ -60,7 +60,7 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 MAX_LOG_LINES = 5000
 COMMUNITY_DISCORD = "https://discord.gg/PAT5SJzdXw"  # bugs, questions, ban appeals
-RANK_SITE = "https://crashteamrank.vercel.app"  # record validation; ranked play later
+RANK_SITE = "https://crashteamrank.vercel.app"  # record validation
 UNSUPPORTED_GPU_CODE = 24  # the game found no Vulkan 1.3 (GPU, driver or loader): vk_platform.h
 TITLE = "SacredFire"
 GAME = "Crash Team Racing: Nitro-Fueled"
@@ -1243,7 +1243,7 @@ class LauncherWindow(Adw.ApplicationWindow):
                "also by IP."))
         for title, button, url in (
                 (tr("Bugs, questions or a ban appeal: our Discord"), tr("Open Discord"), COMMUNITY_DISCORD),
-                (tr("Crash Team Rank: validate your records (ranked play with MMR coming)"), tr("Open page"), RANK_SITE)):
+                (tr("Crash Team Rank: validate your records"), tr("Open page"), RANK_SITE)):
             row = Adw.ActionRow(title=title)
             row.set_title_lines(0)
             open_button = flat_button("web-browser-symbolic", button, lambda _b, url=url: open_external(url))

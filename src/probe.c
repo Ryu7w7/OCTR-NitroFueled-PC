@@ -748,6 +748,39 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (rip - (uintptr_t)image == 0x14a21db) {
+        uintptr_t meta = (uintptr_t)uc->uc_mcontext.gregs[REG_R15];
+        uintptr_t name_address = 0, vtable = 0;
+        char name[128] = "<unreadable>";
+        if (read_self_memory(&name_address, meta + 0x10, sizeof name_address) == (ssize_t)sizeof name_address) {
+            char text[sizeof name];
+            ssize_t n = read_self_memory(text, name_address, sizeof text - 1);
+            if (n > 0) { text[n] = 0; memcpy(name, text, (size_t)n + 1); }
+        }
+        ssize_t got = read_self_memory(&vtable, meta + 0x38, sizeof vtable);
+        snprintf(line, sizeof line, "  native constructor: meta=%p class=%.127s vtable=%p readable=%d\n",
+                 (void *)meta, name, (void *)vtable, got == (ssize_t)sizeof vtable);
+        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    }
+    if (rip - (uintptr_t)image == 0x14f8a55) {
+        uintptr_t directory = (uintptr_t)uc->uc_mcontext.gregs[REG_R15];
+        uintptr_t dependency = (uintptr_t)uc->uc_mcontext.gregs[REG_R14];
+        uintptr_t name_address = 0, dependency_name = 0;
+        unsigned owners = 0;
+        int loads = 0;
+        char name[128] = "<unreadable>";
+        if (read_self_memory(&name_address, directory + 0x10, sizeof name_address) == (ssize_t)sizeof name_address) {
+            ssize_t n = read_self_memory(name, name_address, sizeof name - 1);
+            if (n > 0) name[n] = 0;
+            else memcpy(name, "<unreadable>", sizeof "<unreadable>");
+        }
+        read_self_memory(&owners, directory + 8, sizeof owners);
+        read_self_memory(&loads, directory + 0x84, sizeof loads);
+        read_self_memory(&dependency_name, dependency + 0x10, sizeof dependency_name);
+        snprintf(line, sizeof line, "  native dependency: directory=%p name=%.127s owners=%u loads=%d dependency=%p name_address=%p\n",
+                 (void *)directory, name, owners & 0x7ffffu, loads, (void *)dependency, (void *)dependency_name);
+        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    }
     /* Native code has frame pointers but no host unwind metadata. */
     if (rip - (uintptr_t)image < 0x10000000) dump_frames(uc);
     /* RIP in no mapping at all (zero, or a pointer like 0xffffffff): nothing there to name, and

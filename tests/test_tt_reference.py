@@ -119,3 +119,15 @@ class TTReferenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReferenceCacheInputs(unittest.TestCase):
+    def test_ghost_update_invalidates_references(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'ghosts').mkdir()
+            ghost=root/'ghosts/reference.igb';ghost.write_bytes(b'old')
+            before=ghosts.source_stamp(root)
+            ghost.write_bytes(b'updated ghost')
+            self.assertNotEqual(before,ghosts.source_stamp(root))

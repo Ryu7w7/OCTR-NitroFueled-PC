@@ -278,6 +278,9 @@ def prepare(game, out, config, env, base):
     launches while the archives, the art and the base patches are the same."""
     style = chosen_style(config, env)
     if style == 'playstation':
+        from cache_cleanup import discard_files
+        folder = Path(out) / 'button_prompts'
+        discard_files(folder, [*folder.glob('*.bbpatch'), folder/'stamp.json'])
         return {}
     import hashlib
     import json
@@ -285,16 +288,21 @@ def prepare(game, out, config, env, base):
     folder = Path(out) / 'button_prompts'
     from mod_file_paths import resolve
     archives = [resolve(Path(game) / 'archives' / name) for name in ARCHIVES if resolve(Path(game) / 'archives' / name).is_file()]
-    stamp = {'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(), 'fonts': list(FONTS),
+    stamp = {'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+             'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(), 'fonts': list(FONTS),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}
     stamp_file = folder / 'stamp.json'
+    made = {}
     try:
         made = json.loads(stamp_file.read_text(encoding='utf-8'))
         if made['stamp'] == stamp and all(Path(p).is_file() for p in made['patches'].values()):
             return {g: Path(p) for g, p in made['patches'].items()}
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         pass
+    from cache_cleanup import discard_files
+    if isinstance(made, dict) and isinstance(made.get('patches'), dict):
+        discard_files(folder, made['patches'].values())
     art = read_png(art_path)
     folder.mkdir(parents=True, exist_ok=True)
     patches = {}

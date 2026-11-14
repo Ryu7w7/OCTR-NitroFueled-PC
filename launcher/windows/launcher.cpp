@@ -4877,8 +4877,7 @@ void OnlineTab() {
     }
     ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
     CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
-    // Record validation now; ranked play with ranks and MMR, tied to the server, later.
-    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)", "Crash Team Rank: validate your records (ranked play with MMR coming)"));
+    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords", "Crash Team Rank: validate your records"));
     ImGui::SameLine();
     if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
 

@@ -43,7 +43,12 @@ class SpeedModeCacheTests(unittest.TestCase):
                 normal, speed = output / 'a.normal.bbpatch', output / 'a.speed.bbpatch'
                 normal.write_bytes(b'N')
                 speed.write_bytes(b'S')
-                return [normal, *base_patches], [speed, *base_patches], 40
+                extra = []
+                if len(builds) == 1:
+                    obsolete = output/'obsolete.bbpatch'
+                    obsolete.write_bytes(b'old')
+                    extra.append(obsolete)
+                return [normal, *extra, *base_patches], [speed, *base_patches], 40
 
             with mock.patch.object(speed_mode, 'build', build):
                 first = speed_mode.prepare(root / 'game', out, [base])
@@ -52,6 +57,8 @@ class SpeedModeCacheTests(unittest.TestCase):
                 base.write_bytes(b'BASE 2')  # an earlier overlay changed (item rules, a mod)
                 speed_mode.prepare(root / 'game', out, [base])
                 self.assertEqual(len(builds), 2)
+                self.assertFalse((out/'obsolete.bbpatch').exists())
+                self.assertEqual(base.read_bytes(),b'BASE 2')
                 pak.write_bytes(b'TRACK, updated')  # the game's archive changed
                 speed_mode.prepare(root / 'game', out, [base])
                 self.assertEqual(len(builds), 3)

@@ -102,12 +102,15 @@ int runtime_time_trial_start(unsigned char *image, size_t size);
  * a player who joins takes it, also when joining by invitation (no selector seen). */
 void runtime_online_mode_adopt(int speed);
 void runtime_online_mode_leave_cup(void);
+void runtime_online_mode_new_session(void); /* game thread: fresh Online menu choice */
+void runtime_online_mode_request_leave(int fresh); /* worker-safe; consumed on game thread */
 int runtime_online_mode_private_speed(void);
 int runtime_online_mode_private_cup(void);
 int runtime_online_mode_private_single_options(void);
 int runtime_online_mode_private_teams(void);
 int runtime_online_mode_in_private(void);
 int runtime_online_mode_lobby_open(void);        /* an online lobby is on screen */
+void runtime_online_mode_selector_left(void);
 void runtime_online_mode_note_frame(void);       /* the game's thread, every frame */
 int runtime_online_mode_room_on(void);           /* in_private as of the last frame, for any thread */
 int runtime_online_mode_public_on(void);         /* a public match's lobby as of the last frame */
@@ -122,13 +125,16 @@ void runtime_room_mode_host_name(char out[24]);
 int runtime_room_mode_ready(void);
 /* 1 verified/frozen, 0 rejected, -1 background verification pending. */
 int runtime_room_mode_begin_race(void);
+int runtime_room_mode_race_frozen(void);
 void runtime_room_mode_end_race(void);
 int runtime_public_itemless_start(unsigned char *image, size_t size);
 int runtime_public_itemless_available(void);
 int runtime_public_itemless_announce(void);
 int runtime_public_itemless_active(void);
+int runtime_public_itemless_lobby_mode(void);
 int runtime_public_match_active(void);
 int runtime_private_match_active(void);
+int runtime_online_party_active(void);
 /* 1 accepted, 0 rejected, -1 asynchronous check pending. */
 int runtime_private_party_check(void);
 void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *));
@@ -137,9 +143,42 @@ void runtime_private_party_cancel(void);
 int runtime_private_difficulty_modified(void);
 int runtime_public_itemless_selected(void);
 void runtime_public_itemless_select(int enabled);
+int runtime_ranked_active(void);
+int runtime_ranked_selected(void);
+/* -1 checking, 0 closed/unavailable, 1 open; fresh rechecks before entry. */
+int runtime_ranked_status(int fresh);
+void runtime_ranked_gate_update(void *root, int ranked);
+/* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
+int runtime_ranked_session(uint64_t *room, int *mode);
+/* One racer of the validated finish order, best first (runtime_ranked.c). */
+struct runtime_ranked_racer { char name[32]; int finished; int pos; }; /* pos: the on-screen finish position (AIs take their own slots, honestly) */
+/* The finish order of the race just ended, 0 none (runtime_online_mode.c). */
+int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
+/* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */
+void runtime_ranked_start(void);
+void runtime_ranked_race_end(void);
+/* The member's current Ranked tier (1..7), or 0 when unavailable. */
+int runtime_ranked_tier(const char *name, int *mode);
+int runtime_ranked_badge(const char *name, int *mode); /* -1 for an empty/placeholder slot. */
+int runtime_ranked_profile(const char *name, int mode, int *tier, int *mmr, int *placements, int *position);
+void runtime_online_mode_ranked_menu_update(unsigned char *root, int shown, int mode);
+int runtime_ranked_mmr(const char *name);
+const char *runtime_ranked_tier_name(int mode, int tier);
+void runtime_online_mode_set_text(void *placeable, const char *text);
+void runtime_online_mode_show_placeable(void *placeable, int shown);
+void runtime_online_mode_hof_legend(void *project);
+int runtime_online_mode_hof_activate(void *project);
+void runtime_online_mode_hof_cycle(void *placeable, int direction);
+void *runtime_online_mode_content(void *placeable);
 void runtime_public_itemless_reset(void);
+void runtime_public_itemless_new_session(void);
+void runtime_public_itemless_menu_return(void);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
+int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);
+void runtime_online_mode_matchmaking_update(unsigned char *root);
+int runtime_online_mode_matchmaking_timeout(void);
+int runtime_online_mode_matchmaking_cancel(int route); /* 0 search, 1 room leave, 2 host-closed/Waiting Room */
 int runtime_speed_mode_enabled(void);
 int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
@@ -195,4 +234,8 @@ void runtime_trophy_badges(const char *json); /* the server's badges: OCTR's tro
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
 void runtime_thread_attach_host(const char *name);
+
+/* Notify the retained native leaderboard graph after the HOF view is initialized. */
+void runtime_hof_native_ready(void *project);
+void runtime_hof_focus_list(void *placeable);
 #endif

@@ -195,6 +195,13 @@ int runtime_room_mode_begin_race(void) {
     return result;
 }
 
+int runtime_room_mode_race_frozen(void) {
+    pthread_mutex_lock(&follow_lock);
+    int frozen = race_frozen;
+    pthread_mutex_unlock(&follow_lock);
+    return frozen;
+}
+
 void runtime_room_mode_end_race(void) {
     pthread_mutex_lock(&follow_lock);
     race_frozen = 0; verify_done=0; ++verify_epoch;
@@ -249,6 +256,7 @@ void runtime_room_mode_joined(const char *session_id) {
     memcpy(followed_host, f->host, sizeof followed_host);
     race_frozen = 0;
     pthread_mutex_unlock(&follow_lock);
+    runtime_online_mode_request_leave(1);
     start(follow, f);
 }
 
@@ -256,12 +264,12 @@ void runtime_room_mode_joined(const char *session_id) {
 void runtime_room_mode_left(void) {
     pthread_mutex_lock(&follow_lock);
     followed_host[0] = 0;
-    race_frozen = 0;
+    race_frozen = 0; verify_done = 0;
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
     pthread_mutex_unlock(&follow_lock);
     runtime_race_options_leave_room();
-    runtime_online_mode_leave_cup();
+    runtime_online_mode_request_leave(0);
 }
 
 void runtime_room_mode_host_name(char out[24]) {

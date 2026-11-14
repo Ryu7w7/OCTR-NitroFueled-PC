@@ -132,8 +132,14 @@ server address can be changed there too, to play on your own RyuNET server.
 
 **Connection problems:** the game connects players directly to each other (UDP port 3074), as
 on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) cannot reach some
-other players. If a match keeps failing with the same people, enabling UPnP on your router or
-forwarding UDP 3074 to your PC helps.
+other players. Online startup skips automatic UPnP discovery so an unresponsive router cannot
+hold up the connection. NAT discovery, hole punching, and the port's tunnel remain active.
+Set `BB_UPNP_PORT` to an external UDP port (1024–9999) before launching if you want the game's
+UPnP router mapping instead. Manual port forwarding remains available too.
+
+Press Online once while the network starts; the request continues when the network is ready.
+Moving focus or pressing Back cancels that request. “Connected to servers” appears only after
+server login and native network startup both finish.
 
 **No donations:** this is a non-commercial fan project. It does not accept donations and sells
 nothing; online play is free and the same for everyone. You need your own copy of the game.

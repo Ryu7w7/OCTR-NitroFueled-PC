@@ -312,7 +312,7 @@
  "Use your own nickname: do not impersonate anyone.": "Usa tu propio apodo: no te hagas pasar por otra persona.",
  "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.": "¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.",
  "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP.": "Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.",
- "Crash Team Rank: validate your records (ranked play with MMR coming)": "Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)",
+ "Crash Team Rank: validate your records": "Crash Team Rank: valida tus récords",
  "Open page": "Abrir página",
  "This PC's clock is {} min off: online corrects it, but set the date and time to automatic in the system settings.": "La hora de este PC va {} min desfasada: el online la corrige, pero activa la fecha y hora automáticas en la configuración del sistema.",
  "This nickname is yours (recovered from another installation on this PC).": "Este apodo es tuyo (recuperado de otra instalación de este PC).",

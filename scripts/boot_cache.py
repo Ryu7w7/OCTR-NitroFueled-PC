@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 import game_check
+from cache_cleanup import linked
 import launch_lock
 import link_libc
 import link_modules
@@ -26,7 +27,7 @@ OUTPUTS = ('boot.bin', 'eboot.elf', 'entry.bin', 'profile.txt', 'analysis.json',
 MAGICS = {'boot.bin': b'BBPROBE2', 'boot-libc.bin': b'BBPROBE4',
           'boot-linked.bin': b'BBPROBE5', 'eboot.elf': b'\x7fELF'}
 KEY = re.compile(r'[0-9a-f]{64}')
-KEEP_PER_TITLE = 2
+KEEP_PER_TITLE = 1
 
 
 def digest(path):
@@ -35,10 +36,6 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             h.update(block)
     return h.hexdigest()
-
-
-def linked(path):
-    return path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction())
 
 
 def fingerprint(game):
@@ -93,7 +90,7 @@ def build(game, target):
 
 
 def prune(region, current):
-    """Only managed fingerprints, under the full launch lock; keep two builds per edition."""
+    """Only managed fingerprints, under the full launch lock; keep only the current build per edition."""
     candidates = []
     for folder in region.iterdir():
         if (folder != current and KEY.fullmatch(folder.name) and folder.is_dir()
@@ -135,6 +132,10 @@ def ensure(game, out, log=print):
             raise ValueError('Boot cache entry must not be a symlink or junction')
         if valid(target, inputs):
             log('Boot cache: hit (' + title + '): ' + str(target))
+            try:
+                prune(region, target)
+            except OSError as error:
+                log('Boot cache: old cache cleanup deferred (' + str(error) + ')')
             return target
         log('Boot cache: rebuilding (' + title + '; inputs changed or output missing/invalid)')
         # A killed build leaves only staging. No reader uses it and the session lock excludes writers.

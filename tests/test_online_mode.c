@@ -1,11 +1,16 @@
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_ranked.h"
 #include "runtime_name_colors.h"
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/mman.h>
+
+extern unsigned char *ranked_mode_select_root(unsigned char *owner);
+extern void ranked_mode_select_layout(unsigned char *root, int ranked);
 
 int runtime_name_color(const char *nick, float rgb[3]) { (void)nick, (void)rgb; return 0; }
 
@@ -20,14 +25,55 @@ int runtime_private_party_update(void) { return 0; }
 void runtime_private_party_cancel(void) {}
 static int mode_checks;
 void runtime_race_options_map_loading(const char *map) { (void)map; }
-static int public_available, public_selected, public_active;
+static int public_available, public_selected, public_active, ranked_selected;
 static int public_normal_active;
 int runtime_public_match_active(void) { return public_normal_active || public_active; }
 int runtime_public_itemless_active(void) { return public_active; }
+int runtime_public_itemless_lobby_mode(void) { return public_active || public_selected; }
+static int hof_active, hof_updates;
+static void *hof_expected_root, *hof_expected_project;
+void runtime_hof_update(void *root, void *project) {
+    assert(root == hof_expected_root && project == hof_expected_project); ++hof_updates;
+}
+int runtime_hof_active(void) { return hof_active; }
+void runtime_hof_close(void) {}
+static int hof_pending_open, hof_named_opens, asset_opens;
+static unsigned char hof_open_options[0x28], hof_open_manager[0x1b0], hof_result_handle[0x30];
+int runtime_hof_take_open(void) { int pending = hof_pending_open; hof_pending_open = 0; return pending; }
+const char *runtime_hof_project(const char *name) { return name; }
+static int ranked_score_active, ranked_score_ready, score_test_active;
+static struct runtime_ranked_result score_result;
+int runtime_ranked_active(void) { return ranked_score_active; }
+void runtime_ranked_gate_update(void *root, int ranked) { (void)root; (void)ranked; }
+int runtime_ranked_selected(void) { return ranked_selected; }
+void runtime_ranked_race_end(void) {}
+void runtime_ranked_race_begin(void) {}
+int runtime_ranked_result_copy(struct runtime_ranked_result *result) { *result = score_result; return ranked_score_ready; }
+int runtime_ranked_tier(const char *name, int *mode) { (void)name; if (mode) *mode = 0; return 0; }
+static int ranked_profile_mode, ranked_best_badge_mode, ranked_profile_tier;
+int runtime_ranked_badge(const char *name, int *mode) { (void)name; if (mode) *mode = ranked_best_badge_mode; return 0; }
+int runtime_ranked_mmr(const char *name) { (void)name; return 0; }
+int runtime_ranked_profile(const char *name, int mode, int *tier, int *mmr, int *placements, int *position) {
+    (void)name; ranked_profile_mode = mode;
+    if (tier) *tier = ranked_profile_tier;
+    if (mmr) *mmr = ranked_profile_tier ? 1234 : 0;
+    if (placements) *placements = 5;
+    if (position) *position = 3;
+    return 1;
+}
+const char *runtime_ranked_tier_name(int mode, int tier) { (void)mode; (void)tier; return "UNRANKED"; }
+const char *runtime_np_get_online_name(void) { return "LocalHost"; }
 int runtime_public_itemless_available(void) { return public_available; }
 int runtime_public_itemless_selected(void) { return public_selected; }
+void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
+void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_update(void) {}
+static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
+int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
+    *elapsed=search_test_elapsed;*timeout=180;*range=search_test_range;*ranked=search_test_ranked;
+    return search_test_active;
+}
 void runtime_public_itemless_select(int enabled) { public_selected = enabled; }
 static int synced_finished_mask=-1;
 int runtime_ai_catchup_results(void) { return synced_finished_mask; }
@@ -49,13 +95,22 @@ static int ABI damage_mock(unsigned char *component, unsigned kind, void **sourc
 static int confetti_calls, animation_calls, animation_selection;
 static unsigned char result_anim[8];
 static int result_sounds, released_result_sounds, result_sound_won;
+static int ranked_sound_calls, ranked_sound_releases;
+static char ranked_sound_token, last_ranked_sound[80];
 static void ABI result_sound_mock(void *kart, const char *name, void **sound, void **callback) {
     assert(kart && !callback[0] && !callback[1]);
+    if (!strncmp(name,"UI_GrandPrix_",13)) {
+        snprintf(last_ranked_sound,sizeof last_ranked_sound,"%s",name);
+        *sound=&ranked_sound_token;
+        ++ranked_sound_calls;
+        return;
+    }
     result_sound_won = !strcmp(name, "UI_Player_Lap_Change_End_Win");
     assert(result_sound_won || !strcmp(name, "UI_Player_Lap_Change_End_Lose"));
     *sound = result_anim; ++result_sounds;
 }
 static void ABI release_result_sound_mock(void *sound) {
+    if (sound==&ranked_sound_token) { ++ranked_sound_releases; return; }
     assert(sound == result_anim); ++released_result_sounds;
 }
 static void *ABI result_animation_mock(void *kart) { assert(kart); return result_anim; }
@@ -115,15 +170,15 @@ static void ABI marker_event_mock(unsigned char *self, unsigned char *event, voi
     (void)self; (void)owner;
     if (event) marker_native_flag = event[0x28];
 }
-static int legend_buttons[3], legend_adds;
+static int legend_buttons[5], legend_adds;
 static char current_legend[16];
 static void ABI legend_dispatch_mock(void *project, unsigned char *event) {
     (void)project;
     int button = *(int *)(event + 0x18);
-    assert(button == 1 || button == 2); legend_buttons[button] = 0;
+    assert(button == 1 || button == 2 || button == 3); legend_buttons[button] = 0;
 }
 static void ABI legend_add_mock(void *project, int button, char **label, unsigned char force) {
-    assert(project && force && (button == 1 || button == 2));
+    assert(project && force && (button == 1 || button == 2 || button == 3));
     legend_buttons[button] = 1; ++legend_adds;
     snprintf(current_legend, sizeof current_legend, "%s", *label);
 }
@@ -149,8 +204,18 @@ static void *ABI lookup_hero_mock(void *catalog, const char *hero) {
     return hero_record;
 }
 static int room_active, lobby_updates;
+static void *checked_mode_selector;
+static unsigned char expected_mode_options[3];
+static void check_mode_options(void *self) {
+    if (!checked_mode_selector || self != checked_mode_selector) return;
+    unsigned char *available = *(void **)((char *)self + 0x1b0);
+    unsigned char *items = *(void **)(available + 0x20);
+    assert(!memcmp(items, expected_mode_options, 3));
+    assert(((unsigned char *)self)[0x194] == 1);
+}
 static void ABI base_update(void *self, void *owner, float dt) {
-    (void)self;
+    check_mode_options(self);
+    if (checked_mode_selector && self == checked_mode_selector) return;
     assert(owner && dt == 0.25f);
     ++lobby_updates;
 }
@@ -182,10 +247,20 @@ static void ABI lobby_start_mock(unsigned char *self) {
     ++gate_native_calls;
     self[0x42] = 1; /* This is the broadcast's native one-shot latch. */
 }
+static int startup_failures;
 static void ABI gate_notice_mock(const char *text, void *callback) {
+    if (!strcmp(text, "Failed to initialize network, try again later")) {
+        assert(!callback); ++startup_failures; return;
+    }
     assert(!callback && ((strstr(text, "TEAMS WITH NO AI NEED") && strstr(text, "ENABLE AI")) ||
                         strstr(text, "synchroniz")));
     ++gate_notices;
+}
+static void ABI member_event_mock(void *self, void *event, void *owner) {
+    (void)self; (void)event; (void)owner;
+}
+static void ABI member_update_mock(void *self, void *owner, float dt) {
+    (void)self; (void)owner; (void)dt;
 }
 static void ABI base_event(void *self, void *event, void *owner) {
     (void)self; (void)event; (void)owner; base_calls++;
@@ -197,11 +272,18 @@ static void *ABI event_type(void *event) {
 static void (ABI *choice)(void *, int);
 static int selector_refreshes;
 static void ABI refresh_selector_mock(unsigned char *self) {
+    if (checked_mode_selector == self) {
+        check_mode_options(self);
+        assert(*(int *)(self + 0x190) == *(int *)(self + 0x1a0));
+        ++selector_refreshes;
+        return;
+    }
     assert(*(int *)(self + 0x190) == 0);
     ++selector_refreshes;
     choice(NULL, 0); /* Must not dispatch a game-mode change while resetting Race Type. */
 }
 static void ABI original_handler(void *self, void *event, void *owner) {
+    check_mode_options(self);
     int index; memcpy(&index, (unsigned char *)event + 8, 4);
     /* Selection event precedes the native stored-index update. */
     choice(owner, index);
@@ -251,13 +333,67 @@ static void *ABI get_sprite(void *row) {
     memcpy(&asset, (char *)row + 0x38, sizeof asset);
     return asset;
 }
+static unsigned char hof_animation_tag[0x18], timeout_input[0x28];
+static void *timeout_project;
+static int timeout_events,timeout_releases,timeout_signal=0x10000;
+static void *timeout_type;
+static unsigned char *timeout_menu_field;
+static int hof_animation_calls, hof_animation_releases;
+static void *score_animation_owner;
+static const char *score_animation_name;
+static int score_animation_calls;
+static void *ABI hof_animation_factory(void *type, void *allocator, int zero) {
+    if(type==(void *)44 || type==(void *)45) { timeout_type=type;memset(timeout_input,0,sizeof timeout_input);return timeout_input; }
+    assert(type == (void *)77 && !allocator && !zero);
+    memset(hof_animation_tag, 0, sizeof hof_animation_tag);
+    return hof_animation_tag;
+}
+static void ABI hof_animation_initialize(void *parameters) { memset(parameters, 0, 0x60); }
+static void ABI hof_animation_play(void *owner, void *tag, void *parameters) {
+    assert(tag == hof_animation_tag);
+    if (score_animation_owner) {
+        assert(owner == score_animation_owner);
+        assert(!strcmp(*(char **)(hof_animation_tag + 0x10), score_animation_name));
+        ++score_animation_calls;
+        return;
+    }
+    assert(owner == (void *)78);
+    assert(!*(void **)((char *)parameters + 0x50));
+    assert(!strcmp(*(char **)(hof_animation_tag + 0x10),
+                   hof_animation_calls++ ? "CyclePrevious" : "CycleNext"));
+}
+static void ABI hof_animation_release(void *tag) {
+    if(tag==timeout_input) { ++timeout_releases;return; }
+    if (tag==&ranked_sound_token) { ++ranked_sound_releases; return; }
+    assert(tag == hof_animation_tag);
+    free_string(NULL, *(char **)(hof_animation_tag + 0x10) - 16);
+    ++hof_animation_releases;
+}
 static void direct_stub(unsigned char *at, void *function) {
     memcpy(at, "\x48\xb8", 2);
     memcpy(at + 2, &function, 8);
     memcpy(at + 10, "\xff\xe0", 2);
 }
-static int received_mode;
-static void ABI receive_settings(unsigned char *event) { memcpy(&received_mode, event + 0x3c, 4); }
+static int startup_input_calls, startup_event_releases;
+static int startup_notice_calls;
+static void *startup_event_kind;
+static int ABI startup_mask(void *project, int unused) { assert(project && !unused); return 1; }
+static void *ABI startup_event_type(void *event) { (void)event; return startup_event_kind; }
+static void ABI startup_input_mock(unsigned char *self, void *event, void *owner) {
+    assert(self && owner && event);
+    ++startup_input_calls;
+}
+static void ABI startup_release_mock(unsigned char *event) {
+    assert(*(unsigned *)(event + 8) > 1);
+    --*(unsigned *)(event + 8);
+    ++startup_event_releases;
+}
+static void ABI startup_notice_mock(void *target, void *event, int shown) {
+    assert(target && event && shown == 1);
+    ++startup_notice_calls;
+}
+static int received_mode, received_settings_calls;
+static void ABI receive_settings(unsigned char *event) { ++received_settings_calls; memcpy(&received_mode, event + 0x3c, 4); }
 static unsigned char test_zones[4][0x1c0], test_handles[4][48];
 static unsigned char lobby_zone[0x1b8], lobby_data[0x78];
 static void *test_cup, *test_cup_handle;
@@ -318,7 +454,7 @@ static void ABI disable_node_mock(void *context, unsigned char *pins) {
     (void)context; assert(pins); ++disable_node_calls;
 }
 static int expected_grid, grid_calls;
-static unsigned char ranking_handle[0x30], panel_handle[0x30];
+static unsigned char ranking_handle[0x30], panel_handle[0x30], score_handle[0x30], score_project[0x80];
 static unsigned char members_handle[0x30], members_project[0x20], members_root[0x120];
 static unsigned char leaders_handle[0x30], leaders_project[0x20];
 static unsigned char ranking_project[0x20], panel_project[0x20], panel_root[0x20];
@@ -342,6 +478,17 @@ static void *ready_target, *ready_behavior, *ready_owner;
 static void (ABI *ready_handler)(void *, void *, void *);
 static int broadcast_routes, ready_project_events;
 static void ABI project_event_mock(void *self, void *event) {
+    if(event==timeout_input) {
+        assert(self==timeout_project);
+        if(timeout_type==(void *)45) {
+            assert(!strcmp(*(char **)timeout_menu_field,"Octane_Lobby_WaitingRoom"));
+            assert(!*(int *)(timeout_input+0x18) && !*(int *)(timeout_input+0x1c));
+        } else {
+            assert(*(int *)(timeout_input+0x18)==timeout_signal);
+            assert(*(int *)(timeout_input+0x1c)==1);
+        }
+        ++timeout_events;return;
+    }
     if (self == ready_target && ready_handler) {
         ++ready_project_events; ready_handler(ready_behavior, event, ready_owner); return;
     }
@@ -353,8 +500,102 @@ static void ABI broadcast_mock(void *layer, void *event) {
     (void)layer;
     if (broadcast_routes) project_event_mock(ready_target, event);
 }
+
+static void test_startup(unsigned char *image, size_t shift) {
+    unsigned char net[0x228] = {0}, behavior[0x138] = {0}, owner[0x100] = {0};
+    unsigned char project[0x400] = {0}, event[0x28] = {0};
+    unsigned char input[0x20] = {0};
+    void *vtable[] = {(void *)startup_event_type};
+    void (ABI *navigate)(unsigned char *, void *, void *) = (void *)(image + 0x125c7d0 - shift);
+    void (ABI *dispatch)(void *, void *, int) = (void *)(image + 0xa29000);
+    put_pointer(image, 0x2a1a3d0, net);
+    put_pointer(image, 0x2abfc10, (void *)0x300001);
+    put_pointer(owner, 0x20, project);
+    put_pointer(project, 0x50, owner);
+    behavior[0x125] = 1;
+    *(int *)(input + 0x18) = 8;
+    *(int *)(input + 0x1c) = 1;
+    *(int *)(net + 0x220) = 1;
+    int before = startup_input_calls, failures = startup_failures;
+    navigate(behavior, input, owner);
+    navigate(behavior, input, owner);
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 1);
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    put_pointer(project, 0x50, NULL);
+    runtime_online_mode_note_frame();
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 1);
+    put_pointer(project, 0x50, owner);
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    *(int *)(input + 0x18) = 9;
+    navigate(behavior, input, owner);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 2);
+    *(int *)(input + 0x18) = 8;
+    *(int *)(net + 0x220) = 1;
+    navigate(behavior, input, owner);
+    *(int *)(net + 0x220) = -2;
+    runtime_online_mode_note_frame();
+    assert(startup_input_calls == before + 2 && startup_failures == failures + 1);
+    navigate(behavior, input, owner);
+    assert(startup_input_calls == before + 2 && startup_failures == failures + 2);
+    direct_stub(image + 0x149d260 - shift, startup_release_mock);
+    put_pointer(event, 0, vtable);
+    *(unsigned *)(event + 8) = 1;
+    put_pointer(event, 0x18, "Localized connected text");
+    startup_event_kind = (void *)0x300001;
+    *(int *)(net + 0x220) = 1;
+    int banners = startup_notice_calls, released = startup_event_releases;
+    dispatch(project, event, 1);
+    dispatch(project, event, 1);
+    assert(startup_notice_calls == banners && *(unsigned *)(event + 8) == 2);
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 1 && startup_event_releases == released + 1);
+    assert(*(unsigned *)(event + 8) == 1);
+    *(int *)(net + 0x220) = 1;
+    dispatch(project, event, 1);
+    *(int *)(event + 0x20) = 1;
+    dispatch(project, event, 1);
+    *(int *)(net + 0x220) = 2;
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 2 && startup_event_releases == released + 2);
+    *(int *)(event + 0x20) = 0;
+    *(int *)(net + 0x220) = 1;
+    dispatch(project, event, 1);
+    *(int *)(net + 0x220) = -2;
+    runtime_online_mode_note_frame();
+    assert(startup_notice_calls == banners + 2 && *(unsigned *)(event + 8) == 1);
+    put_pointer(image, 0x2a1a3d0, NULL);
+    direct_stub(image + 0x149d260 - shift, release_result_sound_mock);
+}
+static void ABI open_asset_mock(void **result, void *manager, void *asset,
+                                void *options, int player, void *context, float delay) {
+    assert(manager == hof_open_manager && asset == (void *)2 && options == hof_open_options);
+    assert(player == 4 && context == (void *)5 && delay == 0.25f);
+    ++asset_opens; *result = (void *)6;
+}
 static void ABI open_panel_mock(void **result, void *manager, const char *name,
                                unsigned char *options, int player, void *context, float delay) {
+    if (!strcmp(name, "Octane_HallOfFame")) {
+        assert(manager == hof_open_manager && options == hof_open_options && player == 4);
+        assert(context == (void *)5 && delay == 0.25f);
+        assert(options[0x21] == 1);
+        ++hof_named_opens; *result = hof_result_handle; return;
+    }
+    if (score_test_active && !strcmp(name, "Octane_Race_Ranking")) { *result = score_handle; return; }
     if (!strcmp(name, "Octane_LobbyMembers")) {
         *result = members_handle;
         return;
@@ -528,6 +769,16 @@ int64_t runtime_file_stat(const char *path, void *guest_stat) {
     return strstr(path, "/drivermymod.pak") ? 0 : -2;
 }
 
+static int directory_unloads;
+static void ABI unload_directory_mock(void *manager, unsigned char *directory, int types, int flags) {
+    assert(manager == (void *)0x42 && types == 1 && flags == 0);
+    int references;
+    memcpy(&references, directory + 0x84, sizeof references);
+    assert(references >= 0); if (references) --references;
+    memcpy(directory + 0x84, &references, sizeof references);
+    ++directory_unloads;
+}
+
 static void test_region(size_t shift) {
     expected_ranking = NULL;
     team_score_opens = 0;
@@ -582,6 +833,26 @@ static void test_region(size_t shift) {
     image[0x1277e00 - shift + 13] += (unsigned char)shift;
     /* Record the remapped index and relocated LEA result, then undo the prologue. */
     memcpy(image + (0x1277e11 - shift), "\x89\x37\x48\x89\x47\x08\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d\xc3", 17);
+    /* Native next/previous searches: exercise real branches rather than input mocks. */
+    const unsigned char native_search[] =
+        "\x4c\x8b\x97\xb0\x01\x00\x00\x44\x8b\x87\xa0\x01\x00\x00\x80\xbf"
+        "\x94\x01\x00\x00\x00\x45\x8b\x4a\x0c\x45\x8d\x58\x01\x74\x05\x45"
+        "\x39\xcb\x7d\x2a\xb8\x01\x00\x00\x00\x45\x39\xcb\x7d\x1f\x4d\x8b"
+        "\x52\x20\x45\x39\xc3\x74\x0c\x49\x63\xcb\x41\x0f\xb6\x0c\x0a\x84"
+        "\xc9\x74\x13\x45\x85\xdb\x78\x05\x31\xc0\x44\x89\x1e\xc3\x45\x31"
+        "\xdb\xc6\x02\x01\xeb\xce\x41\xff\xc3\x45\x39\xcb\x7c\x11\x0f\xb6"
+        "\x8f\x94\x01\x00\x00\x84\xc9\x74\x06\x45\x31\xdb\xc6\x02\x01\x45"
+        "\x39\xcb\x7c\xbe\xeb\xd7\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90"
+        "\x53\x44\x8b\x97\xa0\x01\x00\x00\x45\x85\xd2\x44\x89\xd1\x7f\x1a"
+        "\x8a\x87\x94\x01\x00\x00\x44\x89\xd1\x84\xc0\x74\x0d\x48\x8b\x87"
+        "\xb0\x01\x00\x00\x8b\x48\x0c\xc6\x02\x01\xb8\x01\x00\x00\x00\x85"
+        "\xc9\x7e\x2c\x4c\x8b\x87\xb0\x01\x00\x00\x4d\x8b\x48\x20\x48\x63"
+        "\xd9\x4c\x8d\x5b\xff\x45\x39\xd3\x74\x0a\x41\x0f\xb6\x5c\x19\xff"
+        "\x84\xdb\x74\x0d\x41\x3b\x48\x0c\x7f\x05\x31\xc0\x44\x89\x1e\x5b"
+        "\xc3\x83\xf9\x02\x7f\x12\x0f\xb6\x8f\x94\x01\x00\x00\x84\xc9\x74"
+        "\x07\x45\x8b\x58\x0c\xc6\x02\x01\x45\x85\xdb\x44\x89\xd9\x7f\xbe"
+        "\xeb\xdd";
+    memcpy(image + (0x125e050 - shift), native_search, sizeof native_search - 1);
     stub(image + (0x125d570 - shift), (void *)base_event);
     stub(image + (0x125da80 - shift), (void *)refresh_selector_mock);
     memcpy(image + (0xf34573 - shift), "\x45\x85\xed\x7e\xc7", 5);
@@ -598,6 +869,9 @@ static void test_region(size_t shift) {
     memcpy(image + (0xeb71e1 - shift), "\x48\x83\xc4\x58\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0xeb71ef - shift), timer_init_mock);
     memcpy(image + (0x1093ca0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0x14fb600 - shift), image + (0x1093ca0 - shift), 17);
+    memcpy(image + (0x14fb611 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + (0x14fb61f - shift), unload_directory_mock);
     memcpy(image + (0x1093cb1 - shift), "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + (0x1093cbf - shift), individual_sound_mock);
     direct_stub(image + (0x1024340 - shift), result_sound_mock);
@@ -639,8 +913,11 @@ static void test_region(size_t shift) {
     direct_stub(image + 0x248d2f, broadcast_mock);
     put_pointer(image, 0x2abee50, (void *)42); put_pointer(image, 0x2abee68, (void *)43);
     memcpy(image + 0x986820, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x48", 17);
+    memcpy(image + 0x986170, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
     memcpy(image + 0x986831, "\x48\x83\xc4\x48\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
     direct_stub(image + 0x98683f, open_panel_mock);
+    memcpy(image + 0x986181, "\x48\x83\xc4\x38\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0x98618f, open_asset_mock);
     open_race_ui_project = (void *)(image + 0x986820);
     direct_stub(image + 0x27ae10, finish_context_mock);
     direct_stub(image + 0x252110, hide_panel_mock);
@@ -818,7 +1095,58 @@ static void test_region(size_t shift) {
     setenv("BB_ONLINE_MODE_HOOK", shift ? "1277e00" : "1277df0", 1);
     assert(!runtime_online_mode_start(image, size));
     setenv("BB_ONLINE_MODE_HOOK", shift ? "1277df0" : "1277e00", 1);
+    direct_stub(image + 0x1281810, member_event_mock);
+    direct_stub(image + 0x273fc0, member_update_mock);
+    put_pointer(image, 0x2774d88, image + 0x1281810);
+    put_pointer(image, 0x2774d98, image + 0x273fc0);
+    setenv("BB_ONLINE", "1", 1);
+    if (shift) setenv("BB_UPNP_PORT", "3074", 1); else unsetenv("BB_UPNP_PORT");
+    memcpy(image + 0x195abd, "\x41\xc6\x87\xe8\0\0\0\0", 8);
+    memcpy(image + 0x125c7d0 - shift, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x78", 17);
+    memcpy(image + 0x125c7e1 - shift, "\x48\x83\xc4\x78\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0x125c7ef - shift, startup_input_mock);
+    direct_stub(image + 0x24a560, startup_mask);
+    memcpy(image + 0xa29000, "\x55\x48\x89\xe5\x53\x48\x83\xec\x48\x48\x8b\x1d\x88\xe0\xdd\x01", 16);
+    memcpy(image + 0xa29010, "\x48\x83\xc4\x48\x5b\x5d", 6);
+    direct_stub(image + 0xa29016, startup_notice_mock);
     assert(runtime_online_mode_start(image, size));
+    assert(image[0x195ac4] == !shift);
+    test_startup(image, shift);
+    unsetenv("BB_ONLINE");
+    unsetenv("BB_UPNP_PORT");
+    void (ABI *unload)(void *, unsigned char *, int, int) = (void *)(image + (0x14fb600 - shift));
+    const unsigned char unload_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
+    assert(!memcmp((void *)unload, unload_prefix, sizeof unload_prefix));
+    unsigned char directory[0xc0] = {0};
+    put_pointer(directory, 0x10, "octanecustomization_readycountdown");
+    *(int *)(directory + 0x84) = 1;
+    int before_unload = directory_unloads;
+    unload((void *)0x42, directory, 1, 0);
+    assert(directory_unloads == before_unload + 1 && !*(int *)(directory + 0x84));
+    void (ABI *open_asset)(void **, void *, void *, void *, int, void *, float) =
+        (void *)(image + 0x986170);
+    {
+    unsigned char composition[0x28] = {0}, asset_handle[0x30] = {0}, placeable[0x40] = {0};
+    void *composition_root = (void *)0x12340;
+    *(void **)composition = image + 0x2431b18;
+    memcpy(composition + 0x20, &composition_root, 8);
+    *(void **)(asset_handle + 0x28) = composition;
+    *(void **)(placeable + 0x38) = asset_handle;
+    assert(runtime_online_mode_content(placeable) == composition_root);
+    *(void **)composition = NULL;
+    assert(!runtime_online_mode_content(placeable));
+    }
+    void *hof_opened = NULL;
+    int assets_before = asset_opens, named_before = hof_named_opens;
+    open_asset(&hof_opened, hof_open_manager, (void *)2, hof_open_options, 4, (void *)5, 0.25f);
+    assert(hof_opened == (void *)6 && asset_opens == assets_before + 1);
+    hof_pending_open = 1;
+    open_asset(&hof_opened, hof_open_manager, (void *)2, hof_open_options, 4, (void *)5, 0.25f);
+    assert(hof_opened == hof_result_handle && hof_named_opens == named_before + 1);
+    assert(hof_open_options[0x21] == 0);
+    open_asset(&hof_opened, hof_open_manager, (void *)2, hof_open_options, 4, (void *)5, 0.25f);
+    assert(hof_opened == (void *)6 && asset_opens == assets_before + 2);
     /* A racer from a mod this game lacks shows as Crash; the game's own and this player's mod
      * racers stay; no list (an older launcher) changes nothing. */
     int (ABI *team_gate)(void) = (void *)(image + 0x2000);
@@ -912,6 +1240,67 @@ static void test_region(size_t shift) {
     event.index = 2; handle(self, &event, result);
     assert(public_selected == 0 && result[0] == 1);
     event.index = 0; handle(self, &event, result);
+    ranked_selected = 1;
+    event.index = -1; handle(self, &event, NULL);
+    assert(items[2] == 0); /* Ranked offers only Normal and Itemless. */
+    result[0] = 99;
+    event.index = 2; handle(self, &event, result);
+    assert(result[0] == 99);
+    checked_mode_selector = self;
+    void (ABI *update_mode)(void *, void *, float);
+    memcpy(&update_mode, image + 0x2773b50, sizeof update_mode);
+    for (int context = 0; context < 3; ++context) {
+        private = context == 1;
+        public_available = context == 0;
+        expected_mode_options[0] = 1;
+        expected_mode_options[1] = context != 2;
+        expected_mode_options[2] = private;
+        items[0] = 1; items[1] = items[2] = 0;
+        self[0x194] = 1; /* Captured live hang: only Normal enabled, wrapping on. */
+        event.index = 0;
+        handle(self, &event, result);
+        items[1] = items[2] = 0;
+        self[0x194] = 1;
+        update_mode(self, NULL, 0.25f);
+        check_mode_options(self);
+    }
+    /* Recover from a disabled Ranked selector after startup HTTP failure. */
+    private = 0; public_available = 1;
+    expected_mode_options[0] = expected_mode_options[1] = 1;
+    expected_mode_options[2] = 0;
+    items[0] = 1; items[1] = items[2] = 0;
+    self[0x1b8] = 1;
+    ptr = (void *)1; memcpy(self + 0x198, &ptr, 8);
+    *(int *)(self + 0x1a0) = 0;
+    int refresh_before = selector_refreshes;
+    update_mode(self, NULL, 0.25f);
+    assert(selector_refreshes == refresh_before + 1);
+    update_mode(self, NULL, 0.25f);
+    assert(selector_refreshes == refresh_before + 1);
+    ptr = NULL; memcpy(self + 0x198, &ptr, 8);
+    self[0x1b8] = 0;
+    checked_mode_selector = NULL;
+    *(int *)(flags + 12) = 3;
+    int (ABI *next_option)(void *, int *, unsigned char *) = (void *)(image + (0x125e050 - shift));
+    int (ABI *previous_option)(void *, int *, unsigned char *) = (void *)(image + (0x125e0d0 - shift));
+    for (int mask = 1; mask < 8; ++mask) {
+        for (int i = 0; i < 3; ++i) items[i] = !!(mask & (1 << i));
+        self[0x194] = 1;
+        for (int start = 0; start < 3; ++start) {
+            if (!items[start]) continue;
+            *(int *)(self + 0x1a0) = start;
+            for (int direction = -1; direction <= 1; direction += 2) {
+                int expected = start;
+                do { expected = (expected + direction + 3) % 3; } while (!items[expected]);
+                int found = -1;
+                unsigned char wrapped = 0;
+                assert(!(direction < 0 ? previous_option : next_option)(self, &found, &wrapped));
+                assert(found == expected);
+            }
+        }
+    }
+    private = 0;
+    ranked_selected = 0;
     public_available = 0;
     event.index = 1;
     /* Other native two-option selectors retain their original index meanings. */
@@ -1053,13 +1442,69 @@ static void test_region(size_t shift) {
     card_update(NULL, card, 0.25f);
     assert(lobby_updates == 2 && *(unsigned *)image_handle == 11);
     assert(!*(unsigned *)(card_name + 12) && !*(unsigned *)(card_mode + 12));
+    {
+        /* The real callback argument is a behavior context, not a placeable. */
+        unsigned char context[0x30] = {0}, project[0x18] = {0}, wrapper[0x40] = {0};
+        unsigned char asset[0x28] = {0}, handle[0x30] = {0}, hof_root[0xf0] = {0};
+        put_pointer(context, 0x20, project);
+        put_pointer(project, 0x10, wrapper);
+        put_pointer(wrapper, 0x38, handle);
+        put_pointer(handle, 0x28, asset);
+        put_pointer(asset, 0, image + 0x2431b18);
+        put_pointer(asset, 0x20, hof_root);
+        put_pointer(hof_root, 0x28, "OCTR_HOF_ROOT");
+        hof_expected_root = hof_root; hof_expected_project = project; hof_active = 1; hof_updates = 0;
+        const int native_before = lobby_updates;
+        card_update(NULL, context, 0.25f);
+        assert(hof_updates == 1 && lobby_updates == native_before + 1);
+        hof_active = 0;
+        card_update(NULL, context, 0.25f);
+        assert(hof_updates == 1 && lobby_updates == native_before + 2);
+        hof_expected_root = hof_expected_project = NULL;
+    }
     room_active = 1;
     /* Public vote cards use confirmed lobby mode, including a party guest's mode. */
     private = 0;
     put_pointer(card, 0x28, "OCTR_PUBLIC_LOBBY");
     public_selected = 1; public_active = 0;
     card_update(NULL, card, 0.25f);
-    assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - NORMAL"));
+    assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - ITEMLESS"));
+    {
+        unsigned char member[0x20] = {0}, label[0x100] = {0};
+        unsigned char itemless_icon[0x100] = {0}, normal_icon[0x100] = {0};
+        put_pointer(member, 0x10, label); put_pointer(label, 0x30, "LocalHost");
+        put_pointer(label, 0x50, itemless_icon); put_pointer(itemless_icon, 0x50, normal_icon);
+        put_pointer(itemless_icon, 0x28, "OCTR_RANK_ICON_1_0");
+        put_pointer(normal_icon, 0x28, "OCTR_RANK_ICON_0_0");
+        public_active = 1;
+        runtime_online_mode_selector_left();
+        ranked_profile_mode = -1;
+        void (ABI *member_event_handler)(void *, void *, void *) =
+            *(void **)(image + 0x2774d88);
+        member_event_handler(member, NULL, NULL);
+        assert(ranked_profile_mode == 1);
+        assert(!(*(unsigned *)(itemless_icon + 12) & 0x400));
+        assert(*(unsigned *)(normal_icon + 12) & 0x400);
+        ranked_best_badge_mode = 1;
+        for (int route = 0; route < 3; ++route) {
+            private = route == 2;
+            ranked_selected = route == 1;
+            public_active = public_normal_active = 0;
+            public_selected = 0;
+            runtime_online_mode_selector_left();
+            ranked_profile_mode = -1;
+            member_event_handler(member, NULL, NULL);
+            assert(ranked_profile_mode == -1); /* Online main uses the best badge, not the last queue. */
+            assert(!(*(unsigned *)(itemless_icon + 12) & 0x400));
+            assert(*(unsigned *)(normal_icon + 12) & 0x400);
+        }
+        private = 0;
+        public_normal_active = 1;
+        member_event_handler(member, NULL, NULL);
+        assert(ranked_profile_mode == 0); /* A confirmed Normal room still uses Normal. */
+        assert(!(*(unsigned *)(normal_icon + 12) & 0x400));
+        public_normal_active = ranked_selected = ranked_best_badge_mode = 0;
+    }
     /* Party members can retain the private scene flag after entering public. */
     private = 1;
     public_selected = 0; public_active = 1;
@@ -1706,7 +2151,9 @@ static void test_region(size_t shift) {
     private = 1;
     memcpy(packet + 0x3c, &cup_mode, 4);
     put_pointer(packet, 0x28, "unknown-track");
+    const int calls_before_bad_cup = received_settings_calls;
     received(packet);
+    assert(received_settings_calls == calls_before_bad_cup); /* Never downgrade an unknown CUP to Single. */
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
     runtime_online_mode_leave_cup();
     assert(runtime_online_mode_private_cup()); /* retain own host preference */
@@ -1809,6 +2256,12 @@ static void test_region(size_t shift) {
     void *members = NULL;
     open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
     assert(!(*(unsigned *)(members_root + 12) & 0x400));
+    hof_active = 1;
+    open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
+    assert(*(unsigned *)(members_root + 12) & 0x400);
+    hof_active = 0;
+    open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
+    assert(!(*(unsigned *)(members_root + 12) & 0x400));
     expected_ranking = "Octane_TeamSelect";
     *race_mode = 1;
     controls_enabled = 0;
@@ -1819,7 +2272,7 @@ static void test_region(size_t shift) {
     open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
     assert(*(unsigned *)(members_root + 12) & 0x400); /* Reopen stays hidden. */
     unsigned char selector_behavior[0xa0] = {0}, selector_owner[0x28] = {0};
-    unsigned char native_selector_project[0x50] = {0};
+    unsigned char native_selector_project[0x60] = {0};
     unsigned char native_selector_root[0x20] = {0};
     put_pointer(native_selector_project, 0x10, native_selector_root);
     *(int *)(native_selector_project + 0x48) = 3;
@@ -1834,6 +2287,7 @@ static void test_region(size_t shift) {
     assert(*(unsigned *)(native_selector_project + 0x44) == 0xff);
     /* Cancel never leaves private Single; ready Cancel still reaches native Unready. */
     put_pointer(image, 0x2a21d00, (void *)44);
+    put_pointer(image, 0x2ae3190, (void *)45);
     direct_stub(image + 0x9c32c0, selector_ready_find_mock);
     unsigned char selector_player[0x100] = {0}, selector_manager[0x18] = {0};
     put_pointer(selector_manager, 0x10, selector_player);
@@ -1861,6 +2315,194 @@ static void test_region(size_t shift) {
     assert(selector_native_events == ++before_input);
     assert(!legend_buttons[1] && legend_buttons[2] && !strcmp(current_legend, "UNREADY"));
     assert(legend_adds == 2);
+    direct_stub(image + 0x14a0e30, hof_animation_factory);
+    direct_stub(image + 0x9990b0, hof_animation_initialize);
+    direct_stub(image + 0x250b20, hof_animation_play);
+    direct_stub(image + 0x149d260, hof_animation_release);
+    put_pointer(image, 0x2a21310, (void *)77);
+    hof_animation_calls = hof_animation_releases = 0;
+    runtime_online_mode_hof_cycle((void *)78, 1);
+    runtime_online_mode_hof_cycle((void *)78, -1);
+    assert(hof_animation_calls == 2 && hof_animation_releases == 2);
+    direct_stub(image + 0x149d260, release_result_sound_mock);
+    int before_hof_controls = controls_enabled;
+    *(int *)(native_selector_project + 0x48) = 1;
+    native_selector_project[0x34] &= ~0x20;
+    runtime_online_mode_hof_legend(native_selector_project);
+    assert(controls_enabled == before_hof_controls);
+    assert(*(int *)(native_selector_project + 0x48) == 1);
+    assert(!(native_selector_project[0x34] & 0x20));
+    assert(runtime_online_mode_hof_activate(native_selector_project));
+    assert(controls_enabled == before_hof_controls + 1);
+    assert(!*(int *)(native_selector_project + 0x48));
+    assert(native_selector_project[0x34] & 0x20);
+    assert(!runtime_online_mode_hof_activate(native_selector_project));
+    controls_enabled = before_hof_controls;
+    hof_expected_root = runtime_online_mode_content(native_selector_root);
+    hof_expected_project = native_selector_project;
+    hof_active = 1;
+    int before_hof_updates = hof_updates;
+    runtime_online_mode_note_frame();
+    assert(hof_updates == before_hof_updates + 1);
+    unsigned char unload_type[0x20] = {0}, unload_event[0x28] = {0};
+    void *unload_vtable[] = {panel_event_type};
+    put_pointer(unload_type, 0x10, "igGuiEventProjectUnload");
+    put_pointer(unload_event, 0, unload_vtable);
+    put_pointer(unload_event, 8, unload_type);
+    project_event(native_selector_project, unload_event);
+    runtime_online_mode_note_frame();
+    assert(hof_updates == before_hof_updates + 1); /* Unload retires the retained project immediately. */
+    unsigned members_references = *(unsigned *)members_handle;
+    project_event(members_project, unload_event);
+    assert(*(unsigned *)members_handle == members_references - 1);
+    project_event(members_project, unload_event);
+    assert(*(unsigned *)members_handle == members_references - 1); /* Repeated unload cannot release twice. */
+    *(unsigned *)(members_root + 12) &= ~0x400u;
+    open_race_ui_project(&members, NULL, "Octane_LobbyMembers", NULL, -1, NULL, 0);
+    assert(*(unsigned *)members_handle == members_references); /* A new Online entry takes a fresh reference. */
+    void *saved_racer_manager=*(void **)(image+0x2ad4b70);
+    void *saved_player_manager=*(void **)(image+0x2ad1160), *saved_local_player=local_player_mock;
+    int saved_controller_id=local_controller_id;
+    unsigned char sound_racer[0x30]={0},sound_player[0x80]={0},sound_kart[8]={0};
+    unsigned char sound_player_handle[0x30]={0},sound_kart_handle[0x30]={0};
+    unsigned char sound_roster[0x30]={0},sound_manager[0x18]={0},sound_players[0x18]={0};
+    void *sound_racers[]={sound_racer};
+    put_pointer(sound_racer,0x10,sound_player_handle);put_pointer(sound_player_handle,0x28,sound_player);
+    put_pointer(sound_racer,0x20,sound_kart_handle);put_pointer(sound_kart_handle,0x28,sound_kart);
+    put_pointer(sound_roster,0x20,sound_racers);*(int *)(sound_roster+12)=1;
+    put_pointer(sound_manager,0x10,sound_roster);put_pointer(image,0x2ad4b70,sound_manager);
+    put_pointer(sound_players,0x10,sound_roster);put_pointer(image,0x2ad1160,sound_players);
+    local_player_mock=sound_player;local_controller_id=0;
+    unsigned char ranked_score_root[0x120] = {0}, score_composition[0x30] = {0};
+    unsigned char ranked_score_asset[0x30] = {0}, score_icon[0x120] = {0};
+    unsigned char score_content[0x120] = {0}, score_next_icon[0x120] = {0}, ranked_score_children[0x30] = {0};
+    unsigned char score_unranked[0x120] = {0}, score_mmr[0x120] = {0}, score_tier[0x120] = {0}, score_delta[0x120] = {0};
+    unsigned char score_fx_up[0x120]={0},score_fx_down[0x120]={0};
+    put_pointer(score_fx_up,0x28,"OCTR_RESULT_FX_UP");
+    put_pointer(score_fx_down,0x28,"OCTR_RESULT_FX_DOWN");
+    void *score_icons[] = {score_icon, score_next_icon, score_unranked, score_mmr, score_tier, score_delta,score_fx_up,score_fx_down};
+    put_pointer(score_unranked, 0x28, "OCTR_RESULT_ICON_0_0");
+    put_pointer(score_mmr, 0x28, "OCTR_RESULT_MMR");
+    put_pointer(score_delta, 0x28, "OCTR_RESULT_DELTA");
+    put_pointer(score_tier, 0x28, "OCTR_RESULT_TIER");
+    put_pointer(score_content, 0x48, ranked_score_children);
+    put_pointer(ranked_score_children, 0x20, score_icons);
+    *(int *)(ranked_score_children + 12) = 8;
+    put_pointer(score_next_icon, 0x28, "OCTR_RESULT_ICON_0_4");
+    put_pointer(score_handle, 0x28, score_project);
+    put_pointer(score_project, 0x10, ranked_score_root);
+    put_pointer(ranked_score_root, 0x38, ranked_score_asset);
+    put_pointer(ranked_score_asset, 0x28, score_composition);
+    put_pointer(score_composition, 0, image + 0x2431b18);
+    put_pointer(score_composition, 0x20, score_content);
+    put_pointer(score_icon, 0x28, "OCTR_RESULT_ICON_0_3");
+    score_result = (struct runtime_ranked_result){.mode=0,.ranked=1,.tier=3,.tier_before=3};
+    score_test_active = ranked_score_active = 1;
+    ranked_score_ready = 0;
+    void *score = NULL;
+    open_race_ui_project(&score, NULL, "Octane_Race_Ranking", NULL, -1, NULL, 0);
+    assert(*(unsigned *)(score_icon+12) & 0x400); /* Local finish waits for global scored results. */
+    unsigned char score_finish_kind[0x20] = {0}, score_finish_event[0x28] = {0};
+    put_pointer(score_finish_kind,0x10,"CGuiEventRaceFinished");
+    put_pointer(score_finish_event,0,unload_vtable);
+    put_pointer(score_finish_event,8,score_finish_kind);
+    put_pointer(image,0x2ac02a8,score_finish_kind);
+    ranked_profile_tier = 3;
+    project_event(score_project,score_finish_event);
+    runtime_online_mode_note_frame();
+    assert(!(*(unsigned *)(score_icon+12) & 0x400)); /* DNF card is immediate while the server is pending. */
+    assert(!strcmp(*(char **)(score_mmr+0x30),"TOTAL 1234 MMR"));
+    ranked_profile_tier = 0;
+    put_pointer(image,0x2ac02a8,(void *)12);
+    ranked_score_ready = 1;
+    runtime_online_mode_note_frame();
+    assert(!(*(unsigned *)(score_icon+12) & 0x400));
+    assert(*(float *)(score_icon+0xe0) == 1);
+    assert(!strcmp(*(char **)(score_delta+0x30),"+0 MMR"));
+    assert(*(float *)(score_delta+0xc0)<*(float *)(score_delta+0xc4));
+    assert(*(float *)(score_delta+0xc4)<*(float *)(score_delta+0xc8));
+    score_result.mode = 1;
+    runtime_online_mode_note_frame();
+    assert(*(unsigned *)(score_icon+12) & 0x400); /* Never show the other mode's badge. */
+    for (int mode = 0; mode < 2; ++mode) {
+        put_pointer(score_unranked, 0x28, mode ? "OCTR_RESULT_ICON_1_0" : "OCTR_RESULT_ICON_0_0");
+        score_result = (struct runtime_ranked_result){.mode=mode,.placements=mode ? 4 : 3};
+        runtime_online_mode_note_frame();
+        assert(!(*(unsigned *)(score_unranked+12) & 0x400));
+        assert(!strcmp(*(char **)(score_delta+0x30), mode ? "1 / 5" : "2 / 5"));
+        assert(!strcmp(*(char **)(score_mmr+0x30), "PLACEMENT RACES"));
+        assert(!strcmp(*(char **)(score_tier+0x30), "UNRANKED"));
+    }
+    direct_stub(image + 0x149d260, hof_animation_release);
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        const int mode = scenario == 1;
+        put_pointer(score_icon, 0x28, mode ? "OCTR_RESULT_ICON_1_3" : "OCTR_RESULT_ICON_0_3");
+        put_pointer(score_next_icon, 0x28, mode ? "OCTR_RESULT_ICON_1_4" : "OCTR_RESULT_ICON_0_4");
+        score_result = (struct runtime_ranked_result){.mode=mode,.ranked=1,
+            .tier=mode ? 3 : 4,.tier_before=scenario == 2 ? 0 : mode ? 4 : 3,
+            .delta=mode ? -55 : 44,.mmr=mode ? 4886 : 5003};
+        put_pointer(score_unranked, 0x28, mode ? "OCTR_RESULT_ICON_1_0" : "OCTR_RESULT_ICON_0_0");
+        ranked_score_ready = 0;
+        open_race_ui_project(&score, NULL, "Octane_Race_Ranking", NULL, -1, NULL, 0);
+        assert((*(unsigned *)(score_icon+12) & 0x400) && (*(unsigned *)(score_next_icon+12) & 0x400));
+        score_animation_calls = ranked_sound_calls = ranked_sound_releases = 0;
+        score_animation_owner = scenario == 2 ? score_unranked : mode ? score_next_icon : score_icon;
+        score_animation_name = "PopUpContentOut";
+        ranked_score_ready = 1;
+        runtime_online_mode_note_frame();
+        assert(score_animation_calls == 1);
+        assert(ranked_sound_calls==1 && ranked_sound_releases==1);
+        assert(!strcmp(last_ranked_sound,"UI_GrandPrix_Tier_Scroll_out"));
+        assert((*(unsigned *)(score_fx_up+12)&0x400) && (*(unsigned *)(score_fx_down+12)&0x400));
+        assert(!strcmp(*(char **)(score_delta+0x30),mode ? "-55 MMR" : "+44 MMR"));
+        assert(!strcmp(*(char **)(score_mmr+0x30),mode ? "TOTAL 4886 MMR" : "TOTAL 5003 MMR"));
+        assert(mode ? *(float *)(score_delta+0xc0)>*(float *)(score_delta+0xc4) :
+                      *(float *)(score_delta+0xc0)<*(float *)(score_delta+0xc4));
+        runtime_online_mode_note_frame();
+        assert(score_animation_calls == 1); /* Never restart the shrinking animation each frame. */
+        usleep(760000);
+        score_animation_owner = mode ? score_icon : score_next_icon;
+        score_animation_name = "PopUpContentIn";
+        runtime_online_mode_note_frame();
+        assert(score_animation_calls == 2);
+        assert(ranked_sound_calls==2 && ranked_sound_releases==2);
+        assert(!strcmp(last_ranked_sound,mode ? "UI_GrandPrix_Tier_Scroll_in" : "UI_GrandPrix_Reward_Unlock"));
+        assert(!!(*(unsigned *)(score_fx_up+12)&0x400)==!!mode);
+        assert(!!(*(unsigned *)(score_fx_down+12)&0x400)==!mode);
+        runtime_online_mode_note_frame();
+        assert(score_animation_calls == 2);
+        score_animation_owner = NULL;
+    }
+    direct_stub(image + 0x149d260, release_result_sound_mock);
+    score_result=(struct runtime_ranked_result){.mode=0,.ranked=1,.tier=3,.tier_before=3,.delta=44,.mmr=1234};
+    ranked_score_ready=0;
+    open_race_ui_project(&score,NULL,"Octane_Race_Ranking",NULL,-1,NULL,0);
+    ranked_sound_calls=ranked_sound_releases=0;
+    ranked_score_ready=1;
+    runtime_online_mode_note_frame();
+    assert(ranked_sound_calls==1 && ranked_sound_releases==1);
+    assert(!strcmp(last_ranked_sound,"UI_GrandPrix_Challenge_Bonus_in"));
+    assert(!(*(unsigned *)(score_fx_up+12)&0x400));
+    runtime_online_mode_note_frame();
+    assert(ranked_sound_calls==1); /* An ordinary gain still gets feedback, once. */
+    free_string(NULL, *(char **)(score_mmr+0x30) - 16);
+    free_string(NULL, *(char **)(score_delta+0x30) - 16);
+    free_string(NULL, *(char **)(score_tier+0x30) - 16);
+    ranked_score_active = 0;
+    runtime_online_mode_note_frame();
+    assert((*(unsigned *)(score_icon+12) & 0x400) && (*(unsigned *)(score_next_icon+12) & 0x400));
+    unsigned score_references = *(unsigned *)score_handle;
+    project_event(score_project, unload_event);
+    assert(*(unsigned *)score_handle == score_references-1);
+    project_event(score_project, unload_event);
+    assert(*(unsigned *)score_handle == score_references-1);
+    ranked_score_active = ranked_score_ready = score_test_active = 0;
+    put_pointer(image,0x2ad4b70,saved_racer_manager);put_pointer(image,0x2ad1160,saved_player_manager);
+    local_player_mock=saved_local_player;local_controller_id=saved_controller_id;
+    hof_active = 0;
+    runtime_online_mode_note_frame(); /* Retire the HOF handle after native unload. */
+    hof_expected_root = hof_expected_project = NULL;
+    assert(legend_adds == 4 && legend_buttons[1] && legend_buttons[3] && !strcmp(current_legend, "To Leaderboard"));
     selector_ready_found = 0;
     selector_event(selector_behavior, input_event, selector_owner);
     assert(selector_native_events == before_input);
@@ -2208,6 +2850,14 @@ static void test_region(size_t shift) {
     unsigned char score_avatar[0x120] = {0}, racer_row[0x120] = {0};
     put_pointer(score_avatar,0x40,racer_row);
     put_pointer(score_name,0x40,racer_row);
+    unsigned char team_badge[0x120]={0}, badge_children[40]={0};
+    void *team_badge_items[]={score_name,team_badge};
+    put_pointer(team_badge,0x28,"OCTR_NAME_ICON_0_0");
+    put_pointer(racer_row,0x48,badge_children);
+    put_pointer(badge_children,0x20,team_badge_items); *(int *)(badge_children+12)=2;
+    *(float *)(score_name+0x94)=40;
+    *(float *)(score_name+0x84)=*(float *)(score_name+0x88)=1;
+
     put_pointer(score_avatar, 0x28, "OCTR_TEAM_AVATAR");
     *(unsigned *)(score_avatar + 12) = 0x400;
     put_pointer(row_behavior, 0x98, score_avatar);
@@ -2242,6 +2892,18 @@ static void test_region(size_t shift) {
     *(int *)branch_pins = 0;
     network_branch(NULL, branch_pins, branch_outputs);
     assert(last_graph_node == branch_nodes[0]); /* Other online graphs stay online. */
+    *(int *)branch_pins = 2;
+    ranked_score_active = 1;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[1]); /* Only tagged Ranked score navigation is manual. */
+    *(int *)branch_pins = 0;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[0]); /* Lobby countdown/other online graphs remain native. */
+    *(int *)branch_pins = 2;
+    ranked_score_active = 0;
+    network_branch(NULL, branch_pins, branch_outputs);
+    assert(last_graph_node == branch_nodes[0]); /* Casual uses its original auto flow. */
+    *(int *)branch_pins = 0;
     network_query_value = 0;
     network_branch(NULL, branch_pins, branch_outputs);
     assert(last_graph_node == branch_nodes[1]);
@@ -2313,6 +2975,13 @@ static void test_region(size_t shift) {
         *(int *)(score_asset + 0x40) = 1;
         *(float *)(score_text + 0xe0) = .5f;
         row_event(row_behavior, NULL, NULL);
+        const float badge_name_x=*(float *)(score_name+0x60), badge_name_width=*(float *)(score_name+0x90);
+        assert(badge_name_x>158 && badge_name_width<185);
+        for(int refresh=0;refresh<3;++refresh) {
+            project_event(ranking_project,panel_event);
+            assert(*(float *)(score_name+0x60)==badge_name_x);
+            assert(*(float *)(score_name+0x90)==badge_name_width);
+        }
         for (int c = 0; c < 4; ++c) assert(*(float *)(score_text + 0xc0 + c * 4) == 1.f);
         assert(*(int *)(score_asset + 0x40) == 0);
         assert(*(float *)(score_text + 0xe0) == 1.f);
@@ -2338,8 +3007,8 @@ static void test_region(size_t shift) {
         assert(*(float *)(racer_row+0xe0)==0.6f);
         assert(!(*(unsigned *)(score_avatar + 12) & 0x400));
         assert(!(*(unsigned *)(score_engine + 12) & 0x400));
-        assert(*(float *)(score_name+0x60)==158);
-        assert(*(float *)(score_name+0x90)==185);
+        assert(*(float *)(score_name+0x60)==badge_name_x);
+        assert(*(float *)(score_name+0x90)==badge_name_width);
         for(int c=0;c<4;++c) assert(*(float *)(score_engine+0xc0+c*4)==1);
         assert(*(float *)(list_template+0x94)==86 && *(int *)(list_asset+0x90)==8);
         assert(*(float *)(list_placeable+0x64)==-7);
@@ -2804,11 +3473,220 @@ static void test_region(size_t shift) {
     assert(damage(damage_component, 0, &source_handle, 0) == 0 && damage_calls == 7);
     clock_apply(clock_component, victim, NULL);
     assert(clock_calls == 3);
+    /* Online result badges preserve native bounds, hide for AI/Battle/offline and support placement. */
+    runtime_online_mode_leave_cup();
+    private=1; network_query_value=1; public_active=0; room_active=1;
+    unsigned char badge_selector[0x1d0]={0};
+    put_pointer(badge_selector,0x1a8,options);put_pointer(badge_selector,0x1b0,flags);
+    *(int *)(options+12)=3; event.index=0; handle(badge_selector,&event,result);
+    unsigned char badge_row[0x100]={0}, badge_name[0x120]={0}, badge_parent[0x120]={0};
+    unsigned char badge_table[0x40]={0}, badge_icons[16][0x120]={{0}};
+    unsigned char badge_racer[0x180]={0}, badge_handle[0x40]={0}, badge_player_handle[0x40]={0};
+    unsigned char badge_player[0x100]={0};
+    void *badge_items[17]={badge_name};char badge_tags[16][40];
+    put_pointer(badge_row,0x78,badge_handle);put_pointer(badge_handle,0x28,badge_racer);
+    put_pointer(badge_racer,0x10,badge_player_handle);put_pointer(badge_player_handle,0x28,badge_player);
+    put_pointer(badge_row,0xa8,badge_name);put_pointer(badge_name,0x40,badge_parent);
+    put_pointer(badge_name,0x28,"[PlayerTagText]");put_pointer(badge_name,0x30,"LongestName_1234");
+    put_pointer(badge_player,0x68,"LongestName_1234");
+    put_pointer(badge_parent,0x48,badge_table);put_pointer(badge_table,0x20,badge_items);
+    *(int *)(badge_table+12)=17;
+    *(float *)(badge_name+0x60)=120;*(float *)(badge_name+0x90)=259;*(float *)(badge_name+0x94)=50;
+    *(float *)(badge_name+0xe0)=1;
+    *(float *)(badge_name+0x84)=*(float *)(badge_name+0x88)=1;*(float *)(badge_name+0x70)=.5f;
+    for (int i=0;i<16;++i) {
+        snprintf(badge_tags[i],sizeof badge_tags[i],"OCTR_NAME_ICON_%d_%d",i/8,i%8);
+        put_pointer(badge_icons[i],0x28,badge_tags[i]);badge_items[i+1]=badge_icons[i];
+    }
+    void (ABI *badge_tick)(unsigned char *,void *,float)=*(void **)(image+0x25436d8);
+    for (int m=0;m<2;++m) for (int t=0;t<=7;t+=7) {
+        speed=m;ranked_profile_tier=t;
+        badge_tick(badge_row,NULL,.25f);badge_tick(badge_row,NULL,.25f);
+        assert(ranked_profile_mode==m);
+        assert(*(float *)(badge_name+0x60)==164 && *(float *)(badge_name+0x90)==215);
+        assert(*(float *)(badge_name+0x60)+*(float *)(badge_name+0x90)==379);
+        for (int i=0;i<16;++i) assert(*(float *)(badge_icons[i]+0xe0)==(i==m*8+t ? 1.f:0.f));
+        assert(*(float *)(badge_icons[m*8+t]+0x64)==0);
+    }
+    *(float *)(badge_name+0xe0)=.25f;badge_tick(badge_row,NULL,.25f);
+    assert(*(float *)(badge_icons[15]+0xe0)==.25f); /* Fade with the native nickname. */
+    *(float *)(badge_name+0xe0)=1;
+    put_pointer(badge_racer,0x10,NULL);badge_tick(badge_row,NULL,.25f);
+    assert(*(float *)(badge_name+0x60)==120 && *(float *)(badge_name+0x90)==259);
+    put_pointer(badge_racer,0x10,badge_player_handle);
+    network_query_value=0;badge_tick(badge_row,NULL,.25f);
+    for (int i=0;i<16;++i) assert(*(float *)(badge_icons[i]+0xe0)==0);
+    network_query_value=1;event.index=2;handle(badge_selector,&event,result);badge_tick(badge_row,NULL,.25f);
+    for (int i=0;i<16;++i) assert(*(float *)(badge_icons[i]+0xe0)==0);
+    event.index=0;handle(badge_selector,&event,result);
+    *(float *)(badge_name+0x80)=-30;
+    badge_tick(badge_row,NULL,.25f);
+    assert(fabsf(*(float *)(badge_name+0x64)+22)<.001f);
+    assert(fabsf(*(float *)(badge_icons[ranked_profile_mode*8+ranked_profile_tier]+0x64)+11)<.001f);
+    unsigned char badge_text[0x80]={0}, badge_text_handle[0x40]={0};
+    put_pointer(badge_text_handle,0x28,badge_text);put_pointer(badge_name,0x38,badge_text_handle);
+    badge_tick(badge_row,NULL,.25f); /* Native top alignment, not a forced center style. */
+    assert(fabsf(*(float *)(badge_icons[ranked_profile_mode*8+ranked_profile_tier]+0x64)+17.062178f)<.001f);
+    put_pointer(badge_racer,0x10,NULL);badge_tick(badge_row,NULL,.25f);
+    assert(*(float *)(badge_name+0x64)==0 && *(float *)(badge_name+0x60)==120);
+    ranked_profile_tier=0;network_query_value=1;
+    /* Team Itemless -> Online main -> fresh Private Cup, on host and guest. */
+    *(unsigned *)cup_handle=8; /* Mock interned handle retains its native owners across resets. */
+    following_host=0; private=1; event.index=1;
+    handle(badge_selector,&event,result);
+    *(int *)(native_settings+0x28)=4;
+    public_active=public_normal_active=public_selected=ranked_selected=1;
+    runtime_online_mode_new_session();
+    assert(!runtime_online_mode_private_speed() && !runtime_online_mode_private_cup());
+    assert(!runtime_online_mode_private_cup_race() && speed==0);
+    assert(*(int *)(native_settings+0x28)==1 && *race_mode==1);
+    assert(!public_active && !public_normal_active && !public_selected && !ranked_selected);
+    assert(!*(void **)(manager+0xd88));
+    public_active=public_normal_active=1;
+    runtime_online_mode_request_leave(1);
+    assert(public_active && public_normal_active); /* Worker only queues: no native UI access. */
+    runtime_online_mode_note_frame();
+    assert(!public_active && !public_normal_active);
+    following_host=1; speed=1;
+    runtime_online_mode_request_leave(1);
+    put_pointer(packet,0x28,maps[0]); memcpy(packet+0x3c,&cup_mode,4);
+    received(packet); /* Flush old state before accepting the host's new CUP. */
+    assert(runtime_online_mode_private_cup() && speed==1 && received_mode==1);
+    assert(*(void **)(manager+0xd88));
+    const int before_rejected_loads=map_loads, before_rejected_returns=lobby_returns;
+    put_pointer(packet,0x28,"unknown-track");
+    received(packet);
+    load_map(maps[0],8);
+    assert(map_loads==before_rejected_loads && lobby_returns==before_rejected_returns+1);
+    put_pointer(packet,0x28,maps[0]); received(packet);
+    assert(runtime_online_mode_private_cup());
+    following_host=0;
+    runtime_online_mode_new_session();
+    assert(!runtime_online_mode_private_cup() && speed==0);
+    unsigned char search_root[0x100]={0}, search_project[0x100]={0}, search_panel[0x100]={0}, search_table[0x40]={0};
+    unsigned char labels[4][0x100]={{0}};
+    void *search_items[]={search_panel,labels[0],labels[1],labels[2],labels[3]};
+    put_pointer(search_root,0x48,search_table);
+    put_pointer(search_root,0x20,search_project);
+    timeout_project=search_project;
+    put_pointer(search_table,0x20,search_items);
+    *(int *)(search_table+12)=5;
+    put_pointer(search_panel,0x28,"OCTR_SEARCH_PANEL");
+    put_pointer(labels[0],0x28,"OCTR_SEARCH_TITLE");
+    put_pointer(labels[1],0x28,"OCTR_SEARCH_TIME");
+    put_pointer(labels[2],0x28,"OCTR_SEARCH_RANGE");
+    put_pointer(labels[3],0x28,"TimerValue");
+    unsigned char countdown_before[0x100]; memcpy(countdown_before,labels[3],sizeof countdown_before);
+    *(unsigned *)(search_panel+12)|=0x400;
+    search_test_active=search_test_ranked=1;search_test_elapsed=42;search_test_range=700;
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(!strcmp(*(char **)(labels[0]+0x30),"SEARCHING"));
+    assert(!strcmp(*(char **)(labels[1]+0x30),"00:42 / 03:00"));
+    assert(!strcmp(*(char **)(labels[2]+0x30),"WIDENED: 700 MMR"));
+    char *title_before=*(char **)(labels[0]+0x30);
+    for(int frame=0;frame<120;++frame) runtime_online_mode_matchmaking_update(search_root);
+    assert(*(char **)(labels[0]+0x30)==title_before);
+    search_test_range=-1;runtime_online_mode_matchmaking_update(search_root);
+    assert(!strcmp(*(char **)(labels[2]+0x30),"ALL RANKS"));
+    search_test_ranked=0;runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(labels[2]+12)&0x400);
+    assert(*(float *)(labels[0]+0x64)==68.5f && *(float *)(labels[1]+0x64)==96.5f);
+    search_test_ranked=1;runtime_online_mode_matchmaking_update(search_root);
+    assert(*(float *)(labels[0]+0x64)==56.0f && *(float *)(labels[1]+0x64)==84.0f);
+    search_test_active=0;runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(search_panel+12)&0x400);
+    assert(!memcmp(countdown_before,labels[3],sizeof countdown_before));
+    direct_stub(image + 0x149d260,hof_animation_release);
+    const int timeout_before=timeout_events,release_before=timeout_releases;
+    assert(runtime_online_mode_matchmaking_timeout());
+    assert(timeout_events==timeout_before+1 && timeout_releases==release_before+1);
+    assert(!runtime_online_mode_matchmaking_timeout());
+    runtime_online_mode_matchmaking_update(search_root);
+    timeout_signal=0x10002;
+    assert(runtime_online_mode_matchmaking_cancel(2));
+    timeout_signal=0x10000;
+    unsigned char private_project[0x100]={0};
+    timeout_menu_field=manager+0xdf0;
+    for (int visit=0;visit<2;++visit) {
+        put_pointer(manager,0xdf0,make_string(NULL,"Octane_Lobby_PrivateGame"));
+        put_pointer(search_root,0x20,private_project);timeout_project=private_project;
+        put_pointer(search_root,0x28,"OCTR_PRIVATE_LOBBY");
+        runtime_online_mode_matchmaking_update(search_root);
+        assert(!runtime_online_mode_matchmaking_timeout());
+        assert(runtime_online_mode_matchmaking_cancel(2) && timeout_type==(void *)45);
+        assert(!runtime_online_mode_matchmaking_cancel(2));
+        free_string(NULL,*(char **)timeout_menu_field-16);
+        *(char **)timeout_menu_field=NULL;
+    }
+    for (int mode=0;mode<2;++mode) {
+        search_test_ranked=mode;
+        put_pointer(manager,0xdf0,make_string(NULL,"Octane_Lobby_WaitingRoom"));
+        put_pointer(search_root,0x20,search_project);timeout_project=search_project;
+        put_pointer(search_root,0x28,"OCTR_PUBLIC_LOBBY");
+        runtime_online_mode_matchmaking_update(search_root);timeout_signal=0x10002;
+        assert(runtime_online_mode_matchmaking_cancel(2) && timeout_type==(void *)44);
+        assert(!strcmp(*(char **)timeout_menu_field,"Octane_Lobby_WaitingRoom"));
+        free_string(NULL,*(char **)timeout_menu_field-16);
+        *(char **)timeout_menu_field=NULL;
+    }
+    timeout_signal=0x10000;timeout_menu_field=NULL;
+    for(int i=0;i<3;++i) free_string(NULL,*(char **)(labels[i]+0x30)-16);
     free_string(NULL, *(char **)(private_settings + 0x10) - 16);
     munmap(image, size);
 }
 
+static void test_ranked_mode_layout(void) {
+    unsigned char root[0x100] = {0}, table[0x40] = {0};
+    unsigned char children[4][0x100] = {{0}};
+    void *items[4] = {children[0], children[1], children[2], children[3]};
+    *(void **)(root + 0x48) = table;
+    *(int *)(table + 12) = 4;
+    *(void ***)(table + 0x20) = items;
+    *(float *)(children[2] + 0x64) = 50.0f;
+    runtime_online_mode_ranked_menu_update(root, 1, 1);
+    assert(ranked_profile_mode == 1);
+    assert(*(float *)(children[2] + 0x64) == 50.0f);
+    runtime_online_mode_ranked_menu_update(root, 0, 0);
+    assert(*(float *)(children[2] + 0x64) == 50.0f);
+}
+
+static void test_ranked_mode_root_with_added_assets(void) {
+    unsigned char root[0x100] = {0}, buttons[0x100] = {0}, header[0x100] = {0};
+    unsigned char root_table[0x40] = {0}, button_table[0x40] = {0};
+    unsigned char table[0x40] = {0}, last[0x100] = {0};
+    unsigned char first[0x100] = {0}, content[0x100] = {0};
+    void *root_items[4] = {0}, *button_items[1] = {header}, *items[27] = {0};
+    root_items[2] = buttons;
+    items[0] = first;
+    items[2] = content;
+    items[26] = last;
+    *(void **)(root + 0x48) = root_table;
+    *(int *)(root_table + 12) = 4;
+    *(void ***)(root_table + 0x20) = root_items;
+    *(void **)(header + 0x40) = buttons;
+    *(void **)(buttons + 0x40) = root;
+    *(void **)(buttons + 0x48) = button_table;
+    *(int *)(button_table + 12) = 1;
+    *(void ***)(button_table + 0x20) = button_items;
+    *(void **)(header + 0x48) = table;
+    *(int *)(table + 12) = 27;
+    *(void ***)(table + 0x20) = items;
+    *(const char **)(last + 0x28) = "OCTR_RANK_PLACEMENT";
+    assert(ranked_mode_select_root(header) == root);
+    *(float *)(first + 0x64) = -52.5f;
+    ranked_mode_select_layout(root, 1);
+    assert(*(float *)(first + 0x64) == 137.5f);
+    assert(*(float *)(content + 0x64) == 190.0f);
+    ranked_mode_select_layout(root, 0);
+    assert(*(float *)(first + 0x64) == -52.5f);
+    assert(*(float *)(content + 0x64) == 0.0f);
+    *(const char **)(last + 0x28) = "OTHER";
+    assert(ranked_mode_select_root(header) == NULL);
+}
+
 int main(void) {
+    test_ranked_mode_root_with_added_assets();
+    test_ranked_mode_layout();
     test_region(0);
     test_region(0x10);
 }

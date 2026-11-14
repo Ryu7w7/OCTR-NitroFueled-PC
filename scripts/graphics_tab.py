@@ -22,6 +22,7 @@ usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
 """
 import argparse
 from contextlib import ExitStack
+import hashlib
 import lzma
 import struct
 import sys
@@ -41,7 +42,6 @@ LABELS = {'en': 'Graphics', 'fr': 'Graphismes', 'mx': 'Gráficos', 'pt': 'Gráfi
 DUMP = ('octane_options_menu', 'octane_options_languageselect', 'octane_mainmenu', 'octane_main_menu',
         'octane_startscreen_menu')
 SECTOR = 0x800
-VERSION = 37  # of this script's output (the cached file is rebuilt when it changes)
 
 
 def fnv1a(text):
@@ -517,15 +517,20 @@ def main():
     if (args.game / OUTPUT).exists():
         print(f'Graphics tab: the game already has {OUTPUT}, off')
         return
-    stamp = '-'.join(f'{(args.game / "archives" / a).stat().st_size}'
-                     for a in ARCHIVES if (args.game / 'archives' / a).is_file())
+    stamp = hashlib.sha256(repr([
+        (a, str((args.game / 'archives' / a).resolve()),
+         (args.game / 'archives' / a).stat().st_size,
+         (args.game / 'archives' / a).stat().st_mtime_ns,
+         (args.game / 'archives' / a).stat().st_ctime_ns)
+        for a in ARCHIVES if (args.game / 'archives' / a).is_file()]).encode()).hexdigest()[:16]
     folder = args.out / 'graphics-tab'
-    dest = folder / f'update3-v{VERSION}-{stamp}.pak'
+    version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    dest = folder / f'update3-{version}-{stamp}.pak'
     try:
         if not dest.is_file():
-            for old in folder.glob('*.pak'):
-                old.unlink()
             build(args.game, dest, folder / 'dump')
+        from cache_cleanup import discard_files
+        discard_files(folder, [old for old in folder.glob('update3-*.pak') if old != dest])
     except (OSError, ValueError, lzma.LZMAError, zlib.error) as error:
         print(f'Graphics tab: {error}, off')
         return
