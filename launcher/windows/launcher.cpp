@@ -5681,8 +5681,8 @@ void ContentTab() {
         if (!r.output.empty()) AddLog(r.output);
         const bool ok = r.started && r.code == 0;
         a.notice = c.converting
-            ? (ok ? T("Mod convertido: ya está en tus paquetes. El registro dice qué cambios se dejaron fuera.",
-                      "Mod converted: it is in your packages now. The log lists the changes left out.")
+            ? (ok ? T("Mod convertido: ya está en tus paquetes (un paquete por pista). El registro dice qué cambios se dejaron fuera.",
+                      "Mod converted: it is in your packages now (one package per track). The log lists the changes left out.")
                   : T("No se pudo convertir el mod. Revisa el registro.", "Could not convert the mod. Check the log."))
             : (ok ? T("Paquete quitado. Se conserva una copia en content-state/removed.",
                       "Package removed. A copy is kept in content-state/removed.")
@@ -5784,11 +5784,13 @@ void ContentTab() {
         }
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete.\n"
+        ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete;\n"
+                                  "si trae varias pistas, un paquete por pista.\n"
                                   "Se dejan fuera sus cambios a archivos que usan todas las pistas.\n"
                                   "Las pistas de CTR Track Editor anteriores a la 0.5 se corrigen al convertir\n"
                                   "(sus contadores de referencias cerraban el juego al cargar la pista siguiente).",
-                                  "A classic track mod (its .pak files and a whole update3.pak) becomes a package.\n"
+                                  "A classic track mod (its .pak files and a whole update3.pak) becomes a package;\n"
+                                  "with several tracks, one package per track.\n"
                                   "Its changes to files every track uses are left out.\n"
                                   "Tracks from CTR Track Editor before 0.5 are fixed when converted\n"
                                   "(their reference counts crashed the game loading the next track)."));

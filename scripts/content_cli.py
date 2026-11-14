@@ -12,7 +12,7 @@
         Moves the package's ZIP or folder to content-state/removed (nothing is deleted).
     python scripts/content_cli.py PORTABLE_ROOT convert GAME_FOLDER MOD
         Converts a classic track mod (its archives and a whole update3.pak) into a package,
-        custom_content/<track id>.zip (scripts/content_convert.py).
+        custom_content/<track id>.zip, one per track of the mod (scripts/content_convert.py).
 
 The launcher writes content-state/selection.json itself (its switches).
 """
@@ -70,12 +70,15 @@ def convert(root, game, mod):
     folder.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='convert-', dir=cp.state(folder).parent) as work:
         made, dropped = content_convert.convert(game, mod, work)
-        target = folder / (made.name + '.zip')
-        if target.exists():
-            raise ValueError(target.name + ' is already in custom_content')
-        content_convert.pack(made, Path(work) / target.name)
-        shutil.move(str(Path(work) / target.name), str(target))
-    return target, dropped
+        targets = [folder / (m.name + '.zip') for m in made]
+        there = [t.name for t in targets if t.exists()]
+        if there:
+            raise ValueError(', '.join(there) + ' already in custom_content')
+        for m, target in zip(made, targets):
+            content_convert.pack(m, Path(work) / target.name)
+        for target in targets:
+            shutil.move(str(Path(work) / target.name), str(target))
+    return targets, dropped
 
 
 def main(argv=None):
@@ -91,8 +94,8 @@ def main(argv=None):
         elif command == 'remove' and len(argv) == 3:
             print('Moved to:', remove(root, argv[2]))
         elif command == 'convert' and len(argv) == 4:
-            target, dropped = convert(root, Path(argv[2]), Path(argv[3]))
-            print('Converted:', target.name)
+            targets, dropped = convert(root, Path(argv[2]), Path(argv[3]))
+            print('Converted:', ', '.join(t.name for t in targets))
             for path in dropped:
                 print('  left out (changes a game file every track uses):', path)
         else:

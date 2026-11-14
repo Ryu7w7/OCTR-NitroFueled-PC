@@ -339,7 +339,8 @@ class ConvertTests(unittest.TestCase):
 
     def classic(self, image=True, extra_track=False):
         import content_convert  # noqa: F401
-        tracks = [tr.Track(MAP, image='LevelImage_Suzuka' if image else None, texture=TEXTURE if image else None)]
+        picture = 'LevelImage_T922_Suzuka' if extra_track else 'LevelImage_Suzuka'  # named after its track
+        tracks = [tr.Track(MAP, image=picture if image else None, texture=TEXTURE if image else None)]
         if extra_track:
             tracks.append(tr.Track('octane/t929_neo_bowser_city/t929_neo_bowser_city'))
         registered = {**self.entries, **tr.register(dict(self.entries), tracks, log=lambda _: None)}
@@ -348,11 +349,15 @@ class ConvertTests(unittest.TestCase):
         update3['maps/octane/t111_crash_cove/a.igz'] = b'changed'  # a global change
         if image:
             update3[f'textures/{TEXTURE}.igz'] = b'picture'
+        if extra_track:
+            update3['maps/octane/t929_neo_bowser_city/t929_neo_bowser_city_zoneinfo.igz'] = b'zone 2'
         mod = self.dir / 'mod'
         (mod / 'archives').mkdir(parents=True)
         write_archive(mod / 'archives/update3.pak',
                       [('t/' + p, p, i << 8, d) for i, (p, d) in enumerate(update3.items())], SimpleNamespace(flags=0))
         (mod / 'archives' / f'{ID}.pak').write_bytes(fake_pak())
+        if extra_track:
+            (mod / 'archives' / 't929_neo_bowser_city.pak').write_bytes(fake_pak())
         (mod / 'mod.json').write_text(json.dumps({'id': 'suzuka', 'name': 'Suzuka (F1)', 'version': '0.7.2',
                                                   'author': 'CTRNFModding', 'compatibility': {'online': 'offline-only'}}))
         (mod / 'README.txt').write_text('Suzuka')
@@ -361,7 +366,7 @@ class ConvertTests(unittest.TestCase):
 
     def test_a_classic_track_mod_becomes_a_package_without_its_global_changes(self):
         import content_convert
-        dest, dropped = content_convert.convert(self.game, self.classic(), self.dir / 'out', log=lambda _: None)
+        [dest], dropped = content_convert.convert(self.game, self.classic(), self.dir / 'out', log=lambda _: None)
         self.assertEqual(dropped, ['maps/octane/t111_crash_cove/a.igz'])
         m = cp.read_folder(dest)
         self.assertEqual((m['id'], m['map'], m['image'], m['texture'], m['online']),
@@ -376,7 +381,20 @@ class ConvertTests(unittest.TestCase):
                                                         staging=self.dir / 'staging'), [(m, dest)])
         self.assertEqual(tr.pages(archive[tr.GUI], archive[tr.SELECT])[-1][2], [MAP])
 
-    def test_a_mod_with_two_new_tracks_is_refused(self):
+    def test_a_mod_with_two_new_tracks_becomes_two_packages(self):
         import content_convert
-        with self.assertRaisesRegex(ValueError, 'expected one new track'):
-            content_convert.convert(self.game, self.classic(extra_track=True), self.dir / 'out', log=lambda _: None)
+        made, _ = content_convert.convert(self.game, self.classic(extra_track=True), self.dir / 'out',
+                                          log=lambda _: None)
+        first, second = (cp.read_folder(d) for d in made)
+        self.assertEqual((first['id'], first['image'], second['id']), (ID, 'LevelImage_T922_Suzuka', 't929_neo_bowser_city'))
+        self.assertNotIn('image', second)
+        self.assertEqual(sorted(r['file'] for r in first['files']),
+                         sorted(['README.txt', f'archives/{ID}.pak', f'files/{ZONE}', f'files/textures/{TEXTURE}.igz']))
+        self.assertEqual(sorted(r['file'] for r in second['files']),
+                         ['README.txt', 'archives/t929_neo_bowser_city.pak',
+                          'files/maps/octane/t929_neo_bowser_city/t929_neo_bowser_city_zoneinfo.igz'])
+        # no zone info names it: the mod's name and the track id
+        self.assertEqual(second['name'], {'en': 'Suzuka (F1) (t929_neo_bowser_city)'})
+        # both build together
+        BuildTests.build(SimpleNamespace(game=self.game, store=self.dir / 'state', staging=self.dir / 'staging'),
+                         [(first, made[0]), (second, made[1])])

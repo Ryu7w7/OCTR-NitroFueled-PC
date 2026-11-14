@@ -3,7 +3,9 @@
 """A classic track mod converted to an external content package (scripts/content_package.py).
 
 A classic track mod is a ZIP or folder with the track's own archives (archives/t922_suzuka.pak,
-its flybys) and a whole update3.pak with the track's registration and its own files in it. The
+its flybys) and a whole update3.pak with the track's registration and its own files in it. A mod
+with several new tracks (CTR Track Editor exports every track of a project in one mod) becomes one
+package per track: each takes the archives named after it and the new files naming it. The
 conversion keeps:
 
   - the track's own archives, with the reference counts of their map files fixed (tracks saved
@@ -16,7 +18,8 @@ conversion keeps:
 It leaves out every other change the mod made to the game's own files ("global" changes, such as
 scripts every track uses): those would change the game for all tracks, which external content
 cannot. They are named in the result, and the classic mod stays as it was.
-The package keeps the mod's name, version and author, and says what it was converted from.
+The package keeps the mod's name (with several tracks, each track's own, from its zone info),
+version and author, and says what it was converted from.
 
     python scripts/content_convert.py GAME_FOLDER MOD.zip OUTPUT_FOLDER
 """
@@ -55,43 +58,83 @@ def source_folder(source, work):
     return root
 
 
-def find_track(game, entries):
-    """(map, image, texture) the mod's registration adds: the new CGuiOctaneLevelData, and the
-    new LevelImage_* of LevelSelect_materials with its texture."""
-    def entry(path):
-        key = next((k for k in entries if k.casefold() == path.casefold()), None)
-        return entries[key][1] if key else None
-    gui = entry(tr.GUI)
+def squeezed(name):
+    """A name to compare names by: LevelImage_T904_Custom_Map, t904custommap."""
+    return name.casefold().replace('_', '')
+
+
+def entry(entries, path):
+    key = next((k for k in entries if k.casefold() == path.casefold()), None)
+    return entries[key][1] if key else None
+
+
+def find_tracks(game, entries):
+    """[(map, image, texture)] of the tracks the mod's registration adds: each new
+    CGuiOctaneLevelData, and the new LevelImage_* of LevelSelect_materials with its texture (the
+    one named after the track; with one track, or one picture left, the one there is)."""
+    gui = entry(entries, tr.GUI)
     if gui is None:
         raise ValueError('the mod registers no track (no guisystemdata.igz in its update archive)')
     have = tr.registered(game.newest(tr.GUI))
     new = sorted(tr.registered(gui) - have)
-    if len(new) != 1:
-        raise ValueError(f'expected one new track in the mod, found {len(new)}: ' + ', '.join(new))
+    if not new:
+        raise ValueError('the mod registers no new track')
     g = File(gui)
-    track = next(g.string_at(o + 0x10) for o, t in g.typed.items()
-                 if t == tr.LEVEL_DATA and g.string_at(o + 0x10).casefold() == new[0])
-    image = texture = None
-    materials = entry(tr.MATERIALS)
+    spelled = {g.string_at(o + 0x10).casefold(): g.string_at(o + 0x10) for o, t in g.typed.items()
+               if t == tr.LEVEL_DATA}
+    tracks = [spelled[n] for n in new]
+    pictures = {}
+    materials = entry(entries, tr.MATERIALS)
     if materials is not None:
         old = set(tr.named(File(game.newest(tr.MATERIALS))))
         z = File(materials)
-        added = [(n, o) for n, o in tr.named(z).items() if n.startswith(tr.IMAGE) and n not in old]
-        if len(added) > 1:
-            raise ValueError('the mod adds several track pictures: ' + ', '.join(n for n, _ in added))
-        if added:
-            image, o = added[0]
+        for image, o in tr.named(z).items():
+            if not image.startswith(tr.IMAGE) or image in old:
+                continue
             textures = [z.handle(z.u32(site))[1] for x in tr.owned(z, o) if z.typed[x] == 'igGraphicsTexture'
                         for tag, site in z.sites_in(x, z.size(x)) if tag == 'RHND']
             if len(textures) != 1:
                 raise ValueError(f'{image}: expected one texture')
-            texture = textures[0]
-    return track, image, texture
+            pictures[image] = textures[0]
+    found = {}
+    for track in tracks:
+        image = next((n for n in pictures if squeezed(n) == squeezed(tr.IMAGE + track.rsplit('/', 1)[-1])), None)
+        if image:
+            found[track] = image
+    left = [n for n in pictures if n not in found.values()]
+    without = [t for t in tracks if t not in found]
+    if len(left) == 1 and len(without) == 1:
+        found[without[0]] = left[0]
+    elif len(tracks) == 1 and left:
+        raise ValueError('the mod adds several track pictures: ' + ', '.join(sorted(pictures)))
+    return [(t, found.get(t), pictures.get(found.get(t))) for t in tracks]
+
+
+def owner(name, idents):
+    """The track id a file or archive name is named after (the longest one it holds), or None."""
+    name = squeezed(name)
+    named = [i for i in idents if squeezed(i) in name]
+    return max(named, key=len) if named else None
+
+
+def zone_name(entries, track):
+    """The English name of a track, from its zone info, or None."""
+    base = track.rsplit('/', 1)[-1]
+    data = entry(entries, f'maps/{track.rsplit("/", 1)[0]}/{base}_zoneInfo_en.lng')
+    if not data:
+        return None
+    try:
+        z = File(data)
+        first = min(o for o, t in z.typed.items() if t == 'igLocalizedStringData')
+        name = z.strings[z.u64(first + 0x10)].strip()
+    except (ValueError, IndexError, KeyError):
+        return None
+    return name[:80] or None
 
 
 def convert(game_folder, source, output, log=print):
-    """The package folder written in `output` (a new folder named after the track id). Returns
-    (package folder, [global changes left out])."""
+    """The package folders written in `output` (a new folder named after each track id). Returns
+    ([package folders], [global changes left out])."""
     installed = te.notice(game_folder)
     if installed:
         raise ValueError(installed)
@@ -105,90 +148,107 @@ def convert(game_folder, source, output, log=print):
             if len(updates) != 1:
                 raise ValueError('expected one update archive (update3.pak) in the mod')
             entries = {logical: (kind, data) for kind, logical, data in cd.delta(game, updates[0])}
-            track, image, texture = find_track(game, entries)
-            ident = track.rsplit('/', 1)[-1].casefold()
-            own = [p for p in paks if p not in updates]
-            bad = [p.name for p in own if not p.name.casefold().startswith(ident)]
+            tracks = find_tracks(game, entries)
+            idents = [track.rsplit('/', 1)[-1].casefold() for track, _, _ in tracks]
+            several = len(tracks) > 1
+            own = {i: [] for i in idents}
+            bad = []
+            for pak in paks:
+                if pak in updates:
+                    continue
+                stem = pak.name.casefold()
+                mine = max((i for i in idents if stem.startswith(i)), key=len, default=None)
+                (own[mine] if mine else bad).append(pak)
             if bad:
-                raise ValueError(f'archives not named after the track ({ident}): ' + ', '.join(bad))
+                raise ValueError(f'archives not named after the track ({", ".join(idents)}): '
+                                 + ', '.join(p.name for p in bad))
+            empty = [i for i in idents if not own[i]]
+            if empty:
+                raise ValueError('no archives of its own for the track ' + ', '.join(empty))
+            for ident in idents:
+                if (Path(output) / ident).exists():
+                    raise ValueError(f'{Path(output) / ident} already exists')
             dropped = sorted(logical for logical, (kind, _) in entries.items() if kind == cd.GLOBAL)
-            dest = Path(output) / ident
-            if dest.exists():
-                raise ValueError(f'{dest} already exists')
-            (dest / 'archives').mkdir(parents=True)
-            fixed = 0
-            rules = []
-            for pak in own:
-                shutil.copy2(pak, dest / 'archives' / pak.name)
-                with_maps = Archive(pak)
-                try:
-                    maps = te.map_files(with_maps)
-                finally:
-                    with_maps.f.close()
-                if maps:
-                    rules.append(te.rule_of(maps.values()))
-                fixed += sum(te.fix_archive(dest / 'archives' / pak.name).values())
-            compat = content_compat.assess(game, own, rules[0] if rules else te.ALL,
-                                           meta.get('id'), meta.get('version'))
+            # Files the game does not have go to the track they name; with several tracks, one
+            # naming none goes to the first.
+            new_files = {i: [] for i in idents}
+            for logical, (kind, _) in entries.items():
+                if kind == cd.NEW:
+                    new_files[owner(logical, idents) or idents[0]].append(logical)
             # Unchanged game files the mod carries that the game keeps only in archives it loads
             # for one track or menu (Sewer Speedway's scripts and menu textures, for Neo Bowser
-            # City) stay, in shared/: the track needs them loaded with it.
-            kept = []
-            for logical, (kind, data) in entries.items():
-                if kind == cd.NEW:
-                    folder_name = 'files'
-                elif kind == cd.FILLER and cd.streamed_only(game, logical):
-                    kept.append(logical)
-                    folder_name = 'shared'
-                else:
-                    continue
-                target = cp.under(dest / folder_name, logical)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-            for extra in folder.iterdir():
-                if extra.is_file() and extra.name.casefold().endswith(cp.EXTRAS):
-                    shutil.copy2(extra, dest / extra.name)
-            (dest / cp.MARKER).write_text(cp.MARKER_TEXT + '\n', encoding='utf-8')
-            m = {'format': cp.FORMAT, 'type': 'track', 'id': ident,
-                 'name': {'en': meta.get('name') or ident}, 'version': meta.get('version') or '1.0.0',
-                 'author': meta.get('author') or 'unknown', 'map': track}
-            if image:
-                m.update(image=image, texture=texture)
-            online = (meta.get('compatibility') or {}).get('online')
-            m['online'] = 'private' if online == 'allowed' else 'offline-only'
-            # The streaming list gets what the mod's own list added for its files, and nothing
-            # more (content_package.track).
+            # City) stay, in shared/: the track needs them loaded with it. Every track gets them.
+            kept = [logical for logical, (kind, _) in entries.items()
+                    if kind == cd.FILLER and cd.streamed_only(game, logical)]
             mine = entries.get(next((p for p in entries if p.casefold() == tr.CHUNKS.casefold()), ''), (None, b''))[1]
+            listed = set()
             if mine:
-                from igz_merge import File
                 theirs = game.newest(tr.CHUNKS)
-                own = {p.casefold() for _, p in tr.chunk_entries(File(mine))[1]}
-                base = {p.casefold() for _, p in tr.chunk_entries(File(theirs))[1]} if theirs else set()
-                ours = kept + [p for p, (kind, _) in entries.items() if kind == cd.NEW]
-                m['stream'] = [p for p in ours if p.casefold() in own - base]
-            m['credits'] = (f'{m["name"]["en"]} by {m["author"]}. Converted by the OCTR launcher from the mod '
-                            f'{meta.get("id", Path(source).stem)} {m["version"]}'
-                            + (f', without {len(dropped)} changes to game files.' if dropped else '.'))
-            m['convertedFrom'] = {'id': meta.get('id'), 'version': meta.get('version'), 'author': meta.get('author'),
-                                  'source': Path(source).name, 'left_out': dropped}
-            if fixed:
-                m['convertedFrom']['fixed_reference_counts'] = fixed
-            m['convertedFrom']['compatibility'] = compat
-            m['files'] = []
-            for path in sorted(p for p in dest.rglob('*') if p.is_file() and p.name not in (cp.MARKER, cp.MANIFEST)):
-                with path.open('rb') as f:
-                    digest = hashlib.file_digest(f, 'sha256').hexdigest()
-                m['files'].append({'file': path.relative_to(dest).as_posix(), 'sha256': digest,
-                                   'bytes': path.stat().st_size})
-            cp.validate_manifest(m)
-            (dest / cp.MANIFEST).write_text(json.dumps(m, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-            cp.read_folder(dest)
-            log(f'{ident}: {m["name"]["en"]} {m["version"]} by {m["author"]}'
-                + (f'; left out {len(dropped)} changes to game files' if dropped else '')
-                + (f'; fixed the reference counts of {fixed} map objects' if fixed else '')
-                + f'; compatibility {compat["level"]}' + (' (tried in game)' if compat['tested'] else '')
-                + (': ' + ', '.join(f'{k} {v}' for k, v in compat['issues'].items()) if compat['issues'] else ''))
-            return dest, dropped
+                listed = ({p.casefold() for _, p in tr.chunk_entries(File(mine))[1]}
+                          - ({p.casefold() for _, p in tr.chunk_entries(File(theirs))[1]} if theirs else set()))
+            made = []
+            for (track, image, texture), ident in zip(tracks, idents):
+                dest = Path(output) / ident
+                (dest / 'archives').mkdir(parents=True)
+                fixed = 0
+                rules = []
+                for pak in own[ident]:
+                    shutil.copy2(pak, dest / 'archives' / pak.name)
+                    with_maps = Archive(pak)
+                    try:
+                        maps = te.map_files(with_maps)
+                    finally:
+                        with_maps.f.close()
+                    if maps:
+                        rules.append(te.rule_of(maps.values()))
+                    fixed += sum(te.fix_archive(dest / 'archives' / pak.name).values())
+                compat = content_compat.assess(game, own[ident], rules[0] if rules else te.ALL,
+                                               meta.get('id'), meta.get('version'))
+                for logical, folder_name in [(p, 'files') for p in new_files[ident]] + [(p, 'shared') for p in kept]:
+                    target = cp.under(dest / folder_name, logical)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(entries[logical][1])
+                for extra in folder.iterdir():
+                    if extra.is_file() and extra.name.casefold().endswith(cp.EXTRAS):
+                        shutil.copy2(extra, dest / extra.name)
+                (dest / cp.MARKER).write_text(cp.MARKER_TEXT + '\n', encoding='utf-8')
+                name = (zone_name(entries, track) or f'{meta.get("name") or ident} ({ident})') if several \
+                    else meta.get('name') or ident
+                m = {'format': cp.FORMAT, 'type': 'track', 'id': ident,
+                     'name': {'en': name}, 'version': meta.get('version') or '1.0.0',
+                     'author': meta.get('author') or 'unknown', 'map': track}
+                if image:
+                    m.update(image=image, texture=texture)
+                online = (meta.get('compatibility') or {}).get('online')
+                m['online'] = 'private' if online == 'allowed' else 'offline-only'
+                # The streaming list gets what the mod's own list added for its files, and nothing
+                # more (content_package.track).
+                if mine:
+                    m['stream'] = [p for p in kept + new_files[ident] if p.casefold() in listed]
+                m['credits'] = (f'{name} by {m["author"]}. Converted by the OCTR launcher from the mod '
+                                f'{meta.get("id", Path(source).stem)} {m["version"]}'
+                                + (f', without {len(dropped)} changes to game files.' if dropped else '.'))
+                m['convertedFrom'] = {'id': meta.get('id'), 'version': meta.get('version'), 'author': meta.get('author'),
+                                      'source': Path(source).name, 'left_out': dropped}
+                if fixed:
+                    m['convertedFrom']['fixed_reference_counts'] = fixed
+                m['convertedFrom']['compatibility'] = compat
+                m['files'] = []
+                for path in sorted(p for p in dest.rglob('*') if p.is_file() and p.name not in (cp.MARKER, cp.MANIFEST)):
+                    with path.open('rb') as f:
+                        digest = hashlib.file_digest(f, 'sha256').hexdigest()
+                    m['files'].append({'file': path.relative_to(dest).as_posix(), 'sha256': digest,
+                                       'bytes': path.stat().st_size})
+                cp.validate_manifest(m)
+                (dest / cp.MANIFEST).write_text(json.dumps(m, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+                cp.read_folder(dest)
+                log(f'{ident}: {name} {m["version"]} by {m["author"]}'
+                    + (f'; left out {len(dropped)} changes to game files' if dropped else '')
+                    + (f'; fixed the reference counts of {fixed} map objects' if fixed else '')
+                    + f'; compatibility {compat["level"]}' + (' (tried in game)' if compat['tested'] else '')
+                    + (': ' + ', '.join(f'{k} {v}' for k, v in compat['issues'].items()) if compat['issues'] else ''))
+                made.append(dest)
+            return made, dropped
     finally:
         game.close()
 

@@ -183,7 +183,9 @@ content-state/removed) and the folder. It reads the folder with scripts/content_
 A classic track mod (its archives and a whole update3.pak) converts into a package:
   python scripts/content_convert.py GAME_FOLDER MOD.zip OUTPUT_FOLDER --zip
 It keeps the track's archives and new files and leaves out, and names, its changes to
-game files every track uses. Formats worked out from Neo Bowser City (PanchoPewPew),
+game files every track uses. A mod with several new tracks (CTR Track Editor exports all the
+tracks of a project in one mod) becomes one package per track, named from its zone info: each
+takes the archives and new files named after it. Formats worked out from Neo Bowser City (PanchoPewPew),
 Suzuka (CTRNFModding) and the Nitro Creator Handbook (venvs and collaborators).
 The conversion also fixes the reference counts of the track's map files (maps/*.igz:
 each object's count, the u32 at +0x08). Wrong counts let a track play, but the next level
