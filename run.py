@@ -230,6 +230,13 @@ def retry_taken_range(code, tries):
     return code == RANGE_TAKEN_CODE and tries < RANGE_TAKEN_TRIES
 
 
+# tools/shaders/compile_d3d11.py VERSION (tests/test_d3d11_compile.py keeps them equal)
+D3D11_COMPILED_VERSION = '3'
+# The translation's (out/d3d11-shaders/hlsl/translated.txt): another one is translated again, its
+# DXBC removed. 2 (v0.8.8): constant buffers declared as large as the shader reads.
+D3D11_TRANSLATION_VERSION = '2'
+
+
 def d3d11_step(script, args, pattern, start, span):
     """One step of prepare_d3d11_shaders: its "<word> N/M" lines move the launcher's progress bar
     from start to start + span percent. Whether it ended well."""
@@ -249,26 +256,48 @@ def d3d11_step(script, args, pattern, start, span):
     return process.wait() == 0
 
 
+D3D11_ORDER = PORT / 'tools' / 'shaders' / 'd3d11_order.txt'
+
+
 def prepare_d3d11_shaders(game, folder):
     """The Direct3D 11 engine's shaders, the first time, before the game starts: the game's programs
     translated to HLSL (tools/shaders/build_d3d11.py --translate-only, about 30 s), the shaders written
     for the PC (tools/shaders/native_d3d11.py) and every translation compiled to DXBC
-    (tools/shaders/compile_d3d11.py, about 5-10 minutes). Compiled in the game instead, draws were left
-    out until their shader was ready (flicker, wrong colours) and the compiler took the game's CPU.
-    Also finishes a folder an earlier version left half compiled. "@progress native-shaders" lines
-    (the same as the native renderer's): the launchers show a progress window meanwhile."""
+    (tools/shaders/compile_d3d11.py, about 2-3 minutes since v0.8.8 declares the constant buffers
+    as large as each shader reads: up to 30 minutes before). Kept, so later starts compile nothing.
+    What fails here the game compiles again as it needs it (gpu/shim/d3d11/renderer.cpp, in the
+    order of tools/shaders/d3d11_order.txt, a draw waiting for its shader). A folder an older version
+    translated is translated again, one it compiled with other flags compiled again
+    (compile_d3d11.py --forget). "@progress native-shaders" lines (the same as the native
+    renderer's): the launchers show a progress window meanwhile."""
     hlsl = folder / 'hlsl'
     translated = (hlsl / 'shaders.idx').is_file()
+    try:
+        translated = translated and (hlsl / 'translated.txt').read_text().strip() == D3D11_TRANSLATION_VERSION
+    except OSError:
+        translated = False
+    if not translated and (hlsl / 'shaders.idx').is_file():  # an older translation: none of it is kept
+        for old in hlsl.glob('*.dxbc'):
+            old.unlink(missing_ok=True)
+        (hlsl / 'shaders.idx').unlink(missing_ok=True)
+    try:  # compile_d3d11.py VERSION: the flags the DXBC in the folder were compiled with
+        current = (hlsl / 'compiled.txt').read_text().strip() == D3D11_COMPILED_VERSION
+    except OSError:
+        current = False
+    if translated and not current:
+        run_python('tools/shaders/compile_d3d11.py', hlsl, '--forget', check=False)
     if translated and all(s.with_suffix('.dxbc').is_file() for s in hlsl.glob('*.hlsl')):
         return True
-    say('Direct3D 11: preparing its shaders from your game (only the first time, 5-10 minutes)')
+    say('Direct3D 11: preparing its shaders from your game (only the first time, about 3 minutes)')
     emit('@progress native-shaders 0 Direct3D 11\n')
-    ok = translated or (d3d11_step('build_d3d11.py', [game, folder, '--translate-only'], 'translated', 0, 10)
+    ok = translated or (d3d11_step('build_d3d11.py', [game, folder, '--translate-only'], 'translated', 0, 20)
                         and (hlsl / 'shaders.idx').is_file())
     if ok and not translated:
         run_python('tools/shaders/native_d3d11.py', hlsl, check=False)
-    if ok:
-        d3d11_step('compile_d3d11.py', [hlsl], 'compiled', 10, 90)  # what fails here, the game tries again
+        run_python('tools/shaders/compile_d3d11.py', hlsl, '--forget', check=False)
+        (hlsl / 'translated.txt').write_text(D3D11_TRANSLATION_VERSION + '\n')
+    if ok:  # what fails here, the game compiles again
+        d3d11_step('compile_d3d11.py', [hlsl], 'compiled', 20, 80)
     emit(f'@progress native-shaders done {"ok" if ok else "failed"}\n')
     return ok
 
@@ -1321,6 +1350,7 @@ def launch(args, restarted=False):
             prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
             if (shaders / 'shaders.idx').is_file():
                 env.setdefault('BB_D3D11_SHADERS', str(shaders))
+                env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
                 say('Direct3D 11 (experimental)')
             else:
                 say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')

@@ -384,7 +384,7 @@ void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
     if (BbD3d11::On()) {
         const u64 address = req.index >= 0 ? u64(req.port->buffer_slots[req.index].address_left) : 0;
-        RunPresenter([address] { BbD3d11::Present(address); });
+        RunPresenter([address, snapshot = req.snapshot] { BbD3d11::Present(address, snapshot); });
     } else {
         RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
             presenter->SetHDR(hdr);
@@ -774,7 +774,7 @@ void VideoOutDriver::DrawLastFrame() {
 }
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
-                                bool is_eop /*= false*/) {
+                                bool is_eop /*= false*/, u32 snapshot /*= 0*/) {
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -791,20 +791,25 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop, snapshot); });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(port, index, flip_arg, is_eop, snapshot);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                        u32 snapshot) {
     Vulkan::Frame* frame = nullptr;
     if (BbD3d11::On()) {
-        // The Direct3D 11 engine keeps no frames: Flip presents what it has. A request without a
+        // The Direct3D 11 engine keeps no frames: Flip presents its copy of the buffer, made now
+        // (the game may draw a later frame there before the flip is shown). A request without a
         // frame reads as no request, so this only says there is one; it is never used as a frame.
         frame = reinterpret_cast<Vulkan::Frame*>(std::uintptr_t{1});
+        if (index >= 0 && !snapshot) { // an EOP flip brings the copy made when it was submitted
+            snapshot = BbD3d11::Snapshot(port->buffer_slots[index].address_left);
+        }
     } else if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
     } else {
@@ -836,6 +841,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .flip_arg = flip_arg,
             .index = index,
             .eop = is_eop,
+            .snapshot = snapshot,
         });
     }
     request_cv.notify_one();

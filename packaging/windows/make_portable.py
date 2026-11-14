@@ -305,7 +305,7 @@ def main():
     shutil.copy2(ROOT / 'tools' / 'shaders' / 'build_spirv.py', folder / 'tools' / 'shaders')
     # The Direct3D 11 engine's (run.py, renderer=d3d11): the translation at the first start, and the
     # shaders written for the PC with their sources (tools/shaders/native_d3d11.py reads them there).
-    for tool in ('build_d3d11.py', 'native_d3d11.py', 'compile_d3d11.py'):
+    for tool in ('build_d3d11.py', 'native_d3d11.py', 'compile_d3d11.py', 'd3d11_order.txt'):
         shutil.copy2(ROOT / 'tools' / 'shaders' / tool, folder / 'tools' / 'shaders')
     shutil.copytree(ROOT / 'gpu' / 'shim' / 'native_shaders', folder / 'gpu' / 'shim' / 'native_shaders',
                     dirs_exist_ok=True)

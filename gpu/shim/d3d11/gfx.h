@@ -24,8 +24,20 @@ void GfxSetGamma(float gamma);
 /// Called from the GNM draw entry points while the engine records a draw.
 void GfxDraw(u32 count, u64 index_addr, bool indexed);
 
-/// The surface at `addr` (a VideoOut buffer) into `target`, holding GfxMutex.
-void GfxPresent(u64 addr, ID3D11RenderTargetView* target);
+/// sceGnmDrawIndexOffset: `count` indices from `index_offset` in the engine's bound index buffer.
+void GfxDrawOffset(u32 count, u32 index_offset);
+
+/// A draw this renderer cannot make yet (the indirect ones: their arguments are in GPU memory):
+/// counted, and named with its shaders in a frame capture.
+void GfxDrawUnsupported(const char* kind);
+
+/// A copy of the surface at `addr` (a VideoOut buffer) as the game flips it, which GfxPresent shows
+/// later: 1..6, 0 none (no such surface). Takes GfxMutex.
+u32 GfxSnapshot(u64 addr);
+
+/// The surface at `addr` (a VideoOut buffer), or its `snapshot` (GfxSnapshot) when it still holds
+/// that buffer, into `target`, holding GfxMutex.
+void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot = 0);
 
 /// Something else used the device context (the overlay), holding GfxMutex: the renderer's record
 /// of what is bound no longer holds.

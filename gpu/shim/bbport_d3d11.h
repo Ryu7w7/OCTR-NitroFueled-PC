@@ -29,7 +29,17 @@ void SetGamma(float gamma);
 /// The game draws (the GNM draw entry points).
 void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr);
 
-/// One picture on screen: the VideoOut buffer at `address`, 0 the last one again. On the swap
-/// thread (VideoOutDriver::RunPresenter).
-void Present(std::uint64_t address);
+/// sceGnmDrawIndexOffset: `count` indices from `index_offset` in the bound index buffer.
+void OnDrawOffset(std::uint32_t count, std::uint32_t index_offset);
+
+/// The draws not made yet (the indirect ones), by GNM entry point: counted, named in a capture.
+void OnDrawUnsupported(const char* kind);
+
+/// The VideoOut buffer at `address` as the game flips it (VideoOutDriver::SubmitFlipInternal): a
+/// copy that Present shows, whatever the game draws there meanwhile. 0: none.
+std::uint32_t Snapshot(std::uint64_t address);
+
+/// One picture on screen: the VideoOut buffer at `address` (its `snapshot`, when taken), 0 the
+/// last one again. On the swap thread (VideoOutDriver::RunPresenter).
+void Present(std::uint64_t address, std::uint32_t snapshot = 0);
 } // namespace BbD3d11

@@ -16,4 +16,8 @@ using s16 = int16_t;
 using s32 = int32_t;
 using s64 = int64_t;
 
-#define LOG(...) (std::printf(__VA_ARGS__), std::putchar('\n'), std::fflush(stdout))
+// A frame capture (F11, renderer.cpp) also writes the lines to its folder's draws.txt.
+extern FILE* g_log_mirror;
+#define LOG(...)                                                                                    \
+    (std::printf(__VA_ARGS__), std::putchar('\n'), std::fflush(stdout),                             \
+     g_log_mirror ? (std::fprintf(g_log_mirror, __VA_ARGS__), std::fputc('\n', g_log_mirror)) : 0)

@@ -59,6 +59,7 @@ HWND window_handle = nullptr;
 UINT width = 0, height = 0, swap_flags = 0, present_flags = 0;
 std::uint64_t presents = 0;
 std::uint64_t last_address = 0;
+std::uint32_t last_snapshot = 0; // GfxSnapshot of last_address's flip, 0 none
 const char* const shaders = std::getenv("BB_D3D11_SHADERS"); // Start runs before PatchImage
 
 // Without shaders the work is only left out: the game runs behind an empty picture.
@@ -145,6 +146,12 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
 
 void Start(void* window) {
     window_handle = static_cast<HWND>(window);
+    // BB_RENDERDOC=<renderdoc.dll> (a lab aid): RenderDoc loaded before the device is made, so it
+    // hooks Direct3D 11; F11 then captures one whole frame of the game (renderer.cpp GfxSnapshot)
+    if (const wchar_t* rd = _wgetenv(L"BB_RENDERDOC"); rd && *rd && !GetModuleHandleW(L"renderdoc.dll")) {
+        const HMODULE m = LoadLibraryW(rd);
+        std::printf("D3D11: RenderDoc %s (F11 captures a frame)\n", m ? "loaded" : "not found at BB_RENDERDOC");
+    }
     UINT device_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     if (const char* debug = std::getenv("BB_D3D11_DEBUG"); debug && debug[0] == '1') {
         device_flags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -226,18 +233,35 @@ void OnDraw(bool indexed, std::uint32_t count, std::uint64_t index_addr) {
     }
 }
 
-void Present(std::uint64_t address) {
+void OnDrawOffset(std::uint32_t count, std::uint32_t index_offset) {
+    if (shaders) {
+        GfxDrawOffset(count, index_offset);
+    }
+}
+
+void OnDrawUnsupported(const char* kind) {
+    if (shaders) {
+        GfxDrawUnsupported(kind);
+    }
+}
+
+std::uint32_t Snapshot(std::uint64_t address) {
+    return swap_chain && shaders ? GfxSnapshot(address) : 0;
+}
+
+void Present(std::uint64_t address, std::uint32_t snapshot) {
     if (!swap_chain) {
         return;
     }
     if (address) {
         last_address = address;
+        last_snapshot = snapshot;
     }
     std::unique_lock lock{GfxMutex()};
     FollowWindow();
     ID3D11RenderTargetView* const view = target.Get();
     if (shaders) {
-        GfxPresent(last_address, view);
+        GfxPresent(last_address, view, last_snapshot);
     } else {
         context->ClearRenderTargetView(view, EmptyPicture);
     }
@@ -266,7 +290,12 @@ void PatchImage(unsigned char*, std::uint64_t) {}
 void Start(void*) {}
 void SetGamma(float) {}
 void OnDraw(bool, std::uint32_t, std::uint64_t) {}
-void Present(std::uint64_t) {}
+void OnDrawOffset(std::uint32_t, std::uint32_t) {}
+void OnDrawUnsupported(const char*) {}
+std::uint32_t Snapshot(std::uint64_t) {
+    return 0;
+}
+void Present(std::uint64_t, std::uint32_t) {}
 #endif
 
 } // namespace BbD3d11

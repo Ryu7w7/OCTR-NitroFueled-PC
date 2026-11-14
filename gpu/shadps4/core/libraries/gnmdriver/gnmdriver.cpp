@@ -671,6 +671,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndexAuto(u32* cmdbuf, u32 size, u32 index_count, u32
 s32 PS4_SYSV_ABI sceGnmDrawIndexIndirect(u32* cmdbuf, u32 size, u32 data_offset, u32 shader_stage,
                                          u32 vertex_sgpr_offset, u32 instance_sgpr_offset,
                                          u32 flags) {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawIndexIndirect");
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if (cmdbuf && (size == 9) && (shader_stage < ShaderStages::Max) &&
@@ -698,6 +699,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndexIndirectCountMulti(u32* cmdbuf, u32 size, u32 da
                                                    u32 max_count, u64 count_addr, u32 shader_stage,
                                                    u32 vertex_sgpr_offset, u32 instance_sgpr_offset,
                                                    u32 flags) {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawIndexIndirectCountMulti");
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if ((!sceKernelIsNeoMode() || !UseNeoCompatSequences) && cmdbuf && (size == 16) &&
@@ -734,6 +736,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndexIndirectCountMulti(u32* cmdbuf, u32 size, u32 da
 int PS4_SYSV_ABI sceGnmDrawIndexIndirectMulti(u32* cmdbuf, u32 size, u32 data_offset, u32 max_count,
                                               u32 shader_stage, u32 vertex_sgpr_offset,
                                               u32 instance_sgpr_offset, u32 flags) {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawIndexIndirectMulti");
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if (cmdbuf && (size == 11) && (vertex_sgpr_offset < 0x10u) && (instance_sgpr_offset < 0x10u) &&
@@ -768,6 +771,7 @@ int PS4_SYSV_ABI sceGnmDrawIndexMultiInstanced() {
 
 s32 PS4_SYSV_ABI sceGnmDrawIndexOffset(u32* cmdbuf, u32 size, u32 index_offset, u32 index_count,
                                        u32 flags) {
+    BbD3d11::OnDrawOffset(index_count, index_offset);
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if (cmdbuf && (size == 9)) {
@@ -785,6 +789,7 @@ s32 PS4_SYSV_ABI sceGnmDrawIndexOffset(u32* cmdbuf, u32 size, u32 index_offset, 
 
 s32 PS4_SYSV_ABI sceGnmDrawIndirect(u32* cmdbuf, u32 size, u32 data_offset, u32 shader_stage,
                                     u32 vertex_sgpr_offset, u32 instance_sgpr_offset, u32 flags) {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawIndirect");
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if (cmdbuf && (size == 9) && (shader_stage < ShaderStages::Max) &&
@@ -817,6 +822,7 @@ int PS4_SYSV_ABI sceGnmDrawIndirectCountMulti() {
 s32 PS4_SYSV_ABI sceGnmDrawIndirectMulti(u32* cmdbuf, u32 size, u32 data_offset, u32 max_count,
                                          u32 shader_stage, u32 vertex_sgpr_offset,
                                          u32 instance_sgpr_offset, u32 flags) {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawIndirectMulti");
     LOG_TRACE(Lib_GnmDriver, "called");
 
     if (cmdbuf && size == 11 && shader_stage < ShaderStages::Max && vertex_sgpr_offset < 0x10 &&
@@ -997,6 +1003,7 @@ u32 PS4_SYSV_ABI sceGnmDrawInitToDefaultContextState400(u32* cmdbuf, u32 size) {
 }
 
 int PS4_SYSV_ABI sceGnmDrawOpaqueAuto() {
+    BbD3d11::OnDrawUnsupported("sceGnmDrawOpaqueAuto");
     LOG_ERROR(Lib_GnmDriver, "(STUBBED) called");
     return ORBIS_OK;
 }

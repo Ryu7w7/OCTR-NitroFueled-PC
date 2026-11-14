@@ -24,6 +24,9 @@
 #include "glue.h"
 #include "glyphs.h"
 #include "texture.h"
+#include "../renderdoc_app.h"
+
+FILE* g_log_mirror = nullptr;  // common.h LOG
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -46,7 +49,7 @@ struct ShaderInfo {
     ComPtr<ID3D11GeometryShader> gs;
     std::once_flag once;  // loaded (the preload threads, or the first draw that needs it)
     std::atomic<bool> ready{false};   // its shader object exists: draws may use it (set last, release)
-    std::atomic<bool> urgent{false};  // a draw asked for it: the preload threads take it first
+    std::atomic<bool> used{false};  // a draw used it (the first use is noted: NoteFirstUse)
     u32 cube_slots = 0;   // texture slots the bytecode declares TextureCube: they take a cube view
     bool video = false;  // Bink's YCbCr -> RGB pixel shader: a video is on screen
 };
@@ -159,6 +162,22 @@ Stats g_stats;
 u64 g_frame = 0;
 std::atomic<u64> g_present_us{0};  // time blocked in Present
 bool g_capture = false;  // logging every draw of the captured frame
+bool g_capture_armed = false;    // F11 pressed: the capture starts at the next flip (GfxSnapshot)
+bool g_capture_by_flip = false;  // the capture running is F11's, from one flip to the next
+fs::path g_capture_dir;          // F11's capture folder
+
+// RenderDoc, when the game was started with it (BB_RENDERDOC, bbport_d3d11.cpp): F11's capture is
+// also its frame capture, and each draw in it is named after its shaders.
+RENDERDOC_API_1_1_2* RenderDoc() {
+    static RENDERDOC_API_1_1_2* api = [] {
+        RENDERDOC_API_1_1_2* found = nullptr;
+        if (HMODULE m = GetModuleHandleA("renderdoc.dll"))
+            if (auto get = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(m, "RENDERDOC_GetAPI")))
+                if (get(eRENDERDOC_API_Version_1_1_2, reinterpret_cast<void**>(&found)) != 1) found = nullptr;
+        return found;
+    }();
+    return api;
+}
 u64 g_capture_frame = [] {
     char v[32] = {};
     return GetEnvironmentVariableA("CTR_CAPTURE", v, sizeof(v)) ? strtoull(v, nullptr, 10) : 0ull;
@@ -501,9 +520,14 @@ bool CompileTranslation(ShaderInfo* info) {
     if (!src) return false;
     const std::string text((std::istreambuf_iterator<char>(src)), std::istreambuf_iterator<char>());
     const char* target = info->kind == "gs" ? "gs_5_0" : info->vertex ? "vs_5_0" : "ps_5_0";
+    // Pixel shaders with the optimizer, as tools/shaders/compile_d3d11.py: unoptimized, the GPU driver
+    // ran some wrong (wrong colours in the post process, vegetation killed at its alpha test).
+    const bool optimized = info->kind != "gs" && !info->vertex;
+    const UINT flags = (optimized ? D3DCOMPILE_OPTIMIZATION_LEVEL0 : D3DCOMPILE_SKIP_OPTIMIZATION) |
+                       D3DCOMPILE_ENABLE_STRICTNESS;
     ComPtr<ID3DBlob> code, err;
     const HRESULT hr = D3DCompile(text.data(), text.size(), info->name.c_str(), nullptr, nullptr, "main", target,
-                                  D3DCOMPILE_SKIP_OPTIMIZATION | D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &err);
+                                  flags, 0, &code, &err);
     if (FAILED(hr) || !code) {
         if (g_compile_failed++ < 20)
             LOG("gfx: %s does not compile: %s", info->name.c_str(),
@@ -559,43 +583,47 @@ void LoadShader(ShaderInfo* info) {
     if (SUCCEEDED(hr)) info->ready.store(true, std::memory_order_release);
 }
 
-// Shaders a draw asked for before they were ready: the preload threads take these first.
-std::mutex g_urgent_lock;
-std::vector<ShaderInfo*> g_urgent;
+// Draws waiting for a shader right now (ReadyOrQueue): the preload threads stand aside meanwhile.
+std::atomic<int> g_draws_waiting{0};
 
-void Urgent(ShaderInfo* info) {
-    if (info->urgent.exchange(true)) return;
-    std::lock_guard<std::mutex> lock(g_urgent_lock);
-    g_urgent.push_back(info);
-}
-
-ShaderInfo* TakeUrgent() {
-    std::lock_guard<std::mutex> lock(g_urgent_lock);
-    if (g_urgent.empty()) return nullptr;
-    ShaderInfo* info = g_urgent.back();  // the newest: what is on screen now
-    g_urgent.pop_back();
-    return info;
-}
-
-// Loads (and compiles, the first time: CompileTranslation) every shader in the background, the
-// ones a draw asked for first, so draws never wait: until its shader is ready a draw is skipped.
-// Below normal priority, leaving two threads to the game.
+// Loads (and compiles, the first time: CompileTranslation) every shader in the background, below
+// normal priority: first in the order the game uses them (BB_D3D11_ORDER, run.py:
+// tools/shaders/d3d11_order.txt), then the rest. A few threads only (the game runs meanwhile), which
+// stand aside while a draw waits; a draw that needs a shader sooner makes it itself, or waits for
+// the thread already on it (ReadyOrQueue).
 void PreloadShaders() {
     static std::vector<ShaderInfo*> list;
     static std::atomic<size_t> next{0};
     static std::atomic<unsigned> running{0};
-    for (auto& [hash, info] : g_shaders) list.push_back(&info);
+    {
+        std::unordered_map<std::string, ShaderInfo*> by_name;
+        for (auto& [hash, info] : g_shaders) by_name[info.name] = &info;
+        std::unordered_set<ShaderInfo*> listed;
+        if (const char* order = std::getenv("BB_D3D11_ORDER")) {
+            std::ifstream in(order);
+            for (std::string line; std::getline(in, line);) {
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                auto it = by_name.find(line);
+                if (it != by_name.end() && listed.insert(it->second).second) list.push_back(it->second);
+            }
+        }
+        const size_t ordered = list.size();
+        for (auto& [hash, info] : g_shaders)
+            if (!listed.count(&info)) list.push_back(&info);
+        LOG("gfx: %zu shaders, %zu of them in the order the game uses them", list.size(), ordered);
+    }
     g_compile_t0 = NowMs();
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned threads = std::max(1u, std::min(8u, cores > 2 ? cores - 2 : 1u));
+    const unsigned threads = std::max(1u, std::min(4u, cores / 2 > 1 ? cores / 2 - 1 : 1u));
     running = threads;
     for (unsigned t = 0; t < threads; t++) {
         std::thread([] {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
             const double t0 = NowMs();
             for (;;) {
-                ShaderInfo* info = TakeUrgent();
-                if (!info) {
+                while (g_draws_waiting.load(std::memory_order_relaxed) > 0) Sleep(2);
+                ShaderInfo* info = nullptr;
+                {
                     const size_t i = next.fetch_add(1);
                     if (i >= list.size()) break;
                     info = list[i];
@@ -609,12 +637,39 @@ void PreloadShaders() {
     }
 }
 
-// A shader a draw may use now: else it goes first in the background, and the draw is skipped.
+// A shader a draw needs now. Not ready yet (v0.8.8: the game compiles its shaders as it runs, none
+// before it starts): loaded and compiled here, or waited for while a preload thread does it. The draw
+// waits, a hitch the first time; left out instead, surfaces went missing and the picture flickered.
+// The order in which the game first uses its shaders, appended to the user folder's
+// d3d11-shader-order.txt (frame and name): from players' sessions comes the list of what to compile
+// first, before the game starts and then in the background.
+void NoteFirstUse(const ShaderInfo* info) {
+    static FILE* f = []() -> FILE* {
+        const fs::path path = UserRoot() / "d3d11-shader-order.txt";
+        std::error_code ec;
+        if (fs::exists(path, ec) && fs::file_size(path, ec) > (2u << 20)) return nullptr;  // enough sessions
+        FILE* file = _wfopen(path.c_str(), L"a");
+        if (file) fprintf(file, "# session\n");
+        return file;
+    }();
+    if (!f) return;
+    fprintf(f, "%llu %s\n", (unsigned long long)g_frame, info->name.c_str());
+    fflush(f);
+}
+
 ShaderInfo* ReadyOrQueue(ShaderInfo* info) {
     if (!info) return nullptr;
+    if (!info->used.exchange(true)) NoteFirstUse(info);
     if (info->ready.load(std::memory_order_acquire)) return info;
-    Urgent(info);
-    return nullptr;
+    const double t0 = NowMs();
+    g_draws_waiting++;
+    std::call_once(info->once, LoadShader, info);
+    g_draws_waiting--;
+    const double waited = NowMs() - t0;
+    g_shader_ms += waited;
+    static int told = 0;
+    if (waited > 100 && told++ < 20) LOG("gfx: a draw waited %.0f ms for %s", waited, info->name.c_str());
+    return info->ready.load(std::memory_order_acquire) ? info : nullptr;
 }
 
 // Which program is at `code` now: the shader hash of its OrbShdr footer (the program's second
@@ -1242,6 +1297,14 @@ void UpdateCBuffers(int stage, u64 shader, const ShaderInfo* si) {
             u32 size = (u32)R<u64>(sizes + k * 8);
             u32 slot = R<u32>(idx + k * 4);
             if (slot >= 13 || !data || !size || size > 65536 || !Readable(data, size)) continue;
+            // the translations declare a buffer read at a computed offset with 512 entries (8 KB,
+            // gcn2hlsl.py CB_COMPUTED_ENTRIES): a larger one would lose what lies past them
+            if (size > 8192) {
+                static int told = 0;
+                if (told++ < 20)
+                    LOG("gfx: %s binds a %u-byte constant buffer (slot %u), past the 8 KB its translation may read",
+                        si->name.c_str(), size, slot);
+            }
             if (!motion_blur && stage == 1 && slot == 0 && size >= 48 && size <= sizeof(patched) &&
                 si->name.compare(0, 10, "MotionBlur") == 0) {
                 memcpy(patched, (const void*)data, size);
@@ -1253,9 +1316,10 @@ void UpdateCBuffers(int stage, u64 shader, const ShaderInfo* si) {
                 char v[128] = {};
                 return GetEnvironmentVariableA("CTR_CAPTURE_AFTER", v, sizeof(v)) ? std::string(v) : std::string();
             }();
-            if (g_capture && !after.empty() && si->name.find(after) != std::string::npos) {
+            // F11's capture: every draw's constants (the first 96 dwords)
+            if (g_capture && (g_capture_by_flip || (!after.empty() && si->name.find(after) != std::string::npos))) {
                 std::string w;
-                for (u32 i = 0; i < size / 4 && i < 52; i++) {
+                for (u32 i = 0; i < size / 4 && i < (g_capture_by_flip ? 96u : 52u); i++) {
                     char b[16];
                     snprintf(b, sizeof(b), " %g", R<float>(data + i * 4));
                     w += b;
@@ -1743,6 +1807,7 @@ struct LayoutMemo {
     ID3D11InputLayout* layout = nullptr;
     bool used[16] = {};
     u32 vin[32] = {};
+    std::string inputs;  // where each input comes from, for a frame capture
 };
 LayoutMemo g_layout_memo[512];
 
@@ -1757,6 +1822,7 @@ ID3D11InputLayout* GetLayout(u64 ctx, u64 vs, const ShaderInfo* si, VbBinding* v
         memcpy(used_slots, memo.used, sizeof(memo.used));
         memcpy(vin_modes, memo.vin, sizeof(memo.vin));
         FillVertexBuffers(ctx, used_slots, vbs);
+        if (g_capture) LOG("    inputs%s", memo.inputs.c_str());
         return memo.layout;
     }
     u64 hdr = Q(vs + SH_HEADER);
@@ -1765,6 +1831,7 @@ ID3D11InputLayout* GetLayout(u64 ctx, u64 vs, const ShaderInfo* si, VbBinding* v
     u64 ins = Q(hdr + HDR_INPUT_ELEMENTS + 0x10);
     if (nin < 0 || !ins || !Readable(ins, (u64)nin * 12)) nin = 0;
     std::vector<D3D11_INPUT_ELEMENT_DESC> descs;
+    std::string inputs;
     u64 key = (u64)si * 0x9E3779B97F4A7C15ull;
     for (auto [sem, size] : si->inputs) {
         u32 usage = 0xFF, uidx = 0xFF;
@@ -1800,6 +1867,12 @@ ID3D11InputLayout* GetLayout(u64 ctx, u64 vs, const ShaderInfo* si, VbBinding* v
             d.AlignedByteOffset = usage == 4 ? 16 : 0;
         }
         descs.push_back(d);
+        {
+            char b[64];
+            if (d.InputSlot == 15) snprintf(b, sizeof(b), " a%u:NONE(usage %u.%u)", (unsigned)sem, usage, uidx);
+            else snprintf(b, sizeof(b), " a%u:s%u+%u/f%d", (unsigned)sem, d.InputSlot, d.AlignedByteOffset, (int)d.Format);
+            inputs += b;
+        }
         u64 part[2] = {(u64)sem << 32 | (u32)d.Format, (u64)d.InputSlot << 32 | d.AlignedByteOffset};
         key = (key ^ Fnv((const u8*)part, 16)) * 0x100000001B3ull;
     }
@@ -1821,6 +1894,8 @@ ID3D11InputLayout* GetLayout(u64 ctx, u64 vs, const ShaderInfo* si, VbBinding* v
     memo.layout = l.Get();
     memcpy(memo.used, used_slots, sizeof(memo.used));
     memcpy(memo.vin, vin_modes, sizeof(memo.vin));
+    memo.inputs = inputs;
+    if (g_capture) LOG("    inputs%s", inputs.c_str());
     return l.Get();
 }
 
@@ -2310,11 +2385,24 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed) {
     };
     double ti = NowMs();
     struct IssueT { double t0; ~IssueT() { g_issue_ms += NowMs() - t0; } } issue{ti};
+    UINT re_count = count, re_start = 0;  // the call made, for F11's pixel counts below
+    bool re_indexed = indexed;
+    if (g_capture_by_flip && RenderDoc()) {  // the draw named in RenderDoc's event list
+        static ComPtr<ID3DUserDefinedAnnotation> marks;
+        if (!marks) g_ctx.As(&marks);
+        if (marks) {
+            wchar_t name[160];
+            swprintf(name, 160, L"%llu %hs / %hs", (unsigned long long)g_stats.draws, vs ? vs->name.c_str() : "?",
+                     ps ? ps->name.c_str() : "-");
+            marks->SetMarker(name);
+        }
+    }
     if (!gen.empty()) {
         u32 off;
         if (!Upload(g_ib_ring, g_ib_pos, kIbRing, gen.data(), (u32)(gen.size() * 4), &off)) return;
         set_indices(g_ib_ring.Get(), DXGI_FORMAT_R32_UINT, off);
         g_ctx->DrawIndexed((UINT)gen.size(), 0, 0);
+        re_count = (UINT)gen.size(), re_indexed = true;
     } else if (indexed) {
         DXGI_FORMAT ifmt = isize == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
         u64 ib = Q(ctx + CTX_INDEX_BUFFER);
@@ -2327,6 +2415,7 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed) {
             g_ib_cached++;
             set_indices(b, ifmt, 0);
             g_ctx->DrawIndexed(count, (UINT)((index_addr - ib_base) / isize), 0);
+            re_start = (UINT)((index_addr - ib_base) / isize);
         } else {
         ring_indices:
             u32 off;
@@ -2340,6 +2429,39 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed) {
         g_ctx->Draw(count, 0);
     }
     g_stats.drawn++;
+    // F11's capture: how many pixels the draw makes, then without the depth test, then without the
+    // pixel shader. What a missing object is lost to: depth, a pixel shader that kills every pixel,
+    // or geometry that never reaches the screen. The draw is made again (no colour written), in the
+    // captured frame only (not under RenderDoc: its capture would hold these draws too).
+    if (g_capture_by_flip && !RenderDoc()) {
+        static ComPtr<ID3D11BlendState> no_write;
+        if (!no_write) {
+            D3D11_BLEND_DESC bd{};
+            for (auto& rt : bd.RenderTarget) rt.RenderTargetWriteMask = 0;
+            g_dev->CreateBlendState(&bd, &no_write);
+        }
+        const auto pixels = [&]() -> unsigned long long {
+            const D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION, 0};
+            ComPtr<ID3D11Query> q;
+            if (FAILED(g_dev->CreateQuery(&qd, &q))) return ~0ull;
+            g_ctx->Begin(q.Get());
+            if (re_indexed) g_ctx->DrawIndexed(re_count, re_start, 0);
+            else g_ctx->Draw(re_count, 0);
+            g_ctx->End(q.Get());
+            UINT64 n = 0;
+            while (g_ctx->GetData(q.Get(), &n, sizeof n, 0) == S_FALSE) {
+            }
+            return n;
+        };
+        g_ctx->OMSetBlendState(no_write.Get(), nullptr, 0xFFFFFFFF);
+        const unsigned long long drawn = pixels();
+        g_ctx->OMSetDepthStencilState(g_depth_off.Get(), 0);
+        const unsigned long long no_depth = pixels();
+        g_ctx->PSSetShader(nullptr, nullptr, 0);
+        const unsigned long long no_ps = pixels();
+        LOG("    pixels %llu, without the depth test %llu, without the pixel shader %llu", drawn, no_depth, no_ps);
+        ForgetBound();
+    }
     if (g_capture) DrainDebugMessages(64);  // hazards next to the draw that caused them (CTR_D3D_DEBUG=1)
     // debugging aid: CTR_CAPTURE_AFTER=<shader name part> saves render target 0 right after each
     // matching draw of the captured frame
@@ -2347,7 +2469,13 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed) {
         char v[128] = {};
         return GetEnvironmentVariableA("CTR_CAPTURE_AFTER", v, sizeof(v)) ? std::string(v) : std::string();
     }();
-    if (g_capture && !after.empty() && ps && ps->name.find(after) != std::string::npos)
+    // F11's capture also keeps render target 0 after the first grass and double sided G-buffer draws
+    static int auto_shots = 0;
+    if (!g_capture) auto_shots = 0;
+    const bool auto_shot = g_capture_by_flip && ps && auto_shots < 4 &&
+                           (ps->name.rfind("GrassOutdoor", 0) == 0 || (prim_setup == 0x240 && dctl == 0x7007b7));
+    if (auto_shot) auto_shots++;
+    if (g_capture && ((!after.empty() && ps && ps->name.find(after) != std::string::npos) || auto_shot))
         if (u64 h = Q(ctx + CTX_COLOR_TARGETS); h && Readable(h, 0x50))
             if (Surface* s0 = GetColorTarget(h)) {  // copy now (no state change), save at present
                 Surface copy = *s0;
@@ -2361,7 +2489,7 @@ void GfxDraw(u32 count, u64 index_addr, bool indexed) {
                     g_ctx->CopyResource(copy.tex.Get(), s0->tex.Get());
                     char path[96];
                     snprintf(path, sizeof(path), "after_%llu_%s.bmp", (unsigned long long)g_stats.draws, ps->name.c_str());
-                    g_after_shots.emplace_back(path, copy);
+                    g_after_shots.emplace_back(g_capture_by_flip ? (g_capture_dir / path).string() : std::string(path), copy);
                 }
             }
     if (g_capture) {
@@ -2755,7 +2883,137 @@ void RecordFrame(ID3D11ShaderResourceView* picture) {
 }
 }  // namespace
 
-void GfxPresent(u64 addr, ID3D11RenderTargetView* target) {
+// Copies of VideoOut buffers made when the game flips them (GfxSnapshot). This renderer draws as
+// the engine records, not when the PS4's GPU would run the command buffer, so by the time the swap
+// thread presents a flip the game may already be drawing a later frame into the same buffer (its
+// wait for the flip is a GPU wait, which nothing here holds it to): presented as it was then, the
+// picture flickered between frames half drawn. The native Vulkan renderer copies at the flip too.
+// sceGnmDrawIndexOffset (v0.8.8): an indexed draw from an offset into the index buffer the engine
+// has bound (its context's index buffer object: size at +0, base at +8). The vegetation draws this
+// way; only DrawIndex and DrawIndexAuto came here before, so they were left out.
+void GfxDrawOffset(u32 count, u32 index_offset) {
+    const u64 dev = g_image_base ? Q(g_image_base + kDeviceGlobal) : 0;
+    const u64 ctx = dev ? Q(dev + DEV_CONTEXT) : 0;
+    const u64 ib = ctx ? Q(ctx + CTX_INDEX_BUFFER) : 0;
+    const u64 base = ib && Readable(ib, 16) ? Q(ib + 8) : 0;
+    const u32 isize = ctx ? R<u32>(ctx + CTX_INDEX_SIZE) : 0;
+    if (!base || (isize != 2 && isize != 4)) {
+        GfxDrawUnsupported("sceGnmDrawIndexOffset (no index buffer)");
+        return;
+    }
+    GfxDraw(count, base + (u64)index_offset * isize, true);
+}
+
+void GfxDrawUnsupported(const char* kind) {
+    std::lock_guard lk(g_mutex);
+    static std::unordered_map<std::string, u64> seen;
+    if (seen[kind]++ == 0) LOG("gfx: the game draws with %s, which this renderer does not make yet", kind);
+    if (!g_capture || !g_image_base) return;
+    const u64 dev = Q(g_image_base + kDeviceGlobal);
+    const u64 ctx = dev ? Q(dev + DEV_CONTEXT) : 0;
+    const ShaderInfo* vs = ctx ? GetShader(Q(ctx + CTX_VS), true) : nullptr;
+    const u64 psh = ctx ? Q(ctx + CTX_PS) : 0;
+    const ShaderInfo* ps = psh ? GetShader(psh, false) : nullptr;
+    LOG("cap draw skipped: %s vs %s ps %s", kind, vs ? vs->name.c_str() : "?", ps ? ps->name.c_str() : "-");
+}
+
+// Frame captures. CTR_CAPTURE=<frame>: every render target into the game's folder; F11: the game's
+// next frame, from one flip to the next, into the user folder's capture/frame_<n>/ (the draws in
+// draws.txt there too, and only the larger colour targets: a frame has some 80).
+
+void SaveCapture(const fs::path& dir) {
+    int n = 0;
+    for (auto& [base, surf] : g_surfaces) {
+        if (!surf.rendered) continue;
+        if (!dir.empty() && (surf.dsv || surf.w < 480 || n >= 24)) continue;
+        char name[96];
+        snprintf(name, sizeof(name), "cap_%05llu_%llx_%ux%u.bmp", (unsigned long long)g_frame - 1,
+                 (unsigned long long)base, surf.w, surf.h);
+        const std::string path = dir.empty() ? std::string(name) : (dir / name).string();
+        if (surf.dsv) SaveDepth(surf, path.c_str());
+        else SaveSurface(surf, path.c_str());
+        for (auto& [p, copy] : g_after_shots) SaveSurface(copy, p.c_str());
+        g_after_shots.clear();
+        static const std::pair<u32, u32> probe = [] {
+            char v[32] = {};
+            u32 x = 960, y = 720;
+            if (GetEnvironmentVariableA("CTR_PROBE", v, sizeof(v))) sscanf(v, "%u,%u", &x, &y);
+            return std::make_pair(x, y);
+        }();
+        // probe coordinates are given for 1920x1080; scale to the surface
+        ProbePixel(base, surf, probe.first * surf.w / 1920, probe.second * surf.h / 1080);
+        n++;
+    }
+    LOG("cap: frame %llu captured, %d render targets saved%s%s", (unsigned long long)g_frame - 1, n,
+        dir.empty() ? "" : " in ", dir.empty() ? "" : dir.string().c_str());
+}
+
+struct Snapshot {
+    ComPtr<ID3D11Texture2D> tex;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    u64 addr = 0;
+};
+constexpr u32 kSnapshots = 6;  // flips the game may have submitted ahead of the screen
+Snapshot g_snapshots[kSnapshots];
+u32 g_next_snapshot = 0;
+
+u32 GfxSnapshot(u64 addr) {
+    std::lock_guard lk(g_mutex);
+    if (g_capture_by_flip) {  // F11: the frame drawn since the last flip, done
+        g_capture = g_capture_by_flip = false;
+        if (RENDERDOC_API_1_1_2* rd = RenderDoc()) {
+            rd->EndFrameCapture(nullptr, nullptr);
+            LOG("cap: RenderDoc capture saved in %s", g_capture_dir.string().c_str());
+        }
+        SaveCapture(g_capture_dir);
+        if (g_log_mirror) std::fclose(std::exchange(g_log_mirror, nullptr));
+    } else if (g_capture_armed) {
+        g_capture_armed = false;
+        std::error_code ec;
+        g_capture_dir = UserRoot() / "capture" / ("frame_" + std::to_string(g_frame));
+        fs::create_directories(g_capture_dir, ec);
+        g_log_mirror = _wfopen((g_capture_dir / "draws.txt").c_str(), L"w");
+        g_capture = g_capture_by_flip = true;
+        LOG("cap: from this flip to the next, into %s", g_capture_dir.string().c_str());
+        if (RENDERDOC_API_1_1_2* rd = RenderDoc()) {
+            rd->SetCaptureFilePathTemplate((g_capture_dir / "renderdoc").string().c_str());
+            rd->StartFrameCapture(nullptr, nullptr);
+        }
+    }
+    if (!g_dev || !addr) return 0;
+    auto it = g_surfaces.find(addr);
+    if (it == g_surfaces.end() || !it->second.tex || !it->second.srv) return 0;
+    D3D11_TEXTURE2D_DESC want;
+    it->second.tex->GetDesc(&want);
+    const u32 slot = g_next_snapshot++ % kSnapshots;
+    Snapshot& s = g_snapshots[slot];
+    D3D11_TEXTURE2D_DESC have{};
+    if (s.tex) s.tex->GetDesc(&have);
+    if (!s.tex || have.Width != want.Width || have.Height != want.Height || have.Format != want.Format ||
+        have.MipLevels != want.MipLevels || have.ArraySize != want.ArraySize ||
+        have.SampleDesc.Count != want.SampleDesc.Count) {
+        s = Snapshot{};
+        D3D11_TEXTURE2D_DESC d = want;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.CPUAccessFlags = 0;
+        d.MiscFlags = 0;
+        D3D11_SHADER_RESOURCE_VIEW_DESC view;
+        it->second.srv->GetDesc(&view);
+        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &s.tex)) ||
+            FAILED(g_dev->CreateShaderResourceView(s.tex.Get(), &view, &s.srv))) {
+            static int warned = 0;
+            if (!warned++) LOG("gfx: no copy of the flipped picture (format %d): shown as drawn", (int)want.Format);
+            s = Snapshot{};
+            return 0;
+        }
+    }
+    g_ctx->CopyResource(s.tex.Get(), it->second.tex.Get());
+    s.addr = addr;
+    return slot + 1;
+}
+
+void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
     if (!Init()) return;
     g_swap_rtv = target;
     static const bool trace_init = [] {
@@ -2828,39 +3086,41 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target) {
         EvictTextures();
     }
     if ((g_frame & 127) == 1) DrainDebugMessages();
-    if (g_capture) {
+    if (g_capture && !g_capture_by_flip) {  // CTR_CAPTURE=<frame>: from this picture to the next
         g_capture = false;
-        int n = 0;
-        for (auto& [base, surf] : g_surfaces) {
-            if (!surf.rendered) continue;
-            char path[96];
-            snprintf(path, sizeof(path), "cap_%05llu_%llx_%ux%u.bmp", (unsigned long long)g_frame - 1,
-                     (unsigned long long)base, surf.w, surf.h);
-            if (surf.dsv) SaveDepth(surf, path);
-            else SaveSurface(surf, path);
-            for (auto& [p, copy] : g_after_shots) SaveSurface(copy, p.c_str());
-            g_after_shots.clear();
-            static const std::pair<u32, u32> probe = [] {
-                char v[32] = {};
-                u32 x = 960, y = 720;
-                if (GetEnvironmentVariableA("CTR_PROBE", v, sizeof(v))) sscanf(v, "%u,%u", &x, &y);
-                return std::make_pair(x, y);
-            }();
-            // probe coordinates are given for 1920x1080; scale to the surface
-            ProbePixel(base, surf, probe.first * surf.w / 1920, probe.second * surf.h / 1080);
-            n++;
+        SaveCapture(fs::path());
+    }
+    // F11 with the game's window in front: the game's next frame is captured, from one flip to the
+    // next (GfxSnapshot). A lab aid only: under RenderDoc (BB_RENDERDOC) or with BB_D3D11_CAPTURE=1;
+    // a player's F11 would stop the game a moment and write some 100 MB of pictures.
+    static const bool capture_key = [] {
+        const char* v = std::getenv("BB_D3D11_CAPTURE");
+        return (v && v[0] == '1') || RenderDoc() != nullptr;
+    }();
+    if (capture_key) {
+        static bool held = false;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        const bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F11) & 0x8000);
+        if (down && !held && !g_capture) {
+            g_capture_armed = true;
+            LOG("cap: F11 pressed");
         }
-        LOG("cap: frame %llu captured, %d render targets saved", (unsigned long long)g_frame - 1, n);
+        held = down;
     }
     if (g_capture_frame && g_frame == g_capture_frame) {
         g_capture = true;
         LOG("cap: capturing frame %llu", (unsigned long long)g_frame);
     }
     auto it = g_surfaces.find(addr);
+    // the copy made at the flip, while it still holds this buffer (not taken over by a later flip)
+    ID3D11ShaderResourceView* picture = it != g_surfaces.end() ? it->second.srv.Get() : nullptr;
+    if (snapshot >= 1 && snapshot <= kSnapshots && g_snapshots[snapshot - 1].addr == addr && g_snapshots[snapshot - 1].srv)
+        picture = g_snapshots[snapshot - 1].srv.Get();
     float black[4] = {0, 0, 0, 1};
     g_ctx->OMSetRenderTargets(1, g_swap_rtv.GetAddressOf(), nullptr);
     g_ctx->ClearRenderTargetView(g_swap_rtv.Get(), black);
-    if (it != g_surfaces.end() && it->second.srv && g_blit_vs) {
+    if (picture && g_blit_vs) {
         // 16:9 picture, letterboxed into the back buffer
         DXGI_SWAP_CHAIN_DESC sd;
         g_swap->GetDesc(&sd);
@@ -2886,10 +3146,10 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target) {
             }
             g_ctx->PSSetConstantBuffers(0, 1, g_copy_cb.GetAddressOf());
         }
-        g_ctx->PSSetShaderResources(0, 1, it->second.srv.GetAddressOf());
+        g_ctx->PSSetShaderResources(0, 1, &picture);
         g_ctx->PSSetSamplers(0, 1, g_samp_linear.GetAddressOf());
         g_ctx->Draw(3, 0);
-        RecordFrame(it->second.srv.Get());
+        RecordFrame(picture);
     }
     // CTR_SCREENSHOT=<n>: every n-th frame; =<first>+<count>: that many frames in a row (flicker)
     static u64 shot_frame = 0, shot_count = 0;

@@ -21,6 +21,8 @@ import gcn  # noqa: E402
 # Direct3D 11 views have no channel order: the shader applies it (GCN2HLSL_D3D11=1). Vulkan's views
 # do, which takes fewer instructions (the note in store()).
 SWIZZLE_IN_SHADER = os.environ.get("GCN2HLSL_D3D11") == "1"
+# Direct3D 11: the entries a constant buffer read at a computed offset (bones) is declared with
+CB_COMPUTED_ENTRIES = 512
 
 
 class Unsupported(Exception):
@@ -1255,8 +1257,17 @@ class Translator:
     def assemble(self, body):
         pin = self.ps_input_vgprs() if self.kind == "ps" else []  # sets uses_scale before the decls
         out = ["// translated from PS4 GCN by tools/gcn2hlsl.py", COMMON_HLSL]
+        text = "\n".join(body)
         for slot in sorted(self.cbuffers):
-            out.append(f"cbuffer CB{slot} : register(b{slot}) {{ uint4 cb{slot}[4096]; }};")
+            size = 4096
+            if SWIZZLE_IN_SHADER:
+                # Direct3D 11 (v0.8.8): each buffer as large as the shader reads, not 64 KB. fxc's
+                # optimizer took ~1 s a pixel shader over 4096 entries, ~0.1 s right sized; a
+                # vertex shader reading bones at a computed offset ~6 s, ~0.8 s at 512 entries
+                # (8 KB: the game binds up to ~3 KB; renderer.cpp logs a larger one).
+                used = [int(i) for i in re.findall(rf"\bcb{slot}\[(\d+)\]", text)]
+                size = CB_COMPUTED_ENTRIES if f"cbload{slot}(" in text else max(used, default=0) + 1
+            out.append(f"cbuffer CB{slot} : register(b{slot}) {{ uint4 cb{slot}[{size}]; }};")
             out.append(f"uint cbload{slot}(uint dw) {{ return cb{slot}[dw >> 2][dw & 3u]; }}")
         for slot, (dims, use) in sorted(self.textures.items()):
             ty = "TextureCube" if slot in self.cube_slots else "Texture2D" if dims == 2 else "Texture2DArray"
