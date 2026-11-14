@@ -1,7 +1,8 @@
-/* Time Trial track rules and maintained boost during eligible Itemless races. */
+/* Native wall classification, Time Trial track rules and eligible Itemless boost retention. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
+#include <math.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -12,9 +13,12 @@
 typedef void (ABI *Contact)(void *, void *, void *);
 typedef void (ABI *StopBoost)(void *);
 typedef void *(ABI *FindRacer)(void *, void *);
+typedef void *(ABI *FindComponent)(void *, void *, int);
 static Contact native_contact;
 static StopBoost native_stop;
 static FindRacer find_racer;
+static FindComponent find_component;
+static void **kart_controller_type;
 static void **racers;
 static _Thread_local void *contact_owner;
 typedef unsigned char (ABI *LayerFilter)(void *, const char *, int);
@@ -34,6 +38,24 @@ static void *ptr(const void *p, size_t off) {
     void *v;
     memcpy(&v, (const unsigned char *)p + off, sizeof v);
     return v;
+}
+
+static float ABI wall_axis(void *response, const float *normal) {
+    const float original=fabsf(normal[2]);
+    void *entity=ptr(response,0x18);
+    void *kart=entity ? find_component(entity,*kart_controller_type,0) : NULL;
+    if (!kart || !((unsigned char *)kart)[0x214] || !((unsigned char *)kart)[0x215])
+        return original;
+    float ground[3],dot=0,length2=0;
+    memcpy(ground,(unsigned char *)kart+0x208,sizeof ground);
+    for (unsigned i=0;i<3;++i) {
+        dot+=normal[i]*ground[i];
+        length2+=ground[i]*ground[i];
+    }
+    /* Keep the native 60-degree test, but recognize continuation of the supported bank. */
+    if (isfinite(dot) && isfinite(length2) && length2>0 && dot*dot>=.25f*length2)
+        return 1;
+    return original;
 }
 
 static int is_racer(void *entity) {
@@ -75,6 +97,30 @@ static void ABI stop_boost(void *boost) {
 static void jump(unsigned char *at, const void *target) {
     memcpy(at, "\xff\x25\0\0\0\0", 6);
     memcpy(at + 6, &target, 8);
+}
+
+static size_t wall_axis_stub(unsigned char *code, void *not_wall, void *resume) {
+    static const unsigned char instructions[] = {
+        0x50,0x51,0x52,0x56,0x57,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,
+        0x48,0x81,0xec,0x08,0x02,0,0, 0x48,0x0f,0xae,0x04,0x24,
+        0x48,0x8b,0xbd,0x10,0xff,0xff,0xff, /* response at rbp-f0 */
+        0x48,0x8d,0xb5,0x20,0xff,0xff,0xff, /* ray normal at rbp-e0 */
+        0x48,0xb8, 0,0,0,0,0,0,0,0, 0xff,0xd0,
+        0xf3,0x0f,0x11,0x84,0x24,0,0x02,0,0, /* preserve returned axis across fxrstor */
+        0x48,0x0f,0xae,0x0c,0x24, 0xf3,0x0f,0x10,0x8c,0x24,0,0x02,0,0,
+        0x48,0x81,0xc4,0x08,0x02,0,0,
+        0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5f,0x5e,0x5a,0x59,0x58,
+        0xc5,0xf8,0x2e,0xd1, 0x77,0x0e, /* native compare; preserve unordered rejection */
+        0xff,0x25,0,0,0,0, 0,0,0,0,0,0,0,0,
+        0x48,0x8b,0x9d,0x10,0xff,0xff,0xff,
+        0xff,0x25,0,0,0,0, 0,0,0,0,0,0,0,0
+    };
+    memcpy(code,instructions,sizeof instructions);
+    void *handler=(void *)wall_axis;
+    memcpy(code+41,&handler,8);
+    jump(code+100,not_wall);
+    jump(code+121,resume);
+    return sizeof instructions;
 }
 
 /* Resume the native crate initializer with its effective mode in ECX and data in RAX. */
@@ -126,6 +172,17 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
         memcmp(s, stop_code, sizeof stop_code) ||
         memcmp(layer, layer_code, sizeof layer_code) ||
         memcmp(crate, crate_code, sizeof crate_code)) return 0;
+    unsigned char *wall=image+0xe91d86-shift;
+    const unsigned char wall_code[]={0xc5,0xf8,0x2e,0xd1,0x0f,0x86,0x38,0xfb,0xff,0xff,
+        0x48,0x8b,0x9d,0x10,0xff,0xff,0xff};
+    const unsigned char *threshold_load=image+0xe91d5e - shift;
+    int32_t threshold_displacement;
+    memcpy(&threshold_displacement,threshold_load+4,4);
+    const int64_t threshold_offset=(int64_t)(0xe91d66-shift)+threshold_displacement;
+    if (memcmp(wall,wall_code,sizeof wall_code) ||
+        memcmp(image+0xe91d56-shift,"\xc5\xf9\x10\x9d\x20\xff\xff\xff",8) ||
+        memcmp(threshold_load,"\xc5\xfa\x10\x15",4) || threshold_offset<0 ||
+        (uint64_t)threshold_offset>size-4 || memcmp(image+threshold_offset,"\0\0\0\x3f",4)) return 0;
 #ifdef _WIN32
     unsigned char *stub = VirtualAlloc(NULL, 512, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #else
@@ -134,7 +191,7 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
     if (stub == MAP_FAILED) stub = NULL;
 #endif
     if (!stub || !writable(c, 14) || !writable(s, 14) ||
-        !writable(layer, 14) || !writable(crate, 14)) return 0;
+        !writable(layer, 14) || !writable(crate, 14) || !writable(wall,sizeof wall_code)) return 0;
     memcpy(stub, collision_code, sizeof collision_code);
     jump(stub + sizeof collision_code, c + sizeof collision_code);
     memcpy(stub + 64, stop_code, sizeof stop_code);
@@ -143,6 +200,9 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
     jump(stub + 128 + sizeof layer_code, layer + sizeof layer_code);
     native_layer_filter = (LayerFilter)(stub + 128);
     crate_mode_stub(stub + 192, image + 0x2acde48, crate + sizeof crate_code);
+    find_component=(FindComponent)(image+0x3dbf90);
+    kart_controller_type=(void **)(image+0x2ac4580);
+    wall_axis_stub(stub+320,image+0xe918c8-shift,wall+sizeof wall_code);
     native_contact = (Contact)stub;
     native_stop = (StopBoost)(stub + 64);
     find_racer = (FindRacer)(image + 0xfd4230 - shift);
@@ -151,9 +211,12 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
     jump(s, (void *)stop_boost);
     jump(layer, (void *)layer_filter);
     jump(crate, stub + 192);
+    jump(wall,stub+320);
+    memset(wall+14,0x90,sizeof wall_code-14);
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
     puts("Native ITEMLESS: Time Trial track layers and crate spawning; preserve boost on racer contact");
+    puts("Native wall contact: bank continuation is classified relative to stable ground");
     return 1;
 }

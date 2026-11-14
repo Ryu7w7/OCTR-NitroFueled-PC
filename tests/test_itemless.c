@@ -30,6 +30,67 @@ static unsigned char ABI filter(void *rule, const char *name, int mode) {
     return (unsigned char)mode;
 }
 
+static unsigned char ground_kart[0x240];
+static int missing_ground;
+static void *ABI ground_component(void *entity, void *type, int unused) {
+    assert(entity==owner && type==other && unused==0);
+    return missing_ground ? NULL : ground_kart;
+}
+
+static void test_banked_wall(void) {
+    unsigned char response[32]={0};
+    void *type=other;
+    put(response,0x18,owner);
+    find_component=ground_component; kart_controller_type=&type;
+    unsigned char *code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,
+                              MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(code!=MAP_FAILED);
+    /* Native-shaped frame: saved response, ray normal, and live XMM0/XMM2/XMM3. */
+    memcpy(code,"\x55\x48\x89\xe5\x53\x48\x81\xec\x08\x01\0\0"
+                "\x48\x89\xbd\x10\xff\xff\xff\xc5\xf8\x10\x1e"
+                "\xc5\xf8\x11\x9d\x20\xff\xff\xff\xf3\x0f\x10\x46\x08"
+                "\xb8\0\0\0\x3f\x66\x0f\x6e\xd0\xbb\x34\x12\0\0",50);
+    jump(code+50,code+256);
+    /* A real wall must restore RBX to response; both exits preserve the actual ray normal. */
+    memcpy(code+128,"\x48\x39\xfb\x74\x02\x0f\x0b\xf3\x0f\x11\x02\x0f\x11\x5a\x04"
+                    "\xb8\x01\0\0\0\x48\x81\xc4\x08\x01\0\0\x5b\x5d\xc3",30);
+    memcpy(code+192,"\xf3\x0f\x11\x02\x0f\x11\x5a\x04\x31\xc0"
+                    "\x48\x81\xc4\x08\x01\0\0\x5b\x5d\xc3",20);
+    assert(wall_axis_stub(code+256,code+192,code+128)<=192);
+    int (ABI *bridge)(void *,const float *,float *)=(void *)code;
+    const struct {
+        float normal[4],ground[3]; unsigned char on,previous; int wall;
+    } cases[]={
+        /* Measured Sewer Speedway120FPS false wall, then measured30FPS real wall. */
+        {{.020900f,.969664f,.243546f,.25f},{.017168f,.834343f,.550978f},1,1,0},
+        {{.833627f,-.419133f,-.359713f,.25f},{.054349f,-.113874f,.992007f},1,1,1},
+        {{1,0,0,0},{0,0,1},1,1,1},
+        {{0,0,1,0},{0,0,1},1,1,0},
+        {{0,0,-1,0},{0,0,1},1,1,0},
+        {{1,0,0,0},{0,.8660254f,.5f},1,1,1},
+        {{0,0,1,0},{0,1,0},1,1,0}, /* Never turn an existing non-wall into a wall. */
+        {{.020900f,.969664f,.243546f,0},{.034336f,1.668686f,1.101956f},1,1,0},
+        {{.020900f,.969664f,.243546f,0},{.017168f,.834343f,.550978f},0,1,1},
+        {{.020900f,.969664f,.243546f,0},{.017168f,.834343f,.550978f},1,0,1},
+        {{.020900f,.969664f,.243546f,0},{0,0,0},1,1,1},
+        {{.020900f,.969664f,.243546f,0},{NAN,0,1},1,1,1},
+        {{0,0,NAN,0},{0,0,1},1,1,0},
+    };
+    for (size_t i=0;i<sizeof cases/sizeof *cases;++i) {
+        memcpy(ground_kart+0x208,cases[i].ground,sizeof cases[i].ground);
+        ground_kart[0x214]=cases[i].on; ground_kart[0x215]=cases[i].previous;
+        float out[5]={0};
+        assert(bridge(response,cases[i].normal,out)==cases[i].wall);
+        assert(!memcmp(out,&cases[i].normal[2],4));
+        assert(!memcmp(out+1,cases[i].normal,16));
+    }
+    missing_ground=1;
+    float out[5];
+    assert(bridge(response,cases[0].normal,out)==1);
+    missing_ground=0;
+    munmap(code,4096);
+}
+
 static void test_track_rules(void) {
     native_layer_filter = filter;
     /* Execute the emitted mid-function bridge with the native stack alignment. */
@@ -61,6 +122,7 @@ static void test_track_rules(void) {
     active = 0;
 }
 int main(void) {
+    test_banked_wall();
     test_track_rules();
     unsigned char self[32] = {0}, context[40] = {0}, world[40] = {0}, bodies[0x120] = {0};
     void *manager = self;
