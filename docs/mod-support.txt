@@ -133,14 +133,17 @@ from the player's own game files, so no game file is in the repository.
                   default): 25 new Arcade cups (8 easy, 9 medium, 8 hard) and their stars,
                   kept in rbo_cups.bin (5.1.4: 5.1.0 hooked five of the six ways to the save
                   data unmount, not the one the game takes after saving; a win also saves
-                  them when the save is mounted).
+                  them when the save is mounted). Cups ask for laps keeping their own branch
+                  of the race settings script (5.1.5: their collage and track names; 5.1.0
+                  sent them to the single race branch, which hides the names and shows a
+                  track's picture): only the cup's hideLaps animation is taken out.
   custom-cup      Custom Cup 2 (Kyouko8): a cup of 4 to 16 tracks of the player's choice.
                   A track can be chosen more than once. Option Miniaturas en ajustes de
                   carrera (on by default): the race settings of a custom cup show its
                   tracks' pictures (ui/Octane_MainMenu_RaceSetting.igz and its materials).
                   The game's cups and the Copas Adicionales show their own picture there
-                  (2.0.2; Ultimate Customizer sends cups to that menu's single race branch,
-                  which showed a track's).
+                  (2.0.2); a custom cup hides the cup branch's four track names over its
+                  first track's picture (2.0.3).
                   Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
                   (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the

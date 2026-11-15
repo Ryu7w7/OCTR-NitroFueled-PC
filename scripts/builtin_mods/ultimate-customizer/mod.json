@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "battle-point-limit-selector",
   "name": "Ultimate Customizer",
-  "version": "5.1.4",
+  "version": "5.1.5",
   "author": "Kyouko8",
   "description": "Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60; Capture the Flag and Steal the Bacon points up to 60.\n- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups (8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws their pictures from your game first.",
   "requiresCapabilities": [
@@ -80,7 +80,7 @@
       "asset": "vsc/UI/Octane_MainMenu_RaceSetting/Octane_MainMenu_RaceSetting_Root.igz",
       "index": 9223,
       "original_sha256": "35410b6d7523410bc8938f53334a515f999117892860132c04bb3d5d51fa0fd5",
-      "patched_sha256": "46f9c8744365c76e7727b7bad01823c46ea60c72707cfc2a055abae1519ac5c9",
+      "patched_sha256": "ce0d479a2178a8ee4fe298bd68f6116a05388eb33dc1bff1e65a5c3ff27ec01a",
       "payload": "payloads/menu-carrera-copa.delta.json"
     }
   ],
@@ -198,7 +198,7 @@
     },
     {
       "file": "payloads/menu-carrera-copa.delta.json",
-      "sha256": "8822e53837d6931530525d6d7005886378fccc2651550feb53efdf0d93a83860",
+      "sha256": "bc231937c291715b4118135dd67f91eb48f70f9e43d4ef3fbba287160726ded3",
       "bytes": 141
     },
     {

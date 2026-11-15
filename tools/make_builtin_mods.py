@@ -52,7 +52,7 @@ BATTLE = ('SystemData_battleArenaLives', 'SystemData_battleArenaLimitPoints', 'S
 # Capture the Flag and Steal the Bacon's points limit: as long as the lives' and minutes' (5.1.1)
 CTF_POINTS = 'SystemData_battleArenaPoints'
 MORE_POINTS = [3, 6, 9, 12, 15, 20, 25, 30, 40, 50, 60]
-UC_VERSION = '5.1.4'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
+UC_VERSION = '5.1.5'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS, save_on_win, cup_branch
 # save_on_win: 5.1.0's code block, the end of its cup win (the jmp's rel32), and the code added
 CAVE, WIN_END, WRITE_SKIP, SAVE_AT = 0x2338000, 0x8f, 0x119def9, 0x2338800
 # The sixth way to the save data unmount (0x1bea988): a tail jmp at 0x14d1ad0, the one the game takes
@@ -130,6 +130,57 @@ def game_entry(game, archive, index, asset, expected):
     if sha(data) != expected:
         raise ValueError(f'{asset} in {archive} is not the USA 1.21 file the mod was made for')
     return data
+
+
+# The race settings script (5.1.5: cup_branch)
+RACE_SCRIPT = 'vsc/UI/Octane_MainMenu_RaceSetting/Octane_MainMenu_RaceSetting_Root.igz'
+PLAY_ANIMATION = 'igGuiPlaceableNodes::playAnimation_VSC'
+
+
+def mode_switches(g):
+    """[(single race node site, cup race node site)] of the script's switches on the race mode
+    (igEnumVscActionNodeHashTable: +0x18 its nodes, +0x20 key bytes, +0x28 the keys,
+    EOctaneRaceModes: SingleRace 1, CupRace 6)."""
+    found = []
+    for o, t in g.typed.items():
+        if t != 'igEnumVscActionNodeHashTable':
+            continue
+        vals, keys, cap = g.u64(o + 0x18), g.u64(o + 0x28), g.u32(o + 0x20) // 4
+        ks = [struct.unpack_from('<i', g.data, keys + 4 * i)[0] for i in range(cap)]
+        if 1 in ks and 6 in ks:
+            found.append((vals + 8 * ks.index(1), vals + 8 * ks.index(6)))
+    return found
+
+
+def cup_branch(stock, mod):
+    """The race settings script with cups asking for laps, keeping their own branch (5.1.5).
+
+    Ultimate Customizer 5.1.0 sends CupRace to the SingleRace branch, which shows the lap row
+    but not the cup: that branch hides the four track names (Text_InfoBox001-004) and leaves the
+    track menu's last picture. The cup branch reads the cup (getCurrentCupData: its picture and
+    track names), shows them, and plays, by its category, the animation that hides the lap row
+    (AnimationTag_hideLaps) before RaceSettingIn: that one node is taken out of the cup's chain
+    instead (the node before it goes on to the one after it)."""
+    g, m = File(stock), File(mod)
+    # the one switch where the game's cups and single races part (5.1.0 joins them)
+    apart = [(single, cup) for single, cup in mode_switches(g) if g.u64(single) != g.u64(cup)]
+    if len(apart) != 1 or any(m.u64(a) != m.u64(b) for a, b in mode_switches(m)):
+        raise ValueError('Ultimate Customizer: unexpected race settings script')
+    single, cup = apart[0]
+    rofs = set(g.sites['ROFS'])
+    links = {'igVscCppActionNode': 0x28, 'igVscAssignNode': 0x20}   # the next node's field
+    found, prev, node = [], None, g.u64(cup)
+    while node in g.typed and g.typed[node] in links:
+        nxt_site = node + links[g.typed[node]]
+        nxt = g.u64(nxt_site) if nxt_site in rofs else 0
+        if g.typed[node] == 'igVscCppActionNode' and g.handle(g.u64(node + 0x38))[0] == PLAY_ANIMATION                 and g.u64(node + 0x20) + 0x18 in rofs:   # an animation by its category
+            found.append((prev, nxt))
+        prev, node = nxt_site, nxt
+    if len(found) != 1 or found[0][0] is None:
+        raise ValueError(f'race settings script: {len(found)} category animations in the cup branch')
+    prev, nxt = found[0]
+    g.set_u64(prev, nxt)
+    return g.build()
 
 
 def battle_only(stock, mod):
@@ -281,6 +332,10 @@ def race_options(game, uc, out):
                 files[path] = delta
                 sets[set_name].append({**op, 'payload': path, 'patched_sha256': sha(data)})
             continue
+        if op['asset'] == RACE_SCRIPT:
+            payload = cup_branch(game_entry(game, op['archive'], op['index'], op['asset'], op['original_sha256']),
+                                 payload)
+            op = {**op, 'patched_sha256': sha(payload)}
         new, path, data = as_delta(game, op, payload)
         files[path] = data
         (sets['cups'] if op['asset'] in CUP_ASSETS else base_ops).append(new)
