@@ -149,8 +149,9 @@ player's settings.
 Local verification covers the native Linux launcher, concurrent settings
 saves, idle native refresh, EOS process/protocol fixtures and real Linux NGX initialization on an
 RTX 3050 Laptop (driver 595.112.07). EOS service login and DLSS image quality require gameplay checks. Real gameplay,
-live account/Discord integration, physical controller behavior, HDR, native Windows execution and
-a complete AppImage distribution still require testing on their target systems.
+live account/Discord integration, physical controller behavior, HDR and native Windows execution
+still require testing on their target systems. The full Nix game/launcher build and finished
+AppImage upgrade check pass locally, including the bundled Linux DLSS bridge ABI check.
 The final changes are built only for Linux. On a desktop with a tray host, run the UI test with
 `BB_TEST_TRAY=1` to check registration, exported DBusMenu labels and activation, host-loss recovery,
 and exit confirmation. The default UI test checks the fallback without a session bus.
@@ -207,9 +208,10 @@ restarting, while retaining custom data/config/save paths. Already released GTK 
 discard custom `BB_*` environment overrides during restart; those users must reopen with their
 usual environment. The standard XDG paths are preserved by those old launchers too.
 
-The upgrade check can also run locally against a native build:
+Run the upgrade check against the finished AppImage, or use `--native` for a standalone build:
 
 ```sh
+python3 packaging/test_launcher_upgrade.py dist/SacredFire-x86_64.AppImage
 python3 packaging/test_launcher_upgrade.py out/launcher/sacredfire-launcher --native
 ```
 
