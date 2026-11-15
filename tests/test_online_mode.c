@@ -244,7 +244,7 @@ void runtime_nsane_mode_set(int enabled) { nsane = enabled; }
 int runtime_nsane_mode_enabled(void) { return nsane; }
 int runtime_nsane_race_active(void) { return nsane && room_active; }
 int runtime_nsane_available(void) { return 1; }
-void runtime_nsane_map_loading(void) {}
+void runtime_nsane_map_loading(const char *map) { (void)map; }
 static void ABI private_state(unsigned char *yes, unsigned char *no) {
     *yes = (unsigned char)private; *no = (unsigned char)!private;
 }
@@ -1237,8 +1237,8 @@ static void test_region(size_t shift) {
     ptr = flags; memcpy(self + 0x1b0, &ptr, 8);
     ptr = items; memcpy(flags + 0x20, &ptr, 8);
     const int count = 3; memcpy(options + 12, &count, 4);
-    static const char *labels[] = {"NORMAL", "ITEMLESS", "BATTLE"}; /* the Game Mode selector's options */
-    ptr = labels; memcpy(options + 0x20, &ptr, 8);
+    static const char *mode_labels[] = {"NORMAL", "ITEMLESS", "BATTLE"}; /* the Game Mode selector's options */
+    ptr = mode_labels; memcpy(options + 0x20, &ptr, 8);
     void *vtable[] = {(void *)event_type};
     struct { void **vtable; int index; } event = {vtable, -1};
     void (ABI *handle)(void *, void *, void *);
