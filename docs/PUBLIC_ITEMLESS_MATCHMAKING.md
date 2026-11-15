@@ -4,6 +4,10 @@ Public Itemless uses a separate queue from Normal. Party members follow the
 confirmed lobby mode. Both the party leader and members see
 `SINGLE RACE - ITEMLESS` or `SINGLE RACE - NORMAL` on the map panel.
 
+Public Itemless disables player/AI kart collisions and places every racer on one
+starting row within the native front-row width. Track and wall collisions remain
+enabled. The same Itemless gameplay rule can be used by future matchmaking modes.
+
 ## Parties and compatibility
 
 The server validates every party member as part of the native asynchronous
@@ -11,6 +15,12 @@ matchmaking request. Go To Lobby does not wait for a separate HTTP preflight or
 its cache. Incompatible parties are rejected through the native matchmaking task;
 rejection does not fall back to Normal. The client still verifies the server's
 Itemless lobby confirmation before enabling Itemless gameplay.
+
+The client advertises `collision_rules: 1`; the server requires it from the search
+and every party member. The server's `octr_itemless_v1` field uses confirmation
+version 2 for these rules. Older confirmation versions are rejected, so the client
+cannot silently race against older collision/grid rules. This requires the matching
+server update; it does not create a second selectable Itemless queue.
 
 ## Mode lifetime
 

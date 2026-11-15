@@ -28,6 +28,8 @@ static void **initialize_type;
 static unsigned char **network;
 static _Thread_local int customized_selector;
 static int private_speed_selected;
+static int private_collision_selected;
+static int collision_refreshing;
 static int selector_mode_index;
 static int private_cup_selected;
 static int remote_cup_selected = -1;
@@ -69,6 +71,7 @@ typedef void (ABI *NativeEvent)(unsigned char *);
 static NativeEvent receive_private_settings;
 static NativeEvent publish_private_track;
 static NativeEvent broadcast_race_settings;
+static NativeEvent receive_race_settings;
 typedef void (ABI *ResizeList)(void *, int, int);
 static ResizeList resize_list;
 static NativeEvent clear_zone_list;
@@ -214,6 +217,8 @@ static void refresh_team_results(void);
 static int racer_team(unsigned char *racer);
 static void team_color(unsigned char *placeable, int team);
 static void clear_team_selector(void);
+static int collision_selector(const unsigned char *self);
+static void collision_selector_event(unsigned char *self, void *event, unsigned char *owner);
 
 static int private_team_selector_allowed(void) {
     int mode = 0, teams = 1;
@@ -244,6 +249,10 @@ static void normalize_race_teams(void) {
 }
 
 static void ABI team_count_event(unsigned char *self, void *event, void *owner) {
+    if (collision_selector(self)) {
+        collision_selector_event(self, event, owner);
+        return;
+    }
     const int cup = runtime_online_mode_private_cup();
     const int single = is_private() && !battle_selected() && !cup;
     normalize_race_teams();
@@ -306,6 +315,7 @@ void runtime_online_mode_adopt(int speed) {
 }
 
 int runtime_online_mode_private_speed(void) { return private_speed_selected; }
+int runtime_online_mode_itemless_collision(void) { return private_collision_selected; }
 
 static void *pointer_at(const void *object, size_t offset) {
     void *pointer;
@@ -564,6 +574,33 @@ static void ABI private_settings_received(unsigned char *event) {
            (const char *)pointer_at(cup, 0x28) : "SINGLE");
 }
 
+/* arenaStartingLives is an igInt32 snapshot field, unused outside Battle.
+ * Borrow it only while serializing; preserve its native value on both peers. */
+#define COLLISION_SETTINGS_TAG 0x434f0000u
+static void ABI broadcast_private_race_settings(unsigned char *settings) {
+    uint32_t lives;
+    memcpy(&lives, settings + 0x38, 4);
+    if (is_private() && !battle_selected() && runtime_speed_mode_enabled() && lives <= 0x7fffu) {
+        const uint32_t tagged = COLLISION_SETTINGS_TAG | lives |
+            ((uint32_t)private_collision_selected << 15);
+        memcpy(settings + 0x38, &tagged, 4);
+    }
+    broadcast_race_settings(settings);
+    memcpy(settings + 0x38, &lives, 4);
+}
+static void ABI collision_settings_received(unsigned char *event) {
+    uint32_t encoded;
+    memcpy(&encoded, event + 0x40, 4);
+    if ((encoded & 0xffff0000u) == COLLISION_SETTINGS_TAG) {
+        private_collision_selected = (encoded >> 15) & 1;
+        const uint32_t lives = encoded & 0x7fffu;
+        memcpy(event + 0x40, &lives, 4);
+    } else {
+        private_collision_selected = 0;
+    }
+    receive_race_settings(event);
+    memcpy(event + 0x40, &encoded, 4);
+}
 static void ABI private_settings_sending(unsigned char *event) {
     int mode = 1;
     if (race_manager && *race_manager)
@@ -576,7 +613,7 @@ static void ABI private_settings_sending(unsigned char *event) {
     /* Native lobby changes broadcast this payload only for Battle. Racing
      * and CUP need the same native event to carry settings to existing/joining peers. */
     if (type == 1 && (mode == 1 || mode == 6) && is_private() && race_settings && *race_settings)
-        broadcast_race_settings(*race_settings);
+        broadcast_private_race_settings(*race_settings);
 }
 
 /* The map loader runs after settings synchronization, on host and peers. Keep
@@ -2244,6 +2281,88 @@ static unsigned char *row_behavior(unsigned char *row) {
     return count > 0 && items ? pointer_at(items, 0) : NULL;
 }
 
+static int collision_selector(const unsigned char *self) {
+    const char *name = pointer_at(self, 0x148);
+    return name && !strcmp(name, "COLLISION");
+}
+
+static void collision_selector_visibility(unsigned char *self, unsigned char *owner) {
+    if (!owner) return;
+    const int shown = is_private() && !battle_selected() && runtime_speed_mode_enabled();
+    unsigned flags;
+    memcpy(&flags, owner + 12, 4);
+    flags = shown ? ((flags & ~0x1400u) | 0x1000u) : flags | 0x1400u;
+    memcpy(owner + 12, &flags, 4);
+    unsigned char *group = pointer_at(owner, 0x40);
+    if (group) {
+        const float x = shown ? 65.0f : 0.0f;
+        const float height = shown ? 180.0f : 0.0f;
+        float previous_height;
+        memcpy(&previous_height, group + 0x64, 4);
+        /* Track and the selector staircase are separate children of the same panel. */
+        unsigned char *root = group;
+        for (int i = 0; root && i < 9; ++i) root = pointer_at(root, 0x40);
+        unsigned char *panel = root ? pointer_at(root, 0x40) : NULL;
+        unsigned char *children = panel ? pointer_at(panel, 0x48) : NULL;
+        int count = 0;
+        if (children) memcpy(&count, children + 12, 4);
+        void **items = children ? pointer_at(children, 0x20) : NULL;
+        for (int i = 0; items && i < count; ++i) {
+            unsigned char *child = items[i];
+            float y;
+            memcpy(&y, child + 0x64, 4);
+            y -= height - previous_height;
+            memcpy(child + 0x64, &y, 4);
+        }
+        memcpy(group + 0x60, &x, 4);
+        memcpy(group + 0x64, &height, 4);
+    }
+    unsigned char *before = pointer_at(self, 0x110), *after = pointer_at(self, 0x118);
+    unsigned char *previous = row_behavior(before), *next = row_behavior(after);
+    void *down = shown ? owner : after, *up = shown ? owner : before;
+    if (previous) memcpy(previous + 0x118, &down, sizeof down);
+    if (next) memcpy(next + 0x110, &up, sizeof up);
+}
+
+static void collision_selector_event(unsigned char *self, void *event, unsigned char *owner) {
+    GetType type = (GetType)pointer_at(pointer_at(event, 0), 0);
+    void *kind = type(event);
+    if (kind == *initialize_type) {
+        const int selected = runtime_online_mode_itemless_collision();
+        memcpy(self + 0x190, &selected, 4);
+    }
+    if (kind == *selector_changed_type) {
+        if (collision_refreshing) return;
+        int selected;
+        memcpy(&selected, (unsigned char *)event + 0x18, 4);
+        if (!is_private() || battle_selected() || !runtime_speed_mode_enabled() ||
+            runtime_room_mode_following() || (selected != 0 && selected != 1)) return;
+        private_collision_selected = selected;
+        memcpy(self + 0x190, &selected, 4);
+        if (race_settings && *race_settings) broadcast_private_race_settings(*race_settings);
+    }
+    if (kind == *gui_input_type && runtime_room_mode_following()) return;
+    base_event(self, event, owner);
+    collision_selector_visibility(self, owner);
+}
+
+static void ABI team_count_update(unsigned char *self, unsigned char *owner, float dt) {
+    original_selector_update(self, owner, dt);
+    if (collision_selector(self)) {
+        int selected;
+        memcpy(&selected, self + 0x190, 4);
+        if (selected != private_collision_selected) {
+            memcpy(self + 0x190, &private_collision_selected, 4);
+            if (pointer_at(self, 0x198)) {
+                collision_refreshing = 1;
+                refresh_selector(self);
+                collision_refreshing = 0;
+            }
+        }
+        collision_selector_visibility(self, owner);
+    }
+}
+
 static void race_type_visibility(unsigned char *mode, unsigned char *owner, int shown) {
     if (!owner || !pointer_at(mode, 0x118)) return;
     unsigned char *row = pointer_at(owner, 0x58);
@@ -2393,6 +2512,7 @@ static void ABI select_mode(void *sender, int index) {
     }
     selector_mode_index = index;
     const int private = is_private();
+    if (!private) private_collision_selected = 0;
     if (!private && index == 1 && !runtime_public_itemless_available()) return;
     clear_team_selector();
     cup_timer_pending = 0;
@@ -2429,6 +2549,7 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         memcpy(&available, self + 0x1b0, sizeof available);
         memcpy(&items, available + 0x20, sizeof items);
         const int private = is_private();
+        if (!private) private_collision_selected = 0;
         items[1] = (unsigned char)(private || runtime_public_itemless_available());
         runtime_public_itemless_reset();
         int type;
@@ -3134,6 +3255,12 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (memcmp(image + 0x9b1fc0, load_prefix, sizeof load_prefix) ||
         memcmp(image + (0xeac310 - shift), timer_prefix, sizeof timer_prefix)) return 0;
     if (memcmp(image + (0xf344e6 - shift), "\x44\x39\xf2\x74\x54", 5)) return 0;
+    const unsigned char settings_broadcast_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
+        0x48,0x83,0xec,0x10,0x4c,0x8b,0x35,0x66,0x83,0xbd,0x01};
+    if (memcmp(image + 0xc2ed20, settings_broadcast_prefix, sizeof settings_broadcast_prefix)) return 0;
+    const unsigned char settings_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x53,0x50,0x49,0x89,0xff,0x48,0x8b,0x3d,0x24,0xad,0xed,0x01};
+    if (memcmp(image + 0xbf3110, settings_prefix, sizeof settings_prefix)) return 0;
     const unsigned char lap_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x54,0x53,0x48,0x8b,0x5f,0x28,0x41,0x89,0xd6};
     const unsigned char complete_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
@@ -3201,6 +3328,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     memcpy(&handler, image + 0x2773b40, sizeof handler);
     if (handler != (uintptr_t)(image + (0x1277c70 - shift))) return 0;
     memcpy(&handler, image + 0x2773b50, sizeof handler);
+    if (handler != (uintptr_t)(image + 0x97dfc0)) return 0;
+    memcpy(&handler, image + 0x2778160, sizeof handler);
     if (handler != (uintptr_t)(image + 0x97dfc0)) return 0;
     memcpy(&handler, image + 0x27744a8, sizeof handler);
     if (handler != (uintptr_t)(image + (0x127c6b0 - shift))) return 0;
@@ -3345,7 +3474,20 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     jump_to(trampoline + 2240 + sizeof lap_prefix, image + (0xf350c0 - shift) + sizeof lap_prefix);
     original_record_lap = (RecordLap)(trampoline + 2240);
     complete_racer = (CompleteRacer)(image + (0xf351b0 - shift));
-    stub_end = 2240 + sizeof lap_prefix + 14;
+    memcpy(trampoline + 2304, settings_prefix, 13);
+    memcpy(trampoline + 2317, "\x48\xbf", 2);
+    void *settings_manager_global = image + 0x2acde48;
+    memcpy(trampoline + 2319, &settings_manager_global, 8);
+    memcpy(trampoline + 2327, "\x48\x8b\x3f", 3);
+    jump_to(trampoline + 2330, image + 0xbf3124);
+    receive_race_settings = (NativeEvent)(trampoline + 2304);
+    memcpy(trampoline + 2368, settings_broadcast_prefix, 11);
+    memcpy(trampoline + 2379, "\x49\xbe", 2);
+    void *broadcast_guard_global = image + 0x2807098;
+    memcpy(trampoline + 2381, &broadcast_guard_global, 8);
+    memcpy(trampoline + 2389, "\x4d\x8b\x36", 3);
+    jump_to(trampoline + 2392, image + 0xc2ed32);
+    stub_end = 2406;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -3412,7 +3554,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     return_to_lobby = (NoArgument)(image + 0xa9cbe0);
     receive_private_settings = (NativeEvent)(trampoline + 192);
     publish_private_track = (NativeEvent)(image + (0xf4f7c0 - shift));
-    broadcast_race_settings = (NativeEvent)(image + 0xc2ed20);
+    broadcast_race_settings = (NativeEvent)(trampoline + 2368);
     race_settings = (unsigned char **)(image + 0x2ad4e30);
     system_data = (void **)(image + 0x2ad9c38);
     resize_list = (ResizeList)(image + (0x14a6f20 - shift));
@@ -3548,6 +3690,10 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xff11a0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, trampoline + 512);
     if (!write_code(image + (0xeb9ffb - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)broadcast_private_race_settings);
+    if (!write_code(image + 0xc2ed20, jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)collision_settings_received);
+    if (!write_code(image + 0xbf3110, jump, sizeof jump)) return 0;
     jump_to(jump, (void *)select_mode);
     const EventHandler team_count_replacement = team_count_event;
     if (!write_code(image + 0x2778150, &team_count_replacement, sizeof team_count_replacement)) return 0;
@@ -3557,9 +3703,11 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     const EventHandler lobby_replacement = lobby_event;
     const BehaviorUpdate lobby_update_replacement = lobby_update;
     const BehaviorUpdate selector_update_replacement = selector_update;
+    const BehaviorUpdate collision_update_replacement = team_count_update;
     const EventHandler timer_replacement = timer_event;
     if (!write_code(image + (0x1277e00 - shift), jump, sizeof jump) ||
         !write_code(image + 0x2773b50, &selector_update_replacement, sizeof selector_update_replacement) ||
+        !write_code(image + 0x2778160, &collision_update_replacement, sizeof collision_update_replacement) ||
         !write_code(image + 0x27744a8, &cup_replacement, sizeof cup_replacement) ||
         !write_code(image + 0x2543218, &level_replacement, sizeof level_replacement) ||
         !write_code(image + 0x2778390, &timer_replacement, sizeof timer_replacement) ||

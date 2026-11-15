@@ -459,9 +459,9 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
                 self.assertEqual(actual, online_mode.private_team_settings(wide))
                 old, new = Igz(wide), Igz(actual)
                 allowed = set(range(0x51f8, 0x51fc)) | set(range(0xe070, 0xe07c))
-                self.assertEqual(old.objects(), new.objects())
-                self.assertEqual(old.fixups, new.fixups)
-                self.assertEqual(len(old.data), len(new.data))
+                allowed |= self.collision_links(old)
+                self.assertEqual(old.objects(), new.objects()[:len(old.objects())])
+                self.assertGreater(len(new.data), len(old.data))
                 self.assertTrue(all(a == b or i in allowed
                                     for i, (a, b) in enumerate(zip(old.data, new.data))))
                 self.assertNotEqual(actual, online_mode.private_team_settings(
@@ -483,6 +483,56 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
     def test_unknown_private_team_settings_need_a_supported_native_menu(self):
         with self.assertRaisesRegex(ValueError, 'unsupported native private team settings'):
             online_mode.private_team_settings(b'modded settings', b'unknown native')
+
+    @staticmethod
+    def collision_links(g):
+        fields = (0x1630 + 0x40, 0x1750 + 0x50, 0x3c50 + 0x58,
+                  0x3a60 + 0x118, 0x3da0 + 0x110,
+                  g.u64(g.u64(0x1750 + 0x48) + 0x20) + 8)
+        return {i for at in fields for i in range(at, at + 8)} | set(range(0x49a0, 0x49a4))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
+    def test_collision_teardown_releases_powerups_and_preserves_shared_animation(self):
+        pak = Path(os.environ['BB_TEST_GAME']) / 'archives/update2.pak'
+        entry = next(e for e in iga.pak_entries(pak) if e[0].lower() == online_mode.SETTINGS_ENTRY)
+        with pak.open('rb') as f:
+            g = Igz(online_mode.private_team_settings(iga.read_entry(f, *entry[1:])))
+        types = dict(g.objects())
+        group = next(o for o, t in types.items() if t == 'igGuiPlaceable'
+                     and g.string_at(o + 0x28) == 'OCTR_COLLISION_LAYOUT')
+        refs = {o: g.u32(o + 8) & 0x7ffff for o in types}
+
+        def children(obj):
+            kind = types[obj]
+            if kind == 'igGuiPlaceable':
+                return [g.u64(obj + at) for at in (0x48, 0xe8, 0xf0) if g.u64(obj + at)]
+            if kind in ('igGuiPlaceableTable', 'igGuiBehaviorList'):
+                return [g.u64(g.u64(obj + 0x20) + i * 8) for i in range(g.u32(obj + 12))]
+            return []
+
+        def release(obj):
+            # Native 149d260 releases the low 19-bit count; placeable/list destructors own these edges.
+            self.assertGreater(refs[obj], 0)
+            refs[obj] -= 1
+            if refs[obj] == 0:
+                for child in children(obj):
+                    release(child)
+
+        subtree, pending = set(), [0x1630]
+        while pending:
+            obj = pending.pop()
+            if obj not in subtree:
+                subtree.add(obj)
+                pending.extend(children(obj))
+        self.assertIn(0xf430, subtree)  # The original Powerups VSC whose metadata was stale.
+        release(group)
+        self.assertEqual(refs[group], 0)
+        self.assertEqual(refs[0x4998], 1)  # Teams still owns the shared animation table.
+        for i in range(g.u32(0x0c)):
+            obj = g.u64(g.u64(0x20) + i * 8)
+            if obj in subtree:
+                release(obj)
+        self.assertEqual(refs[0xf430], 0)
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local USA/EU 1.21 game dump')
     def test_mod_version_of_private_settings_keeps_its_changes_and_gets_teams_row(self):
@@ -512,11 +562,11 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         with pak.open('rb') as f:
             blob = iga.read_entry(f, *entry[1:])
         old, new = Igz(blob), Igz(online_mode.private_team_settings(blob))
-        self.assertEqual(old.objects(), new.objects())
-        self.assertEqual(old.fixups, new.fixups)
+        self.assertEqual(old.objects(), new.objects()[:len(old.objects())])
         selector = next(o for o, t in new.objects() if t == 'CGuiBehaviorTeamCountSettingSelector')
         size = new.sizes[new.u64(selector)]
-        self.assertEqual(old.data[selector:selector + size], new.data[selector:selector + size])
+        self.assertEqual(old.data[selector:selector + 0x118], new.data[selector:selector + 0x118])
+        self.assertEqual(old.data[selector + 0x120:selector + size], new.data[selector + 0x120:selector + size])
 
         def values(row, tag):
             table = new.u64(row + 0xf0)
@@ -535,9 +585,40 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         position = values(new.u64(row + 0x40), 'SingleRace')
         self.assertEqual(struct.unpack_from('<f', new.data, alpha), (1.0,))
         self.assertEqual(struct.unpack_from('<3f', new.data, position), (65.0, 180.0, 0.0))
-        # Only the race visibility and spacing change; battle rules and navigation stay native.
-        allowed = set(range(alpha, alpha + 4)) | set(range(position, position + 12))
+        # Original options stay native; the extra row is linked between Teams and AI.
+        allowed = set(range(alpha, alpha + 4)) | set(range(position, position + 12)) | self.collision_links(old)
         self.assertTrue(all(a == b or i in allowed for i, (a, b) in enumerate(zip(old.data, new.data))))
+        collision = next(o for o, t in new.objects()
+                         if t == 'CGuiBehaviorTeamCountSettingSelector'
+                         and new.string_at(o + 0x148) == 'COLLISION')
+        group = next(o for o, t in new.objects()
+                     if t == 'igGuiPlaceable' and o + 0x28 in new.sites['RSTT']
+                     and new.string_at(o + 0x28) == 'OCTR_COLLISION_LAYOUT')
+        row = next(o for o, t in new.objects()
+                   if t == 'igGuiPlaceable' and o + 0x28 in new.sites['RSTT']
+                   and new.string_at(o + 0x28) == 'OCTR_COLLISION_ROW')
+        options = new.u64(collision + 0x1a8)
+        self.assertEqual(new.u32(options + 12), 2)
+        self.assertEqual([new.string_at(new.u64(options + 32) + i * 8) for i in range(2)], ['OFF', 'ON'])
+        self.assertEqual(new.u64(collision + 0x110), 0x3910)
+        self.assertEqual(new.u64(collision + 0x118), 0x3c50)
+        self.assertEqual(new.u64(0x3a60 + 0x118), row)
+        self.assertEqual(new.u64(0x3da0 + 0x110), row)
+        self.assertEqual(new.u64(row + 0x40), group)
+        self.assertEqual(new.u64(group + 0x40), 0x1750)
+        self.assertEqual(new.u64(0x1630 + 0x40), group)
+        self.assertEqual(new.u64(group + 0xf0), 0)
+        root = group
+        for _ in range(9):
+            root = new.u64(root + 0x40)
+        self.assertEqual(root, 0x2050)
+        self.assertEqual(new.u64(root + 0xf0), 0)
+        children = new.u64(new.u64(root + 0x40) + 0x48)
+        siblings = [new.u64(new.u64(children + 0x20) + i * 8)
+                    for i in range(new.u32(children + 12))]
+        self.assertEqual(siblings, [0xf00, root])
+        self.assertTrue(all(new.u64(sibling + 0xf0) == 0 for sibling in siblings))
+        self.assertTrue(new.u32(row + 12) & 0x400)
 
     def test_hook_requires_supported_adapter(self):
         with self.assertRaisesRegex(ValueError, 'not uniquely recognized'):
@@ -900,6 +981,8 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         behavior_list = new.u64(row + 0xe8)
         behavior = new.u64(new.u64(behavior_list + 0x20))
         self.assertEqual(new.string_at(behavior + 0x148), 'RACE TYPE')
+        for obj in (row, behavior_list, behavior):
+            self.assertEqual(new.u32(obj + 8) & 0x7ffff, 1)
         race_options = new.u64(behavior + 0x1a8)
         self.assertEqual(new.u32(race_options + 12), 2)
         self.assertEqual([new.string_at(new.u64(race_options + 32) + i * 8) for i in range(2)],

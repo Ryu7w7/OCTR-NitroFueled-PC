@@ -168,7 +168,7 @@ int runtime_public_itemless_announce(void) {
     pthread_mutex_unlock(&mode_lock);
     if (!token) return 0;
     char target[512], body[128];
-    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&release=%s", name, token, SACREDFIRE_RELEASE);
+    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&collision_rules=1&release=%s", name, token, SACREDFIRE_RELEASE);
     int status = runtime_ryunet_request("POST", target, body, sizeof body);
     int accepted = status == 200 && !strcmp(body, "ok");
     pthread_mutex_lock(&mode_lock);
@@ -497,7 +497,7 @@ static char *extend(const char *raw, unsigned limit, uint64_t token, int mode) {
     if (n == limit || field(raw, "octr_itemless")) return NULL;
     char *out = malloc(n + 320);
     if (out) snprintf(out, n + 320,
-        "{\"octr_itemless\":{\"version\":1,\"mode\":%d,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},%s",
+        "{\"octr_itemless\":{\"version\":1,\"mode\":%d,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"collision_rules\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\"},%s",
         mode, SACREDFIRE_RELEASE, token, raw + 1);
     return out;
 }
@@ -560,7 +560,8 @@ static void *ABI leave_lobby(void **result, void *self, uint64_t id) {
 static int confirmation(const char *confirmation_doc, uint64_t room, uint64_t token) {
     const char *value = field(confirmation_doc, "octr_itemless_v1");
     char prefix[80], wanted[17];
-    snprintf(prefix, sizeof prefix, "\"1/%" PRIu64 "/1/", room);
+    /* Version 2 confirms collision-free racing and aligned starts for every member. */
+    snprintf(prefix, sizeof prefix, "\"2/%" PRIu64 "/1/", room);
     snprintf(wanted, sizeof wanted, "%016" PRIx64, token);
     if (!value || !token || strncmp(value, prefix, strlen(prefix))) return 0;
     value += strlen(prefix);
