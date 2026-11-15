@@ -3,6 +3,7 @@
 #include "../launcher/launcher.cpp"
 #undef main
 #include <cassert>
+#include "../gpu/shim/bbport_settings.h"
 #include "imgui_internal.h"
 int main(int argc, char** argv) {
     static_assert(alignof(Trophy) >= alignof(void*));
@@ -263,6 +264,42 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
     assert(external.Save(GameIni(), nullptr));
     RefreshGameSettings(true);
     assert(g_app.game.Get("volume") == "37" && g_app.game.Get("temporal") == "fsr1");
+    {
+        // Exercise the real in-game writer and the launcher's timed refresh across a mod session.
+        const auto config_override = Env("BB_CONFIG");
+        const auto preferences_override = Env("BB_LAUNCHER_CONFIG");
+        const auto preferences = GameIni();
+        const auto session = g_app.data / "mod-session.ini";
+        Ini effective;
+        assert(effective.Load(preferences));
+        effective.Set("volume", "10");
+        effective.Set("online", "1");
+        assert(effective.Save(session, nullptr));
+        setenv("BB_CONFIG", PathText(session).c_str(), 1);
+        setenv("BB_LAUNCHER_CONFIG", PathText(preferences).c_str(), 1);
+        BbSettings::Load();
+        auto& settings = BbSettings::Get();
+        settings.temporal = BbSettings::TemporalDlss;
+        settings.render_res = 0;
+        BbSettings::Save();
+        setenv("BB_CONFIG", PathText(preferences).c_str(), 1);
+        SleepMs(550);
+        RefreshGameSettings();
+        assert(g_app.game.Get("render_res") == "480" && g_app.game.Get("temporal") == "dlss");
+        assert(g_app.game.Get("volume") == "37" && !g_app.game.Flag("online", true));
+        g_app.game.Set("volume", "27");
+        SaveGameIni();
+        setenv("BB_CONFIG", PathText(session).c_str(), 1);
+        assert(BbSettings::Refresh(true) && settings.volume == 27);
+        assert(effective.Load(session) && effective.Get("volume") == "27");
+        BbSettings::Load();
+        assert(settings.volume == 27 && settings.temporal == BbSettings::TemporalDlss);
+        assert(BbSettings::RenderResHeights[settings.render_res] == 480);
+        if (config_override.empty()) unsetenv("BB_CONFIG");
+        else setenv("BB_CONFIG", config_override.c_str(), 1);
+        if (preferences_override.empty()) unsetenv("BB_LAUNCHER_CONFIG");
+        else setenv("BB_LAUNCHER_CONFIG", preferences_override.c_str(), 1);
+    }
     assert(WidePath(TextPath("/tmp/日本語 café")) == L"/tmp/日本語 café");
     const auto quoted = Narrow(Quote(L"/tmp/a'b \"c\" $HOME;`false`"));
     assert(LinuxProcess::Arguments(quoted) == std::vector<std::string>{"/tmp/a'b \"c\" $HOME;`false`"});

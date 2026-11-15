@@ -18,6 +18,7 @@ static std::string Read(const char* path) {
 }
 
 int main() {
+    unsetenv("BB_LAUNCHER_CONFIG");
     char path[] = "/tmp/bbport-settings-test-XXXXXX";
     const int fd = mkstemp(path);
     assert(fd >= 0);
@@ -96,7 +97,42 @@ int main() {
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     BbSettings::Refresh(true);
     assert(s.volume == 83 && s.show_fps);
+
+    // Mod snapshots keep their overrides, but user edits must reach the launcher's preferences.
+    const std::string session = std::string(path) + ".session";
+    std::ofstream(path) << "# launcher\nvolume=60\nrender_res=720\ntemporal=off\nonline=1\nkey.cross=Q\n";
+    std::ofstream(session) << "# mod session\nvolume=20\nrender_res=720\ntemporal=off\nonline=0\n";
+    setenv("BB_CONFIG", session.c_str(), 1);
+    setenv("BB_LAUNCHER_CONFIG", path, 1);
+    BbSettings::Load();
+    assert(s.volume == 20 && !BbSettings::Refresh(true));
+    for (int i = 0; i < int(std::size(BbSettings::RenderResHeights)); ++i)
+        if (BbSettings::RenderResHeights[i] == 480) s.render_res = i;
+    s.temporal = BbSettings::TemporalDlss;
+    BbSettings::Save();
+    assert(Read(path).find("render_res=480\n") != std::string::npos);
+    assert(Read(path).find("temporal=dlss\n") != std::string::npos);
+    assert(Read(path).find("volume=60\n") != std::string::npos);
+    assert(Read(path).find("online=1\nkey.cross=Q\n") != std::string::npos);
+    assert(Read(session.c_str()).find("render_res=480\n") != std::string::npos);
+    assert(Read(session.c_str()).find("volume=20\n") != std::string::npos);
+    assert(Read(session.c_str()).find("online=0\n") != std::string::npos);
+    std::ofstream(path) << "# launcher\nvolume=75\nrender_res=1080\ntemporal=fsr3\nonline=1\nkey.cross=W\n";
+    s.show_fps = false;
+    assert(BbSettings::Refresh(true));
+    assert(s.volume == 75 && s.temporal == BbSettings::TemporalFsr3 && !s.show_fps);
+    assert(Read(session.c_str()).find("volume=75\n") != std::string::npos);
+    assert(BbSettings::RenderResHeights[s.render_res] == 1080);
+    BbSettings::Save();
+    BbSettings::Load();
+    assert(s.volume == 75 && s.temporal == BbSettings::TemporalFsr3 && !s.show_fps);
+    assert(BbSettings::RenderResHeights[s.render_res] == 1080);
+    assert(Read(path).find("online=1\nkey.cross=W\n") != std::string::npos);
+    assert(Read(session.c_str()).find("online=0\n") != std::string::npos);
+    unsetenv("BB_LAUNCHER_CONFIG");
+    unlink(session.c_str());
+    unlink((session + ".lock").c_str());
     unlink(path);
     unlink((std::string(path) + ".lock").c_str());
-    std::puts("PASS: live settings merge, deletion, startup state, concurrent writers");
+    std::puts("PASS: live settings merge, deletion, startup state, concurrent writers, mod session preferences");
 }

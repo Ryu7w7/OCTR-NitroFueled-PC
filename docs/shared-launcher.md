@@ -89,7 +89,11 @@ compositor and driver. Native dialogs require the desktop's SDL dialog backend/p
 
 ## Live configuration and shared icon
 
-The launcher and both in-game menus share `BB_CONFIG` (`bbport.ini` by default). ImGui edits
+The launcher and both in-game menus synchronize the player's configuration (`bbport.ini` by default).
+Mod sessions load their effective settings from a separate `BB_CONFIG` snapshot; `BB_LAUNCHER_CONFIG`
+identifies the player's original configuration. Both menus save user edits back to that original
+file and keep the session snapshot current for runtime readers and Windows restarts. Initial mod
+overrides remain isolated instead of replacing the player's preferences. ImGui edits
 save while the menu stays open, with a 150 ms throttle during drags. Native menu edits save
 immediately. The launcher checks file changes every 500 ms; the game checks every 250 ms.
 Both merge external changes before writing and hold the same stable `.lock` sidecar across

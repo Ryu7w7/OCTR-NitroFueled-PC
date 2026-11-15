@@ -24,6 +24,11 @@ const char* Path() {
     return env && env[0] ? env : "bbport.ini";
 }
 
+const char* PreferencesPath() {
+    const char* env = std::getenv("BB_LAUNCHER_CONFIG");
+    return env && env[0] ? env : Path();
+}
+
 float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
 }
@@ -202,7 +207,7 @@ std::string file_path;
 std::chrono::steady_clock::time_point checked;
 
 bool ReadSettings(SettingsMap& values) {
-    std::ifstream file(Path());
+    std::ifstream file(PreferencesPath());
     if (!file) return false;
     std::string line;
     while (std::getline(file, line)) {
@@ -245,8 +250,8 @@ static void RememberSettings() {
     ReadSettings(file_values);
     baseline = CurrentSettings();
     std::error_code error;
-    file_time = std::filesystem::last_write_time(Path(), error);
-    file_path = Path();
+    file_time = std::filesystem::last_write_time(PreferencesPath(), error);
+    file_path = PreferencesPath();
 }
 
 void Load() {
@@ -532,8 +537,8 @@ static bool RefreshLocked(bool force) {
     if (!force && now - checked < std::chrono::milliseconds(250)) return false;
     checked = now;
     std::error_code error;
-    const auto stamp = std::filesystem::last_write_time(Path(), error);
-    if (error || (!force && file_path == Path() && stamp == file_time)) return false;
+    const auto stamp = std::filesystem::last_write_time(PreferencesPath(), error);
+    if (error || (!force && file_path == PreferencesPath() && stamp == file_time)) return false;
     SettingsMap disk;
     if (!ReadSettings(disk)) return false;
     const auto before = CurrentSettings();
@@ -571,26 +576,16 @@ static bool RefreshLocked(bool force) {
     }
     file_values = std::move(disk);
     file_time = stamp;
-    file_path = Path();
+    file_path = PreferencesPath();
     return before != after;
 }
 
-bool Refresh(bool force) {
-    std::scoped_lock lock{sync_mutex};
-    return RefreshLocked(force);
-}
-
-void Save() {
-    std::scoped_lock lock{sync_mutex};
-    SettingsLock file_lock(Path());
-    if (!file_lock) { std::printf("Settings: cannot lock %s\n", Path()); return; }
-    RefreshLocked(true);
-    const auto& v = Get();
-    const auto keys = Snapshot(v);
+static bool WriteSettings(const char* path,
+                          const std::vector<std::pair<std::string, std::string>>& keys) {
     std::string out;
     bool had_lines = false;
     std::vector<bool> written(keys.size());
-    if (FILE* file = std::fopen(Path(), "r")) {
+    if (FILE* file = std::fopen(path, "r")) {
         char line[512];
         while (std::fgets(line, sizeof(line), file)) {
             had_lines = true;
@@ -622,26 +617,64 @@ void Save() {
         }
     }
     // Replaced whole: a crash while writing leaves the old file.
-    const std::string temporary = std::string(Path()) + ".tmp";
+    const std::string temporary = std::string(path) + ".tmp";
     FILE* file = std::fopen(temporary.c_str(), "w");
     bool ok = file && std::fwrite(out.data(), 1, out.size(), file) == out.size();
     ok = file && std::fclose(file) == 0 && ok;
     // std::filesystem::rename replaces an existing file on Windows too (std::rename does not).
     std::error_code error;
     if (ok) {
-        std::filesystem::rename(temporary, Path(), error);
+        std::filesystem::rename(temporary, path, error);
     }
     if (!ok || error) {
-        std::printf("Settings: cannot write %s (%s)\n", Path(), error ? error.message().c_str() : "write failed");
-    } else {
-        RememberSettings();
-        baseline = SettingsMap(keys.begin(), keys.end());
-        std::printf("Settings: saved %s (", Path());
-        for (int g = 0; g < GamePatchCount; ++g) {
-            std::printf("%s%s=%d", g ? ", " : "", GamePatches[g].key, int(v.game_patches[g]));
-        }
-        std::printf(")\n");
+        std::printf("Settings: cannot write %s (%s)\n", path, error ? error.message().c_str() : "write failed");
+        return false;
     }
+    return true;
+}
+
+bool Refresh(bool force) {
+    std::scoped_lock lock{sync_mutex};
+    const bool changed = RefreshLocked(force);
+    if (changed && std::strcmp(Path(), PreferencesPath()) != 0) {
+        // Runtime readers and Windows restarts still use the mod session's effective settings.
+        SettingsLock session_lock(Path());
+        if (session_lock) WriteSettings(Path(), Snapshot(Get()));
+        else std::printf("Settings: cannot lock %s\n", Path());
+    }
+    return changed;
+}
+
+void Save() {
+    std::scoped_lock lock{sync_mutex};
+    const char* preferences = PreferencesPath();
+    SettingsLock file_lock(preferences);
+    if (!file_lock) { std::printf("Settings: cannot lock %s\n", preferences); return; }
+    RefreshLocked(true);
+    const auto& v = Get();
+    const auto snapshot = Snapshot(v);
+    auto keys = snapshot;
+    const bool session = std::strcmp(Path(), preferences) != 0;
+    if (session) {
+        // Persist user edits, not the mod's initial overrides or generated defaults.
+        std::erase_if(keys, [](const auto& entry) {
+            const auto saved = baseline.find(entry.first);
+            return saved != baseline.end() && saved->second == entry.second;
+        });
+    }
+    if (!keys.empty() && !WriteSettings(preferences, keys)) return;
+    if (session) {
+        SettingsLock session_lock(Path());
+        if (!session_lock) { std::printf("Settings: cannot lock %s\n", Path()); return; }
+        if (!WriteSettings(Path(), snapshot)) return;
+    }
+    RememberSettings();
+    baseline = SettingsMap(snapshot.begin(), snapshot.end());
+    std::printf("Settings: saved %s (", preferences);
+    for (int g = 0; g < GamePatchCount; ++g) {
+        std::printf("%s%s=%d", g ? ", " : "", GamePatches[g].key, int(v.game_patches[g]));
+    }
+    std::printf(")\n");
 }
 
 float PresetScale(int preset) {
