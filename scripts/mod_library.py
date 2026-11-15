@@ -149,6 +149,7 @@ def scan(root,patchdir):
     root=Path(root);root.mkdir(parents=True,exist_ok=True);patchdir=Path(patchdir)
     cache=storage(root)/'packages';cache.mkdir(parents=True,exist_ok=True)
     found={};messages=sync_xml(root,patchdir);candidates={}
+    present=set()  # the unpacked copies of the mods here, read or not
     builtins=set(builtin_sources())
     if os.environ.get('BB_BUILTIN_MODS','x'):builtins|=set(builtin_sources(generated_builtin(root)))
     for source in sorted(root.iterdir(),key=lambda p:p.name.casefold())+sorted(builtins):
@@ -165,6 +166,7 @@ def scan(root,patchdir):
                 if source.suffix.lower()=='.zip':
                     inspected=fmt.inspect_zip(source)
                     if inspected:manifest,_=inspected
+            present.add(digest)
             ident=manifest['id'] if manifest else ident_for(source)
             dest=cache/digest/ident
             if not dest.exists():
@@ -217,6 +219,10 @@ def scan(root,patchdir):
             item['version_notice']='Using '+item['version']+'. Other copies retained: '+', '.join(i['source']+' ('+i['version']+')' for i in items if i is not item)
         found[ident]=item
     result={'entries':found,'messages':messages};save_json(storage(root)/'library.json',result)
+    # Unpacked copies of mods no longer here (an older version, a removed mod). Every caller
+    # holds the launch lock (scripts/state_cleanup.py).
+    import state_cleanup
+    state_cleanup.unpacked(cache,present,'Mod library')
     # Display-only catalog: native UI records only the first TitleID and would
     # hide a multi-ID catalog on the other edition. Executable XML is checked separately.
     xml=ET.Element('Patch')

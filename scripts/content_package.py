@@ -274,6 +274,7 @@ def scan(root, log=print):
     previous = json.loads(library.read_text(encoding='utf-8')) if library.is_file() else {}
     known = previous.get('sources', {})
     packages, messages, sources = {}, [], {}
+    present = set()  # the unpacked copies of the ZIPs here, read or not
     if root.is_dir():
         for source in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
             try:
@@ -285,8 +286,10 @@ def scan(root, log=print):
                     if old and old['bytes'] == st.st_size and old['mtime_ns'] == st.st_mtime_ns \
                             and Path(old['folder']).is_dir():
                         digest, folder, verify = old['sha256'], Path(old['folder']), False
+                        present.add(digest)
                     else:
                         digest = sha(source)
+                        present.add(digest)
                         unpacked = store / 'packages' / digest
                         if unpacked.exists():
                             shutil.rmtree(unpacked)
@@ -308,6 +311,10 @@ def scan(root, log=print):
     for message in messages:
         log('External content: ' + message)
     save_json(library, {'sources': sources, 'packages': packages, 'messages': messages})
+    # Unpacked copies of ZIPs no longer here (an older version, a removed package).
+    import state_cleanup
+    state_cleanup.unpacked_unless_running(store / 'packages', present,
+                                          store.parent / 'mod-state', 'External content', log)
     return {'packages': packages, 'messages': messages}
 
 

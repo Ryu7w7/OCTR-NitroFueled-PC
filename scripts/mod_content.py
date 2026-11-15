@@ -295,6 +295,10 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             publish_profile(staging,cache,log)
         except BaseException:
             log('Incomplete preparation preserved at '+str(staging));raise
+    # The prepared sessions kept: this one and the latest others (scripts/state_cleanup.py).
+    os.utime(cache/'ready.json')
+    import state_cleanup
+    state_cleanup.sessions(cache.parent,cache,log)
     # Full PAKs/loose files are read directly from mod storage by the engine.
     # A whole file the profile has its own copy of (a merged racer registration, an archive with
     # a built-in's change merged in) is read from the profile.
