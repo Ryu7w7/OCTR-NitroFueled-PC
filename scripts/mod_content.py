@@ -75,6 +75,22 @@ def claims(folder,settings=None,options=None):
         else:keys=[op['target']]
         items.extend((key.casefold(),folder/'mod.json') for key in keys)
     return list(dict(items).items()) if settings is None else items
+def registers_tracks(update3):
+    """Whether a mod's whole update3.pak registers tracks (it has the game's track list,
+    track_registry.GUI): a track mod, which the external content tab can convert."""
+    import track_registry
+    from archive_reader import Archive
+    try:return any(f['path'].casefold()==track_registry.GUI.casefold() for f in Archive(str(update3)).files)
+    except Exception:return False  # unreadable: not shown as a track mod
+def whole_update3_message(names,update3):
+    """Why mods that ship a whole update3.pak stop a launch with external content: track mods
+    can be converted to external content; the others (karts, racers, ...) cannot."""
+    tracks=[n for n in names if n in update3 and registers_tracks(update3[n])]
+    others=[n for n in names if n not in tracks]
+    parts=[]
+    if tracks:parts.append(', '.join(tracks)+' ships a whole update3.pak: turn it off, or convert it to external content (External content tab: Convert track mod), to use external content')
+    if others:parts.append(', '.join(others)+' ships a whole update3.pak, which cannot be used with external content: turn it off, or turn external content off')
+    return '; '.join(parts)
 def mod_files(folder):return [(Path(key),source) for key,source in claims(folder)]
 def builtin_names(root):
     """The built-in mods of the library (scripts/builtin_mods): what they share with a community
@@ -156,6 +172,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     runtime=sha(engine(root))
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
     added={}  # mod -> the archives it adds (whole files, new or replaced game files)
+    update3={}  # mod -> the whole update3.pak it ships
     owned={}  # mod -> its resolved operations
     for name in names:
         folder=package_folder(mod_root,name)
@@ -184,12 +201,14 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     raise ValueError(name+': executable patch targets a different game edition/version')
                 patches.append((patch_path,name))
             whole.extend((under(folder,r['file']),r['file']) for r in m['files'] if r['file'].startswith('archives/'))
+            update3.update({name:under(folder,r['file']) for r in m['files'] if r['file'].casefold()=='archives/update3.pak'})
             added[name]=[r['file'] for r in m['files'] if r['file'].startswith('archives/')]+\
                 [op['target'] for op in m.get('operations',[]) if op['kind']=='game_file']
             packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant,'options':option_values})
         else:
             files=list(mods.mod_files(folder));whole.extend((source,path.as_posix()) for path,source in files)
             added[name]=[path.as_posix() for path,_ in files]
+            update3.update({name:source for path,source in files if path.as_posix().casefold()=='archives/update3.pak'})
             packages.append({'id':name,'files':[[p.as_posix(),sha(s)] for p,s in files]})
     effective.update(settings)
     # External content (scripts/content_package.py): tracks added to the game, in an update
@@ -199,7 +218,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     content=content_package.selected(content_root,environment.get('BB_ONLINE',effective.get('online','0'))=='1',log)
     if content:
         whole3=[name for name in names for target in added.get(name,[]) if target.casefold()=='archives/update3.pak']
-        if whole3:raise ValueError(', '.join(whole3)+' ships a whole update3.pak: turn it off, or convert it to external content, to use external content')
+        if whole3:raise ValueError(whole_update3_message(whole3,update3))
     for name in names:
         raw=metadata(package_folder(mod_root,name))
         m=fmt.resolve(raw,base,saved_options.get(name))[1] if 'schemaVersion' in raw else raw

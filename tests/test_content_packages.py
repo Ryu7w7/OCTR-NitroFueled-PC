@@ -410,3 +410,24 @@ class ConvertTests(unittest.TestCase):
             self.assertEqual(code, 0, out.getvalue())
             # several tracks in one mod share textures (road, minimap): partial together, export apart
             self.assertEqual('exported together' in out.getvalue(), extra, out.getvalue())
+
+
+class WholeUpdate3Tests(unittest.TestCase):
+    """mod_content.whole_update3_message: a mod with a whole update3.pak stops external content;
+    only a track mod is told to convert it."""
+
+    def test_only_track_mods_are_told_to_convert(self):
+        import mod_content
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        track, racer = work / 'track.pak', work / 'racer.pak'
+        write_archive(track, [('t/' + tr.GUI, tr.GUI, 0, b'gui')], SimpleNamespace(flags=0))
+        write_archive(racer, [('t/looseData/systemData.igz', 'looseData/systemData.igz', 0, b'sys')],
+                      SimpleNamespace(flags=0))
+        self.assertTrue(mod_content.registers_tracks(track))
+        self.assertFalse(mod_content.registers_tracks(racer))
+        self.assertFalse(mod_content.registers_tracks(work / 'missing.pak'))
+        message = mod_content.whole_update3_message(['nbc', 'tag'], {'nbc': track, 'tag': racer})
+        self.assertIn('nbc ships a whole update3.pak: turn it off, or convert it to external content', message)
+        self.assertIn('tag ships a whole update3.pak, which cannot be used with external content', message)
+        self.assertNotIn('convert', message.split('; ')[1])
