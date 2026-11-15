@@ -1,1 +1,1 @@
-{"format":"copy-delta-v1","source_bytes":52568,"result_bytes":52568,"operations":[["copy",0,26840],["bytes","f0080000"],["copy",26844,372],["bytes","0c000000"],["copy",27220,326],["bytes","90c100801dc3"],["copy",27552,25016]]}
+{"format":"copy-delta-v1","source_bytes":52568,"result_bytes":52568,"operations":[["copy",0,26840],["bytes","f0080000"],["copy",26844,364],["bytes","d0350000000000000c000000"],["copy",27220,326],["bytes","90c100801dc3"],["copy",27552,25016]]}

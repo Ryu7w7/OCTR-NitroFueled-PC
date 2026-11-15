@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Reiniciar between a cup's races and after its last one (every cup: the game's, Ultimate Customizer's added ones and a custom cup): the cup starts again from its first race with the points at 0, its tracks as they were chosen. Continuar, Reiniciar, Salir.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
   "requiresCapabilities": [
@@ -77,7 +77,7 @@
       "asset": "ui/Octane_EndRaceMenu.igz",
       "index": 6369,
       "original_sha256": "7e378ecaaea31ee78c1e0e2623e157a1eec26ab50cb0005fc114478dd555bdec",
-      "patched_sha256": "33a979e0ebb89ce9316596b4118893ddabafc01108d1ffd306d78368c242ca9d",
+      "patched_sha256": "effe3a134b29f433394498b9442824ac68164cf981b8576af10ad5e60f359e1c",
       "payload": "payloads/fin-carrera-menu.delta.json"
     }
   ],
@@ -114,12 +114,12 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "4797f9b7415a3095a4611799d9dca0a430099214f89a4385bdb57e901c640a40",
+      "sha256": "e26c9248deca9bd9d120e6a3337eddc65c8ef0e339b18fb1abfddcb23e64ab09",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "911e638b6f39121ed40d2cf2306bb1d81fc221aaebf86186c9a6adb9d1145084",
+      "sha256": "74581e06cd9080f83653b3eb1b2b0a1e68cb7c1174c5d6943c3e1606922bafff",
       "bytes": 16769
     },
     {
@@ -134,8 +134,8 @@
     },
     {
       "file": "payloads/fin-carrera-menu.delta.json",
-      "sha256": "a76fdaf6b70da8dfda6036708b221daa9203dfed64cd33435dac307d0e35a0e6",
-      "bytes": 226
+      "sha256": "40257ef862e040c6dc5141069a1b274dd2543e79980f472a289ec95937e8cd8d",
+      "bytes": 242
     },
     {
       "file": "payloads/fin-carrera-script.delta.json",
