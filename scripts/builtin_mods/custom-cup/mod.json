@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Reiniciar between a cup's races and after its last one (every cup: the game's, Ultimate Customizer's added ones and a custom cup): the cup starts again from its first race with the points at 0, its tracks as they were chosen. Continuar, Reiniciar, Salir.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
   "requiresCapabilities": [
@@ -65,11 +65,20 @@
     {
       "kind": "archive_asset",
       "archive": "update.pak",
+      "asset": "vsc/UI/Octane_EndRaceMenu/Octane_EndRaceMenu_Restart.igz",
+      "index": 2390,
+      "original_sha256": "d815fec79833369482c7963d63dacb04f5ba8f36bbc4f3f078e9d96e840822be",
+      "patched_sha256": "af01fcc3422d39bfb793a5c8a2d53db6f16f7d44678198e384d23bd4e120fe0d",
+      "payload": "payloads/fin-carrera-restart-update.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update.pak",
       "asset": "vsc/UI/Octane_EndRaceMenu/Octane_EndRaceMenu_Root.igz",
       "index": 1029,
       "original_sha256": "719bef8d92d78a949951354324c3d935627d0ad6a3ded530ce4b91466c207bd1",
-      "patched_sha256": "cb142ad21be6b9ec510be18559609e5244f71ce2db53f275b0f44ef853ca254e",
-      "payload": "payloads/fin-carrera-script.delta.json"
+      "patched_sha256": "da75a0b159ef93d1db59e3811ca889564a4c881a6322e799c79f3bdac9cb8d49",
+      "payload": "payloads/fin-carrera-root-update.delta.json"
     },
     {
       "kind": "archive_asset",
@@ -77,8 +86,116 @@
       "asset": "ui/Octane_EndRaceMenu.igz",
       "index": 6369,
       "original_sha256": "7e378ecaaea31ee78c1e0e2623e157a1eec26ab50cb0005fc114478dd555bdec",
-      "patched_sha256": "4f1379ff67350f0c9575c96d850872371f0f6fc5a91d6810b74d6a50191cbaee",
-      "payload": "payloads/fin-carrera-menu.delta.json"
+      "patched_sha256": "d77f3e81e72b4cae07b621bb985f935a63dc5a0159e520d6b34505409e0ffeb5",
+      "payload": "payloads/fin-carrera-update2.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_EndRaceMenu_en.lng",
+      "index": 118,
+      "original_sha256": "3304fcd61ddf48260d0728728193dc3ef27c0b7639dc525465deeb5aae838230",
+      "patched_sha256": "eceee23fe06d79b2e37634e37934c4281e8da51bb0decb839048d9564834c832",
+      "payload": "payloads/fin-carrera-en-juicedomain-race.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_EndRaceMenu_fr.lng",
+      "index": 555,
+      "original_sha256": "f305cb3b3a653c2838f34ddf9908976f10206836e8d9b89d70fd495e03792fbe",
+      "patched_sha256": "7a96ef970161f50c589209de2f71285884528f6e6b38e340c7be962067d44564",
+      "payload": "payloads/fin-carrera-fr-juicedomain-race.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_EndRaceMenu_mx.lng",
+      "index": 321,
+      "original_sha256": "0acdde1175733963c67c65aa1db7ea5a4453142abdb72a17a46905c5aeb85ca1",
+      "patched_sha256": "06052b173082da8b317313d86a2edf81d284c939172ff3e06711d2836ffaa627",
+      "payload": "payloads/fin-carrera-mx-juicedomain-race.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_EndRaceMenu_pt.lng",
+      "index": 585,
+      "original_sha256": "2a4f20eab731071060891a61801332913f6a65d30b70d51bcf077834e80bf00f",
+      "patched_sha256": "8917e69a0673057f78834485459571d8d5d0b6560536f2072f6255ba0001a71e",
+      "payload": "payloads/fin-carrera-pt-juicedomain-race.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_EndRaceMenu_en.lng",
+      "index": 120,
+      "original_sha256": "3304fcd61ddf48260d0728728193dc3ef27c0b7639dc525465deeb5aae838230",
+      "patched_sha256": "eceee23fe06d79b2e37634e37934c4281e8da51bb0decb839048d9564834c832",
+      "payload": "payloads/fin-carrera-en-juicedomain-race-flareday.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_EndRaceMenu_fr.lng",
+      "index": 565,
+      "original_sha256": "f305cb3b3a653c2838f34ddf9908976f10206836e8d9b89d70fd495e03792fbe",
+      "patched_sha256": "7a96ef970161f50c589209de2f71285884528f6e6b38e340c7be962067d44564",
+      "payload": "payloads/fin-carrera-fr-juicedomain-race-flareday.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_EndRaceMenu_mx.lng",
+      "index": 325,
+      "original_sha256": "0acdde1175733963c67c65aa1db7ea5a4453142abdb72a17a46905c5aeb85ca1",
+      "patched_sha256": "06052b173082da8b317313d86a2edf81d284c939172ff3e06711d2836ffaa627",
+      "payload": "payloads/fin-carrera-mx-juicedomain-race-flareday.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_EndRaceMenu_pt.lng",
+      "index": 595,
+      "original_sha256": "2a4f20eab731071060891a61801332913f6a65d30b70d51bcf077834e80bf00f",
+      "patched_sha256": "8917e69a0673057f78834485459571d8d5d0b6560536f2072f6255ba0001a71e",
+      "payload": "payloads/fin-carrera-pt-juicedomain-race-flareday.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_EndRaceMenu_en.lng",
+      "index": 121,
+      "original_sha256": "3304fcd61ddf48260d0728728193dc3ef27c0b7639dc525465deeb5aae838230",
+      "patched_sha256": "eceee23fe06d79b2e37634e37934c4281e8da51bb0decb839048d9564834c832",
+      "payload": "payloads/fin-carrera-en-juicedomain-race-flarenight.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_EndRaceMenu_fr.lng",
+      "index": 565,
+      "original_sha256": "f305cb3b3a653c2838f34ddf9908976f10206836e8d9b89d70fd495e03792fbe",
+      "patched_sha256": "7a96ef970161f50c589209de2f71285884528f6e6b38e340c7be962067d44564",
+      "payload": "payloads/fin-carrera-fr-juicedomain-race-flarenight.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_EndRaceMenu_mx.lng",
+      "index": 326,
+      "original_sha256": "0acdde1175733963c67c65aa1db7ea5a4453142abdb72a17a46905c5aeb85ca1",
+      "patched_sha256": "06052b173082da8b317313d86a2edf81d284c939172ff3e06711d2836ffaa627",
+      "payload": "payloads/fin-carrera-mx-juicedomain-race-flarenight.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_EndRaceMenu_pt.lng",
+      "index": 595,
+      "original_sha256": "2a4f20eab731071060891a61801332913f6a65d30b70d51bcf077834e80bf00f",
+      "patched_sha256": "8917e69a0673057f78834485459571d8d5d0b6560536f2072f6255ba0001a71e",
+      "payload": "payloads/fin-carrera-pt-juicedomain-race-flarenight.delta.json"
     }
   ],
   "patches": [
@@ -114,12 +231,12 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "7c03154b9340a5e0104715ad7000823207231c9fa6fdd4482c7eac0468832778",
+      "sha256": "3a88d6f1f5f27d44b10d5d5c4a967693ff347d2fc6a646b979ec0fa9587fbb06",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "93e9426d8514ffb6f471809e02c4d9a0f413251d79109a53a2bec869747c0731",
+      "sha256": "0d476b478087cb6b21c9020a4e9442de411271618c6b09a296a5fa9fddf81561",
       "bytes": 16769
     },
     {
@@ -133,14 +250,79 @@
       "bytes": 16425
     },
     {
-      "file": "payloads/fin-carrera-menu.delta.json",
-      "sha256": "c8363acb79893211ebee707599695466b8e726c49c08cee429380bd6fe1c5953",
-      "bytes": 186
+      "file": "payloads/fin-carrera-en-juicedomain-race-flareday.delta.json",
+      "sha256": "386dfdad4649ffad0d0dbe1dd10e40828091202209ca5eca51ba6e4e4b690f05",
+      "bytes": 332
     },
     {
-      "file": "payloads/fin-carrera-script.delta.json",
-      "sha256": "e1f40bae6dc20886f1fd2f7a30d07d26cff499acbef5c8a7a12b725775e31245",
-      "bytes": 182
+      "file": "payloads/fin-carrera-en-juicedomain-race-flarenight.delta.json",
+      "sha256": "386dfdad4649ffad0d0dbe1dd10e40828091202209ca5eca51ba6e4e4b690f05",
+      "bytes": 332
+    },
+    {
+      "file": "payloads/fin-carrera-en-juicedomain-race.delta.json",
+      "sha256": "386dfdad4649ffad0d0dbe1dd10e40828091202209ca5eca51ba6e4e4b690f05",
+      "bytes": 332
+    },
+    {
+      "file": "payloads/fin-carrera-fr-juicedomain-race-flareday.delta.json",
+      "sha256": "e47067b19069e0b744abea4b9b2e43ff7fb1693ecd883a374cc93ebda5c1240b",
+      "bytes": 345
+    },
+    {
+      "file": "payloads/fin-carrera-fr-juicedomain-race-flarenight.delta.json",
+      "sha256": "e47067b19069e0b744abea4b9b2e43ff7fb1693ecd883a374cc93ebda5c1240b",
+      "bytes": 345
+    },
+    {
+      "file": "payloads/fin-carrera-fr-juicedomain-race.delta.json",
+      "sha256": "e47067b19069e0b744abea4b9b2e43ff7fb1693ecd883a374cc93ebda5c1240b",
+      "bytes": 345
+    },
+    {
+      "file": "payloads/fin-carrera-mx-juicedomain-race-flareday.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-mx-juicedomain-race-flarenight.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-mx-juicedomain-race.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-pt-juicedomain-race-flareday.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-pt-juicedomain-race-flarenight.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-pt-juicedomain-race.delta.json",
+      "sha256": "bded59a927c6adaf33a72fab6e89d46a0bb96625d6737cdf326467893c2a010e",
+      "bytes": 336
+    },
+    {
+      "file": "payloads/fin-carrera-restart-update.delta.json",
+      "sha256": "9168ce3445fb88b702250e7bcba1b26edb78d6533c747d56cee87402b90c7ef2",
+      "bytes": 195
+    },
+    {
+      "file": "payloads/fin-carrera-root-update.delta.json",
+      "sha256": "ffcae1343d618747eec86d07e9233ee52b36a783a7cab91929bc1f5c9fd56e5f",
+      "bytes": 1732
+    },
+    {
+      "file": "payloads/fin-carrera-update2.delta.json",
+      "sha256": "05eac14fe6b023872fc3021269c12dab1a90e085510423b8f9b5a76ebea4ce1c",
+      "bytes": 1716
     },
     {
       "file": "payloads/menu-pistas-miniaturas.delta.json",
