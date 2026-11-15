@@ -2408,6 +2408,7 @@ void ABI runtime_replay_tick(void) {
     invisible_look(racing);
     runtime_item_lead_tick(racing && !runtime_replay_playing());
     runtime_tips_tick();
+    runtime_nsane_tick();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;

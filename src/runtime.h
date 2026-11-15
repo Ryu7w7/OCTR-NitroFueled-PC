@@ -188,6 +188,15 @@ int runtime_race_options_start(unsigned char *image, size_t size);
 void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
 int runtime_itemless_collisions_disabled(void);
+/* N.Sane Mode (runtime_nsane.c, runtime_file.c): a second stored item in private N.Sane races. */
+int runtime_nsane_start(unsigned char *image, size_t size);
+int runtime_nsane_available(void);
+void runtime_nsane_map_loading(const char *map);
+void runtime_nsane_tick(void);                   /* the game's thread, every frame: the second slot's roulette */
+void runtime_nsane_mode_set(int enabled);
+int runtime_nsane_mode_enabled(void);
+int runtime_nsane_race_active(void);
+int runtime_online_mode_private_nsane(void);
 int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
 /* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
 int runtime_replay_no_crates(void);

@@ -1284,6 +1284,7 @@ def launch(args, restarted=False):
             except (OSError, ValueError, KeyError, TypeError) as error:
                 say(f"Item rules: {error}; the game's own odds")
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
+            env.pop('BB_NSANE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,
             # src/runtime_race_options.c); without them it keeps the native route guidance.
@@ -1314,6 +1315,7 @@ def launch(args, restarted=False):
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
+                        env['BB_NSANE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_mode.nsane_view(out / 'speed-mode')))
                         say(f'ITEMLESS: HUD prepared; native Time Trial track rules cover {track_count} tracks')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives

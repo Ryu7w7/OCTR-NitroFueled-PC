@@ -11,6 +11,8 @@ from archive_reader import Archive
 from archive_patch import MAX_ARCHIVE_OVERLAYS, read, write_entries_patch
 from mod_file_paths import resolve
 from widescreen_startup import IGZ
+import nsane_mode
+import nsane_crates
 
 TRACK_LAYER = re.compile(r'^maps/Octane/(T\d{3}_[^/]+)/[^/]+_(?:Power_Up|Design)\.igz$', re.I)
 WUMPA_HUD = 'ui/GuiSharedAssets/Octane_RacerHud_WumpaCount.igz'
@@ -52,7 +54,7 @@ def race_tracks(archive):
 
 # The scripts whose code shapes the overlays: a change to any of them builds them again.
 SOURCES = ('speed_mode.py', 'archive_patch.py', 'archive_reader.py',
-           'widescreen_startup.py', 'mod_file_paths.py')
+           'widescreen_startup.py', 'mod_file_paths.py', 'nsane_mode.py', 'nsane_crates.py', 'igz_file.py')
 
 
 def stamp_of(game, base_patches):
@@ -88,7 +90,7 @@ def prepare(game, output, base_patches):
     stamp = stamp_of(game, base_patches)
     try:
         kept = json.loads(cache.read_text(encoding='utf-8'))
-        if kept.get('stamp') == stamp and all(Path(p).is_file() for p in kept['normal'] + kept['speed']):
+        if kept.get('stamp') == stamp and all(Path(p).is_file() for p in kept['normal'] + kept['speed'] + kept['nsane']):
             return [Path(p) for p in kept['normal']], [Path(p) for p in kept['speed']], kept['tracks']
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -98,10 +100,19 @@ def prepare(game, output, base_patches):
         discard_files(output, [path for path in kept.get('normal', []) + kept.get('speed', [])
                                if Path(path).resolve() not in protected])
     cache.unlink(missing_ok=True)  # a build stopped halfway must not be trusted next time
-    normal, speed, tracks = build(game, output, base_patches)
+    normal, speed, tracks, nsane = build(game, output, base_patches)
     cache.write_text(json.dumps({'stamp': stamp, 'normal': [str(p) for p in normal],
-                                 'speed': [str(p) for p in speed], 'tracks': tracks}), encoding='utf-8')
+                                 'speed': [str(p) for p in speed], 'nsane': [str(p) for p in nsane],
+                                 'tracks': tracks}), encoding='utf-8')
     return normal, speed, tracks
+
+
+def nsane_view(output):
+    """The archive views of private N.Sane races that prepare() made (the extra crates), or []."""
+    try:
+        return [Path(p) for p in json.loads((Path(output) / 'cache.json').read_text(encoding='utf-8'))['nsane']]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
 
 def build(game, output, base_patches):
@@ -109,6 +120,14 @@ def build(game, output, base_patches):
     current = {read(path)[1]: Path(path) for path in base_patches}
     entries = {}
     tracks = set()
+    crate_views = {}
+    # N.Sane's extra crates: a view of their own. Views must keep the same layout, so the other views
+    # hold the original file padded to the same length (an igz's sections say where its data ends).
+    try:
+        crates = nsane_crates.update2_entries(game)
+    except (ValueError, OSError, KeyError, IndexError, AssertionError, struct.error) as error:
+        print(f'N.SANE crates not added: {error}', file=sys.stderr)
+        crates = {}
     for pak in sorted((game / 'archives').glob('*.pak')):
         if pak.name not in ('update.pak', *HUD_ARCHIVES) \
                 and not re.match(r'^t\d{3}_.+\.pak$', pak.name, re.I):
@@ -125,8 +144,24 @@ def build(game, output, base_patches):
                     normal[item['index']] = original
                 elif path == ITEM_HUD and pak.name in HUD_ARCHIVES:
                     original = archive.extract(item)
+                    # N.Sane Mode's hidden second slot is in both views (src/runtime_nsane.c shows it
+                    # only in N.Sane races); without it N.Sane still stores the item, unseen.
+                    try:
+                        original = nsane_mode.add_second_slot(original)
+                    except (ValueError, KeyError, IndexError, StopIteration, struct.error) as error:
+                        print(f'N.SANE HUD slot not added to {pak.name}: {error}', file=sys.stderr)
                     selected[item['index']] = hide_hud(original, 'Octane_PowerUp_asset_root')
                     normal[item['index']] = original
+            if pak.name == 'update2.pak' and crates:
+                base = current.get('/app0/archives/' + pak.name)
+                records = {o for o, d in read(base)[2] if len(d) == 16} if base is not None else set()
+                table = 0x38 + 4 * len(archive.files)
+                free = {i: c for i, c in crates.items() if table + 16 * i not in records}   # a mod's file stays
+                for index, (original, changed) in free.items():
+                    padded = original + bytes(len(changed) - len(original))
+                    selected[index] = normal[index] = padded
+                if free:
+                    crate_views[pak.name] = {**normal, **{i: c[1] for i, c in free.items()}}
             if selected:
                 if selected.keys() != normal.keys() or any(len(selected[i]) != len(normal[i]) for i in selected):
                     raise ValueError(f'Speed and normal asset layouts differ: {pak.name}')
@@ -138,6 +173,7 @@ def build(game, output, base_patches):
         raise ValueError(f'Speed test resources incomplete: {len(tracks)}/40 tracks, '
                          f'{sorted(entries)}')
     normal_view, speed_view = current.copy(), current.copy()
+    nsane_view_files = []
     for name, (normal_entries, speed_entries) in entries.items():
         guest = '/app0/archives/' + name
         normal_target = output / (name + '.normal.bbpatch')
@@ -147,6 +183,10 @@ def build(game, output, base_patches):
         write_entries_patch(speed_target, game / 'archives' / name, guest,
                             speed_entries, current.get(guest))
         normal_view[guest], speed_view[guest] = normal_target, speed_target
+        if name in crate_views:
+            nsane_target = output / (name + '.nsane.bbpatch')
+            write_entries_patch(nsane_target, game / 'archives' / name, guest, crate_views[name], current.get(guest))
+            nsane_view_files.append(nsane_target)
     if len(normal_view) > MAX_ARCHIVE_OVERLAYS or len(speed_view) > MAX_ARCHIVE_OVERLAYS:
         raise ValueError(f'Speed test exceeds the engine limit of {MAX_ARCHIVE_OVERLAYS} archive overlays: '
                          f'{len(normal_view)}/{len(speed_view)}')
@@ -157,7 +197,7 @@ def build(game, output, base_patches):
         speed_end = max([speed_size] + [o + len(d) for o, d in speed_ranges])
         if normal_size != speed_size or normal_end != speed_end:
             raise ValueError(f'Speed and normal archive sizes differ: {guest}')
-    return list(normal_view.values()), list(speed_view.values()), len(tracks)
+    return list(normal_view.values()), list(speed_view.values()), len(tracks), nsane_view_files
 
 
 def main():

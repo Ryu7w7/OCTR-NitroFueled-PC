@@ -1022,7 +1022,8 @@ def rebuild(blob):
     g = Igz(blob)
     add_race_type(g)
     # The native selector consumes the same option/availability lists as other selectors.
-    set_options(g, 0x1880, 0x18a8, ('NORMAL', 'ITEMLESS', 'BATTLE'))
+    # N.SANE MODE (index 3, private rooms only: src/runtime_nsane.c); BATTLE keeps index 2.
+    set_options(g, 0x1880, 0x18a8, ('NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE'))
     return g.build()
 
 

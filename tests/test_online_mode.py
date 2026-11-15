@@ -1762,16 +1762,16 @@ unset BB_ARCHIVE_PATCHES BB_PRIVATE_ARCHIVE_PATCHES
         self.assertEqual(new.u32(0xfcc), 3)
         self.assertEqual([new.u64(new.u64(0xfe0) + i * 8) for i in range(3)],
                          [0x1000, row, 0x1120])
-        self.assertEqual(new.u32(0x188c), 3)
-        self.assertEqual(new.u32(0x18b4), 3)
+        self.assertEqual(new.u32(0x188c), 4)
+        self.assertEqual(new.u32(0x18b4), 4)
         options = new.u64(0x18a0)
-        self.assertEqual([new.string_at(options + i * 8) for i in range(3)],
-                         ['NORMAL', 'ITEMLESS', 'BATTLE'])
+        self.assertEqual([new.string_at(options + i * 8) for i in range(4)],
+                         ['NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE'])
         available = new.u64(0x18c8)
-        self.assertEqual(new.data[available:available + 3], bytes((1, 1, 1)))
+        self.assertEqual(new.data[available:available + 4], bytes((1, 1, 1, 1)))
         for lst in (0x1880, 0x18a8):
             self.assertTrue(new.u64(lst + 0x18) & (1 << 56), 'archive data must not be heap-freed')
-        for i in range(3):
+        for i in range(4):
             self.assertIn(options + i * 8, new.sites['RSTT'])
         for site in new.sites['ROFS']:
             self.assertLess(new.u64(site), len(new.data))

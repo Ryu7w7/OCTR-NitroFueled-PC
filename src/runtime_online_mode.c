@@ -36,6 +36,7 @@ static _Thread_local int customized_selector;
 static int private_speed_selected;
 static int private_collision_selected;
 static int collision_refreshing;
+static int private_nsane_selected;
 static int selector_mode_index;
 static int matchmaking_return_mode = -1;
 static uint64_t mode_select_updated_ms;
@@ -356,17 +357,20 @@ static void ABI menu_project(void *context, void *pin, void **result, unsigned c
 /* Every pick in the selector (set by runtime_room_mode.c; NULL in the unit test, which links this
  * file alone): in a private match the host's choice goes to RyuNET for the players who join, and
  * a player picking a mode stops following another host's room. */
-void (*runtime_online_mode_chosen)(int speed, int private_room);
+void (*runtime_online_mode_chosen)(int mode, int private_room); /* 0 normal, 1 itemless, 2 n.sane */
 
-/* A joining player takes the room's mode from its host (runtime_room_mode.c): Speed or not,
- * whatever this player picked in the selector. Their own choice stays for their own room. */
-void runtime_online_mode_adopt(int speed) {
-    runtime_speed_mode_set(speed != 0);
-    printf("Native Online mode: %s (the host's private room)\n", speed ? "ITEMLESS" : "NORMAL");
+/* A joining player takes the room's mode from its host (runtime_room_mode.c): 0 Normal, 1 Itemless,
+ * 2 N.Sane, whatever this player picked in the selector. Their own choice stays for their own room. */
+void runtime_online_mode_adopt(int mode) {
+    runtime_speed_mode_set(mode == 1);
+    runtime_nsane_mode_set(mode == 2);
+    printf("Native Online mode: %s (the host's private room)\n",
+           mode == 1 ? "ITEMLESS" : mode == 2 ? "N.SANE" : "NORMAL");
 }
 
 int runtime_online_mode_private_speed(void) { return private_speed_selected; }
 int runtime_online_mode_itemless_collision(void) { return private_collision_selected; }
+int runtime_online_mode_private_nsane(void) { return private_nsane_selected; }
 
 static void *pointer_at(const void *object, size_t offset) {
     void *pointer;
@@ -928,6 +932,7 @@ static void ABI load_private_map(const char *map, int reason) {
     ranked_score_phase = ranked_score_finished = 0;
     finish_order_count = 0;
     cup_timer_pending = 0;
+    runtime_nsane_map_loading(map);
     runtime_race_options_map_loading(map);
     clear_team_selector();
     normalize_race_teams();
@@ -940,7 +945,7 @@ static void ABI load_private_map(const char *map, int reason) {
         strcasecmp(map, "octane/octane_startscreen/octane_startscreen");
     if (private_single_race_active)
         printf("Native private race: loading %s mode=%s teams=%d\n", map,
-               runtime_speed_race_active() ? "ITEMLESS" : "NORMAL",
+               runtime_speed_race_active() ? "ITEMLESS" : runtime_nsane_race_active() ? "N.SANE" : "NORMAL",
                race_settings && *race_settings ? *(int *)(*race_settings + 0x28) : 1);
     const int incomplete_cup_return = private_cup_race_active && !cup_final_results_ready &&
         map && !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
@@ -2893,7 +2898,7 @@ static void refresh_lobby_card(unsigned char *owner) {
     char mode[48];
     /* Show the chosen/adopted mode even before another player sends game traffic. */
     snprintf(mode, sizeof mode, "%s RACE - %s", cup_mode ? "CUP" : "SINGLE",
-             runtime_speed_mode_enabled() ? "ITEMLESS" : "NORMAL");
+             runtime_speed_mode_enabled() ? "ITEMLESS" : runtime_nsane_mode_enabled() ? "N.SANE MODE" : "NORMAL");
     update_card(owner, name, mode, preview, 0);
 }
 
@@ -3304,6 +3309,15 @@ int runtime_online_mode_in_private(void) {
  * flag does not hold during these races (runtime_speed_race_active, Itemless). */
 int runtime_online_mode_private_cup_race(void) { return private_cup_race_active; }
 
+/* The Game Mode selector: NORMAL / ITEMLESS / BATTLE (/ N.SANE MODE), recognized by its labels so that
+ * another selector with as many options (team count) is never taken for it. */
+static int mode_selector(const unsigned char *self, int count) {
+    if (count != 3 && count != 4) return 0;
+    unsigned char *options = pointer_at(self, 0x1a8);
+    const char **labels = options ? pointer_at(options, 0x20) : NULL;
+    return labels && labels[1] && !strcmp(labels[1], "ITEMLESS");
+}
+
 static void ABI select_mode(void *sender, int index) {
     if (customized_selector == 2) {
         if (is_private() && !battle_selected() && (index == 0 || index == 1)) {
@@ -3324,23 +3338,28 @@ static void ABI select_mode(void *sender, int index) {
     if (!private && index == 2 && runtime_ranked_selected()) return;
     if (!private) private_collision_selected = 0;
     if (!private && index == 1 && !runtime_public_itemless_available()) return;
+    if (index == 3 && (!private || !runtime_nsane_available())) return; /* N.Sane: private rooms only */
     selector_mode_index = index;
     clear_team_selector();
     cup_timer_pending = 0;
     reset_team_count();
     runtime_public_itemless_select(!private && index == 1);
     const int speed = index == 1 && private;
+    const int nsane = index == 3 && private;
     if (private) {
         private_speed_selected = speed;
+        private_nsane_selected = nsane;
         if (index == 2) {
             private_cup_selected = 0;
             remote_cup_selected = -1;
         }
     }
-    if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed, private);
+    /* Room mode for RyuNET: 0 normal, 1 itemless (speed), 2 n.sane. */
+    if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed ? 1 : nsane ? 2 : 0, private);
     runtime_speed_mode_set(speed);
-    printf("Native Online mode: %s (%s)\n", index == 1 ? "ITEMLESS" : index == 2 ? "BATTLE" : "NORMAL",
-           private ? "private" : "public");
+    runtime_nsane_mode_set(nsane);
+    printf("Native Online mode: %s (%s)\n", index == 1 ? "ITEMLESS" : index == 2 ? "BATTLE" :
+           index == 3 ? "N.SANE" : "NORMAL", private ? "private" : "public");
     original_choice(sender, index == 2 ? 1 : 0);
 }
 
@@ -3357,7 +3376,7 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         memcpy(self + 0x190, &private_cup_selected, sizeof private_cup_selected);
         base_event(self, event, owner);
         printf("Native Race Type selector initialized: %s\n", private_cup_selected ? "CUP" : "SINGLE");
-    } else if (count == 3 && vtable[0](event) == *initialize_type) {
+    } else if ((count == 3 || mode_selector(self, count)) && vtable[0](event) == *initialize_type) {
         if (ranked_mode_select_root(owner)) runtime_public_itemless_menu_return();
         fprintf(stderr, "ModeSelect selector: ranked=%d private=%d\n",
             runtime_ranked_selected(), is_private());
@@ -3367,10 +3386,15 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         const int private = is_private();
         mode_select_active = 1;
         if (!private) private_collision_selected = 0;
+        /* N.Sane (the fourth option): private rooms only, when its hooks are in. */
+        if (count == 4) items[3] = (unsigned char)(private && runtime_nsane_available());
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
-        const int private_speed = runtime_room_mode_following() ? runtime_speed_mode_enabled() : private_speed_selected;
-        int index = type == 2 && items[2] ? 2 :
+        const int following = runtime_room_mode_following();
+        const int private_speed = following ? runtime_speed_mode_enabled() : private_speed_selected;
+        const int private_nsane = count == 4 && items[3] &&
+            (following ? runtime_nsane_mode_enabled() : private_nsane_selected);
+        int index = type == 2 && items[2] ? 2 : private && private_nsane ? 3 :
                     (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
         if (!private && matchmaking_return_mode>=0) {
             if (matchmaking_return_mode<3 && items[matchmaking_return_mode]) index=matchmaking_return_mode;
@@ -3383,15 +3407,17 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         selector_mode_index = index;
         memcpy(self + 0x190, &index, sizeof index);
         runtime_speed_mode_set(private && index == 1);
+        runtime_nsane_mode_set(private && index == 3);
         /* The asset already supplies all options. Keep the base selector initialization. */
         base_event(self, event, owner);
         race_type_visibility(self, owner, private && index != 2);
     } else {
         const int previous = customized_selector;
-        customized_selector = race ? 2 : count == 3;
+        const int mode = mode_selector(self, count);
+        customized_selector = race ? 2 : mode;
         original_event(self, event, owner);
         customized_selector = previous;
-        if (count == 3) {
+        if (mode) {
             /* The emitted choice precedes both native UI and network updates. */
             race_type_visibility(self, owner, is_private() && selector_mode_index != 2);
         }

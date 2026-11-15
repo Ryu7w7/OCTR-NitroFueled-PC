@@ -48,7 +48,7 @@ class SpeedModeCacheTests(unittest.TestCase):
                     obsolete = output/'obsolete.bbpatch'
                     obsolete.write_bytes(b'old')
                     extra.append(obsolete)
-                return [normal, *extra, *base_patches], [speed, *base_patches], 40
+                return [normal, *extra, *base_patches], [speed, *base_patches], 40, []
 
             with mock.patch.object(speed_mode, 'build', build):
                 first = speed_mode.prepare(root / 'game', out, [base])

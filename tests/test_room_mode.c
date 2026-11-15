@@ -7,6 +7,11 @@ static int active_speed;
 void runtime_speed_mode_set(int enabled) { active_speed = enabled; }
 int runtime_speed_mode_enabled(void) { return active_speed; }
 int runtime_online_mode_private_speed(void) { return 0; }
+/* N.Sane Mode: the room mode RyuNET calls "nsane" (2). */
+static int active_nsane;
+void runtime_nsane_mode_set(int enabled) { active_nsane = enabled; }
+int runtime_nsane_mode_enabled(void) { return active_nsane; }
+int runtime_online_mode_private_nsane(void) { return 0; }
 int runtime_online_mode_in_private(void) { return 0; }
 void runtime_race_options_leave_room(void) {}
 static int requested_leave, requested_fresh;
