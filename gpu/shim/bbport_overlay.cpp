@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +16,8 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -28,6 +31,7 @@
 #include "bbport_perf.h"
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
+#include "../../src/runtime_http.h"
 #include "../../src/runtime_spectate.h"
 #include "../../src/runtime_chat.h"
 #include "../../src/runtime_name_colors.h"
@@ -522,6 +526,62 @@ const char* FriendResultText(const std::string& action, const char* word) {
     return BbSettings::MenuText("Could not reach the server", "Сервер недоступен");
 }
 
+/// The player's picture from RyuNET (server avatar.go: their Discord or Steam picture, the account
+/// linked first; 404 without one), kept for this session. Missing ones are asked again after 10 min.
+struct PictureEntry {
+    std::string png;
+    std::chrono::steady_clock::time_point asked;
+};
+std::mutex picture_mutex;
+std::unordered_map<std::string, PictureEntry> pictures;
+
+bool PictureNick(const std::string& nick) {
+    if (nick.size() < 3 || nick.size() > 16) return false;
+    for (const char ch : nick) {
+        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_' && ch != '-') return false;
+    }
+    return true;
+}
+
+std::string PlayerPicture(const std::string& nick) {
+    std::string key = nick;
+    for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::scoped_lock lock{picture_mutex};
+        const auto it = pictures.find(key);
+        if (it != pictures.end() && (!it->second.png.empty() || now - it->second.asked < std::chrono::minutes(10))) {
+            return it->second.png;
+        }
+    }
+    std::string png;
+    char* reply = nullptr;
+    size_t reply_size = 0;
+    const std::string target = "/ryunet/avatar?name=" + nick;
+    if (runtime_ryunet_transfer("GET", target.c_str(), nullptr, 0, &reply, &reply_size, 1u << 20) == 200 && reply &&
+        reply_size > 8 && !std::memcmp(reply, "PNG", 4)) {
+        png.assign(reply, reply_size);
+    }
+    std::free(reply);
+    std::scoped_lock lock{picture_mutex};
+    if (pictures.size() > 256) pictures.clear();
+    pictures[key] = PictureEntry{png, now};
+    return png;
+}
+
+/// A friend's notice with their picture: asked in the background, the notice shows when it is
+/// known (or without one).
+void NotifyWithPicture(const std::string& title, const std::string& name, const std::string& detail, int kind) {
+    if (!PictureNick(name)) {
+        Notify(title, name, detail, kind, nullptr, 0);
+        return;
+    }
+    std::thread([title, name, detail, kind] {
+        const std::string png = PlayerPicture(name);
+        Notify(title, name, detail, kind, png.empty() ? nullptr : png.data(), png.size());
+    }).detach();
+}
+
 /// Friend notices: checked every frame. The menu's options leave out friends coming online, or
 /// every notice from friends (the Invite button's own result still shows).
 void PollFriends() {
@@ -598,7 +658,11 @@ void PollFriends() {
             break;
         default: continue;
         }
-        Notify(title, shown, detail, 5, nullptr, 0);
+        if (kind == RF_EVENT_INVITED || kind == RF_EVENT_NO_ONE_ONLINE) {
+            Notify(title, shown, detail, 5, nullptr, 0);
+        } else {
+            NotifyWithPicture(title, shown, detail, 5);
+        }
     }
 }
 
