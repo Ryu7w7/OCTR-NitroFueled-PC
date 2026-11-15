@@ -136,8 +136,11 @@ from the player's own game files, so no game file is in the repository.
                   them when the save is mounted).
   custom-cup      Custom Cup 2 (Kyouko8): a cup of 4 to 16 tracks of the player's choice.
                   A track can be chosen more than once. Option Miniaturas en ajustes de
-                  carrera (on by default): the race settings of every cup show its four
+                  carrera (on by default): the race settings of a custom cup show its
                   tracks' pictures (ui/Octane_MainMenu_RaceSetting.igz and its materials).
+                  The game's cups and the Copas Adicionales show their own picture there
+                  (2.0.2; Ultimate Customizer sends cups to that menu's single race branch,
+                  which showed a track's).
                   Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
                   (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
