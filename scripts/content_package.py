@@ -275,8 +275,10 @@ def scan(root, log=print):
     known = previous.get('sources', {})
     packages, messages, sources = {}, [], {}
     present = set()  # the unpacked copies of the ZIPs here, read or not
+    unsure = False
     if root.is_dir():
         for source in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
+            digest = None
             try:
                 if source.is_symlink():
                     raise ValueError('links are not supported')
@@ -308,12 +310,15 @@ def scan(root, log=print):
                                      'sha256': digest or manifest_digest(m), 'manifest': m}
             except (ValueError, OSError, zipfile.BadZipFile) as error:
                 messages.append(f'{source.name}: {error}')
+                if digest is None and source.suffix.casefold() == '.zip':
+                    unsure = True  # a ZIP failed before its copy was known: nothing is removed
     for message in messages:
         log('External content: ' + message)
     save_json(library, {'sources': sources, 'packages': packages, 'messages': messages})
     # Unpacked copies of ZIPs no longer here (an older version, a removed package).
     import state_cleanup
-    state_cleanup.unpacked_unless_running(store / 'packages', present,
+    if not unsure:
+        state_cleanup.unpacked_unless_running(store / 'packages', present,
                                           store.parent / 'mod-state', 'External content', log)
     return {'packages': packages, 'messages': messages}
 
