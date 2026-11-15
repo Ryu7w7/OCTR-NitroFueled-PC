@@ -3181,18 +3181,23 @@ void ranked_mode_select_layout(unsigned char *root, int ranked) {
     memcpy(content + 0x64, &target_content, 4);
 }
 
+static int mode_selector(const unsigned char *self, int count);
+
 static void refresh_mode_options(unsigned char *self) {
     unsigned char *options = pointer_at(self, 0x1a8);
-    if (!options || *(int *)(options + 12) != 3) return;
+    const int count = options ? *(int *)(options + 12) : 0;
+    /* NORMAL / ITEMLESS / BATTLE, and N.SANE as a fourth option (private rooms only). */
+    if (count != 3 && !(count == 4 && mode_selector(self, count))) return;
     unsigned char *available = pointer_at(self, 0x1b0);
     unsigned char *items = available ? pointer_at(available, 0x20) : NULL;
     if (!items) return;
     const int private = is_private();
     const unsigned char enabled[] = {1,
         (unsigned char)(private || runtime_public_itemless_available()),
-        (unsigned char)(private || !runtime_ranked_selected())};
-    const int changed = memcmp(items, enabled, sizeof enabled);
-    memcpy(items, enabled, sizeof enabled);
+        (unsigned char)(private || !runtime_ranked_selected()),
+        (unsigned char)(private && runtime_nsane_available())};
+    const int changed = memcmp(items, enabled, (size_t)count);
+    memcpy(items, enabled, (size_t)count);
     self[0x194] = 1;
     if (changed && self[0x1b8] && pointer_at(self, 0x198)) {
         /* Refresh native disabled styling when the server recovers, preserving selection. */
@@ -3208,7 +3213,7 @@ static void ABI selector_update(unsigned char *self, unsigned char *owner, float
     unsigned char *options = pointer_at(self, 0x1a8);
     int count = 0;
     if (options) memcpy(&count, options + 12, 4);
-    if (count == 3) {
+    if (count == 3 || (count == 4 && mode_selector(self, count))) {
         if (mode_select_active)
             __atomic_store_n(&mode_select_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
         race_type_visibility(self, owner, is_private() && selector_mode_index != 2);
