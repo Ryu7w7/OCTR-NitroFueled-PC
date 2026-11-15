@@ -2029,6 +2029,7 @@ void StartGame() {
         if (!map.empty()) AddLog("Online through Epic Online Services: this network does not reach the server directly");
     }
     SetEnv(L"BB_GAME_DIR", PathText(a.game_dir));
+    SetEnv(L"BB_ART_DIR", PathText(a.root / L"art"));  // Tacho: letra y fondo del menu del juego (bbport_overlay.cpp)
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
@@ -9099,10 +9100,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), 0.0f, &merge);
         }
     };
-    if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
-    else io.Fonts->AddFontDefault();
-    merge_fallbacks(false);
-    const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
+    // Tacho: letra del CTR (art/ctr-text.ttf, CCGeekSpeak) para todo el texto, con Segoe UI y las CJK de Windows
+    // para lo que no trae (acentos raros, cirilico, japones...). Sin el archivo: Segoe UI como antes.
+    const fs::path text_font = g_app.root / L"art" / L"ctr-text.ttf";
+    if (fs::is_regular_file(text_font, ec)) {
+        io.Fonts->AddFontFromFileTTF(PathText(text_font).c_str());
+        merge_fallbacks(true);
+    } else {
+        if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
+        else io.Fonts->AddFontDefault();
+        merge_fallbacks(false);
+    }
+    // Titulos y boton Jugar: art/ctr-title.ttf (CCZoinks, la del logo del CTR); si no esta, ctr-menu.ttf.
+    fs::path ctr_font = g_app.root / L"art" / L"ctr-title.ttf";
+    if (!fs::is_regular_file(ctr_font, ec)) ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
     if (fs::is_regular_file(ctr_font, ec)) {
         g_ctr_font = io.Fonts->AddFontFromFileTTF(PathText(ctr_font).c_str(), style.FontSizeBase);
         merge_fallbacks(true);  // Cyrillic and CJK labels in the CTR font's places

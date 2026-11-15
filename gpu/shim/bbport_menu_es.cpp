@@ -332,6 +332,18 @@ const char* Spanish(const char* english) {
     {"Bugs, questions or a ban appeal: our Discord", "Errores, dudas o apelar un baneo: nuestro Discord"},
     {"Open", "Abrir"},
     {"Copy link", "Copiar enlace"},
+    // Tacho: menu con columna, Amigos en sub-pestanas, Imagen + Juego + Rendimiento juntos
+    {"Requests", "Solicitudes"},
+    {"Invite everyone online", "Invitar a todos los que están en línea"},
+    {"Sends an invitation to your room to every friend who is online.",
+     "Manda una invitación a tu sala a todos tus amigos en línea."},
+    {"No friends yet: search for a nickname in Add.", "Aún no tienes amigos: busca un apodo en Agregar."},
+    {"Accept all", "Aceptar todas"},
+    {"Decline all", "Rechazar todas"},
+    {"No friend requests.", "No tienes solicitudes de amistad."},
+    {"Picture and performance", "Imagen y rendimiento"},
+    {"Quit game###quit_game", "Salir del juego###quit_game"},           // el boton busca la clave con su ###id
+    {"Exit game###confirm_quit", "Salir del juego###confirm_quit"},
     };
     const auto it = table.find(english);
     return it == table.end() ? english : it->second;
