@@ -4,9 +4,9 @@ import argparse
 import json
 from pathlib import Path
 import struct
-import subprocess
 
 import gcn_shaders as iga
+from bc3 import bc3_encode
 from button_prompts import IMG_DATA, IMG_W, _morton, _objects, read_png
 from graphics_tab import Archive, write_archive
 from ranked_ui_assets import (HOF_BACKGROUND_TEXTURE, RANKED_BACKGROUND_TEXTURE, asset_replacements,
@@ -32,12 +32,10 @@ def lobby_background_texture(domain_pak, kind):
     png = ASSETS / f'{kind}_background.png'
     if read_png(png)[:2] != (256, 256):
         raise ValueError(f'{kind} background must be 256x256')
-    encoded = subprocess.run(
-        ['magick', str(png), '-flip', '-define', 'dds:compression=dxt5', 'DDS:-'],
-        capture_output=True, check=True).stdout
-    if encoded[84:88] != b'DXT5' or len(encoded) < 128 + 65536:
+    width, height, rgba = read_png(png)
+    linear = bc3_encode(width, height, rgba, flip=True)
+    if len(linear) != 65536:
         raise ValueError(f'{kind} background BC3 encoding failed')
-    linear = encoded[128:128 + 65536]
     tiled = bytearray(65536)
     for y in range(64):
         for x in range(64):
