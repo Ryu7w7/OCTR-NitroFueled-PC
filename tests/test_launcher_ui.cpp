@@ -159,6 +159,29 @@ int main(int argc, char** argv) {
     assert(DiscordPresence::GetStatus() == DiscordPresence::Status::Error);
     g_app.python = FindPython(g_app.root);
     {
+        g_app.root = g_app.data / "cloud-fixture";
+        fs::create_directories(g_app.root / "scripts");
+        const auto capture = g_app.data / "cloud-user.txt";
+        const auto user = g_app.data / "custom saves 日本語";
+        g_app.launcher.Set("user_dir", PathText(user));
+        std::ofstream(g_app.root / "scripts/cloud_cli.py")
+            << "import sys\nfrom pathlib import Path\nsys.path.insert(0,\""
+            << JsonEscape(PathText(actual_root / "scripts")) << "\")\nimport cloud_cli as cli\n"
+            << "cli.run.online_key=lambda *_: '1'*64\ncli.run.nick_ok=lambda *_: True\n"
+            << "cli.run.server_settings=lambda *_: None\n"
+            << "def call(self,*args,**kwargs):\n Path(\"" << JsonEscape(PathText(capture))
+            << "\").write_text(str(self.progress))\n return {'saves':[]}\ncli.Account.call=call\ncli.main()\n";
+        CloudCli({L"list"}, [](const std::string&) {});
+        for (int i = 0; i < 300; ++i) {
+            { std::scoped_lock lock(g_cloud.mutex); if (!g_cloud.busy) break; }
+            SleepMs(10);
+        }
+        { std::scoped_lock lock(g_cloud.mutex); assert(!g_cloud.busy); }
+        assert(ReadText(capture) == PathText(user));
+        g_app.launcher.Erase("user_dir");
+        g_app.root = actual_root;
+    }
+    {
         // Run the real Python service and native pipe consumer without contacting Discord.
         g_app.root = g_app.data / "discord-fixture";
         fs::create_directories(g_app.root / "launcher/linux");
@@ -256,6 +279,38 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
     assert(sdl_ready);
     g_app.hwnd = SDL_CreateWindow("Launcher UI test", 1120, 840, SDL_WINDOW_HIDDEN);
     assert(g_app.hwnd);
+    if (!tray_only) {
+        SDL_ShowWindow(g_app.hwnd);
+        SDL_RaiseWindow(g_app.hwnd);
+        for (int i = 0; i < 100 && !(SDL_GetWindowFlags(g_app.hwnd) & SDL_WINDOW_INPUT_FOCUS); ++i) {
+            SDL_PumpEvents(); SleepMs(10);
+        }
+        assert(SDL_GetWindowFlags(g_app.hwnd) & SDL_WINDOW_INPUT_FOCUS);
+        SDL_VirtualJoystickDesc desc{};
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+        desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
+        desc.name = "Launcher capture regression";
+        const auto id = SDL_AttachVirtualJoystick(&desc);
+        assert(id && SDL_IsGamepad(id));
+        auto* joystick = SDL_OpenJoystick(id);
+        assert(joystick);
+        for (const auto button : {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_TOUCHPAD}) {
+            assert(SDL_SetJoystickVirtualButton(joystick, button, true));
+            SDL_UpdateJoysticks(); SDL_PumpEvents();
+            const char* pressed = PollGamepadButton();
+            assert(pressed && std::string(pressed) == (button == SDL_GAMEPAD_BUTTON_SOUTH ? "a" : "touchpad"));
+            assert(SDL_SetJoystickVirtualButton(joystick, button, false));
+            SDL_UpdateJoysticks(); SDL_PumpEvents();
+            assert(!PollGamepadButton());
+        }
+        SDL_CloseJoystick(joystick);
+        SDL_DetachVirtualJoystick(id);
+        SDL_HideWindow(g_app.hwnd);
+    }
     if (tray_test) {
         EnsureTray();
         for (int i = 0; i < 200 && !g_tray_connected; ++i) { UpdateTray(); SleepMs(10); }

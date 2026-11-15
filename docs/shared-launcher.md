@@ -43,6 +43,12 @@ when set. Otherwise Linux automatically uses an existing `$XDG_DATA_HOME/sacredf
 started from a new checkout. Without existing XDG settings, a source build uses its checkout;
 the packaged launcher defaults to the XDG location. `BB_CONFIG` and `BB_USER_DIR` remain
 supported. Saves, backups, DLC and online keys stay in their existing locations.
+Cloud save operations use the same configured save directory as local save operations.
+
+Linux records hashes of bundled XML copies in `patches/.bundled.json`. Updates replace only
+unchanged managed copies and remove unchanged copies no longer bundled. Edited files and
+untracked files that differ from the current bundle remain user overrides. Identical legacy
+copies are adopted automatically, so later package updates can refresh them safely.
 
 On first use, Linux imports `~/.config/sacredfire-launcher/settings.json` (or its
 `XDG_CONFIG_HOME` equivalent) into `launcher.ini`. Existing native settings take precedence;
@@ -135,7 +141,8 @@ The process test covers argument quoting, Unicode, stdin, output pressure, exit 
 process-group timeouts. Settings import tests cover ordering, Unicode and case-sensitive paths;
 the NAT test validates protocol parsing without network access. With Xvfb installed, the UI test
 renders all ten shared pages into `out/launcher/ui-test/` using isolated data. It checks artwork,
-keyboard capture, game termination, environment isolation and failed updates. Mesa lavapipe
+keyboard and virtual gamepad capture (including touchpad), custom cloud save paths, game
+termination, environment isolation and failed updates. Mesa lavapipe
 also supports GPU-free runs. Migration and Linux service tests never use a real account or the
 player's settings.
 

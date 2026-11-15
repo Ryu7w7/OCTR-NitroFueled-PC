@@ -1848,7 +1848,8 @@ static int writable(void *address, size_t length) {
 }
 
 int runtime_race_options_start(unsigned char *image, size_t size) {
-    if (size < 0x2af2608) return 0;
+    /* Small loader images do not contain CTR's native race option hooks. */
+    if (size < 0x2af2608) return 1;
     const uintptr_t team_native = (uintptr_t)ptr(image, 0x2778150);
     /* Online may already wrap this slot; detect the region from the native code. */
     const unsigned char signature[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};

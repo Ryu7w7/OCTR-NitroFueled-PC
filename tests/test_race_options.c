@@ -1765,6 +1765,10 @@ static void test_all_items(void) {
 }
 
 int main(void) {
+    assert(runtime_race_options_start(NULL, 0));
+    unsigned char *invalid_image = calloc(1, 0x2af2608);
+    assert(invalid_image && !runtime_race_options_start(invalid_image, 0x2af2608));
+    free(invalid_image);
     put_int(default_race, 0xd40, 1); put_int(default_race, 0xd4c, 1);
     unsigned char race[0xd50] = {0}, config[0x30] = {0}, self[0x1d0] = {0};
     unsigned char labels_list[40] = {0}, flags_list[40] = {0}, event[32] = {0};

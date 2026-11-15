@@ -4946,7 +4946,8 @@ void CloudCli(const std::vector<std::wstring>& args, std::function<void(const st
     }
     std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-I -X utf8 " + Quote(WidePath((a.root / L"scripts" / L"cloud_cli.py")));
     for (const auto& arg : args) cmd += L" " + arg;
-    cmd += L" --data " + Quote(WidePath(a.data)) + L" --config " + Quote(WidePath(GameIni()));
+    cmd += L" --data " + Quote(WidePath(a.data)) + L" --config " + Quote(WidePath(GameIni())) +
+           L" --user " + Quote(WidePath(UserRoot()));
     const std::wstring exe = a.python->exe;
     const fs::path root = a.root;
     std::thread([cmd, exe, root, done] {

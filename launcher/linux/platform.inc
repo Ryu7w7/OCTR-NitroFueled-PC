@@ -248,6 +248,7 @@ const char* PollGamepadButton() {
             "leftshoulder", "rightshoulder", "dpup", "dpdown", "dpleft", "dpright"};
         for (int b = 0; b < int(std::size(names)) && !pressed; ++b)
             if (SDL_GetGamepadButton(pad, SDL_GamepadButton(b))) pressed = names[b];
+        if (!pressed && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_TOUCHPAD)) pressed = "touchpad";
         SDL_CloseGamepad(pad);
     }
     SDL_free(ids);

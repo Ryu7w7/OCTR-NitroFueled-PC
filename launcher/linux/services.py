@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Native launcher's Linux integrations, reusing the existing GTK launcher's services."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -64,13 +65,38 @@ def migrate(data):
             temporary = path.with_name(path.name + ".tmp")
             temporary.write_text(content)
             temporary.replace(path)
-    # The package is read-only. Only missing bundled patches are seeded into writable data.
+    # Update managed copies, but keep edited or independently installed XML as user overrides.
     if data.resolve() != ROOT.resolve():
         (data / "patches").mkdir(exist_ok=True)
+        manifest = data / "patches/.bundled.json"
+        try:
+            managed = json.loads(manifest.read_text())
+        except (FileNotFoundError, ValueError):
+            managed = {}
+        if not isinstance(managed, dict):
+            managed = {}
+        bundled_names = set()
         for patch in (ROOT / "patches").glob("*.xml"):
+            bundled_names.add(patch.name)
             dest = data / "patches" / patch.name
-            if not dest.exists():
-                shutil.copyfile(patch, dest)
+            if dest.is_symlink():
+                continue
+            bundled = hashlib.sha256(patch.read_bytes()).hexdigest()
+            current = hashlib.sha256(dest.read_bytes()).hexdigest() if dest.exists() else None
+            if current is None or current == managed.get(patch.name) or current == bundled:
+                if current != bundled:
+                    temporary = dest.with_suffix(".tmp")
+                    shutil.copyfile(patch, temporary)
+                    temporary.replace(dest)
+                managed[patch.name] = bundled
+        for dest in (data / "patches").glob("*.xml"):
+            if dest.name not in bundled_names and not dest.is_symlink() and \
+                    hashlib.sha256(dest.read_bytes()).hexdigest() == managed.get(dest.name):
+                dest.unlink()
+                del managed[dest.name]
+        temporary = manifest.with_suffix(".tmp")
+        temporary.write_text(json.dumps(managed, sort_keys=True))
+        temporary.replace(manifest)
     try:
         install_icon()
     except OSError:

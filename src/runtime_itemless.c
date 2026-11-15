@@ -160,7 +160,8 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28};
     const unsigned char layer_code[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
         0x41,0x89,0xd6,0x48,0x89,0xfb,0x48,0x85,0xf6};
-    if (size < 0x2ad4b78) return 0;
+    /* Small loader images do not contain CTR's native collision hooks. */
+    if (size < 0x2ad4b78) return 1;
     size_t shift = memcmp(image + 0xe916b0, collision_code, sizeof collision_code) ? 0x10 : 0;
     unsigned char *c = image + 0xe916b0 - shift, *s = image + 0xe92e90 - shift;
     unsigned char *layer = image + 0xfe44c0 - shift;

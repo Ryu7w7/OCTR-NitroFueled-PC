@@ -14,6 +14,36 @@ spec.loader.exec_module(services)
 
 
 class NativeLauncherTests(unittest.TestCase):
+    def test_bundled_patch_updates_preserve_custom_xml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, data = root / "package", root / "data"
+            (package / "patches").mkdir(parents=True)
+            (data / "patches").mkdir(parents=True)
+            patch = package / "patches/game.xml"
+            patch.write_text("bundled v1")
+            (package / "patches/legacy.xml").write_text("legacy v1")
+            (data / "patches/legacy.xml").write_text("legacy v1")
+            (package / "patches/custom.xml").write_text("default")
+            (data / "patches/custom.xml").write_text("custom override")
+            with mock.patch.object(services, "ROOT", package), mock.patch.dict(os.environ,
+                    {"XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "xdg")}):
+                services.migrate(data)
+                patch.write_text("bundled v2")
+                (package / "patches/legacy.xml").write_text("legacy v2")
+                services.migrate(data)
+                self.assertEqual((data / "patches/game.xml").read_text(), "bundled v2")
+                self.assertEqual((data / "patches/legacy.xml").read_text(), "legacy v2")
+                self.assertEqual((data / "patches/custom.xml").read_text(), "custom override")
+                (data / "patches/game.xml").write_text("edited v2")
+                patch.write_text("bundled v3")
+                (package / "patches/legacy.xml").unlink()
+                (package / "patches/custom.xml").unlink()
+                services.migrate(data)
+                self.assertEqual((data / "patches/game.xml").read_text(), "edited v2")
+                self.assertFalse((data / "patches/legacy.xml").exists())
+                self.assertEqual((data / "patches/custom.xml").read_text(), "custom override")
+
     def test_migration_keeps_unicode_settings_and_original_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
