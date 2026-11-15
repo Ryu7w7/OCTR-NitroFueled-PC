@@ -230,3 +230,13 @@ class NativeLauncherTests(unittest.TestCase):
         self.assertEqual(env["BB_DATA_DIR"], "/custom/data")
         self.assertEqual(env["BB_CONFIG"], "/custom/game.ini")
         self.assertEqual(env["BB_USER_DIR"], "/custom/saves")
+
+    def test_appimage_open_drops_bundle_environment(self):
+        with mock.patch.dict(os.environ, {"APPIMAGE": "/games/SacredFire.AppImage",
+                "LD_LIBRARY_PATH": "/nix/store/bundled/lib"}), mock.patch.object(services.subprocess, "Popen") as spawn:
+            result = services.dispatch({"op": "open", "target": "/games/My Port"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(spawn.call_args.args[0], ["xdg-open", "/games/My Port"])
+        env = spawn.call_args.kwargs["env"]
+        self.assertNotIn("APPIMAGE", env)
+        self.assertNotIn("LD_LIBRARY_PATH", env)

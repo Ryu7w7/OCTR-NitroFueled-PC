@@ -105,7 +105,9 @@ def migrate(data):
 
 
 def open_url(url):
-    return subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from host_environment import host_environment
+    return subprocess.Popen(["xdg-open", url], env=host_environment() if os.environ.get("APPIMAGE") else None,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def install_icon():
@@ -220,6 +222,9 @@ def dispatch(request):
     if operation == "oauth":
         import discord_oauth
         return discord_oauth.authorize(request["client"], open_url, timeout=request["timeout"])
+    if operation == "open":
+        open_url(request["target"])
+        return {"ok": True}
     if operation == "steam":
         return steam()
     if operation == "desktop":

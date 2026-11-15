@@ -40,14 +40,21 @@ std::string RunService(const std::string& request, unsigned timeout_ms, const st
 std::string ServiceRequest(const char* operation) {
     return "{\"op\":\"" + std::string(operation) + "\",\"data\":\"" + JsonEscape(PathText(g_app.data)) + "\"}";
 }
-bool OpenUrl(const std::string& url) { return SDL_OpenURL(url.c_str()); }
+bool OpenUrl(const std::string& url) {
+    if (Env("APPIMAGE").empty()) return SDL_OpenURL(url.c_str());
+    const auto answer = RunService("{\"op\":\"open\",\"target\":\"" + JsonEscape(url) + "\"}", 10000);
+    return JsonBool(answer, "ok");
+}
 fs::path PortFolder() {
     const auto appimage = Env("APPIMAGE");
     return appimage.empty() ? g_app.root : TextPath(appimage).parent_path();
 }
 void OpenInShell(const fs::path& target) {
     const std::string value = PathText(target);
-    if (value.find("://") != std::string::npos) { OpenUrl(value); return; }
+    if (!Env("APPIMAGE").empty() || value.find("://") != std::string::npos) {
+        if (!OpenUrl(value)) g_app.notice = "Could not open: " + value;
+        return;
+    }
     const auto child = LinuxProcess::Start({"xdg-open", value}, "", {}, -1, false);
     if (!child.pid) return;
     if (child.output >= 0) close(child.output);
