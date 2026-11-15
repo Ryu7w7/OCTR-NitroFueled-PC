@@ -206,4 +206,110 @@ Result Authorize(const std::string& client_id, int timeout_seconds, bool spanish
     return result;
 }
 
+Result SteamSignIn(int timeout_seconds, bool spanish, const std::function<void(const std::string& url)>& open_url) {
+    Result result;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        result.error = "network";
+        return result;
+    }
+    SOCKET listener = INVALID_SOCKET;
+    int port = 0;
+    for (const int p : kPorts) {
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) continue;
+        BOOL exclusive = TRUE;
+        setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof exclusive);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(u_short(p));
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 && listen(s, 4) == 0) {
+            listener = s;
+            port = p;
+            break;
+        }
+        closesocket(s);
+    }
+    const std::string state = RandomState();
+    if (listener == INVALID_SOCKET || state.empty()) {
+        if (listener != INVALID_SOCKET) closesocket(listener);
+        WSACleanup();
+        result.error = "busy";
+        return result;
+    }
+    const std::string realm = "http://127.0.0.1:" + std::to_string(port);
+    result.redirect_uri = realm + "/steam?state=" + state;
+    const std::string any_account = "http://specs.openid.net/auth/2.0/identifier_select";
+    const std::string url = "https://steamcommunity.com/openid/login?openid.ns=" +
+                            FormEncode("http://specs.openid.net/auth/2.0") + "&openid.mode=checkid_setup&openid.return_to=" +
+                            FormEncode(result.redirect_uri) + "&openid.realm=" + FormEncode(realm) +
+                            "&openid.identity=" + FormEncode(any_account) + "&openid.claimed_id=" + FormEncode(any_account);
+    if (open_url) {
+        open_url(url);
+    } else {
+        ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+    result.error = "timeout";
+    for (;;) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) break;
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(listener, &readable);
+        timeval tv{long(left.count() / 1000), long(left.count() % 1000) * 1000};
+        if (select(0, &readable, nullptr, nullptr, &tv) <= 0) break;
+        SOCKET client = accept(listener, nullptr, nullptr);
+        if (client == INVALID_SOCKET) continue;
+        DWORD recv_timeout = 5000;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout), sizeof recv_timeout);
+        std::string request;
+        char buf[2048];
+        while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
+            const int got = recv(client, buf, sizeof buf, 0);
+            if (got <= 0) break;
+            request.append(buf, size_t(got));
+        }
+        // "GET /steam?state=...&openid.ns=...&openid.mode=id_res&... HTTP/1.1"
+        std::string target;
+        if (request.compare(0, 4, "GET ") == 0) {
+            const size_t end = request.find(' ', 4);
+            if (end != std::string::npos) target = request.substr(4, end - 4);
+        }
+        const size_t q = target.find('?');
+        const std::string path = target.substr(0, q);
+        const std::string query = q == std::string::npos ? std::string() : target.substr(q + 1);
+        if (path != "/steam") {
+            Reply(client, "404 Not Found", "404", "");
+            closesocket(client);
+            continue;
+        }
+        if (QueryParam(query, "state") != state) {
+            Reply(client, "400 Bad Request", spanish ? "Solicitud no válida" : "Invalid request",
+                  spanish ? "Este inicio de sesión no es el que pidió el launcher." : "This sign-in is not the launcher's.");
+            closesocket(client);
+            continue;
+        }
+        if (QueryParam(query, "openid.mode") != "id_res") {
+            result.error = "denied";
+            Reply(client, "200 OK", spanish ? "Inicio de sesión cancelado" : "Sign-in cancelled",
+                  spanish ? "Puedes cerrar esta pestaña y volver al launcher." : "You can close this tab and go back to the launcher.");
+        } else {
+            result.ok = true;
+            result.code = query;
+            result.error.clear();
+            Reply(client, "200 OK", spanish ? "Listo" : "Done",
+                  spanish ? "Sesión de Steam iniciada. Puedes cerrar esta pestaña y volver al launcher."
+                          : "Signed in with Steam. You can close this tab and go back to the launcher.");
+        }
+        closesocket(client);
+        break;
+    }
+    closesocket(listener);
+    WSACleanup();
+    return result;
+}
+
 }  // namespace DiscordLink
