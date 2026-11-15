@@ -46,6 +46,7 @@ typedef void ABI make_handle_fn(void *slot, void *object);
 typedef void *ABI pool_new_fn(void *pool);
 typedef void ABI send_message_fn(void *message, void *target, void *sender);
 typedef void *ABI player_kart_fn(void *kart_manager, int player, int one);
+typedef void ABI node_flags_fn(void *node, uint32_t mask, int set);  /* a render node's flags (bit 2: hidden) */
 typedef void ABI void0_fn(void);
 typedef char *ABI string_fn(void *pool, const char *text);
 typedef void ABI string_release_fn(void *pool, char *header);
@@ -85,6 +86,7 @@ static struct {
     pool_new_fn *ghost_look_end_new, *ghost_look_start_new;
     send_message_fn *send_message;
     player_kart_fn *player_kart;
+    node_flags_fn *node_flags;
     void0_fn *despawn_items, *load_next_map;
     string_fn *string;
     string_release_fn *string_release;
@@ -2315,6 +2317,82 @@ static void skip_intro(void) {
     }
 }
 
+/* Invisibility, seen from the player's own seat (v0.8.6): while the local kart is invisible (the
+ * Invisibility item), its kart and driver take the Time Trial ghost look on this screen, instead of
+ * showing only the wheels. Only the look: the item, the other players' view (they still see nothing),
+ * hits and collisions stay as they are.
+ *   invisible: CKartEffectsComponent (meta global 0x2ac5438) +0x48 goes from -1 to 1 and +0xf8 from 1
+ *              to 0 for the item's whole time, a second one used meanwhile included (found by diffing
+ *              the kart's components around three uses, 2026-11-12)
+ *   look:      the game's own CKartStartTemporaryGhostMessage / CKartEndTemporaryGhostMessage (replays
+ *              give Time Trial ghosts the same), sent to this kart only; nothing goes over the network
+ *   kept:      the kart controller's _isGhost (+0x260: a ghost takes no damage) is put back as it was
+ *              every frame of the look, so the item plays as before.
+ * BB_INVISIBLE_LOOK=0 turns it off. Not while a replay plays (its ghosts have their own look). */
+#define D_KART_EFFECTS_META 0x2ac5438
+static struct {
+    void *kart;     /* the kart that has the look, 0 none */
+    uint8_t ghost;  /* its _isGhost before the look */
+    int setting;
+} IL = {.setting = -1};
+
+/* The item hides the kart and its driver (0xe26410 -> 0xbd40d0: the entity's render node, entity
+ * +0xb0 -> +0x28, flag 2 at +0x20); the wheels are entities of their own and stay. Shown again on this
+ * screen only, through the node's own flag setter (0x349530), which changes nothing but the flag. */
+static void invisible_look_show(void *entity) {
+    void *render = entity ? RR_AT(entity, 0xb0, void *) : 0;
+    void *node = render ? RR_AT(render, 0x28, void *) : 0;
+    if (node && (RR_AT(node, 0x20, uint8_t) & 2)) game.node_flags(node, 2, 0);
+}
+
+static void invisible_look_message(void *kart, int start) {
+    void *message = (start ? game.ghost_look_start_new : game.ghost_look_end_new)(0);
+    if (!message) return;
+    game.send_message(message, kart, kart);
+    game.release(message);
+}
+
+static void invisible_look(int racing_now) {
+    if (IL.setting < 0) {
+        const char *s = getenv("BB_INVISIBLE_LOOK");
+        IL.setting = !(s && *s == '0');
+        if (!IL.setting) puts("Invisibility look: off (BB_INVISIBLE_LOOK=0)");
+    }
+    if (!IL.setting) return;
+    void *kart = 0;
+    if (racing_now && !runtime_replay_playing()) {
+        int id = -1;
+        local_controller(&id);
+        char *karts = rr_ptr(RR_D_KART_MANAGER);
+        kart = id >= 0 && karts ? game.player_kart(karts, id, 1) : 0;
+    }
+    void *effects = kart ? rr_component(kart, D_KART_EFFECTS_META) : 0;
+    const int invisible = effects && RR_AT(effects, 0x48, int32_t) == 1 && RR_AT(effects, 0xf8, uint8_t) == 0;
+    if (IL.kart && (IL.kart != kart || !invisible)) {
+        /* the look ends with the item; a kart gone (race over, level left) takes it with it */
+        if (IL.kart == kart) {
+            invisible_look_message(kart, 0);
+            void *move = rr_component(kart, RR_D_KART_CONTROLLER_META);
+            if (move) RR_AT(move, 0x260, uint8_t) = IL.ghost;
+            puts("Invisibility look: off (the item ended)");
+        }
+        IL.kart = 0;
+    }
+    if (!kart || !invisible) return;
+    void *move = rr_component(kart, RR_D_KART_CONTROLLER_META);
+    if (!IL.kart) {
+        IL.ghost = move ? RR_AT(move, 0x260, uint8_t) : 0;
+        invisible_look_message(kart, 1);
+        IL.kart = kart;
+        puts("Invisibility look: on (the Time Trial ghost look on this screen only)");
+    }
+    if (move && RR_AT(move, 0x260, uint8_t) != IL.ghost) RR_AT(move, 0x260, uint8_t) = IL.ghost;
+    /* the kart and its driver (CKartComponent, meta global 0x2ac44e0: +0x30 the driver's handle) */
+    invisible_look_show(kart);
+    void *kart_part = rr_component(kart, 0x2ac44e0);
+    invisible_look_show(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0);
+}
+
 static int racing;                              /* the last frame: a kart and a race clock */
 int runtime_replay_chat_allowed(void) {
     return !__atomic_load_n(&racing, __ATOMIC_RELAXED) || runtime_replay_local_finished();
@@ -2327,6 +2405,9 @@ void ABI runtime_replay_tick(void) {
     __atomic_store_n(&racing, rr_kart_of(0, 0) && race_timer(), __ATOMIC_RELAXED);
     runtime_online_mode_note_frame();
     runtime_presence_tick();
+    invisible_look(racing);
+    runtime_item_lead_tick(racing && !runtime_replay_playing());
+    runtime_tips_tick();
     apply_look();                               /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
@@ -2472,6 +2553,7 @@ int runtime_replay_play_install(int eu) {
     game.ghost_look_start_new = fn(0x112d8b0, 1, eu);
     game.send_message = fn(0xd32160, 0, eu);
     game.player_kart = fn(0xe50f70, 0, eu);
+    game.node_flags = fn(0x349530, 0, eu);
     game.despawn_items = fn(0x1056bb0, 1, eu);
     game.string = fn(0x1574080, 1, eu);
     game.string_release = fn(0x1518e30, 1, eu);

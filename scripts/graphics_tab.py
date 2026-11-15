@@ -30,6 +30,7 @@ import zlib
 from pathlib import Path
 
 from mod_components import long_path
+import quit_confirmation
 
 # Searched newest first: the first archive that has a file wins.
 ARCHIVES = ('update2.pak', 'update.pak', 'juicedomain_permanent.pak',
@@ -407,6 +408,7 @@ def own_quit_level(blob, wireless):
     if len(mine) != 1 or others < 1:
         raise ValueError(f'Octane_MainMenu.igz: Wireless level references {len(mine)}, others {others}')
     igz.set_u64(mine[0], igz.string_index(QUIT_LEVEL[1][:-1].decode()))
+    quit_confirmation.bind(igz, owner(mine[0])[0])
     out = igz.build()
     check = Igz(out)
     if (check.strings[check.u64(mine[0])] != QUIT_LEVEL[1][:-1].decode() or
@@ -419,6 +421,7 @@ def own_quit_level(blob, wireless):
 OPTIONAL = {f'ui/octane_mainmenu_{lang}.lng': quit_labels(*labels)
             for lang, labels in QUIT_LABELS.items()}
 OPTIONAL['ui/octane_mainmenu.igz'] = show_quit
+OPTIONAL[quit_confirmation.SOURCE] = quit_confirmation.graph
 # The main menu's root script handles Wireless by name (hidden off the Switch): the name matches
 # nothing now, as with the Graphics tab.
 OPTIONAL['vsc/ui/octane_mainmenu/octane_mainmenu_root.igz'] = rename(
@@ -486,6 +489,9 @@ def build(game, dest, dump, *, asset_transform=None):
                 for low in sorted(quit_required):
                     archive, i, name = found[low]
                     full, logical = archive.names[i]
+                    if low == quit_confirmation.SOURCE:
+                        full = full.replace(quit_confirmation.ORIGINAL, quit_confirmation.NAME)
+                        logical = logical.replace(quit_confirmation.ORIGINAL, quit_confirmation.NAME)
                     quit_files.append((full, logical, archive.infos[i][1] & ~0xFF,
                                        OPTIONAL[low](source(archive, i, name, low))))
                 files += quit_files
@@ -524,8 +530,10 @@ def main():
          (args.game / 'archives' / a).stat().st_ctime_ns)
         for a in ARCHIVES if (args.game / 'archives' / a).is_file()]).encode()).hexdigest()[:16]
     folder = args.out / 'graphics-tab'
-    version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
-    dest = folder / f'update3-{version}-{stamp}.pak'
+    scripts = Path(__file__).resolve().parent
+    digest = hashlib.sha256(b''.join((scripts / name).read_bytes() for name in
+        ('graphics_tab.py', 'graphics_widgets.py', 'igz_file.py', 'quit_confirmation.py'))).hexdigest()[:16]
+    dest = folder / f'update3-{digest}-{stamp}.pak'
     try:
         if not dest.is_file():
             build(args.game, dest, folder / 'dump')

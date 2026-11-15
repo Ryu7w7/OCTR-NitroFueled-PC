@@ -147,6 +147,7 @@ DEFAULTS = {
     "fullscreen": False,
     "present_mode": "Mailbox",
     "gpu": "",               # the graphics card by name (bb-gpu-capabilities --gpus); "" automatic
+    "gpu_nth": 0,            # which of the GPUs that share that name, in --gpus order (0: the first)
     "gpu_preference": "auto",  # earlier choice by kind: integrated, discrete (used without "gpu")
     "gamepad": "",
     "gamepad_name": "",
@@ -306,13 +307,30 @@ def save_ini(values, lines):
     ini_path().write_text("\n".join(out) + "\n")
 
 
-def game_environment(s):
-    """Environment for run.sh from the launcher settings."""
+def gpu_index(names, name, nth):
+    """The place in names (bb-gpu-capabilities --gpus, Vulkan's order: BB_GPU_ID) of the nth GPU
+    called name when several share it, the first one's if there are no longer that many; None
+    when the name is unique or not listed (BB_GPU_NAME is enough)."""
+    same = [i for i, n in enumerate(names) if n == name]
+    if len(same) < 2:
+        return None
+    return same[nth] if isinstance(nth, int) and 0 <= nth < len(same) else same[0]
+
+
+def game_environment(s, gpus=None):
+    """Environment for run.sh from the launcher settings. gpus: the names bb-gpu-capabilities
+    --gpus lists, in its order (None: not known, the graphics card goes by name)."""
     env = dict(os.environ)
     env.pop("BB_GPU_NAME", None)
     env.pop("BB_GPU_PREFERENCE", None)
     if s.get("gpu"):
-        env["BB_GPU_NAME"] = s["gpu"]  # one that is gone falls back to automatic (vk_instance.cpp)
+        index = gpu_index(gpus or [], s["gpu"], s.get("gpu_nth", 0))
+        if index is not None:
+            # GPUs that share the name: BB_GPU_NAME takes the first. Otherwise a BB_GPU_ID set
+            # outside the launcher stays as it was.
+            env["BB_GPU_ID"] = str(index)
+        else:
+            env["BB_GPU_NAME"] = s["gpu"]  # one that is gone falls back to automatic (vk_instance.cpp)
     elif s.get("gpu_preference") in ("integrated", "discrete"):
         env["BB_GPU_PREFERENCE"] = s["gpu_preference"]
     env["BB_GAME_DIR"] = str(Path(s["game_dir"]).expanduser())
@@ -361,20 +379,23 @@ def connected_gamepads():
 
 def connected_gpus():
     """(name, label) of the GPUs Vulkan sees (bb-gpu-capabilities --gpus: kind, Vulkan version,
-    name), with the driver setup the game gets (bbport_vulkan.py wraps the launcher too)."""
+    name), with the driver setup the game gets (bbport_vulkan.py wraps the launcher too). GPUs
+    that share a name are told apart in their labels: #1, #2 in Vulkan's order."""
     tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
     try:
         run = subprocess.run([str(tool), "--gpus"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
+    lines = [parts for parts in (line.strip().split("\t", 2) for line in run.stdout.splitlines())
+             if len(parts) == 3]
+    names = [name for _kind, _version, name in lines]
     found = []
-    for line in run.stdout.splitlines():
-        parts = line.strip().split("\t", 2)
-        if len(parts) < 3:
-            continue
-        kind, version, name = parts
-        label = name + {"discrete": tr(" (dedicated)"), "integrated": tr(" (integrated)"),
-                        "cpu": tr(" (software, very slow)")}.get(kind, "")
+    for kind, version, name in lines:
+        label = name
+        if names.count(name) > 1:
+            label += f" #{[n for n, _ in found].count(name) + 1}"
+        label += {"discrete": tr(" (dedicated)"), "integrated": tr(" (integrated)"),
+                  "cpu": tr(" (software, very slow)")}.get(kind, "")
         try:
             major, minor = (int(x) for x in version.split(".")[:2])
         except ValueError:
@@ -1297,15 +1318,21 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         screen = Adw.PreferencesGroup(title=tr("Display"))
         gpus = connected_gpus()
-        gpu_choices = [(tr("Automatic"), "")] + gpus
-        if self.settings.get("gpu") and self.settings["gpu"] not in [n for n, _ in gpus]:
-            gpu_choices.append((tr("{} (not detected)").format(self.settings["gpu"]), self.settings["gpu"]))
+        # Each card is (name, which of the cards with that name): two with one name stay apart.
+        self.gpu_names = [n for n, _ in gpus]
+        gpu_choices = [(tr("Automatic"), ("", 0))] + [(label, (n, self.gpu_names[:i].count(n)))
+                                                      for i, (n, label) in enumerate(gpus)]
+        gpu, gpu_nth = self.settings.get("gpu", ""), self.settings.get("gpu_nth", 0)
+        if gpu and gpu not in self.gpu_names:
+            gpu_choices.append((tr("{} (not detected)").format(gpu), (gpu, gpu_nth)))
+        elif (gpu, gpu_nth) not in [value for _, value in gpu_choices]:
+            gpu_nth = 0  # fewer cards with that name now: the first of them
         self.gpu_row = combo_row(
             tr("Graphics card"),
             tr("On laptops with two GPUs, choose the dedicated one (NVIDIA or AMD) if the game starts on the "
                "integrated one. Automatic uses the dedicated GPU when it has Vulkan 1.3. Applied when the game "
                "starts. If your dedicated GPU is not listed, update its driver."),
-            gpu_choices, self.settings.get("gpu", ""))
+            gpu_choices, (gpu, gpu_nth))
         screen.add(self.gpu_row)
         self.renderer_row = combo_row(
             tr("Graphics engine"),
@@ -1540,8 +1567,13 @@ class LauncherWindow(Adw.ApplicationWindow):
     def restart_into(self, appimage):
         """The new AppImage starts in place of this launcher (the stable Steam link follows it)."""
         self.store()
-        subprocess.Popen([str(appimage)], env=host_environment(), start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen([str(appimage), "--updated"], cwd=str(appimage.parent),
+                             env=host_environment(), start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.update_banner.set_title(tr("Updated, but could not restart the launcher: {}").format(error))
+            return
         self.presence.shutdown()
         self.get_application().quit()
 
@@ -1654,7 +1686,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["neo"] = self.neo_row.get_active()
         s["fullscreen"] = self.fullscreen_row.get_active()
         s["present_mode"] = combo_value(self.present_row)
-        s["gpu"] = combo_value(self.gpu_row)
+        s["gpu"], s["gpu_nth"] = combo_value(self.gpu_row)
         s["gpu_preference"] = "auto"
         s["mangohud"] = self.mangohud_row.get_active()
         s["frame_stats"] = self.stats_row.get_active()
@@ -1737,7 +1769,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.update_layout(self.ini.get("aspect_output", self.ini.get("widescreen_output", "")))
 
     def environment(self):
-        return game_environment(self.settings)
+        return game_environment(self.settings, self.gpu_names)
 
     def set_ini(self, changes):
         """Writes some bbport.ini keys at once (None removes a line: the default again),
@@ -3701,7 +3733,9 @@ class LauncherWindow(Adw.ApplicationWindow):
 class LauncherApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID,
-                         flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+                         # The old instance still owns the application ID during update handoff.
+                         flags=(Gio.ApplicationFlags.NON_UNIQUE if "--updated" in sys.argv
+                                else Gio.ApplicationFlags.DEFAULT_FLAGS))
 
     def do_activate(self):
         window = self.get_active_window() or LauncherWindow(self)
@@ -3718,7 +3752,7 @@ def play():
         print("SacredFire: choose the game folder in the launcher first", file=sys.stderr)
         return 1
     os.chdir(PORT_DIR)
-    env = game_environment(settings)
+    env = game_environment(settings, [n for n, _ in connected_gpus()] if settings.get("gpu") else None)
     steam_shortcuts.stable_appimage_link()
     if not settings.get("discord_rpc", True):
         os.execvpe("bash", ["bash", str(PORT_DIR / "run.sh")], env)  # nothing to do alongside
@@ -3793,4 +3827,4 @@ def play():
 if __name__ == "__main__":
     if "--play" in sys.argv[1:]:
         sys.exit(play())
-    sys.exit(LauncherApp().run([a for a in sys.argv if a != "--play"]))
+    sys.exit(LauncherApp().run([a for a in sys.argv if a not in ("--play", "--updated")]))

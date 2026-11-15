@@ -70,6 +70,8 @@ bool IsCtrTitle(const std::string& title) {
 }
 constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
+constexpr const char* kSiteUrl = "https://octr.ryu7w7.xyz/";
+constexpr const char* kPortRepoUrl = "https://github.com/Ryu7w7/OCTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
 constexpr std::uintmax_t kCompleteGameMinBytes = 10ull << 30;
 
@@ -144,6 +146,8 @@ const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
 // The game found no Vulkan 1.3 (GPU, driver or loader): UnsupportedVulkanExitCode in vk_platform.h.
 constexpr DWORD kUnsupportedGpuCode = 24;
+// Windows could not give the game its memory (error 1455): OUT_OF_MEMORY_CODE in run.py.
+constexpr DWORD kOutOfMemoryCode = 26;
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 // The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
@@ -1990,6 +1994,17 @@ void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
 
+/// The place in gpus (bb-gpu-capabilities --gpus, Vulkan's order: BB_GPU_ID) of the nth GPU
+/// called name when several share it, the first one's if there are no longer that many; -1 when
+/// the name is unique or not listed (BB_GPU_NAME is enough).
+int GpuIndex(const std::vector<App::Gpu>& gpus, const std::string& name, int nth) {
+    std::vector<int> same;
+    for (size_t i = 0; i < gpus.size(); ++i)
+        if (gpus[i].name == name) same.push_back(int(i));
+    if (same.size() < 2) return -1;
+    return nth >= 0 && nth < int(same.size()) ? same[nth] : same[0];
+}
+
 bool UpdateBusy();
 
 void StartGame() {
@@ -2017,7 +2032,24 @@ void StartGame() {
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
-    SetEnv(L"BB_GPU_NAME", a.launcher.Get("gpu"));  // the graphics card, by name (empty: automatic)
+    {
+        // The graphics card, by name (empty: automatic); one of several GPUs that share a name by
+        // its place in Vulkan's list instead (BB_GPU_NAME would take the first of them). Otherwise
+        // a BB_GPU_ID set outside the launcher stays: the one it started with, not an earlier game's.
+        static const std::wstring outside_id = [] {
+            const wchar_t* value = _wgetenv(L"BB_GPU_ID");
+            return std::wstring(value ? value : L"");
+        }();
+        const std::string gpu = a.launcher.Get("gpu");
+        int index;
+        {
+            std::scoped_lock lock{a.mutex};
+            index = GpuIndex(a.gpus, gpu, a.launcher.Int("gpu_nth", 0));
+        }
+        SetEnv(L"BB_GPU_NAME", index < 0 ? gpu : "");
+        if (index >= 0) SetEnv(L"BB_GPU_ID", std::to_string(index));
+        else SetEnvironmentVariableW(L"BB_GPU_ID", outside_id.empty() ? nullptr : outside_id.c_str());
+    }
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
@@ -3371,6 +3403,20 @@ void PlayTab() {
                                        "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
             ImGui::PopStyleColor();
         }
+        else if (a.exit_code == kOutOfMemoryCode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", T("El juego se quedó sin memoria: Windows no pudo darle la que necesita (error 1455, la RAM más el "
+                                       "archivo de paginación no alcanzan). Agranda el archivo de paginación: busca \"Ajustar la "
+                                       "apariencia y rendimiento de Windows\" > Opciones avanzadas > Memoria virtual > Cambiar, marca "
+                                       "\"Administrar automáticamente\" o pon al menos 8192 MB en C:, y reinicia el PC. Antes de jugar, "
+                                       "cierra los programas y overlays que no uses.",
+                                       "The game ran out of memory: Windows could not give it what it needs (error 1455, RAM plus the "
+                                       "page file are not enough). Enlarge the page file: search \"Adjust the appearance and "
+                                       "performance of Windows\" > Advanced > Virtual memory > Change, tick \"Automatically manage\" "
+                                       "or set at least 8192 MB on C:, and restart the PC. Before playing, close the programs and "
+                                       "overlays you don't use."));
+            ImGui::PopStyleColor();
+        }
         else ImGui::TextColored(kRed, T("El juego se cerró con un error (código %lu). Mira el registro abajo o en last_run.log.",
                                         "The game ended with an error (code %lu). See the log below or last_run.log."),
                                 (unsigned long)a.exit_code);
@@ -3516,8 +3562,25 @@ void SetWindowsGpuPreference(int preference) {
     RegCloseKey(key);
 }
 
-std::string GpuLabel(const App::Gpu& gpu) {
+/// The place of gpus[i] among the GPUs with its name (0: the first), and how many have it.
+int GpuNth(const std::vector<App::Gpu>& gpus, size_t i, int& same) {
+    int nth = 0;
+    same = 0;
+    for (size_t j = 0; j < gpus.size(); ++j) {
+        if (gpus[j].name != gpus[i].name) continue;
+        if (j < i) ++nth;
+        ++same;
+    }
+    return nth;
+}
+
+/// GPUs that share a name are told apart: #1, #2 in Vulkan's order.
+std::string GpuLabel(const std::vector<App::Gpu>& gpus, size_t i) {
+    const App::Gpu& gpu = gpus[i];
     std::string label = gpu.name;
+    int same = 0;
+    const int nth = GpuNth(gpus, i, same);
+    if (same > 1) label += " #" + std::to_string(nth + 1);
     if (gpu.kind == "discrete") label += T(" (dedicada)", " (dedicated)");
     else if (gpu.kind == "integrated") label += T(" (integrada)", " (integrated)");
     else if (gpu.kind == "cpu") label += T(" (por software, muy lenta)", " (software, very slow)");
@@ -3529,29 +3592,40 @@ std::string GpuLabel(const App::Gpu& gpu) {
 }
 
 /// The graphics card: automatic (the engine prefers a dedicated GPU with Vulkan 1.3) or one of
-/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic).
+/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic) and,
+/// when several share it, which of them (gpu_nth, BB_GPU_ID).
 void GpuCombo() {
     App& a = g_app;
     std::scoped_lock lock{a.mutex};
     const std::string current = a.launcher.Get("gpu");
+    const int index = GpuIndex(a.gpus, current, a.launcher.Int("gpu_nth", 0));
+    const auto chosen = [&](size_t i) { return a.gpus[i].name == current && (index < 0 || index == int(i)); };
     std::string preview = T("Automática", "Automatic");
     bool listed = false;
-    for (const auto& gpu : a.gpus)
-        if (gpu.name == current) { preview = GpuLabel(gpu); listed = true; }
+    for (size_t i = 0; i < a.gpus.size(); ++i)
+        if (chosen(i)) { preview = GpuLabel(a.gpus, i); listed = true; }
     if (!current.empty() && !listed) preview = current + T(" (no detectada)", " (not detected)");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
     if (ImGui::BeginCombo(T("Tarjeta gráfica", "Graphics card"), preview.c_str())) {
         if (ImGui::Selectable(T("Automática", "Automatic"), current.empty())) {
             a.launcher.Set("gpu", "");
+            a.launcher.Erase("gpu_nth");
             SaveLauncher();
             SetWindowsGpuPreference(0);
         }
-        for (const auto& gpu : a.gpus) {
-            if (ImGui::Selectable(GpuLabel(gpu).c_str(), gpu.name == current)) {
+        for (size_t i = 0; i < a.gpus.size(); ++i) {
+            const auto& gpu = a.gpus[i];
+            ImGui::PushID(int(i));  // GPUs that share a name share their label too
+            if (ImGui::Selectable(GpuLabel(a.gpus, i).c_str(), chosen(i))) {
+                int same = 0;
+                const int nth = GpuNth(a.gpus, i, same);
                 a.launcher.Set("gpu", gpu.name);
+                if (nth) a.launcher.Set("gpu_nth", std::to_string(nth));
+                else a.launcher.Erase("gpu_nth");
                 SaveLauncher();
                 SetWindowsGpuPreference(gpu.kind == "discrete" ? 2 : gpu.kind == "integrated" ? 1 : 0);
             }
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -3642,7 +3716,8 @@ void SettingsTab() {
         // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
         // shaders from the player's game the first time)
         static constexpr Choice kRenderer[] = {{"Vulkan (shadPS4)", "Vulkan (shadPS4)", "shadps4"},
-                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"}};
+                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"},
+                                               {"DirectX 11 (experimental)", "DirectX 11 (experimental)", "d3d11"}};
         if (GameChoiceCombo(T("Motor gráfico", "Graphics engine"), "renderer", kRenderer, "shadps4", 16.0f)) SaveGameIni();
         HelpMarker(T("Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la "
                      "emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara "
@@ -8148,7 +8223,16 @@ void ToolsTab() {
                                             : T("FSR 4: archivos no incluidos (carpeta fsr4_shaders)",
                                                 "FSR 4: files not included (fsr4_shaders folder)"));
     }
-    ImGui::TextLinkOpenURL(kRepoUrl, kRepoUrl);
+    ImGui::Spacing();
+    ImGui::TextColored(kGrey, "%s", T("Página oficial:", "Official site:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kSiteUrl)) OpenInShell(fs::path(Widen(kSiteUrl)));
+    ImGui::TextColored(kGrey, "%s", T("Código fuente:", "Source code:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kPortRepoUrl)) OpenInShell(fs::path(Widen(kPortRepoUrl)));
+    ImGui::TextColored(kGrey, "%s", T("Proyecto original:", "Original project:"));
+    ImGui::SameLine();
+    if (ImGui::TextLink(kRepoUrl)) OpenInShell(fs::path(Widen(kRepoUrl)));
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());
 }
 
@@ -8407,6 +8491,18 @@ void Frame() {
         }
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
     }
+    // The official page and the source, always in sight (v0.8.8)
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + 6.0f, ImGui::GetWindowHeight() - 64.0f));
+    ImGui::SetCursorPosX(18.0f);
+    ImGui::PushStyleColor(ImGuiCol_TextLink, ImVec4(0.55f, 0.88f, 1.0f, 1.0f));
+    if (ImGui::TextLink(T("Web oficial", "Official site"))) OpenInShell(fs::path(Widen(kSiteUrl)));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kSiteUrl);
+    ImGui::SameLine(0.0f, 6.0f);
+    ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.5f), "•");
+    ImGui::SameLine(0.0f, 6.0f);
+    if (ImGui::TextLink("GitHub")) OpenInShell(fs::path(Widen(kPortRepoUrl)));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kPortRepoUrl);
+    ImGui::PopStyleColor();
     ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 38.0f));
     ImGui::SetCursorPosX(18.0f);
     ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.84f), "CTR  •  %s", a.version.c_str());
@@ -8585,15 +8681,30 @@ bool CreateDevice(HWND hwnd) {
     sd.OutputWindow = hwnd;
     sd.SampleDesc.Count = 1;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
     D3D_FEATURE_LEVEL level;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
-                                               &sd, &g_swapchain, &g_device, &level, &g_context);
-    if (hr == DXGI_ERROR_UNSUPPORTED)
-        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 2, D3D11_SDK_VERSION, &sd,
-                                           &g_swapchain, &g_device, &level, &g_context);
+    // The flip model (v0.8.8): DWM shows our buffer itself instead of copying it, which presents
+    // with less latency and without the stutter of the old blit model when the window moves or
+    // resizes. Windows 10 has FLIP_DISCARD, 8.1 FLIP_SEQUENTIAL; the blit model stays the last
+    // resort.
+    HRESULT hr = E_FAIL;
+    for (const DXGI_SWAP_EFFECT effect : {DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                                          DXGI_SWAP_EFFECT_DISCARD}) {
+        sd.SwapEffect = effect;
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2,
+                                           D3D11_SDK_VERSION, &sd, &g_swapchain, &g_device, &level, &g_context);
+        if (hr == DXGI_ERROR_UNSUPPORTED)
+            hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 2,
+                                               D3D11_SDK_VERSION, &sd, &g_swapchain, &g_device, &level, &g_context);
+        if (hr == S_OK) break;
+    }
     if (hr != S_OK) return false;
+    // One frame queued at most: what is drawn is what the mouse did a frame ago, not three.
+    IDXGIDevice1* dxgi = nullptr;
+    if (SUCCEEDED(g_device->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
+        dxgi->SetMaximumFrameLatency(1);
+        dxgi->Release();
+    }
     CreateRenderTarget();
     return true;
 }
@@ -8608,11 +8719,83 @@ void CleanupDevice() {
     g_device = nullptr;
 }
 
+// Frame pacing (v0.8.8). While the launcher is in use (input in the last second, an item held,
+// text being typed, an animation that asked for it) frames come at the display's rate; otherwise
+// it draws a few frames a second, enough for background work's progress, and nothing while it
+// is minimized or hidden. It used to draw 60 frames a second all the time, the game's included.
+double g_active_until = 0.0;
+bool g_sizing = false;   // inside the move/resize loop: WM_SIZE draws the frame itself
+bool g_in_frame = false; // RenderFrame is running (a WM_SIZE it causes must not start another)
+
+double NowSeconds() {
+    static const double period = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1.0 / double(f.QuadPart);
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return double(c.QuadPart) * period;
+}
+
+/// Full frame rate for the next `seconds` (an animation or a transition in progress).
+void KeepAnimating(double seconds) { g_active_until = std::max(g_active_until, NowSeconds() + seconds); }
+
+/// Milliseconds to wait for input before the next frame; 0 draws it at once (vsync paces it).
+DWORD FrameWait(HWND hwnd) {
+    if (IsIconic(hwnd)) return 250;
+    if (NowSeconds() < g_active_until) return 0;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput || ImGui::IsAnyItemActive()) return 0;
+    return GetForegroundWindow() == hwnd ? 50 : 250;
+}
+
+void RenderFrame() {
+    if (g_in_frame || !g_swapchain) return;
+    g_in_frame = true;
+    ImGuiIO& io = ImGui::GetIO();
+    if (g_resize_w && g_resize_h) {
+        CleanupRenderTarget();
+        g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
+        g_resize_w = g_resize_h = 0;
+        CreateRenderTarget();
+    }
+    // The controller drives the launcher only while it is the window in front: XInput is
+    // read whatever window has the focus, so playing moved the launcher's menus too.
+    if (GetForegroundWindow() == g_app.hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    // The controller sends no window messages: a button or stick read this frame is input too.
+    if (io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) {
+        for (int key = ImGuiKey_GamepadStart; key <= ImGuiKey_GamepadRStickDown; ++key) {
+            if (ImGui::IsKeyDown(ImGuiKey(key))) {
+                KeepAnimating(1.0);
+                break;
+            }
+        }
+    }
+    Frame();
+    ImGui::Render();
+    const float clear[4] = {0.08f, 0.08f, 0.10f, 1.0f};
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+    g_context->ClearRenderTargetView(g_rtv, clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
+    g_in_frame = false;
+}
+
 } // namespace
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // Input, focus and size changes: full frame rate for a second (FrameWait).
+    if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+        msg == WM_MOUSELEAVE || msg == WM_NCMOUSEMOVE || msg == WM_SETFOCUS || msg == WM_KILLFOCUS ||
+        msg == WM_ACTIVATE || msg == WM_SIZE || msg == WM_DPICHANGED || msg == WM_DROPFILES)
+        KeepAnimating(1.0);
     if (msg == WM_NCHITTEST) {
         POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd, &pt);
@@ -8684,6 +8867,15 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         if (wparam == SIZE_MINIMIZED) return 0;
         g_resize_w = LOWORD(lparam);
         g_resize_h = HIWORD(lparam);
+        // Dragging a border runs Windows' own loop, not ours: the frame is drawn here, so the
+        // content follows the border instead of freezing or stretching until it is let go.
+        if (g_sizing) RenderFrame();
+        return 0;
+    case WM_ENTERSIZEMOVE:
+        g_sizing = true;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        g_sizing = false;
         return 0;
     case WM_SYSCOMMAND:
         if ((wparam & 0xfff0) == SC_KEYMENU) return 0;
@@ -8789,11 +8981,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     if (direct_launch) {
+        // The EOS bridge too (#226): without the window, nothing started it, and a game launched from
+        // Steam or a shortcut went to the server directly on networks that only reach it through Epic.
+        EosBridgePoll();
         if (g_app.worker.joinable()) g_app.worker.join();
         PollJobs();
         if (GameReady()) {
             if (g_app.launcher.Flag("discord_rpc", true))
                 RegisterDiscordLaunch(DiscordAppId());
+            {   // its check and EOS login take a while on a blocked network: wait for its decision
+                const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+                std::string host;
+                INTERNET_PORT port = 0, local = 0;
+                SplitServer(server, host, port);
+                if (g_app.game.Flag("online", true)) EosBridgeRoute(server, port, local, 30000);
+            }
+            // A chosen graphics card that shares its name with another is told apart by the GPU list.
+            if (!g_app.launcher.Get("gpu").empty() && g_app.probe.joinable()) g_app.probe.join();
             StartGame();
             while (g_app.game_running) {
                 MSG msg;
@@ -8806,6 +9010,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 Sleep(50);
             }
             DiscordPresence::Shutdown();
+            EosBridgeStop();  // the game is over: the bridge ends with it
             if (g_app.worker.joinable()) g_app.worker.join();
             if (g_app.probe.joinable()) g_app.probe.join();
             CoUninitialize();
@@ -8912,8 +9117,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     bool done = false;
     while (!done) {
         MSG msg;
-        // Idle while minimized or not in front: wait for input or 100 ms (background work).
-        if (IsIconic(hwnd)) MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
+        // Idle when nothing moves: wait for input, or a few frames a second for background work.
+        if (const DWORD wait = FrameWait(hwnd))
+            MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -8930,26 +9136,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             continue;
         }
         g_occluded = false;
-        if (g_resize_w && g_resize_h) {
-            CleanupRenderTarget();
-            g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
-            g_resize_w = g_resize_h = 0;
-            CreateRenderTarget();
-        }
-        // The controller drives the launcher only while it is the window in front: XInput is
-        // read whatever window has the focus, so playing moved the launcher's menus too.
-        if (GetForegroundWindow() == hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        Frame();
-        ImGui::Render();
-        const float clear[4] = {0.08f, 0.08f, 0.10f, 1.0f};
-        g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-        g_context->ClearRenderTargetView(g_rtv, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
+        RenderFrame();
     }
 
     // The bridge first (v0.8.5): the waits below for background work (a network check, an update)

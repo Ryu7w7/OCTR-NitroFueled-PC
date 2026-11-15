@@ -9,7 +9,8 @@
 extern "C" {
 #endif
 
-#define RR_LIST_MAX 64
+#define RR_LIST_MAX 500
+#define RR_LIST_PAGE 10 /* the menu shows them a page at a time */
 
 typedef struct {
     char file[64];      /* name in RaceReplay */

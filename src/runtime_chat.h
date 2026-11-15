@@ -28,6 +28,10 @@ void runtime_chat_set_enabled(int on);
 void runtime_chat_set_public(int on);
 /* 1 where the chat works now (in a public lobby, once the server says this player is in the room). */
 int runtime_chat_available(void);
+/* The chat during the races too (on by default); off, it waits for the end of the race as before. */
+void runtime_chat_set_in_race(int on);
+/* 1 while a race runs and this player has not finished it (the chat box keeps small then). */
+int runtime_chat_racing(void);
 unsigned runtime_chat_serial(void);
 /* The newest lines, oldest first, without the muted players'. The serial changes with them. */
 unsigned runtime_chat_view(RcLine *out, int max, int *count, int *status);

@@ -10,6 +10,11 @@
 #include "video_core/host_shaders/depth_stencil_bits_frag.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
 #include "bbport_toggles.h"
+#include "bbport_live_graphics.h"
+#include "video_core/host_shaders/depth_ms_resample_frag.h"
+#include "video_core/host_shaders/depth_stencil_ms_resample_frag.h"
+#include "video_core/host_shaders/depth_stencil_ms_bits_frag.h"
+#include "video_core/host_shaders/ms_resample_frag.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -70,9 +75,9 @@ bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
 // 1 for the scene size, 2 for half resolution (the game's post-processing chain), else 0.
 // Half resolution needs a scene size that halves exactly: the proxy keeps the scene's factor,
 // so the shaders' FragCoord conversion (1920 / scene width) stays correct for it.
-static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene) {
-    if (i.size.width == 1920 && i.size.height == 1080) return 1;
-    if (i.size.width == 960 && i.size.height == 540 && scene.width % 2 == 0 &&
+static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene, SceneResolution::Size native) {
+    if (i.size.width == native.width && i.size.height == native.height) return 1;
+    if (i.size.width == native.width / 2 && i.size.height == native.height / 2 && scene.width % 2 == 0 &&
         scene.height % 2 == 0 && !BbToggle::Disabled(BbToggle::SceneHalfRes)) {
         return 2;
     }
@@ -80,10 +85,22 @@ static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scen
 }
 bool SceneTargets::Eligible(const VideoCore::Image& image) const {
     const auto& i = image.info;
-    const u32 div = SizeDivisor(i, size);
-    if (!div || i.size.depth != 1 || i.resources.layers != 1 || i.num_samples != 1 ||
-        i.props.is_block || !image.backing || image.backing->num_samples != 1) {
+    const u32 div = SizeDivisor(i, size, native_size);
+    if (!div || i.size.depth != 1 || i.resources.layers != 1 || image.usage.vo_surface ||
+        i.props.is_block || !image.backing) {
         return false;
+    }
+    if (u32(image.backing->image.image_ci.samples) > 1) {
+        const auto format = image.backing->image.image_ci.format;
+        const bool depth = i.props.is_depth;
+        const auto attachment = depth ? vk::FormatFeatureFlagBits::eDepthStencilAttachment :
+                                        vk::FormatFeatureFlagBits::eColorAttachment;
+        const auto required = vk::FormatFeatureFlagBits::eSampledImage | attachment;
+        const bool color = format == vk::Format::eR8G8B8A8Unorm ||
+                           format == vk::Format::eR16G16B16A16Sfloat ||
+                           format == vk::Format::eB10G11R11UfloatPack32;
+        return i.resources.levels == 1 && (depth || color) &&
+               (Features(format) & required) == required;
     }
     if (i.resources.levels != 1) {
         // Mip chains (the bloom pyramid at half resolution): one blitted proxy per level.
@@ -107,11 +124,26 @@ std::string SceneTargets::Why(const VideoCore::Image& image) const {
            std::to_string(image.info.size.width) + "x" + std::to_string(image.info.size.height);
 }
 bool SceneTargets::EligibleScene(const VideoCore::Image& image) const {
-    return image.info.size.width == 1920 && image.info.size.height == 1080 && Eligible(image);
+    return image.info.size.width == native_size.width && image.info.size.height == native_size.height && Eligible(image);
 }
 SceneResolution::Size SceneTargets::ProxySize(const VideoCore::Image& image, u32 level) const {
-    const u32 div = std::max(1u, SizeDivisor(image.info, size));
+    const u32 div = std::max(1u, SizeDivisor(image.info, size, native_size));
     return {std::max(1u, size.width / div >> level), std::max(1u, size.height / div >> level)};
+}
+void SceneTargets::SetNativeSize(SceneResolution::Size next) {
+    if (next == native_size) return;
+    ResolveAll();
+    scheduler.Finish();
+    entries.clear();
+    tracked.clear();
+    recent = {};
+    ++generation;
+    native_size = next;
+    size = next;
+}
+u32 SceneTargets::ShaderSize() const {
+    return SceneResolution::Pack({BbLiveGraphics::Extent(1920, float(size.width) / native_size.width),
+                                  BbLiveGraphics::Extent(1080, float(size.height) / native_size.height)});
 }
 bool SceneTargets::SetSize(SceneResolution::Size next) {
     if (next == size) return false;
@@ -174,15 +206,19 @@ void SceneTargets::Copy(Entry& e, VideoCore::Image& original, bool to_native) {
     }
     const vk::Image src = to_native ? vk::Image(e.image) : original.GetImage();
     const vk::Image dst = to_native ? original.GetImage() : vk::Image(e.image);
-    if (ShaderResampled(original)) {
+    if (ShaderResampled(original) || u32(original.backing->image.image_ci.samples) > 1) {
+        const bool depth = original.info.props.is_depth;
         constexpr auto read_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-        constexpr auto write_layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+        const auto write_layout = depth ? vk::ImageLayout::eDepthStencilAttachmentOptimal :
+                                          vk::ImageLayout::eColorAttachmentOptimal;
         constexpr auto read_stage = vk::PipelineStageFlagBits2::eFragmentShader;
-        constexpr auto write_stage = vk::PipelineStageFlagBits2::eEarlyFragmentTests |
-                                     vk::PipelineStageFlagBits2::eLateFragmentTests;
+        const auto write_stage = depth ? vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                     vk::PipelineStageFlagBits2::eLateFragmentTests :
+                                     vk::PipelineStageFlags2(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
         constexpr auto read_access = vk::AccessFlagBits2::eShaderSampledRead;
-        constexpr auto write_access = vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-                                      vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+        const auto write_access = depth ? vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                                      vk::AccessFlagBits2::eDepthStencilAttachmentWrite :
+                                      vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite;
         runtime.Transit(&original, to_native ? write_layout : read_layout,
                         to_native ? write_stage : read_stage,
                         to_native ? write_access : read_access);
@@ -236,6 +272,8 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
                             vk::Extent2D dst_size) {
     const auto device = instance.GetDevice();
     const auto format = original.backing->image.image_ci.format;
+    const bool depth = original.info.props.is_depth;
+    const u32 samples = u32(original.backing->image.image_ci.samples);
     const bool stencil = bool(original.aspect_mask & vk::ImageAspectFlagBits::eStencil);
     const bool stencil_bits = stencil && !depth_stencil_frag;
     const auto make_view = [&](vk::Image image, vk::ImageAspectFlags aspect,
@@ -246,24 +284,24 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
             .format = format, .subresourceRange = {aspect, 0, 1, 0, 1},
         }));
     };
-    const auto depth_view = make_view(src, vk::ImageAspectFlagBits::eDepth,
+    const auto depth_view = make_view(src, depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor,
                                       vk::ImageUsageFlagBits::eSampled);
     const auto stencil_view = stencil ? make_view(src, vk::ImageAspectFlagBits::eStencil,
                                                   vk::ImageUsageFlagBits::eSampled)
                                       : vk::ImageView{};
     const auto target_view = make_view(dst, original.aspect_mask,
-                                       vk::ImageUsageFlagBits::eDepthStencilAttachment);
+                                       depth ? vk::ImageUsageFlagBits::eDepthStencilAttachment : vk::ImageUsageFlagBits::eColorAttachment);
     scheduler.DeferOperation([device, depth_view, stencil_view, target_view] {
         device.destroyImageView(depth_view);
         if (stencil_view) device.destroyImageView(stencil_view);
         device.destroyImageView(target_view);
     });
-    const auto pipeline = ResamplePipeline(format, stencil);
+    const auto pipeline = ResamplePipeline(format, stencil, samples, depth);
     const auto layout = *resample_layout;
     scheduler.RecordCrumb({.name = "scene resample"}, [=](vk::CommandBuffer cmd) {
         const vk::RenderingAttachmentInfo attachment{
             .imageView = target_view,
-            .imageLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+            .imageLayout = depth ? vk::ImageLayout::eDepthStencilAttachmentOptimal : vk::ImageLayout::eColorAttachmentOptimal,
             .loadOp = vk::AttachmentLoadOp::eDontCare,
             .storeOp = vk::AttachmentStoreOp::eStore,
         };
@@ -274,7 +312,9 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
         }
         cmd.beginRendering({
             .renderArea = {{0, 0}, dst_size}, .layerCount = 1,
-            .pDepthAttachment = &attachment,
+            .colorAttachmentCount = depth ? 0u : 1u,
+            .pColorAttachments = depth ? nullptr : &attachment,
+            .pDepthAttachment = depth ? &attachment : nullptr,
             .pStencilAttachment = stencil ? &stencil_attachment : nullptr,
         });
         const std::array infos{
@@ -316,8 +356,12 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
 void SceneTargets::CreateResampleResources() {
     const auto device = instance.GetDevice();
     fs_tri_vert = vk::UniqueShaderModule(CompileSPV(FS_TRI_VERT, device), device);
+    ms_color_frag = vk::UniqueShaderModule(CompileSPV(MS_RESAMPLE_FRAG, device), device);
+    ms_depth_frag = vk::UniqueShaderModule(CompileSPV(DEPTH_MS_RESAMPLE_FRAG, device), device);
+    ms_bits_frag = vk::UniqueShaderModule(CompileSPV(DEPTH_STENCIL_MS_BITS_FRAG, device), device);
     depth_frag = vk::UniqueShaderModule(CompileSPV(DEPTH_RESAMPLE_FRAG, device), device);
     if (instance.IsShaderStencilExportSupported() && !force_stencil_bits) {
+        ms_stencil_frag = vk::UniqueShaderModule(CompileSPV(DEPTH_STENCIL_MS_RESAMPLE_FRAG, device), device);
         depth_stencil_frag =
             vk::UniqueShaderModule(CompileSPV(DEPTH_STENCIL_RESAMPLE_FRAG, device), device);
     }
@@ -342,15 +386,16 @@ void SceneTargets::CreateResampleResources() {
         .pushConstantRangeCount = 1, .pPushConstantRanges = &push,
     }));
 }
-vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
+vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil, u32 samples, bool depth) {
     const bool stencil_bits = stencil && !depth_stencil_frag;
-    const std::pair key{format, stencil};
+    const std::tuple key{format, stencil, samples, depth};
     for (const auto& [k, pipeline] : resample_pipelines) if (k == key) return *pipeline;
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
         .topology = vk::PrimitiveTopology::eTriangleList,
     };
     const vk::PipelineMultisampleStateCreateInfo multisampling{
-        .rasterizationSamples = vk::SampleCountFlagBits::e1,
+        .rasterizationSamples = vk::SampleCountFlagBits(samples),
+        .sampleShadingEnable = samples > 1, .minSampleShading = 1.f,
     };
     // Reference, compare and write masks are static; the exported value replaces the reference.
     const vk::StencilOpState stencil_op{
@@ -359,7 +404,7 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
         .compareMask = 0xff, .writeMask = 0xff, .reference = 0,
     };
     const vk::PipelineDepthStencilStateCreateInfo depth_state{
-        .depthTestEnable = true, .depthWriteEnable = true,
+        .depthTestEnable = depth, .depthWriteEnable = depth,
         .depthCompareOp = vk::CompareOp::eAlways,
         .stencilTestEnable = stencil, .front = stencil_op, .back = stencil_op,
     };
@@ -374,15 +419,20 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eVertex,
                                           .module = *fs_tri_vert, .pName = "main"},
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eFragment,
-                                          .module = stencil ? (stencil_bits ? *stencil_bits_frag :
-                                                             *depth_stencil_frag) : *depth_frag,
+                                          .module = !depth ? *ms_color_frag : samples > 1 ?
+                                              (stencil ? (stencil_bits ? *ms_bits_frag : *ms_stencil_frag) : *ms_depth_frag) :
+                                              (stencil ? (stencil_bits ? *stencil_bits_frag : *depth_stencil_frag) : *depth_frag),
                                           .pName = "main"},
     };
     const vk::PipelineRenderingCreateInfo rendering{
-        .depthAttachmentFormat = format,
+        .colorAttachmentCount = depth ? 0u : 1u, .pColorAttachmentFormats = depth ? nullptr : &format,
+        .depthAttachmentFormat = depth ? format : vk::Format::eUndefined,
         .stencilAttachmentFormat = stencil ? format : vk::Format::eUndefined,
     };
-    const vk::PipelineColorBlendStateCreateInfo color_blending{};
+    const vk::PipelineColorBlendAttachmentState color{.colorWriteMask = vk::ColorComponentFlagBits::eR |
+        vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA};
+    const vk::PipelineColorBlendStateCreateInfo color_blending{
+        .attachmentCount = depth ? 0u : 1u, .pAttachments = depth ? nullptr : &color};
     const vk::PipelineViewportStateCreateInfo viewport_info{};
     const vk::PipelineVertexInputStateCreateInfo vertex_input{};
     const vk::PipelineRasterizationStateCreateInfo raster{.lineWidth = 1.f};

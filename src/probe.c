@@ -15,6 +15,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <signal.h>
+/* Laptops with two GPUs: the NVIDIA and AMD drivers run a program that exports these on the dedicated GPU
+ * (Optimus / PowerXpress). The Vulkan GPU itself is the port's choice (vk_instance.cpp: the dedicated one first,
+ * or the launcher's pick); these keep the drivers' power and display routing on the same side. */
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -339,6 +344,52 @@ static void dump_corrupt_block(const CONTEXT *c, uintptr_t block) {
     fflush(stderr);
 }
 
+/* The first corrupt block, as the anonymous perf report may carry it (scripts/perf_report.py): the
+ * kind of each word around the block's header, never its data (heap memory can hold names), and
+ * the guest callers. A small number (a size, a count, flags), a pointer near the block or into the
+ * executable (a vtable, code), other pointers, text or anything else: which of them is where the
+ * size should be tells an overflow of the block before from a write into a freed one. */
+static void heap_word_kind(char *out, size_t size, uintptr_t block, uint64_t v) {
+    unsigned char b[8];
+    memcpy(b, &v, 8);
+    int printable = 0, text = 1;
+    for (int i = 0; i < 8; ++i) {
+        if (b[i] >= 0x20 && b[i] < 0x7f) ++printable;
+        else if (b[i]) text = 0;
+    }
+    if (!v) snprintf(out, size, "0");
+    else if (v < 0x100000) snprintf(out, size, "n%llx", (unsigned long long)v);
+    else if (v - (uintptr_t)image < image_bytes) snprintf(out, size, "img+%llx", (unsigned long long)(v - (uintptr_t)image));
+    else if (v - block + 0x100000 < 0x200000)
+        snprintf(out, size, "b%s%llx", v < block ? "-" : "+", (unsigned long long)(v < block ? block - v : v - block));
+    else if (text && printable >= 4) snprintf(out, size, "txt");
+    else if (v < 0x800000000000ull) snprintf(out, size, "ptr");
+    else snprintf(out, size, "?");
+}
+
+static void heap_summary(const CONTEXT *c, uintptr_t block) {
+    uint64_t words[12];
+    SIZE_T got = 0;
+    ReadProcessMemory(GetCurrentProcess(), (void *)(block - 0x40), words, sizeof words, &got);
+    fprintf(stderr, "Runtime: corrupt block words (block-0x40..+0x18):");
+    for (SIZE_T i = 0; i < 12; ++i) {
+        char kind[32] = "unread";
+        if ((i + 1) * 8 <= got) heap_word_kind(kind, sizeof kind, block, words[i]);
+        fprintf(stderr, " %s", kind);
+    }
+    uintptr_t stack[256];
+    got = 0;
+    ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c->Rsp, stack, sizeof stack, &got);
+    fprintf(stderr, "; callers:");
+    for (SIZE_T i = 0, shown = 0; i < got / sizeof stack[0] && shown < 12; ++i)
+        if (stack[i] - (uintptr_t)image < image_bytes && stack[i] > (uintptr_t)image + 0x80) {
+            fprintf(stderr, " 0x%" PRIxPTR, stack[i] - (uintptr_t)image);
+            ++shown;
+        }
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -464,6 +515,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
                 static int count = 0;
                 if (!count) fprintf(stderr, "Runtime: bailing corrupt free at guest offset 0x%llx (block %p, r8=%p, pool=%p)\n",
                     (unsigned long long)(c->Rip - (uintptr_t)image), (void *)(wrapper ? c->R15 : c->Rsi), (void *)c->R8, (void *)c->Rdi);
+                if (!count) heap_summary(c, wrapper ? c->R15 : c->Rsi);
                 if (count < 4) dump_corrupt_block(c, wrapper ? c->R15 : c->Rsi);
                 ++count;
                 c->Rip = (uintptr_t)image + (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift;
@@ -924,16 +976,18 @@ void runtime_restart(void) {
      * closed below, and an assertion there must not end the process (exit 23) before exec. */
     runtime_restarting = 1;
     __sync_synchronize();
-#ifdef _WIN32
-    /* SacredFire: run.py sets BB_RESTART_EXIT_CODE and starts the game again itself when it ends
-     * with that code (new patches, same console and log). The process ends at once, as exec
-     * replaces it on Linux: the GPU threads must not run its exit handlers. */
+    /* run.py and launch_lock.py retain the launch lock and rebuild settings on restart. */
     const char *restart_code=getenv("BB_RESTART_EXIT_CODE");
     if (restart_code && *restart_code) {
-        puts("Runtime: restarting (run.py starts the game again)");
+        puts("Runtime: restarting (the supervisor starts the game again)");
         fflush(NULL);
+#ifdef _WIN32
         TerminateProcess(GetCurrentProcess(),(UINT)atoi(restart_code));
+#else
+        _exit(atoi(restart_code));
+#endif
     }
+#ifdef _WIN32
     /* Otherwise BB_RESTART_COMMAND: the launch command line, started again (new patches). */
     const char *command=getenv("BB_RESTART_COMMAND");
     puts("Runtime: restarting through run.py");

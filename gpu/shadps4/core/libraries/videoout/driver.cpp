@@ -16,6 +16,7 @@
 #include "common/assert.h"
 #include "bbport_toggles.h"
 #include "bbport_settings.h"
+#include "bbport_live_graphics.h"
 #include "bbport_heap_sites.h"
 #include "bbport_wait_trace.h"
 #include "bbport_native_signals.h"
@@ -27,6 +28,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/flip_timing.h"
 #include "core/libraries/kernel/equeue.h"
 
 extern "C" void runtime_sleep_stats(uint64_t* calls, uint64_t* ns);
@@ -38,6 +40,7 @@ extern "C" void runtime_wait_report(double frames);
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_d3d11.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -240,7 +243,9 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
         port->buffer_labels[startIndex + i] = 0;
         port->SignalVoLabel();
 
-        presenter->RegisterVideoOutSurface(group, address);
+        if (!BbD3d11::On()) {
+            presenter->RegisterVideoOutSurface(group, address);
+        }
         LOG_INFO(Lib_VideoOut, "buffers[{}] = {:#x}", i + startIndex, address);
     }
 
@@ -378,10 +383,15 @@ static void PrintMemory() {
 
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-        presenter->SetHDR(hdr);
-        presenter->Present(frame);
-    });
+    if (BbD3d11::On()) {
+        const u64 address = req.index >= 0 ? u64(req.port->buffer_slots[req.index].address_left) : 0;
+        RunPresenter([address, snapshot = req.snapshot] { BbD3d11::Present(address, snapshot); });
+    } else {
+        RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+            presenter->SetHDR(hdr);
+            presenter->Present(frame);
+        });
+    }
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
 
@@ -741,6 +751,10 @@ void VideoOutDriver::Flip(const Request& req) {
 }
 
 void VideoOutDriver::DrawBlankFrame() {
+    if (BbD3d11::On()) {
+        RunPresenter([] { BbD3d11::Present(0); });
+        return;
+    }
     RunPresenter([this] {
         const auto empty_frame = presenter->PrepareBlankFrame(true);
         presenter->Present(empty_frame, false, false);
@@ -748,6 +762,10 @@ void VideoOutDriver::DrawBlankFrame() {
 }
 
 void VideoOutDriver::DrawLastFrame() {
+    if (BbD3d11::On()) {
+        RunPresenter([] { BbD3d11::Present(0); });
+        return;
+    }
     RunPresenter([this] {
         const auto frame = presenter->PrepareLastFrame();
         if (frame != nullptr) {
@@ -757,7 +775,7 @@ void VideoOutDriver::DrawLastFrame() {
 }
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
-                                bool is_eop /*= false*/) {
+                                bool is_eop /*= false*/, u32 snapshot /*= 0*/) {
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -774,17 +792,26 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop, snapshot); });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(port, index, flip_arg, is_eop, snapshot);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
-    Vulkan::Frame* frame;
-    if (index == -1) {
+void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop,
+                                        u32 snapshot) {
+    Vulkan::Frame* frame = nullptr;
+    if (BbD3d11::On()) {
+        // The Direct3D 11 engine keeps no frames: Flip presents its copy of the buffer, made now
+        // (the game may draw a later frame there before the flip is shown). A request without a
+        // frame reads as no request, so this only says there is one; it is never used as a frame.
+        frame = reinterpret_cast<Vulkan::Frame*>(std::uintptr_t{1});
+        if (index >= 0 && !snapshot) { // an EOP flip brings the copy made when it was submitted
+            snapshot = BbD3d11::Snapshot(port->buffer_slots[index].address_left);
+        }
+    } else if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
     } else {
         const auto& buffer = port->buffer_slots[index];
@@ -815,6 +842,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .flip_arg = flip_arg,
             .index = index,
             .eop = is_eop,
+            .snapshot = snapshot,
         });
     }
     request_cv.notify_one();
@@ -848,14 +876,15 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::AccurateTimer timer{vblank_period};
 
     // bbport: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
-    // until its slot; slots advance by one period (no drift) but never lag behind by more.
+    // until its slot; missed slots are discarded so loading cannot cause catch-up bursts.
     // SacredFire: BB_FPS_LIMIT when set, else the in-game menu's limit, read every tick.
     const char* const limit_env = std::getenv("BB_FPS_LIMIT");
     const auto current_limit = [limit_env]() -> u32 {
-        if (limit_env && *limit_env) {
-            return EmulatorSettings.GetFrameLimit();
-        }
-        return u32(std::max(0, BbSettings::Get().fps_limit.load(std::memory_order_relaxed)));
+        const auto& settings = BbSettings::Get();
+        const u32 requested = limit_env && *limit_env ? EmulatorSettings.GetFrameLimit() :
+            u32(std::max(0, settings.fps_limit.load(std::memory_order_relaxed)));
+        return settings.LiveGraphics() ?
+            BbLiveGraphics::FrameLimit(requested, settings.game_patches[0]) : requested;
     };
     auto next_flip = std::chrono::steady_clock::now();
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
@@ -878,7 +907,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // bbport: with a frame limit or the uncapped presets a queued flip is presented as soon
         // as it arrives and its slot allows (no limit: at once), between vblanks, instead of on
         // the next vblank tick.
-        const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
+        const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank() ||
+                                     BbSettings::Get().LiveGraphics();
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
@@ -895,7 +925,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = NextFlipDeadline(next_flip, now, frame_period);
             }
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
@@ -947,7 +977,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     break; // next vblank
                 }
             }
-            if (std::chrono::steady_clock::now() < next_flip) {
+            if (frame_limit && std::chrono::steady_clock::now() < next_flip) {
                 if (next_flip >= tick_deadline) {
                     break;
                 }
@@ -956,7 +986,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();
             if (request) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = NextFlipDeadline(next_flip, now, frame_period);
                 Flip(request);
                 FRAME_END;
             }

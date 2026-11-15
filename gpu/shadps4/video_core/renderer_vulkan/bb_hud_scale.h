@@ -109,7 +109,8 @@ inline std::optional<std::vector<std::uint32_t>> Scale(std::span<const std::uint
 // The SPIR-V to make the module of this shader from: scaled when BB_HUD_SCALE names it (and the
 // motion blur shaders without their blur with BB_NO_MOTION_BLUR, bb_motion_blur.h).
 inline std::optional<std::vector<std::uint32_t>> ForModule(std::uint64_t pgm_hash, std::size_t perm,
-                                                           std::span<const std::uint32_t> spv) {
+                                                           std::span<const std::uint32_t> spv,
+                                                           bool motion_blur = true) {
     for (const auto& e : Entries()) {
         if (e.hash != pgm_hash || e.perm != perm) continue;
         auto scaled = Scale(spv, e.factor);
@@ -119,7 +120,7 @@ inline std::optional<std::vector<std::uint32_t>> ForModule(std::uint64_t pgm_has
         }
         return scaled;
     }
-    return BbBlur::ForModule(pgm_hash, spv); // with the motion blur patch: no blur shader either
+    return motion_blur ? BbBlur::ForModule(pgm_hash, spv) : std::nullopt;
 }
 
 } // namespace BbHud
