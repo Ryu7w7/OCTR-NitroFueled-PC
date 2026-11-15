@@ -127,7 +127,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "dlss_output") {
         v.dlss_output = i == 2160 ? 1 : 0;
     } else if (key == "dlss_model") {
-        v.dlss_model = value == "cnn" ? 1 : 0;
+        v.dlss_model = 0;
+        for (int m = 0; m < DlssModelCount; ++m) {
+            if (value == DlssModelNames[m]) v.dlss_model = m;
+        }
     } else if (key == "fsr3_sharpness") {
         v.fsr3_sharpness = Clamp(f, 0.0f, 1.0f);
     } else if (key == "render_res") {
@@ -475,7 +478,7 @@ void Save() {
     put("temporal", TemporalNames[std::clamp(v.temporal.load(), 0, TemporalCount - 1)]);
     put("dlss_quality", DlssQualityNames[std::clamp(v.dlss_quality.load(), 0, DlssQualityCount - 1)]);
     put("dlss_output", std::to_string(DlssOutputHeights[v.dlss_output ? 1 : 0]));
-    put("dlss_model", DlssModelNames[v.dlss_model ? 1 : 0]);
+    put("dlss_model", DlssModelNames[std::clamp(v.dlss_model.load(), 0, DlssModelCount - 1)]);
     put("fsr3_sharpness", fixed(v.fsr3_sharpness, 2));
     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                           std::to_string(OutputHeights[v.output_res]));

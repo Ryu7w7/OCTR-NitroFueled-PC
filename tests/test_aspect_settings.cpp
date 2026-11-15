@@ -73,6 +73,16 @@ int main() {
     std::ofstream(path) << "aspect_ratio=16x9\nwidescreen_layout=21x9\n";
     BbSettings::Load();
     assert(s.aspect_ratio == BbSettings::Aspect16x9);
+    // dlss_model: each name loads as its NGX preset and is saved back; an unknown one is transformer.
+    for (const auto& model : {std::pair{"transformer", 0u}, std::pair{"cnn", 5u},
+                              std::pair{"transformer_k", 11u}, std::pair{"unknown", 0u}}) {
+        std::ofstream(path) << "dlss_model=" << model.first << "\n";
+        BbSettings::Load();
+        assert(BbSettings::DlssModelPreset() == model.second);
+        BbSettings::Save();
+        const std::string expected = model.second == 0u ? "transformer" : model.first;
+        assert(Read(path).find("dlss_model=" + expected + "\n") != std::string::npos);
+    }
     std::filesystem::remove(temporary);
-    std::puts("PASS: aspect ratios, key precedence, load/save and legacy widescreen compatibility");
+    std::puts("PASS: aspect ratios, key precedence, load/save and legacy widescreen compatibility, dlss_model");
 }
