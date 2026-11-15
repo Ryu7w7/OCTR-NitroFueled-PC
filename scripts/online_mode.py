@@ -1604,10 +1604,14 @@ def _prepare(game, out, elf, bases):
         'ui/octane_cuprace_ranking.igz': cup_ui,
         score_graph_path.removeprefix(PACKAGE_PREFIX): score_graph,
     }
+    # Pack Tacho's race HUD files (scripts/tacho_pack.py), so the streamed copies match the archives.
+    import tacho_pack
+    pack_ui = {path: data for path, data in tacho_pack.stream_replacements().items()
+               if path.startswith('ui/') and path not in ranking_replacements}
     for project in ('octane_battleteam_ranking', 'octane_race_ranking', 'octane_race_leaders',
                     'octane_cuprace_ranking'):
         archive = out / (project + '.pak')
-        ranking_stream_archive(game, archive, race_package, project, ranking_replacements)
+        ranking_stream_archive(game, archive, race_package, project, {**pack_ui, **ranking_replacements})
         mapped.setdefault('archives/' + archive.name, archive)
     # StreamingUI fallbacks: game may open these pak files directly (#0009).
     lobby_archive = out / 'octane_lobbymembers.pak'

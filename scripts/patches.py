@@ -43,6 +43,9 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
                  'patch_unlock_all':'CrashTeamRacingUnlockAll.xml/Unlock Everything',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
+# Pack Tacho's executable patches (scripts/tacho_pack.py; on unless bbport.ini tacho_pack=0).
+TACHO_PACK_FILES=('RaceLeaders_hud.xml','HudOriginal.xml','ItemsMejorados.xml','NtropyPosicion.xml',
+                  'SinItemsPortales.xml','BarraReservas.xml')
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
                'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
@@ -513,16 +516,26 @@ def external_selection(found, config, ini=None):
     if any(selection_key(key) == blur and meta.get('AppVer') == '01.21' for key, _, meta in found):
         enabled.discard(blur)
         disabled.add(blur)
+    # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): off as a whole with its game files.
+    if (ini or {}).get('tacho_pack','1').strip().lower() in ('0','off','no','false') or \
+            os.environ.get('BB_TACHO_PACK','').strip().lower() in ('0','off','no','false'):
+        found=[patch for patch in found if not tacho_pack_patch(patch[0])]
     return [(key,path,meta) for key,path,meta in found
             if selection_key(key) in enabled
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
+def tacho_pack_patch(key):
+    """One of Pack Tacho's executable patches (scripts/tacho_pack.py), by its file name."""
+    return key.partition('/')[0] in TACHO_PACK_FILES
+
+
 def optional_game_patch(key):
     """One of the bundled community game patches (GAME_PATCH_KEYS: 60 FPS, motion blur, ...),
-    under any edition's file name. Nothing a mod ships depends on them, so one whose code is not
-    found in this executable (another build of the update) is skipped even in a mod session."""
-    return selection_key(key) in GAME_PATCH_KEYS.values()
+    under any edition's file name, or of Pack Tacho (made for the USA 1.21 executable only).
+    Nothing a mod ships depends on them, so one whose code is not found in this executable
+    (another build of the update) is skipped even in a mod session."""
+    return selection_key(key) in GAME_PATCH_KEYS.values() or tacho_pack_patch(key)
 
 
 def compile_external(selected, segments, elf=None, strict=False, require_verification=False,

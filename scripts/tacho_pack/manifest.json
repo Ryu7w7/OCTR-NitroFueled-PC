@@ -1,0 +1,226 @@
+{
+ "format": 1,
+ "name": "Pack Tacho",
+ "version": "1.2.8",
+ "author": "Tacho",
+ "description": "Paquete: Lista 8 puestos compacta + nombre + wumpas + item (Hud Power Charged) 0.53.0 (con No = HUD original) + Logo Power Charged en el menu principal 0.6.0 + Items mejorados 1.5.1 + Reloj de N. Tropy por posicion 0.3.0 + Sin items en los portales 0.19.0 + Barra de reservas 1.0.1. Minimapa un poco mas arriba (no tapa el velocimetro).",
+ "operations": [
+  {
+   "kind": "archive_asset",
+   "archive": "update.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 36,
+   "original_sha256": "18c3401278639ef239e0109fe8c5be6180e967d70c05bd93cd5bf4074a8c9906",
+   "patched_sha256": "13ba0c73edf93b2c4e865e5e4df6405986fbd9bfa0440aa55731b2c23923ad92",
+   "payload": "payloads/13ba0c73edf93b2c.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 6,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flareday.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 7,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flarenight.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 7,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "update2.pak",
+   "asset": "ui/Octane_Racer_HUD.igz",
+   "index": 10067,
+   "original_sha256": "0018619b6ccf5b40015bd1b4caa24516028d487ce05b27a6ecc1b9c57b71be2f",
+   "patched_sha256": "716be7d86455c297b4dceff51e6a5e8db9c9d462bcd8b3a898285f727c4fc5a2",
+   "payload": "payloads/716be7d86455c297.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_01`tga,101.igz",
+   "index": 32,
+   "original_sha256": "ffbc0378f357d4dc2784a21f17e4bdb9f1e5f3083b9836accfadebfc146656a6",
+   "patched_sha256": "7b1c576093b0f3eaf930947883afebafcdcadc82f8eb5446c10865acd9b0aaf2",
+   "payload": "payloads/7b1c576093b0f3ea.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_04`tga,101.igz",
+   "index": 220,
+   "original_sha256": "3dccb61b71c5892b7b90e569bcc41b49833c6d9d8b7314c3d09fcaea67f9a94f",
+   "patched_sha256": "28a693486f43a020a793f016cfc488c108bfa81948c697958654ca6443b62dc0",
+   "payload": "payloads/28a693486f43a020.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_02`tga,101.igz",
+   "index": 452,
+   "original_sha256": "49b379f9d80eeb10fe0a4d5cd1f3c9314624b6236668b8387c0292611f039f75",
+   "patched_sha256": "e2e2bd9b56644a71085d68d9dd621e88814cf844ecbdec33377b2bf2a35f0c0e",
+   "payload": "payloads/e2e2bd9b56644a71.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_03`tga,101.igz",
+   "index": 555,
+   "original_sha256": "1a32274c80dee3124db447ec5a6c3326150487b7577d5791ff075c065cb56a3b",
+   "patched_sha256": "05a4ae3ec1de4b2c98bda7fd0e5b71f2dfebfac406e471734d14faf51f7066f4",
+   "payload": "payloads/05a4ae3ec1de4b2c.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_wireless`tga,101.igz",
+   "index": 1316,
+   "original_sha256": "004047283f33472cef24cfa7b99b5e16ea1ee2f235512e65eb76ffde00634bb0",
+   "patched_sha256": "492bd02258efde157cb5aac943885d28c3e5434978ad710371e297b5fe56019a",
+   "payload": "payloads/492bd02258efde15.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_01`tga,101.igz",
+   "index": 32,
+   "original_sha256": "ffbc0378f357d4dc2784a21f17e4bdb9f1e5f3083b9836accfadebfc146656a6",
+   "patched_sha256": "7b1c576093b0f3eaf930947883afebafcdcadc82f8eb5446c10865acd9b0aaf2",
+   "payload": "payloads/7b1c576093b0f3ea.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_04`tga,101.igz",
+   "index": 227,
+   "original_sha256": "3dccb61b71c5892b7b90e569bcc41b49833c6d9d8b7314c3d09fcaea67f9a94f",
+   "patched_sha256": "28a693486f43a020a793f016cfc488c108bfa81948c697958654ca6443b62dc0",
+   "payload": "payloads/28a693486f43a020.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_02`tga,101.igz",
+   "index": 451,
+   "original_sha256": "49b379f9d80eeb10fe0a4d5cd1f3c9314624b6236668b8387c0292611f039f75",
+   "patched_sha256": "e2e2bd9b56644a71085d68d9dd621e88814cf844ecbdec33377b2bf2a35f0c0e",
+   "payload": "payloads/e2e2bd9b56644a71.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_adventure_03`tga,101.igz",
+   "index": 541,
+   "original_sha256": "1a32274c80dee3124db447ec5a6c3326150487b7577d5791ff075c065cb56a3b",
+   "patched_sha256": "05a4ae3ec1de4b2c98bda7fd0e5b71f2dfebfac406e471734d14faf51f7066f4",
+   "payload": "payloads/05a4ae3ec1de4b2c.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Background!octane_ui_foreground_menu_wireless`tga,101.igz",
+   "index": 1279,
+   "original_sha256": "004047283f33472cef24cfa7b99b5e16ea1ee2f235512e65eb76ffde00634bb0",
+   "patched_sha256": "492bd02258efde157cb5aac943885d28c3e5434978ad710371e297b5fe56019a",
+   "payload": "payloads/492bd02258efde15.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_hub.pak",
+   "asset": "ui/Octane_MainMenu.igz",
+   "index": 647,
+   "original_sha256": "f760040e15f83120deca6108c2a43c50c341ec56770aecdc4fdbf9811be7333d",
+   "patched_sha256": "f67552c783deee5e6fb927384a42a08ced860ff5adf18a84c97b67bba16be044",
+   "payload": "payloads/f67552c783deee5e.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_startscreen.pak",
+   "asset": "ui/Octane_MainMenu.igz",
+   "index": 630,
+   "original_sha256": "f760040e15f83120deca6108c2a43c50c341ec56770aecdc4fdbf9811be7333d",
+   "patched_sha256": "f67552c783deee5e6fb927384a42a08ced860ff5adf18a84c97b67bba16be044",
+   "payload": "payloads/f67552c783deee5e.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "update.pak",
+   "asset": "ui/Octane_MainMenu.igz",
+   "index": 1858,
+   "original_sha256": "ffd39077435e6deb3db9e497d3b230a62bcb16006cd39fb44c898469b694625e",
+   "patched_sha256": "ceb41574865f89d8a97aa1162bbbc161ffae1fbc860a7486c8401b6dbd79f023",
+   "payload": "payloads/ceb41574865f89d8.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "update2.pak",
+   "asset": "ui/Octane_MainMenu.igz",
+   "index": 5197,
+   "original_sha256": "a828ab2f20a616e02c94bf8ff6bc719f1176e18ca26fadd941a7fff993789601",
+   "patched_sha256": "ddf61a7eba439d5b504ede4910bc67cf539957f60b3a5b72f9fe77c16e2b58f6",
+   "payload": "payloads/ddf61a7eba439d5b.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 283,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flareday.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 287,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flarenight.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 288,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  }
+ ],
+ "menu_operations": [
+  {
+   "kind": "archive_asset",
+   "archive": "update2.pak",
+   "asset": "ui/Octane_Options_Menu_Page.igz",
+   "index": 1582,
+   "original_sha256": "a3f73faeb9311f80c24436bfd604204125b4e429653e3927bfc5adc98cdbf4b0",
+   "patched_sha256": "db9174f804219cf3e609cc47ec3deb756358279c56fb9f97d348b40a66422a93",
+   "payload": "payloads/db9174f804219cf3.igz"
+  }
+ ],
+ "patches": [
+  "RaceLeaders_hud.xml",
+  "HudOriginal.xml",
+  "ItemsMejorados.xml",
+  "NtropyPosicion.xml",
+  "SinItemsPortales.xml",
+  "BarraReservas.xml"
+ ]
+}
