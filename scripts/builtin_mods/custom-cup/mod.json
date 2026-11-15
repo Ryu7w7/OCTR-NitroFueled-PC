@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its four races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its four tracks' pictures in the same row, with their white frames.",
   "requiresCapabilities": [
@@ -84,7 +84,7 @@
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "1ed9a4e2dfdd86748e66c3ca8f46f4408a3a9eb44f61b2d87f9c06a9ae49a66d",
+      "sha256": "c84e76d8d6a6d369b295282915d34d052f45db1e4010a0495f966e0f89bf092f",
       "bytes": 14499
     },
     {
