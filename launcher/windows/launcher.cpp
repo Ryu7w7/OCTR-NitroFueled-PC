@@ -1999,6 +1999,17 @@ void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
 
+/// The place in gpus (bb-gpu-capabilities --gpus, Vulkan's order: BB_GPU_ID) of the nth GPU
+/// called name when several share it, the first one's if there are no longer that many; -1 when
+/// the name is unique or not listed (BB_GPU_NAME is enough).
+int GpuIndex(const std::vector<App::Gpu>& gpus, const std::string& name, int nth) {
+    std::vector<int> same;
+    for (size_t i = 0; i < gpus.size(); ++i)
+        if (gpus[i].name == name) same.push_back(int(i));
+    if (same.size() < 2) return -1;
+    return nth >= 0 && nth < int(same.size()) ? same[nth] : same[0];
+}
+
 bool UpdateBusy();
 
 void StartGame() {
@@ -2026,7 +2037,24 @@ void StartGame() {
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
-    SetEnv(L"BB_GPU_NAME", a.launcher.Get("gpu"));  // the graphics card, by name (empty: automatic)
+    {
+        // The graphics card, by name (empty: automatic); one of several GPUs that share a name by
+        // its place in Vulkan's list instead (BB_GPU_NAME would take the first of them). Otherwise
+        // a BB_GPU_ID set outside the launcher stays: the one it started with, not an earlier game's.
+        static const std::wstring outside_id = [] {
+            const wchar_t* value = _wgetenv(L"BB_GPU_ID");
+            return std::wstring(value ? value : L"");
+        }();
+        const std::string gpu = a.launcher.Get("gpu");
+        int index;
+        {
+            std::scoped_lock lock{a.mutex};
+            index = GpuIndex(a.gpus, gpu, a.launcher.Int("gpu_nth", 0));
+        }
+        SetEnv(L"BB_GPU_NAME", index < 0 ? gpu : "");
+        if (index >= 0) SetEnv(L"BB_GPU_ID", std::to_string(index));
+        else SetEnvironmentVariableW(L"BB_GPU_ID", outside_id.empty() ? nullptr : outside_id.c_str());
+    }
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
@@ -3540,8 +3568,25 @@ void SetWindowsGpuPreference(int preference) {
     RegCloseKey(key);
 }
 
-std::string GpuLabel(const App::Gpu& gpu) {
+/// The place of gpus[i] among the GPUs with its name (0: the first), and how many have it.
+int GpuNth(const std::vector<App::Gpu>& gpus, size_t i, int& same) {
+    int nth = 0;
+    same = 0;
+    for (size_t j = 0; j < gpus.size(); ++j) {
+        if (gpus[j].name != gpus[i].name) continue;
+        if (j < i) ++nth;
+        ++same;
+    }
+    return nth;
+}
+
+/// GPUs that share a name are told apart: #1, #2 in Vulkan's order.
+std::string GpuLabel(const std::vector<App::Gpu>& gpus, size_t i) {
+    const App::Gpu& gpu = gpus[i];
     std::string label = gpu.name;
+    int same = 0;
+    const int nth = GpuNth(gpus, i, same);
+    if (same > 1) label += " #" + std::to_string(nth + 1);
     if (gpu.kind == "discrete") label += T(" (dedicada)", " (dedicated)");
     else if (gpu.kind == "integrated") label += T(" (integrada)", " (integrated)");
     else if (gpu.kind == "cpu") label += T(" (por software, muy lenta)", " (software, very slow)");
@@ -3553,29 +3598,40 @@ std::string GpuLabel(const App::Gpu& gpu) {
 }
 
 /// The graphics card: automatic (the engine prefers a dedicated GPU with Vulkan 1.3) or one of
-/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic).
+/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic) and,
+/// when several share it, which of them (gpu_nth, BB_GPU_ID).
 void GpuCombo() {
     App& a = g_app;
     std::scoped_lock lock{a.mutex};
     const std::string current = a.launcher.Get("gpu");
+    const int index = GpuIndex(a.gpus, current, a.launcher.Int("gpu_nth", 0));
+    const auto chosen = [&](size_t i) { return a.gpus[i].name == current && (index < 0 || index == int(i)); };
     std::string preview = T("Automática", "Automatic");
     bool listed = false;
-    for (const auto& gpu : a.gpus)
-        if (gpu.name == current) { preview = GpuLabel(gpu); listed = true; }
+    for (size_t i = 0; i < a.gpus.size(); ++i)
+        if (chosen(i)) { preview = GpuLabel(a.gpus, i); listed = true; }
     if (!current.empty() && !listed) preview = current + T(" (no detectada)", " (not detected)");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
     if (ImGui::BeginCombo(T("Tarjeta gráfica", "Graphics card"), preview.c_str())) {
         if (ImGui::Selectable(T("Automática", "Automatic"), current.empty())) {
             a.launcher.Set("gpu", "");
+            a.launcher.Erase("gpu_nth");
             SaveLauncher();
             SetWindowsGpuPreference(0);
         }
-        for (const auto& gpu : a.gpus) {
-            if (ImGui::Selectable(GpuLabel(gpu).c_str(), gpu.name == current)) {
+        for (size_t i = 0; i < a.gpus.size(); ++i) {
+            const auto& gpu = a.gpus[i];
+            ImGui::PushID(int(i));  // GPUs that share a name share their label too
+            if (ImGui::Selectable(GpuLabel(a.gpus, i).c_str(), chosen(i))) {
+                int same = 0;
+                const int nth = GpuNth(a.gpus, i, same);
                 a.launcher.Set("gpu", gpu.name);
+                if (nth) a.launcher.Set("gpu_nth", std::to_string(nth));
+                else a.launcher.Erase("gpu_nth");
                 SaveLauncher();
                 SetWindowsGpuPreference(gpu.kind == "discrete" ? 2 : gpu.kind == "integrated" ? 1 : 0);
             }
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -9513,6 +9569,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 SplitServer(server, host, port);
                 if (g_app.game.Flag("online", true)) EosBridgeRoute(server, port, local, 30000);
             }
+            // A chosen graphics card that shares its name with another is told apart by the GPU list.
+            if (!g_app.launcher.Get("gpu").empty() && g_app.probe.joinable()) g_app.probe.join();
             StartGame();
             while (g_app.game_running) {
                 MSG msg;

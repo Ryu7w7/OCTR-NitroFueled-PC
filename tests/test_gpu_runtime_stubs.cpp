@@ -6,6 +6,10 @@
 #include <setjmp.h>
 #include "../src/runtime_friends.h"
 #include "../src/runtime_net_ping.h"
+#include "../src/runtime_chat.h"
+#include "../src/runtime_spectate.h"
+#include "../src/runtime_replay_list.h"
+#include "../src/runtime_name_colors.h"
 // Renderer tests have no guest process. Clock/host-thread services work; guest accesses abort.
 extern "C" {
 thread_local sigjmp_buf* runtime_fault_recover = nullptr;
@@ -14,6 +18,35 @@ void (*runtime_thread_started_hook)(const char*) = nullptr;
 int runtime_memory_is_mapped(uintptr_t, uint64_t) { return 0; }
 int runtime_graphics_tab_ready = 0;
 unsigned runtime_friends_serial() { return 0; }
+void runtime_chat_start() {}
+void runtime_chat_set_enabled(int) {}
+void runtime_chat_set_public(int) {}
+void runtime_chat_set_in_race(int) {}
+int runtime_chat_available() { return 0; }
+int runtime_chat_racing() { return 0; }
+unsigned runtime_chat_serial() { return 0; }
+unsigned runtime_chat_view(RcLine*, int, int* count, int* status) { *count = *status = 0; return 0; }
+int runtime_chat_send(const char*) { std::abort(); }
+void runtime_chat_mute(const char*, int) { std::abort(); }
+int runtime_chat_muted(const char*) { return 0; }
+void runtime_spectate_set_share(int) {}
+void runtime_spectate_watch(const char*) { std::abort(); }
+void runtime_spectate_stop() { std::abort(); }
+int runtime_spectate_following(char*, int) { return 0; }
+unsigned runtime_spectate_status(int* state, char*, int) { *state = RS_IDLE; return 0; }
+int runtime_spectate_viewers() { return 0; }
+int runtime_replay_list(RrListEntry*, int) { return 0; }
+int runtime_replay_play_file(const char*) { std::abort(); }
+int runtime_replay_can_start() { return 0; }
+const char* runtime_replay_blocked_reason() { return "No guest in renderer tests"; }
+int runtime_replay_playing() { return 0; }
+void runtime_replay_folder(char*, size_t) { std::abort(); }
+int runtime_replay_export(const char*, char*, size_t) { std::abort(); }
+int runtime_replay_import() { std::abort(); }
+int runtime_replay_delete(const char*) { std::abort(); }
+int runtime_replay_view(RrView*) { return 0; }
+void runtime_name_colors_start() {}
+int runtime_name_color(const char*, float[3]) { return 0; }
 void runtime_friends_view(RfView* out) { *out = {}; }
 void runtime_friends_action(const char*, const char*) { std::abort(); }
 void runtime_friends_search(const char*) { std::abort(); }
