@@ -1231,10 +1231,13 @@ def launch(args, restarted=False):
             say(f"CTR TV logo: {error}; the game's own")
         # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): its HUD, leaders list and main
         # menu files by archive patch, and the Graphics tab's main menu made from the pack's.
+        # It has no off switch; a changed pack stops the launch (every player has the same rules).
         try:
             tacho_patches, tacho_env = startup_call('tacho_pack.prepare', tacho_pack.prepare, game, out, config, env, base_patches)
             base_patches.update(tacho_patches)
             env.update(tacho_env)
+        except tacho_pack.Modified as error:
+            fail(f'Pack Tacho: {error}')
         except (OSError, ValueError, KeyError) as error:
             say(f"Pack Tacho: {error}; the game's own files")
         # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE

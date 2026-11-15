@@ -1,9 +1,11 @@
-"""Pack Tacho built into the port (scripts/tacho_pack.py, patches/)."""
+"""Pack Tacho built into the port (scripts/tacho_pack.py, scripts/tacho_pack/patches/)."""
 import hashlib
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -17,7 +19,7 @@ class TachoPackTests(unittest.TestCase):
     def test_every_game_file_is_present_and_intact(self):
         m = tacho_pack.manifest()
         self.assertEqual(len(m['operations']), 22)
-        self.assertEqual(len(m['menu_operations']), 1)
+        self.assertEqual(len(m['menu_operations']), 1)  # kept in the data, never applied
         for op in m['operations'] + m['menu_operations']:
             data = (tacho_pack.FOLDER / op['payload']).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), op['patched_sha256'], op['payload'])
@@ -39,17 +41,31 @@ class TachoPackTests(unittest.TestCase):
             for line in ET.parse(patches.TACHO_PACK_DIR / name).getroot().iter('Line'):
                 self.assertTrue(line.get('Signature') or line.get('ExpectedSHA256'), name)
 
-    def test_the_pack_turns_off_as_a_whole(self):
-        self.assertEqual(patches.tacho_pack_patches({'tacho_pack': '0'}), [])
+    def test_no_setting_turns_it_off(self):
+        with mock.patch.dict(os.environ, {'BB_TACHO_PACK': '0', 'BB_TACHO_PACK_MENU': '1'}):
+            self.assertEqual(len(patches.tacho_pack_patches({'tacho_pack': '0'})), 6)
+            self.assertEqual(len(tacho_pack.operations()), 22)  # never the Options page entries
+
+    def test_a_changed_file_stops_the_launch(self):
         with tempfile.TemporaryDirectory() as folder:
-            ini = Path(folder) / 'bbport.ini'
-            ini.write_text('tacho_pack=0\n', encoding='utf-8')
-            self.assertFalse(tacho_pack.wanted(ini, {}))
-            self.assertEqual(tacho_pack.prepare(folder, folder, ini, {}, {}), ({}, {}))
-            ini.write_text('tacho_pack_menu=1\n', encoding='utf-8')
-            self.assertTrue(tacho_pack.wanted(ini, {}))
-            self.assertEqual(len(tacho_pack.operations(ini, {})), 23)
-        self.assertEqual(len(tacho_pack.operations(None, {})), 22)
+            copy = Path(folder) / 'tacho_pack'
+            shutil.copytree(tacho_pack.FOLDER, copy)
+            with mock.patch.object(tacho_pack, 'FOLDER', copy), \
+                    mock.patch.object(patches, 'TACHO_PACK_DIR', copy / 'patches'):
+                tacho_pack.verify()
+                op = tacho_pack.operations()[0]
+                original = (copy / op['payload']).read_bytes()
+                (copy / op['payload']).write_bytes(b'not the pack')
+                with self.assertRaises(tacho_pack.Modified):
+                    tacho_pack.payload(op)
+                (copy / op['payload']).write_bytes(original)
+                xml = copy / 'patches' / 'ItemsMejorados.xml'
+                xml.write_bytes(xml.read_bytes().replace(b'PatchVer="1.5.1"', b'PatchVer="9.9.9"'))
+                with self.assertRaises(tacho_pack.Modified):
+                    patches.tacho_pack_patches({})
+                xml.unlink()
+                with self.assertRaises(tacho_pack.Modified):
+                    tacho_pack.verify()
 
     def test_its_patches_never_block_another_executable(self):
         for name in patches.TACHO_PACK_FILES:

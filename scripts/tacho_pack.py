@@ -15,10 +15,11 @@ which the game reads last, so it is rebuilt from the pack's menu. Online mode (s
 builds streaming copies of the leaders list from the game's files; stream_replacements() gives
 it the pack's.
 
-It has no launcher setting. bbport.ini tacho_pack = 0 (or BB_TACHO_PACK=0) is a hidden kill
-switch that leaves the whole pack out, patches included, to tell whether a problem comes from it.
-tacho_pack_menu = 1 adds the pack's "Hud Power Charged" and "Barra de reservas" entries to
-Options > Game (another Options page; without it the new HUD and the bar are always on).
+It is fixed: no launcher or bbport.ini setting turns it off or changes it, so every player
+races under the same rules. Its files are checked against SHA256 values written here
+(verify()); a changed or missing file stops the launch until the port is installed again.
+The pack's optional Options page entries ("Hud Power Charged", "Barra de reservas", which turn
+its HUD off) are left out for the same reason.
 SPDX-License-Identifier: GPL-2.0-or-later
 """
 import contextlib
@@ -33,8 +34,17 @@ from archive_reader import Archive
 from mod_file_paths import resolve
 
 FOLDER = Path(__file__).resolve().parent / 'tacho_pack'
-OFF = ('0', 'off', 'no', 'false')
-FORMAT = 1
+FORMAT = 2
+# The pack as shipped: the manifest (which holds every game file's SHA256) and its patches.
+EXPECTED = {
+    'manifest.json': 'b02a256311c3ce84d08e8aac7ccacdd836c380867c34a35783b4181e9a96e82b',
+    'patches/BarraReservas.xml': '3259ce94fbc6c71a71f913e76fc33f7c4455ec63e0624e192b467415de71bafc',
+    'patches/HudOriginal.xml': '1b150e56c06b36619fcca5c49e16f07b5633ce45d96320ea891ecc966c0d621d',
+    'patches/ItemsMejorados.xml': 'af2146c67bdde0ccbc27cdbbfc28fbab9d05d64e10d6c7348ef2048506329725',
+    'patches/NtropyPosicion.xml': '2d698ba3dd71472f428e1e2df3a8fdc1f37b8049331331986d0828779c2e5115',
+    'patches/RaceLeaders_hud.xml': 'ad35f230077e60061518d79c6df0dfd24ff4e790d62e8a10d1620b0bfc03ef0f',
+    'patches/SinItemsPortales.xml': '138ed816f5e64ac77b54835364c1eb1be4bee526e10d51dfb8516a2773336d69',
+}
 # (Its executable patches are listed in scripts/patches.py, TACHO_PACK_FILES.)
 # {asset path (lower case): pack bytes} of this launch's swaps, for scripts/online_mode.py.
 _ACTIVE = {}
@@ -44,37 +54,40 @@ def say(text):
     print(f'Pack Tacho: {text}', flush=True)
 
 
-def _setting(config, env, key, variable, default):
-    value = env.get(variable, '') if env is not None else ''
-    if not value and config and Path(config).is_file():
-        for line in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
-            name, sep, setting = line.partition('=')
-            if sep and name.strip() == key:
-                value = setting.strip()
-    return (value or default).strip().lower()
+class Modified(ValueError):
+    """A file of the pack is not the one shipped: the launch stops (run.py)."""
 
 
-def wanted(config, env=None):
-    return _setting(config, env, 'tacho_pack', 'BB_TACHO_PACK', '1') not in OFF
-
-
-def menu_wanted(config, env=None):
-    return _setting(config, env, 'tacho_pack_menu', 'BB_TACHO_PACK_MENU', '0') not in OFF
+def verify():
+    """Raises Modified when the manifest or a patch differs from the shipped one (the manifest
+    pins every game file's SHA256, which payload() checks)."""
+    for name, digest in EXPECTED.items():
+        path = FOLDER / name
+        try:
+            # LF line ends, as git stores them: a Windows checkout has CRLF in these text files.
+            actual = hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+        except OSError:
+            actual = None
+        if actual != digest:
+            raise Modified(f'scripts/tacho_pack/{name} is missing or was changed; install the port again')
 
 
 def manifest():
+    verify()
     return json.loads((FOLDER / 'manifest.json').read_text(encoding='utf-8'))
 
 
-def operations(config, env=None):
-    m = manifest()
-    return m['operations'] + (m['menu_operations'] if menu_wanted(config, env) else [])
+def operations():
+    return manifest()['operations']
 
 
 def payload(op):
-    data = (FOLDER / op['payload']).read_bytes()
-    if hashlib.sha256(data).hexdigest() != op['patched_sha256']:
-        raise ValueError(f'damaged file {op["payload"]}')
+    try:
+        data = (FOLDER / op['payload']).read_bytes()
+    except OSError:
+        data = None
+    if data is None or hashlib.sha256(data).hexdigest() != op['patched_sha256']:
+        raise Modified(f'scripts/tacho_pack/{op["payload"]} is missing or was changed; install the port again')
     return data
 
 
@@ -113,17 +126,15 @@ def _swaps(game, ops, base):
 
 
 def prepare(game, out, config, env, base):
-    """({guest archive: patch file}, {environment overrides}); nothing when the pack is off."""
+    """({guest archive: patch file}, {environment overrides}). Raises Modified when the pack's
+    files were changed. config is unused: the pack has no settings."""
     _ACTIVE.clear()
-    if not wanted(config, env) or not (FOLDER / 'manifest.json').is_file():
-        return {}, {}
-    ops = operations(config, env)
+    ops = operations()
     folder = Path(out) / 'tacho-pack'
     names = sorted({op['archive'] for op in ops})
     archives = [resolve(Path(game) / 'archives' / n) for n in names]
     stamp = {'format': FORMAT, 'script': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
              'manifest': hashlib.sha256((FOLDER / 'manifest.json').read_bytes()).hexdigest(),
-             'menu': menu_wanted(config, env),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives if a.is_file()},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}
     stamp_file = folder / 'stamp.json'
@@ -152,7 +163,7 @@ def prepare(game, out, config, env, base):
     order = {'update2.pak': 0, 'update.pak': 1}
     for op in sorted(chosen, key=lambda o: order.get(o['archive'], 2)):
         _ACTIVE.setdefault(op['asset'].lower(), payload(op))
-    say(f'{len(chosen)} of {len(ops)} game files' + (' (Options menu entries)' if menu_wanted(config, env) else ''))
+    say(f'{len(chosen)} of {len(ops)} game files')
     return made, graphics_tab_override(game, out, env, chosen)
 
 

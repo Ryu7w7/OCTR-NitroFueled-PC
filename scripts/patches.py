@@ -532,13 +532,15 @@ def tacho_pack_patch(key):
 
 
 def tacho_pack_patches(ini=None, app_version=APP_VERSION, title_id=TITLE_ID):
-    """Pack Tacho's patches, always selected; none only with the hidden kill switch
-    (bbport.ini tacho_pack=0 or BB_TACHO_PACK=0, for diagnosing a problem)."""
-    off=('0','off','no','false')
-    if (ini or {}).get('tacho_pack','1').strip().lower() in off or \
-            os.environ.get('BB_TACHO_PACK','').strip().lower() in off:
-        return []
-    return [patch for patch in external_patches(TACHO_PACK_DIR,app_version,title_id) if tacho_pack_patch(patch[0])]
+    """Pack Tacho's patches, always selected: no setting turns them off, so every player has
+    the same rules. Raises tacho_pack.Modified when a file of the pack was changed. ini is unused."""
+    from tacho_pack import verify
+    verify()
+    found=[patch for patch in external_patches(TACHO_PACK_DIR,app_version,title_id) if tacho_pack_patch(patch[0])]
+    # Made for the USA game (CUSA13795) 1.21 only: another edition or update has none of them.
+    if (title_id,app_version)==('CUSA13795','01.21') and len(found)!=len(TACHO_PACK_FILES):
+        raise ValueError('Pack Tacho: patches missing from scripts/tacho_pack/patches; install the port again')
+    return found
 
 
 def optional_game_patch(key):
@@ -673,8 +675,13 @@ def main():
     found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     applied=[]
+    try:
+        pack=tacho_pack_patches(settings,a.app_version,a.title_id)
+    except ValueError as error:  # tacho_pack.Modified among them: never start without the pack
+        print(f'Pack Tacho: {error}',file=sys.stderr)
+        sys.exit(3)
     writes=compile_external(external_selection(found,a.patches_config,settings)
-                            +tacho_pack_patches(settings,a.app_version,a.title_id)+render_patches(settings)
+                            +pack+render_patches(settings)
                             +theme_patches(settings)+end_race_patches(),
                             segments,elf,strict=a.strict_overlap,applied=applied)
     write_blob(a.out,writes)

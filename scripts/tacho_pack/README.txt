@@ -20,11 +20,10 @@ Where it lives in the port:
 - scripts/tacho_pack/manifest.json and payloads/: the game files it swaps
   (scripts/tacho_pack.py applies them).
 
-Settings (bbport.ini):
-- tacho_pack = 0 leaves the whole pack out (a hidden switch for diagnosing problems; the
-  launcher has no setting for the pack).
-- tacho_pack_menu = 1 adds "Hud Power Charged" (Yes: new HUD, No: the game's own, from the next
-  race) and "Barra de reservas" (Yes/No) to Options > Game.
+It has no settings: every player races with the same pack. scripts/tacho_pack.py checks these
+files against the SHA256 values written in it, and a changed or missing file stops the launch
+until the port is installed again. The pack's optional Options entries ("Hud Power Charged",
+"Barra de reservas") are not used, as they turn its HUD off.
 
 It is made for the USA game (CUSA13795), update 1.21. With another executable, its patches are
 skipped whole and its game files stay the game's own.
