@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its four races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its tracks' pictures, with their white frames.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing. The thumbnails are a grid of 4 x 4.",
   "requiresCapabilities": [
@@ -96,13 +96,13 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "d454600d8f936df605e099053324772daf92a7fc7dafe8f001ef8659583f9c85",
+      "sha256": "a3e3ecfb289b2513564cd076d3b939bbea44187f85b95df62374fd2aea247414",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "c2bf61d00785110b98cc340daa96a0b5e4fc0268daeb5a9854724715319be388",
-      "bytes": 15203
+      "sha256": "4ba99c53ce3f33cd21c4e259f0b97f986a4303b64e9804c09b44f72cc5dea082",
+      "bytes": 16175
     },
     {
       "file": "payloads/ajustes-carrera-materiales.delta.json",
