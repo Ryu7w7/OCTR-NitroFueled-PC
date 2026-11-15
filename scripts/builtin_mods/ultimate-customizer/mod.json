@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "battle-point-limit-selector",
   "name": "Ultimate Customizer",
-  "version": "5.1.2",
+  "version": "5.1.3",
   "author": "Kyouko8",
   "description": "Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60; Capture the Flag and Steal the Bacon points up to 60.\n- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups (8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws their pictures from your game first.",
   "requiresCapabilities": [
@@ -163,8 +163,8 @@
     },
     {
       "file": "patches/copas-adicionales.xml",
-      "sha256": "0e4516bbf341366e9d87e62c1e3b36ef9b09e83775fc6aee900eda5e81094d2a",
-      "bytes": 4811
+      "sha256": "9fb686a1999eae5c5a88e864412e6a817d527e229e6601f5c96430cf8a7ee1b6",
+      "bytes": 5177
     },
     {
       "file": "patches/ultimate-customizer.xml",

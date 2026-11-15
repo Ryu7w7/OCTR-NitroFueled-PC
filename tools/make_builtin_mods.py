@@ -52,18 +52,26 @@ BATTLE = ('SystemData_battleArenaLives', 'SystemData_battleArenaLimitPoints', 'S
 # Capture the Flag and Steal the Bacon's points limit: as long as the lives' and minutes' (5.1.1)
 CTF_POINTS = 'SystemData_battleArenaPoints'
 MORE_POINTS = [3, 6, 9, 12, 15, 20, 25, 30, 40, 50, 60]
-UC_VERSION = '5.1.2'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
+UC_VERSION = '5.1.3'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
 # save_on_win: 5.1.0's code block, the end of its cup win (the jmp's rel32), and the code added
 CAVE, WIN_END, WRITE_SKIP, SAVE_AT = 0x2338000, 0x8f, 0x119def9, 0x2338800
-# push rbp..r12 (aligned); if STATE (0x2bee700) & 3 == 3 (loaded, changed): BUF (0x2bee710) =
-# "RBOCUPS1" + the table, open("/savedata0/rbo_cups.bin", 0x601, 0x1b6), pwrite 0x48 bytes, clear
-# bit 2 when all are written, close; pop; jmp WRITE_SKIP. The strings are 5.1.0's (0x23383cf,
-# 0x23383fd); open, pwrite and close its imports (0x1beab78, 0x1bea868, 0x1beaa38).
+# push rbp..r13, aligned, 0x50 bytes of stack. When STATE (0x2bee700) bit 2 (changed) is set:
+# - not yet loaded (bit 1; 5.1.0 loads at an unmount, which never comes here): read
+#   /savedata0/rbo_cups.bin to the stack and, with its magic, OR its 64 cup bytes into the table
+#   (BUF + 8, 0x2bee718: this session's wins stay); a full read marks it loaded;
+# - BUF (0x2bee710) = "RBOCUPS1" + the table, open(path, 0x601, 0x1b6), pwrite 0x48 bytes; all
+#   written: clear bit 2 and mark it loaded (the save is mounted: a missing file was no file).
+# With the save not mounted both opens fail and nothing changes (the unmount does it, as 5.1.0).
+# Then pop and jmp WRITE_SKIP. The strings are 5.1.0's (0x23383cf, 0x23383fd); open, pread,
+# pwrite and close its imports (0x1beab78, 0x1bea7b8, 0x1bea868, 0x1beaa38).
 SAVE_CODE = bytes.fromhex(
-    '554889e5505152565741504151415241535341544883e4f0488d1de15e8b008b0383e00383f8037555488b059ffbffff'
-    '488d0dd95e8b00488901488d3dbcfbffffbe01060000bab6010000e828238bff4189c44585e478264489e7488d35ae5e'
-    '8b00ba4800000031c9e8fa1f8bff83f84875038323fd4489e7e8ba218bff488d65a8415c5b415b415a415941585f5e5a'
-    '59585de96156e6fe')
+    '554889e55051525657415041514152415353415441554883e4f04883ec50488d1ddb5e8b00f703020000000f84020100'
+    '00f703010000000f859e000000488d3db9fbffff31f631d2e82b238bff4189c44585e40f88820000004489e74889e6ba'
+    '4800000031c9e84d1f8bff4189c54489e7e8c2218bff4183fd48755f488b054cfbffff48390424754f488d0d805e8b00'
+    '488b44240848094108488b44241048094110488b44241848094118488b44242048094120488b44242848094128488b44'
+    '243048094130488b44243848094138488b44244048094140830b01488b05edfaffff488d0d275e8b00488901488d3d0a'
+    'fbffffbe01060000bab6010000e876228bff4189c44585e478294489e7488d35fc5d8b00ba4800000031c9e8481f8bff'
+    '83f84875068323fd830b014489e7e805218bff488d65a0415d415c5b415b415a415941585f5e5a59585de9aa55e6fe')
 CUP_ASSETS = ('materialinstances/UI/CupSelect_materials.igz',)
 ART_ASSET = 'textures/GuiStandard_diffuse,textures@!ui!Octane!RaceSelect!octane_ui_raceselect_bg_spacecup`tga,101.igz'
 # Ultimate Customizer's patch: the lines of the added cups, by their comment.
@@ -170,12 +178,12 @@ def more_battle_points(blob):
 
 
 def save_on_win(xml):
-    """Ultimate Customizer 5.1.0's patch with the added cups' stars saved when a cup is won (5.1.2).
+    """Ultimate Customizer 5.1.0's patch with the added cups' stars saved when a cup is won (5.1.2; 5.1.3 loads the file first).
 
     5.1.0 writes /savedata0/rbo_cups.bin where the game unmounts its save data; this runtime
     mounts it once a session and never unmounts it, so the stars were lost on closing the game.
     The win's code (in the cave, 0x2338000) now goes on to SAVE_CODE at SAVE_AT, which writes the
-    table at once when it is loaded and changed (the unmount still does it too)."""
+    table at once, reading the file first when it was not loaded (the unmount still writes it too)."""
     m = re.search(r'(Address="0x%x" Value=")([0-9A-F]+)"' % (CAVE + 0x400000), xml)
     body = bytearray(bytes.fromhex(m.group(2)))
     # lea rsi, [STATE]; or dword ptr [rsi], 2; jmp WRITE_SKIP: the end of the win's code
