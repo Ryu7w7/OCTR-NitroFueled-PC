@@ -14,6 +14,34 @@ from paths import ROOT
 
 
 class RestartTests(unittest.TestCase):
+    def test_renderer_environment_is_rebuilt_after_settings_change(self):
+        tree = ast.parse((ROOT / 'run.py').read_text(encoding='utf-8'))
+        renderer = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'apply_renderer')
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import native_shaders
+        settings = {'renderer': 'native', 'temporal': 'fsr3'}
+        env = {'USER_OVERRIDE': 'kept'}
+        scope = dict(env=env, renderer_changes={}, ini_value=lambda _, key: settings.get(key),
+                     config=None, title_id='CUSA13795', app_version='01.21', data=Path('/data'),
+                     native_shaders=native_shaders, say=lambda _: None, out=Path('/out'))
+        exec(compile(ast.Module(body=[renderer], type_ignores=[]), 'run', 'exec'), scope)
+        with mock.patch.object(native_shaders, 'ready', return_value=True):
+            scope['apply_renderer']()
+            self.assertEqual(env['BB_TEMPORAL'], 'fsr1')
+            settings['temporal'] = 'dlss'
+            scope['apply_renderer']()
+            self.assertNotIn('BB_TEMPORAL', env)
+            self.assertEqual(env['BB_NATIVE_VK'], '1')
+            settings['renderer'] = 'shadps4'
+            scope['apply_renderer']()
+            self.assertNotIn('BB_NATIVE_VK', env)
+            self.assertNotIn('BB_VK_SHADERS', env)
+            self.assertEqual(env, {'USER_OVERRIDE': 'kept'})
+            env['BB_NATIVE_VK'] = '0'
+            settings['renderer'] = 'native'
+            scope['apply_renderer']()
+            self.assertEqual(env['BB_NATIVE_VK'], '0')
+
     def launcher_scope(self):
         tree = ast.parse((ROOT / 'launcher/sacredfire_launcher.py').read_text(encoding='utf-8'))
         app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'LauncherApp')
@@ -26,7 +54,7 @@ class RestartTests(unittest.TestCase):
         scope = {'Adw': types.SimpleNamespace(Application=Application), 'APP_ID': 'test',
                  'Gio': types.SimpleNamespace(ApplicationFlags=types.SimpleNamespace(DEFAULT_FLAGS=0, NON_UNIQUE=1)),
                  'sys': sys, 'subprocess': mock.Mock(DEVNULL=subprocess.DEVNULL),
-                 'host_environment': lambda: {'PATH': '/usr/bin'}, 'tr': lambda s: s}
+                 'host_environment': lambda **kwargs: {'PATH': '/usr/bin'}, 'tr': lambda s: s}
         exec(compile(ast.Module(body=[app, restart], type_ignores=[]), 'launcher', 'exec'), scope)
         return scope, base
 
@@ -93,7 +121,7 @@ class RestartTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('wine') and shutil.which('x86_64-w64-mingw32-g++'), 'requires Wine and MinGW')
     def test_windows_update_reopens_packaged_launcher(self):
-        source = (ROOT / 'launcher/windows/launcher.cpp').read_text(encoding='utf-8')
+        source = (ROOT / 'launcher/windows/platform.inc').read_text(encoding='utf-8')
         start = source.index('bool RestartLauncher(const std::wstring& args) {')
         end = source.index('\n}', start) + 2
         with tempfile.TemporaryDirectory() as folder:

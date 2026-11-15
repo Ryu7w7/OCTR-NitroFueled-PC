@@ -21,10 +21,15 @@ std::wstring Lower(std::wstring s) {
 }
 
 /// The same folder, whatever the spelling.
-std::wstring Key(const fs::path& dir) {
+std::string Key(const fs::path& dir) {
     std::error_code ec;
     const fs::path canonical = fs::weakly_canonical(dir, ec);
-    return Lower((ec ? dir : canonical).lexically_normal().wstring());
+    fs::path key = (ec ? dir : canonical).lexically_normal();
+#ifdef _WIN32
+    key = Lower(key.wstring());
+#endif
+    const auto text = key.generic_u8string();
+    return std::string(text.begin(), text.end());
 }
 
 /// installs.txt: one folder per line, in UTF-8.
@@ -39,7 +44,7 @@ std::vector<fs::path> ReadList(const fs::path& file) {
 }
 
 fs::file_time_type LastUse(const fs::path& dir) {
-    fs::file_time_type newest{};
+    auto newest = fs::file_time_type::min();
     for (const wchar_t* name : {L"bbport.ini", L"launcher.ini"}) {
         std::error_code ec;
         const auto t = fs::last_write_time(dir / name, ec);
@@ -52,12 +57,15 @@ fs::file_time_type LastUse(const fs::path& dir) {
 
 bool IsUsedInstall(const fs::path& dir) {
     std::error_code ec;
-    return fs::is_regular_file(dir / L"run.py", ec) &&
+#ifdef _WIN32
+    if (!fs::is_regular_file(dir / L"run.py", ec)) return false;
+#endif
+    return
            (fs::is_regular_file(dir / L"bbport.ini", ec) || fs::is_regular_file(dir / L"launcher.ini", ec));
 }
 
 void Remember(const fs::path& installs_file, const fs::path& root) {
-    const std::wstring key = Key(root);
+    const std::string key = Key(root);
     for (const fs::path& dir : ReadList(installs_file))
         if (Key(dir) == key) return;
     std::error_code ec;
@@ -69,9 +77,9 @@ void Remember(const fs::path& installs_file, const fs::path& root) {
 
 std::vector<fs::path> Previous(const fs::path& installs_file, const fs::path& root) {
     std::vector<fs::path> found;
-    std::vector<std::wstring> keys{Key(root)};
+    std::vector<std::string> keys{Key(root)};
     auto consider = [&](const fs::path& dir) {
-        const std::wstring key = Key(dir);
+        const std::string key = Key(dir);
         if (std::find(keys.begin(), keys.end(), key) != keys.end() || !IsUsedInstall(dir)) return;
         keys.push_back(key);
         found.push_back(dir);
@@ -84,7 +92,9 @@ std::vector<fs::path> Previous(const fs::path& installs_file, const fs::path& ro
         for (fs::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
             std::error_code e2;
             if (!it->is_directory(e2)) continue;
-            if (Lower(it->path().filename().wstring()).find(L"ctr") == std::wstring::npos) continue;
+            auto name = it->path().filename().generic_u8string();
+            for (auto& c : name) if (c >= u8'A' && c <= u8'Z') c += u8'a' - u8'A';
+            if (name.find(u8"ctr") == std::u8string::npos) continue;
             consider(it->path());
             consider(it->path() / L"CTR-NitroFueled-PC-portable");
         }
@@ -104,7 +114,12 @@ std::vector<fs::path> Items(const fs::path& from) {
             const fs::path relative = it->path().lexically_relative(from);
             std::error_code e2;
             // The shader cache is rebuilt for each release.
-            if (it->is_directory(e2) && Lower(relative.lexically_normal().wstring()) == L"user\\cache") {
+#ifdef _WIN32
+            const bool cache = Lower(relative.lexically_normal().generic_wstring()) == L"user/cache";
+#else
+            const bool cache = relative.lexically_normal() == fs::path("user/cache");
+#endif
+            if (it->is_directory(e2) && cache) {
                 it.disable_recursion_pending();
                 continue;
             }

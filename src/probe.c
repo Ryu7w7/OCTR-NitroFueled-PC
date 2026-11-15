@@ -1227,7 +1227,8 @@ int main(int argc, char **argv) {
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         char icon[4200];
-        snprintf(icon,sizeof(icon),"%s/sce_sys/icon0.png",app0);
+        const char *window_icon=getenv("BB_WINDOW_ICON");
+        snprintf(icon,sizeof(icon),"%s",window_icon && *window_icon ? window_icon : "launcher/io.github.sacredfire.Launcher.png");
         BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,icon};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");

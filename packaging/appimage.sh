@@ -18,7 +18,7 @@
 # before building so the version reads as the tag. BB_ALLOW_DIRTY=1 skips the check for test builds.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
-[[ -f out/sacredfire && -f out/gpu/libbbgpu.so && -f out/VERSION ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
+[[ -f out/launcher/sacredfire-launcher && -f out/sacredfire && -f out/gpu/libbbgpu.so && -f out/VERSION ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
 built_from=$(cat out/VERSION)
 checkout=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
 git update-index -q --refresh 2>/dev/null || true
@@ -35,7 +35,9 @@ root=$PWD
 # The libraries' store paths (RUNPATH entries and their closures come along).
 {
     echo '['
-    for elf in out/sacredfire out/gpu/libbbgpu.so; do
+    for elf in out/sacredfire out/gpu/libbbgpu.so out/launcher/sacredfire-launcher \
+               out/dlss/*.so* out/eosbridge/ryunet-bridge out/eosbridge/*.so; do
+        [[ -f $elf ]] || continue
         readelf -d "$elf" | sed -n 's/.*\[\(.*\)\]/\1/p' | tr ':' '\n'
     done | grep -o '^/nix/store/[^/]*' | sort -u | grep -v -- '-nix-shell$' | sed 's/.*/  "&"/'
     echo ']'

@@ -292,6 +292,8 @@ def main():
     python = bundle_python(folder, a.dist / 'pycache')
     bundle_iced_x86(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
+    (folder / 'launcher').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'launcher/io.github.sacredfire.Launcher.png', folder / 'launcher')
     # No docs/ (v0.8.5): the mod guides are read on GitHub (the launcher's Mods tab links them).
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')

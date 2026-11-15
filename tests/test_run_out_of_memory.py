@@ -33,7 +33,7 @@ class OutOfMemoryTests(unittest.TestCase):
     def test_its_code_is_not_one_the_game_uses(self):
         self.assertNotIn(run.OUT_OF_MEMORY_CODE, (0, run.RESTART_CODE, run.RANGE_TAKEN_CODE, run.START_FAULT_CODE,
                                                   run.UNSUPPORTED_GPU_CODE))
-        launcher = (ROOT / 'launcher' / 'windows' / 'launcher.cpp').read_text(encoding='utf-8')
+        launcher = (ROOT / 'launcher' / 'launcher.cpp').read_text(encoding='utf-8')
         self.assertIn(f'kOutOfMemoryCode = {run.OUT_OF_MEMORY_CODE};', launcher)
 
 

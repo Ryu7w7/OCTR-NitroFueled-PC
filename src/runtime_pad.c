@@ -839,6 +839,7 @@ static int stale_noted, expired_noted;
  * Per-port and protected by read_lock, like sample_host_from's other game-side state. */
 static uint32_t rearm_buttons[PORTS];
 static void sample_host_from(PadData *d, int p) {
+    bbgpu_refresh_graphics_tab();
     if (pad_thread_state<0) pad_poll();
     PortSnap s;
     pthread_mutex_lock(&snap_lock);

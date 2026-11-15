@@ -1038,6 +1038,7 @@ def remove_obsolete_files():
 
 def launch(args, restarted=False):
     env = os.environ
+    env.setdefault('BB_WINDOW_ICON', str(PORT / 'launcher/io.github.sacredfire.Launcher.png'))
     remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
@@ -1344,38 +1345,53 @@ def launch(args, restarted=False):
         # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
-        if ini_value(config, 'renderer') == 'd3d11':
-            env['BB_D3D11'] = '1'
-            shaders = out / 'd3d11-shaders' / 'hlsl'
-            prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
-            if (shaders / 'shaders.idx').is_file():
-                env.setdefault('BB_D3D11_SHADERS', str(shaders))
-                env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
-                say('Direct3D 11 (experimental)')
-            else:
-                say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')
-        if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
-            if not native_shaders.supported(title_id, app_version):
-                say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
-                    f'{app_version}, so the game starts with Vulkan (shadPS4)')
-            else:
-                shaders = native_shaders.shader_dir(data, title_id, app_version)
-                if not native_shaders.ready(shaders):
-                    say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
-                    # "@progress" lines: the launchers show a window with a progress bar meanwhile
-                    last = [-1]
+        renderer_changes = {}
 
-                    def progress(percent, stage):
-                        if percent != last[0]:
-                            last[0] = percent
-                            emit(f'@progress native-shaders {percent} {stage}\n')
-                    built = native_shaders.build(PORT, game, shaders, say, progress=progress)
-                    emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
-                if native_shaders.ready(shaders):
-                    env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
-                    say('Graphics engine: native Vulkan (experimental)')
+        def apply_renderer():
+            # Drop only generated overrides; explicit user environment survives a restart.
+            for key, previous in renderer_changes.items():
+                if previous is None:
+                    env.pop(key, None)
                 else:
-                    say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
+                    env[key] = previous
+            renderer_changes.clear()
+            previous = env.copy()
+            if ini_value(config, 'renderer') == 'd3d11':
+                env['BB_D3D11'] = '1'
+                shaders = out / 'd3d11-shaders' / 'hlsl'
+                prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
+                if (shaders / 'shaders.idx').is_file():
+                    env.setdefault('BB_D3D11_SHADERS', str(shaders))
+                    env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
+                    say('Direct3D 11 (experimental)')
+                else:
+                    say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')
+            if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
+                if not native_shaders.supported(title_id, app_version):
+                    say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
+                        f'{app_version}, so the game starts with Vulkan (shadPS4)')
+                else:
+                    shaders = native_shaders.shader_dir(data, title_id, app_version)
+                    if not native_shaders.ready(shaders):
+                        say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
+                        # "@progress" lines: the launchers show a window with a progress bar meanwhile
+                        last = [-1]
+
+                        def progress(percent, stage):
+                            if percent != last[0]:
+                                last[0] = percent
+                                emit(f'@progress native-shaders {percent} {stage}\n')
+                        built = native_shaders.build(PORT, game, shaders, say, progress=progress)
+                        emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
+                    if native_shaders.ready(shaders):
+                        env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
+                        say('Graphics engine: native Vulkan (experimental)')
+                    else:
+                        say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
+            renderer_changes.update({key: previous.get(key) for key, value in env.items()
+                                     if previous.get(key) != value})
+
+        apply_renderer()
         # The GPU library builds its path table when it loads: the user directory must exist.
         user_dir.mkdir(parents=True, exist_ok=True)
         env['BB_GPU_USER_DIR'] = str(user_dir)
@@ -1397,6 +1413,7 @@ def launch(args, restarted=False):
             if not first:  # the in-game menu may have changed render_res
                 settings, layout_patches = apply_layout()
                 apply_render_res(env, settings)
+                apply_renderer()
                 if mod_packages.ACTIVE:
                     startup_call('mod_packages.preflight', mod_packages.preflight, Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
                                            [layout_patches] if layout_patches else [], title_id, app_version, game=game)

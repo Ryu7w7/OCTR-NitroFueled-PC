@@ -67,7 +67,7 @@ class EUUnlockAllTests(unittest.TestCase):
                        if isinstance(node, ast.Assign)
                        and any(isinstance(t, ast.Name) and t.id == 'INI_PATCHES' for t in node.targets))
         self.assertEqual(mapping[self.KEY], 'patch_unlock_all')
-        windows = (ROOT / 'launcher/windows/launcher.cpp').read_text(encoding='utf-8')
+        windows = (ROOT / 'launcher/launcher.cpp').read_text(encoding='utf-8')
         self.assertIn('{"' + self.KEY + '", "patch_unlock_all"}', windows)
 
     def test_usa_patch_remains_selected(self):

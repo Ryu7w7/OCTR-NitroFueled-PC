@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_settings.h"
+#include "../../src/settings_lock.h"
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -99,6 +103,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "volume") {
         v.volume = std::clamp(i, 0, 200);
     } else if (key == "menu_pos") {
+        if (value.empty()) v.menu_x = v.menu_y = -1.0f;
         float x = -1.0f, y = -1.0f;
         if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
             y <= 1.0f) {
@@ -131,11 +136,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "fsr3_sharpness") {
         v.fsr3_sharpness = Clamp(f, 0.0f, 1.0f);
     } else if (key == "render_res") {
+        if (value.empty()) v.render_res = -1;
         for (int r = 0; r < RenderResCount; ++r) {
             if (i == RenderResHeights[r]) v.render_res = r;
         }
     } else if (key == "ultrawide") {
-        v.ultrawide = i != 0 ? 1 : 0;
+        v.ultrawide = value.empty() ? -1 : i != 0 ? 1 : 0;
     } else if (key == "aspect_ratio") {
         v.aspect_ratio = Aspect16x9;
         for (int a = 0; a < AspectRatioCount; ++a) {
@@ -157,6 +163,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "ultrawide_ask") {
         v.ultrawide_ask = i != 0;
     } else if (key == "ultrawide_size") {
+        if (value.empty()) v.ultrawide_w = v.ultrawide_h = 0;
         int w = 0, h = 0;
         if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 16384 &&
             h <= 8640) {
@@ -187,6 +194,30 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     }
 }
 
+using SettingsMap = std::map<std::string, std::string>;
+std::mutex sync_mutex;
+SettingsMap file_values, baseline;
+std::filesystem::file_time_type file_time{};
+std::string file_path;
+std::chrono::steady_clock::time_point checked;
+
+bool ReadSettings(SettingsMap& values) {
+    std::ifstream file(Path());
+    if (!file) return false;
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto start = line.find_first_not_of(" \t\r");
+        const auto eq = line.find('=');
+        if (start == std::string::npos || line[start] == '#' || line[start] == ';' || eq == std::string::npos) continue;
+        std::string key = line.substr(start, eq - start), value = line.substr(eq + 1);
+        key.erase(key.find_last_not_of(" \t\r") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r"));
+        value.erase(value.find_last_not_of(" \t\r") + 1);
+        values[key] = value;
+    }
+    return !file.bad();
+}
+
 } // namespace
 
 std::mutex& PortsMutex() { static std::mutex m; return m; }
@@ -204,7 +235,22 @@ const char* MenuText(const char* english, const char* russian) {
     }
 }
 
+static std::vector<std::pair<std::string, std::string>> Snapshot(const Values& v);
+static SettingsMap CurrentSettings() {
+    const auto values = Snapshot(Get());
+    return {values.begin(), values.end()};
+}
+static void RememberSettings() {
+    file_values.clear();
+    ReadSettings(file_values);
+    baseline = CurrentSettings();
+    std::error_code error;
+    file_time = std::filesystem::last_write_time(Path(), error);
+    file_path = Path();
+}
+
 void Load() {
+    std::scoped_lock lock{sync_mutex};
     auto& v = Get();
     v.aspect_ratio = Aspect16x9;
     v.aspect_w = v.aspect_h = 0;
@@ -242,13 +288,6 @@ void Load() {
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
-    }
-    // v0.4: the launcher's language (BB_MENU_LANGUAGE) wins over the saved one: the launcher is
-    // where the player picks it.
-    if (const char* lang = std::getenv("BB_MENU_LANGUAGE"); lang && *lang) {
-        if (!std::strncmp(lang, "es", 2)) v.menu_language = MenuLanguage::Spanish;
-        else if (!std::strncmp(lang, "ru", 2)) v.menu_language = MenuLanguage::Russian;
-        else if (!std::strncmp(lang, "en", 2)) v.menu_language = MenuLanguage::English;
     }
     // SacredFire: bbport's temporal upscalers and object motion vectors read the scene of the game
     // bbport was built for (its render targets, constants and vertex streams), not this one; they
@@ -312,6 +351,7 @@ void Load() {
     v.startup_dlss_output = v.dlss_output;
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
+    RememberSettings();
 }
 
 bool RenderSizeNeedsRestart() {
@@ -395,8 +435,7 @@ bool ResolutionNeedsRestart() {
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
 }
 
-void Save() {
-    const auto& v = Get();
+static std::vector<std::pair<std::string, std::string>> Snapshot(const Values& v) {
     // The keys the menu writes, in this order; the rest of the file stays as it is: the
     // launcher's controls (key.* / pad.*) and its other keys, comments.
     std::vector<std::pair<std::string, std::string>> keys;
@@ -485,6 +524,69 @@ void Save() {
         put("menu_pos", fixed(v.menu_x, 4) + "," + fixed(v.menu_y, 4));
     }
 
+    return keys;
+}
+
+static bool RefreshLocked(bool force) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - checked < std::chrono::milliseconds(250)) return false;
+    checked = now;
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(Path(), error);
+    if (error || (!force && file_path == Path() && stamp == file_time)) return false;
+    SettingsMap disk;
+    if (!ReadSettings(disk)) return false;
+    const auto before = CurrentSettings();
+    auto& values = Get();
+    const int old_resolution = values.render_res;
+    auto changes = disk;
+    Values defaults;
+    for (int e = 0; e < EffectCount; ++e) defaults.effects[e] = Effects[e].default_on;
+    const auto default_keys = Snapshot(defaults);
+    const SettingsMap default_values(default_keys.begin(), default_keys.end());
+    for (const auto& [key, value] : file_values) {
+        if (!disk.contains(key)) {
+            const auto found = default_values.find(key);
+            changes[key] = found == default_values.end() ? "" : found->second;
+        }
+    }
+    for (const auto& [key, value] : changes) {
+        const auto old = file_values.find(key);
+        const auto local = before.find(key);
+        const auto saved = baseline.find(key);
+        if ((old == file_values.end() || old->second != value || !disk.contains(key)) &&
+            (local == before.end() || (saved != baseline.end() && local->second == saved->second)))
+            Set(values, key, value);
+    }
+    // The legacy upscaler reads another game's buffers; keep the same guard as Load().
+    if (!std::getenv("BB_UPSCALER")) values.upscaler = UpscalerOff;
+    if (!std::getenv("BB_OBJECT_MOTION")) values.object_motion = false;
+    const auto after = CurrentSettings();
+    if (values.LiveGraphics() && values.render_res != old_resolution)
+        values.native_resolution_requested = true;
+    for (const auto& [key, value] : after) {
+        const auto local = before.find(key);
+        const auto saved = baseline.find(key);
+        if (local == before.end() || (saved != baseline.end() && local->second == saved->second)) baseline[key] = value;
+    }
+    file_values = std::move(disk);
+    file_time = stamp;
+    file_path = Path();
+    return before != after;
+}
+
+bool Refresh(bool force) {
+    std::scoped_lock lock{sync_mutex};
+    return RefreshLocked(force);
+}
+
+void Save() {
+    std::scoped_lock lock{sync_mutex};
+    SettingsLock file_lock(Path());
+    if (!file_lock) { std::printf("Settings: cannot lock %s\n", Path()); return; }
+    RefreshLocked(true);
+    const auto& v = Get();
+    const auto keys = Snapshot(v);
     std::string out;
     bool had_lines = false;
     std::vector<bool> written(keys.size());
@@ -532,6 +634,8 @@ void Save() {
     if (!ok || error) {
         std::printf("Settings: cannot write %s (%s)\n", Path(), error ? error.message().c_str() : "write failed");
     } else {
+        RememberSettings();
+        baseline = SettingsMap(keys.begin(), keys.end());
         std::printf("Settings: saved %s (", Path());
         for (int g = 0; g < GamePatchCount; ++g) {
             std::printf("%s%s=%d", g ? ", " : "", GamePatches[g].key, int(v.game_patches[g]));

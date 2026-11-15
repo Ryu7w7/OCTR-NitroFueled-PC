@@ -276,6 +276,8 @@ inline const char* Label(const char* english) { return MenuText(english, english
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();
+/// Imports changed settings from disk without resetting startup state or pending local edits.
+bool Refresh(bool force = false);
 /// Checks the loaded choice before the first frame; unsupported FSR 4 uses FSR 3.1.
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411);
 /// Startup-patched scene dimensions cannot change until run.sh prepares a new image.

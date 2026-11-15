@@ -15,7 +15,8 @@ RyuNET server. The bridge only gives players who cannot reach it another way in.
 
 ## How it works
 
-1. **The check.** The launcher starts `eos\ryunet-bridge.exe --client`. It tries the server
+1. **The check.** The launcher starts `eos\ryunet-bridge.exe --client` on Windows or
+   `eos/ryunet-bridge --client` on Linux. It tries the server
    directly: `GET /ryunet/theme` (it must answer JSON), a lobby TCP connection, and a NAT probe on
    UDP 3074. If all three work, it prints `BRIDGE DIRECT` and exits. Players whose network works
    see no change.
@@ -24,7 +25,7 @@ RyuNET server. The bridge only gives players who cannot reach it another way in.
    port (3074–3080, 8460, 8080). Then it prints:
    `BRIDGE READY ip=<server ip> vip=<virtual ip> map=<udp>,<server port>:<local port>,...`
 3. **Who uses it.**
-   - The launcher's requests: `EosBridgeRoute` in `launcher/windows/launcher.cpp`.
+   - The launcher's requests: `EosBridgeRoute` in the shared `launcher/eos.inc`.
    - run.py and the cloud scripts: `run.bridge_port`.
    - The game: `src/runtime_net_bridge.c`. It reads `BB_ONLINE_BRIDGE` (the map) and
      `BB_ONLINE_SERVER_IP`, and from then on every connection and datagram to the server goes to
@@ -94,17 +95,66 @@ The Developer Portal is free (dev.epicgames.com/portal):
 4. Copy `eosbridge/eosbridge.ini.example` to `eosbridge/eosbridge.ini` and fill in the ids. This
    file is not in git.
 
-### 2. Build
+### 2. Build the game and EOS together
 
-On Windows, from Git Bash, with `EOS_SDK` set to the SDK folder (it defaults to `~/Downloads/EOS-SDK-*`):
+This is maintainer setup, not a requirement for players. Windows and Linux use the same
+`eosbridge/eosbridge.c` and product configuration; each build links or loads its own Epic SDK
+library. The Windows build uses MSYS2 CLANG64 and the Linux build uses the native compiler.
+
+Download Epic's SDK and complete `eosbridge/eosbridge.ini` from step 1. The SDK directory must
+contain `SDK/Include/eos_sdk.h` and the runtime for the target platform:
+
+| Platform | Required SDK files | Build output |
+| --- | --- | --- |
+| Windows x64 | `SDK/Bin/EOSSDK-Win64-Shipping.dll`, `SDK/Lib/EOSSDK-Win64-Shipping.lib` | `out/eosbridge/ryunet-bridge.exe` and the DLL |
+| Linux x64 | `SDK/Bin/libEOSSDK-Linux-Shipping.so` | `out/eosbridge/ryunet-bridge` and the shared library |
+
+Then use the normal build command on either platform:
 
 ```bash
-bash eosbridge/build.sh          # out/eosbridge/ryunet-bridge.exe + EOSSDK-Win64-Shipping.dll (MSYS2 CLANG64)
-bash eosbridge/build.sh linux    # out/eosbridge/ryunet-bridge + libEOSSDK-Linux-Shipping.so (through WSL)
+EOS_SDK=/path/to/EOS-SDK bash build.sh
 ```
 
-The Linux binary needs glibc 2.34 or later (Ubuntu 22.04 is fine). The build checks this and
-prints it.
+On Windows, run this in MSYS2 CLANG64 and use an MSYS path such as `/c/SDK/EOS-SDK`.
+`~/Downloads/EOS-SDK-*` and the download cache at `out/deps/eos-sdk` are also detected.
+Linux's standalone `bash launcher/build.sh` includes the same EOS build hook.
+There is no separate EOS compile command to remember. Configuration is embedded by the existing
+recipe, and packaging copies the native executable and runtime library. SDK headers and the
+plaintext product configuration are not included in the player packages.
+
+Without any EOS configuration, the build explicitly skips EOS and keeps direct RyuNET available.
+Once EOS inputs are supplied, incomplete configuration, download errors, and compilation errors
+fail the build instead of producing a release that claims to contain working EOS.
+
+#### One CI run produces both platforms
+
+For Ryu or another repository maintainer, configure these repository Actions secrets once:
+
+- `EOS_SDK_URL`: an HTTPS ZIP URL that runners can download. The archive must contain the SDK
+  headers, Windows import library/DLL, and Linux shared library listed above.
+- `EOS_BRIDGE_INI`: the complete product configuration from `eosbridge.ini`, including the
+  gateway's `gateway_id` for the relay connection described below. Both platforms use it.
+
+Run the existing **Build and release** workflow, or push a release tag. Its Windows and Linux
+jobs both pass those secrets into their normal `bash build.sh` command. The shared auto-build
+hook downloads/prepares the SDK, validates the required product fields, embeds the configuration,
+and builds the matching bridge. The resulting Windows ZIP and Linux AppImage include EOS.
+A local build produces its current platform; the workflow's two runners produce both in one run.
+
+Downloads are cached locally at `out/deps/eos-sdk`; an existing `EOS_SDK` directory avoids another
+download. To change the downloaded SDK version, remove that cache or point `EOS_SDK` at the new SDK.
+`eosbridge/eosbridge.ini` remains ignored by Git. Do not put private SDK URLs or product
+configuration into workflow YAML or commit them to the repository.
+
+The standalone bridge recipe remains available for gateway development:
+
+```bash
+bash eosbridge/build.sh          # current platform, without rebuilding the game
+bash eosbridge/build.sh linux    # Linux gateway from Windows through WSL
+```
+
+The explicit `linux` gateway target uses compatibility flags and reports its required glibc
+version. Normal Linux game builds use the current native/Nix toolchain and package its runtime.
 
 ### 3. Run the gateway next to the server
 
@@ -170,3 +220,17 @@ server's side is covered by `server/eos_gateway_test.go`.
   for players who reach nothing else. If in doubt, ask Epic through the Developer Portal.
 - **Linux.** The Linux launcher does not start the bridge yet. run.py and the game already follow
   `BB_ONLINE_BRIDGE` when it is set.
+
+
+### Shared Linux launcher and CI
+
+The native Linux launcher uses the same bridge status, settings, routing protocol and game
+environment as Windows. Place `ryunet-bridge` and `libEOSSDK-Linux-Shipping.so` in `eos/` next
+to the launcher scripts, or build them with `EOS_SDK=/path/to/sdk bash eosbridge/build.sh` and
+include `out/eosbridge/` through the AppImage package. The bridge's product configuration is
+embedded when `eosbridge/eosbridge.ini` exists; it is not copied as plaintext into the package.
+
+Release CI accepts `EOS_SDK_URL` and `EOS_BRIDGE_INI` repository secrets. Without those secrets,
+the package retains direct RyuNET and reports that the EOS bridge is missing. Launcher protocol
+and process tests use a local fixture; actual Epic login requires the licensed SDK and valid
+product settings. Neither the SDK nor product secrets belong in source control.

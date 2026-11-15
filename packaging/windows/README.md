@@ -39,7 +39,7 @@ python tools/merge_update.py <path>/CUSA13795 <path>/CUSA13795-patch <path>/CUSA
 
 ## Launcher
 
-`CTR-NitroFueled-PC.exe` (`launcher/windows/launcher.cpp`, target `ctr-launcher`; Dear ImGui on
+`CTR-NitroFueled-PC.exe` (`launcher/launcher.cpp`, target `ctr-launcher`; Dear ImGui on
 Win32 + Direct3D 11, linked statically, no DLLs) is what players open:
 
 - **Play**: base game and 1.21 update folders (told apart by `param.sfo`), merged with hard links

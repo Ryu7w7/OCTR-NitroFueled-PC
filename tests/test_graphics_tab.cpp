@@ -112,9 +112,21 @@ static void controls_test() {
     *reinterpret_cast<void***>(event) = vtable;
     *reinterpret_cast<u32*>(event+0x18) = 9;
     language_item_original = native_event;
+    guest_ui_thread = std::this_thread::get_id();
+    RequestRefresh();
+    std::thread wrong_thread([] { PollRefresh(); });
+    wrong_thread.join();
+    assert(refresh_requested); // Never touch guest objects from the SDL/render thread.
+    PollRefresh();
+    assert(!refresh_requested); // An idle input poll refreshes the page without a UI event.
     RequestRefresh(); // Closing ImGui queues work for the guest UI thread.
     assert(LanguageItemHook(item,event,nullptr,nullptr,nullptr,nullptr) == 17);
     assert(native_events == 1 && !refresh_requested); // Refresh keeps native Back handling.
+    assert(rows.empty() && list_items.empty());
+    RequestRefresh();
+    PollRefresh();
+    assert(refresh_requested); // Closed pages no longer expose guest pointers.
+    refresh_requested = false;
     alignas(8) u8 anchor[0x120] = {}, selector[0x120] = {}, button[0x120] = {};
     alignas(8) u8 root[0x120] = {}, table[0x28] = {};
     u64 children[] = {reinterpret_cast<u64>(selector),reinterpret_cast<u64>(button)};

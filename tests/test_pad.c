@@ -5,6 +5,7 @@
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
+void bbgpu_refresh_graphics_tab(void) {}
 int bbgpu_pad_rescan_take(void) { return 0; }
 static char status_name[4][64];
 static int status_pressing[4];

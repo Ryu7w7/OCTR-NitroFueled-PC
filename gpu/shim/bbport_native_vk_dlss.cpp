@@ -230,7 +230,7 @@ bool Upscale(const Frame& f) {
             warned = true;
             std::printf("Native Vulkan: DLSS: not available (%s)\n",
                         dlss ? dlss->Problem().c_str()
-                             : "sacredfire_dlss.dll or nvngx_dlss.dll is not next to the game");
+                             : "the DLSS bridge or NVIDIA runtime is missing");
             std::fflush(stdout);
         }
         failed.store(true, std::memory_order_relaxed); // no jitter left on the scene either

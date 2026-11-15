@@ -287,17 +287,7 @@ if (WIN32)
     target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan PkgConfig::SDL3)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
-    add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
-        ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp ../launcher/windows/port_update.cpp
-        ../launcher/windows/settings_import.cpp
-        third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
-        third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
-        third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
-    target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends)
-    target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
-    target_link_options(ctr-launcher PRIVATE -static -municode -s)
-    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi windowscodecs ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
-    set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
+    add_subdirectory(../launcher launcher)
     # The updater: versions, the release answer, protected files and a rolled-back install.
     add_executable(port-update-test EXCLUDE_FROM_ALL ../tests/test_port_update.cpp ../launcher/windows/port_update.cpp)
     target_compile_options(port-update-test PRIVATE -UNDEBUG -Wall -Wextra)
@@ -383,7 +373,7 @@ target_link_libraries(motion-shader-test PRIVATE bbgpu)
 add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
 target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(ui-composition-test PRIVATE ..)
-add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp)
+add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp shim/bbport_menu_es.cpp)
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
 add_executable(aspect-settings-test EXCLUDE_FROM_ALL ../tests/test_aspect_settings.cpp
