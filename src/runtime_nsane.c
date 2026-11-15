@@ -60,6 +60,7 @@ static PrepareOdds prepare_odds;
 static RollType roll_type;
 static Statistic statistic;
 static void **block_meta, **hud_meta, **racers, **game_manager;
+static unsigned char *game_image;
 static int available;
 
 #define SLOTS 8
@@ -247,6 +248,17 @@ static void ABI crate_collected(void *controller, void *arg, unsigned char *mess
 }
 
 static void ABI item_finished(unsigned char *controller, void *item) {
+    /* Not a use: a beaker's hit empties the hand and then spins the roulette for a new first item (0xf15440,
+     * returns to 0xf154e0), and the component's start empties it too (0xf0a7d0, returns to 0xf0aa4d). Handing
+     * the second over there gave the HUD that item while the roulette then gave another: the second stays. */
+    const uintptr_t from = (uintptr_t)__builtin_return_address(0);
+    if (from == (uintptr_t)(game_image + 0xf154e0) || from == (uintptr_t)(game_image + 0xf0aa4d)) {
+        native_finished(controller, item);
+        /* the beaker's roulette may land on the stored item: runtime_nsane_tick waits for it, then differs */
+        const int slot = from == (uintptr_t)(game_image + 0xf154e0) && controller ? find_slot(controller) : -1;
+        if (slot >= 0 && runtime_nsane_race_active()) second[slot].spin = now_ms();
+        return;
+    }
     void *before = controller ? ptr(controller, 0x30) : NULL;
     /* used while the small roulette still spins: what it shows next must differ from this one */
     const int spinning = controller && before && runtime_nsane_race_active() ? find_slot(controller) : -1;
@@ -354,6 +366,7 @@ int runtime_nsane_start(unsigned char *image, size_t size) {
     jump(stub + sizeof crate_code, crate + sizeof crate_code);
     memcpy(stub + 64, used_code, sizeof used_code);
     jump(stub + 64 + sizeof used_code, used + sizeof used_code);
+    game_image = image;
     native_crate = replay_handler ? (CrateCollected)replay_handler : (CrateCollected)stub;
     native_finished = (ItemFinished)(stub + 64);
     give_item = (GiveItem)(image + 0xe366b0);
