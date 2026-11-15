@@ -398,3 +398,15 @@ class ConvertTests(unittest.TestCase):
         # both build together
         BuildTests.build(SimpleNamespace(game=self.game, store=self.dir / 'state', staging=self.dir / 'staging'),
                          [(first, made[0]), (second, made[1])])
+
+    def test_tracks_exported_together_are_told_to_be_exported_apart(self):
+        import contextlib, io, content_cli
+        for extra, root in ((False, 'one'), (True, 'two')):
+            shutil.rmtree(self.dir / 'mod', ignore_errors=True)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = content_cli.main([str(self.dir / root), 'convert', str(self.game),
+                                         str(self.classic(extra_track=extra))])
+            self.assertEqual(code, 0, out.getvalue())
+            # several tracks in one mod share textures (road, minimap): partial together, export apart
+            self.assertEqual('exported together' in out.getvalue(), extra, out.getvalue())

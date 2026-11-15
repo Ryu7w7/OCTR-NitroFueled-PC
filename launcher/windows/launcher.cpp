@@ -5633,19 +5633,28 @@ std::string ClashText(const std::string& id) {
     if (with.empty()) return std::string();
     return std::string(T("Comparte texturas del juego con el mismo nombre y distinto contenido con: ",
                          "Shares game textures of the same name and different contents with: ")) + with +
-           T(". Activadas juntas, el juego usa una sola versión y esta pista puede verse con las texturas de otra.",
-             ". On together, the game uses one version and this track can show another one's textures.");
+           T(". Activadas juntas, el juego usa una sola versión y esta pista puede verse con la carretera o el minimapa "
+             "de otra. Suele pasar con pistas exportadas juntas: exportadas por separado no comparten nada.",
+             ". On together, the game uses one version and this track can show another one's road or minimap. It "
+             "usually comes from tracks exported together: exported one by one they share nothing.");
 }
 
-// What a package's compatibility (scripts/content_compat.py) means, for its card.
-std::string CompatibilityText(const std::string& compat) {
+// What a package's compatibility (scripts/content_compat.py) means, for its card. `sharing`: it
+// shares textures with another track that is on (ClashText), which makes a full one partial.
+std::string CompatibilityText(const std::string& compat, bool sharing) {
     if (compat.empty()) return std::string();
     const size_t a = compat.find(';');
     const size_t b = a == std::string::npos ? std::string::npos : compat.find(';', a + 1);
     const std::string level = compat.substr(0, a);
     const bool tested = a != std::string::npos && compat.substr(a + 1, b - a - 1) == "1";
     std::string text;
-    if (level == "full")
+    if (level == "full" && sharing)
+        text = std::string(T("Compatibilidad parcial: se juega, pero con problemas visuales menores mientras esté activada junto "
+                             "con las pistas que se indican abajo (carretera, minimapa u otras texturas de otra pista)",
+                             "Partial compatibility: it plays, but with minor visual problems while it is on together with "
+                             "the tracks named below (another track's road, minimap or other textures)")) +
+               (tested ? T("; sola, probada en el juego.", "; alone, tried in game.") : ".");
+    else if (level == "full")
         text = tested ? T("Compatibilidad completa: probada en el juego.", "Full compatibility: tried in game.")
                       : T("Compatibilidad completa: no se encontró nada que la afecte (sin probar en el juego).",
                           "Full compatibility: nothing found that affects it (not tried in game).");
@@ -5766,8 +5775,14 @@ void ContentTab() {
         const Captured r = c.action.get();
         if (!r.output.empty()) AddLog(r.output);
         const bool ok = r.started && r.code == 0;
+        const bool together = r.output.find("exported together") != std::string::npos;
         a.notice = c.converting
-            ? (ok ? T("Mod convertido: ya está en tus paquetes (un paquete por pista). El registro dice qué cambios se dejaron fuera.",
+            ? (ok && together
+                   ? T("Mod convertido: un paquete por pista. Sus pistas se exportaron juntas y comparten texturas "
+                       "(carretera, minimapa): juntas tienen compatibilidad parcial. Se recomienda exportarlas por separado.",
+                       "Mod converted: one package per track. Its tracks were exported together and share textures "
+                       "(road, minimap): together their compatibility is partial. Exporting them one by one is recommended.")
+               : ok ? T("Mod convertido: ya está en tus paquetes (un paquete por pista). El registro dice qué cambios se dejaron fuera.",
                       "Mod converted: it is in your packages now (one package per track). The log lists the changes left out.")
                   : T("No se pudo convertir el mod. Revisa el registro.", "Could not convert the mod. Check the log."))
             : (ok ? T("Paquete quitado. Se conserva una copia en content-state/removed.",
@@ -5793,6 +5808,7 @@ void ContentTab() {
                                "with the rest at start. Off, the game sees no package; each keeps its own switch.");
     std::vector<PatchInfo> cards;
     for (const auto& p : c.packages) {
+        const std::string clash = ClashText(p.id);
         PatchInfo card;
         card.key = "content:" + p.id;
         card.content_id = p.id;
@@ -5805,8 +5821,7 @@ void ContentTab() {
             (p.online == "private" ? T("Sin conexión y en salas privadas.", "Offline and in private rooms.")
                                    : T("Solo sin conexión.", "Offline only.")) +
             (p.credits.empty() ? std::string() : "\n" + p.credits) +
-            (p.compat.empty() ? std::string() : "\n" + CompatibilityText(p.compat));
-        const std::string clash = ClashText(p.id);
+            (p.compat.empty() ? std::string() : "\n" + CompatibilityText(p.compat, !clash.empty()));
         if (!clash.empty()) card.mod_description += "\n" + clash;
         cards.push_back(std::move(card));
     }
@@ -5857,12 +5872,14 @@ void ContentTab() {
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("%s", T("Un mod de pista clásico (sus .pak y un update3.pak entero) pasa a ser un paquete;\n"
-                                  "si trae varias pistas, un paquete por pista.\n"
+                                  "si trae varias pistas, un paquete por pista (exportadas juntas comparten\n"
+                                  "texturas y minimapa: mejor exportar cada pista por separado).\n"
                                   "Se dejan fuera sus cambios a archivos que usan todas las pistas.\n"
                                   "Las pistas de CTR Track Editor anteriores a la 0.5 se corrigen al convertir\n"
                                   "(sus contadores de referencias cerraban el juego al cargar la pista siguiente).",
                                   "A classic track mod (its .pak files and a whole update3.pak) becomes a package;\n"
-                                  "with several tracks, one package per track.\n"
+                                  "with several tracks, one package per track (exported together they share\n"
+                                  "textures and minimap: better export each track on its own).\n"
                                   "Its changes to files every track uses are left out.\n"
                                   "Tracks from CTR Track Editor before 0.5 are fixed when converted\n"
                                   "(their reference counts crashed the game loading the next track)."));
@@ -5936,13 +5953,16 @@ void ContentTab() {
         ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
         ImGui::TextWrapped("%s", T("Texturas compartidas: varias de las pistas activadas modifican texturas del juego sin "
                                    "cambiarles el nombre, y el juego usa una sola versión para todas, así que una pista puede "
-                                   "verse con las texturas de otra (por ejemplo, la carretera). Cada paquete afectado lo indica; "
-                                   "si una se ve mal, juégala con las demás desactivadas o vuelve a exportarla con texturas de "
-                                   "nombre propio.",
+                                   "verse con la carretera, el minimapa u otras texturas de otra. Suele pasar con las pistas "
+                                   "exportadas juntas desde el editor (varias en un mismo mod): su compatibilidad pasa a parcial, "
+                                   "con problemas visuales menores. Se recomienda exportar cada pista por separado; mientras "
+                                   "tanto, juega la que se vea mal con las demás desactivadas. Cada paquete afectado lo indica.",
                                    "Shared textures: several of the tracks that are on change game textures without renaming "
                                    "them, and the game uses one version for all of them, so a track can show another one's "
-                                   "textures (its road, say). Each package concerned says so; if one looks wrong, play it with "
-                                   "the others off or export it again with textures of its own names."));
+                                   "road, minimap or other textures. It usually comes from tracks exported together from the "
+                                   "editor (several in one mod): their compatibility becomes partial, with minor visual "
+                                   "problems. Exporting each track on its own is recommended; meanwhile, play the one that "
+                                   "looks wrong with the others off. Each package concerned says so."));
         ImGui::PopStyleColor();
     }
     // The tracks are made by the community: some ask more of the GPU and CPU than the game's own.

@@ -108,6 +108,9 @@ def main(argv=None):
             print('Converted:', ', '.join(t.name for t in targets))
             for path in dropped:
                 print('  left out (changes a game file every track uses):', path)
+            if len(targets) > 1:
+                print('  these tracks were exported together: they share textures (road, minimap), so on '
+                      'together their compatibility is partial. Export each track on its own to avoid it.')
         else:
             print(__doc__)
             return 2

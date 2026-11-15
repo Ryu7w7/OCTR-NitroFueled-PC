@@ -211,7 +211,9 @@ Packages whose archives hold files of one name with different contents clash: th
 keeps one version for all, so a track can show another one's textures (CTR Track Editor saves
 the game textures a track changes under their own names). The listing names each pair
 (content_compat.clashes, hashes kept in content-state/archive-hashes.json) and the launcher
-warns when both are on.
+warns when both are on: their cards say partial compatibility (minor visual problems: another
+track's road or minimap) while the other one is on. It comes from tracks exported together (several
+in one mod); converting one says so and recommends exporting each track on its own.
 Unpacked copies of ZIPs no longer in custom_content or mods (an older version, a removed
 package) are removed when the launcher reads its folders, and only the latest three prepared
 sessions are kept (scripts/state_cleanup.py); nothing is removed while a game session runs.
