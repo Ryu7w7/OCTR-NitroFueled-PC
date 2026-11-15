@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "1.5.0",
+  "version": "1.5.3",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its four races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its four tracks' pictures in the same row, with their white frames.",
   "requiresCapabilities": [
@@ -62,7 +62,7 @@
         "asset": "ui/Octane_MainMenu_RaceSetting.igz",
         "index": 3210,
         "original_sha256": "0751567cdebff0893a05ee96fa7ebb3b53233de260b239ddba626777a373a7e3",
-        "patched_sha256": "6bd94f3c0358eb95c12aec7e8f97a5d607e69ad9b72ba0661536a8f9876a3bd0",
+        "patched_sha256": "d24602b538bdf500e4147d43634c9acd7dcc2d97ee87a3ef702c7778ac9fc8b8",
         "payload": "payloads/ajustes-carrera-miniaturas.delta.json"
       },
       {
@@ -84,8 +84,8 @@
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "55104f637107981132db2e3f0df9c746b67320d2cc4dec83fc1f8a726c7c30e6",
-      "bytes": 13925
+      "sha256": "1ed9a4e2dfdd86748e66c3ca8f46f4408a3a9eb44f61b2d87f9c06a9ae49a66d",
+      "bytes": 14499
     },
     {
       "file": "payloads/ajustes-carrera-materiales.delta.json",
@@ -94,7 +94,7 @@
     },
     {
       "file": "payloads/ajustes-carrera-miniaturas.delta.json",
-      "sha256": "b8f176dd467667658b726d319e1d4a63df24b5513442dd1b37189bfad6608ffc",
+      "sha256": "4ddfd7f5cdc4b99bcd76603f9c3a49099da1ae3309ca8d23763e29a89f0d825c",
       "bytes": 7399
     },
     {
