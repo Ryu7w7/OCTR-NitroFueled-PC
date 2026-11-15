@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "id": "battle-point-limit-selector",
   "name": "Ultimate Customizer",
-  "version": "5.1.0",
+  "version": "5.1.1",
   "author": "Kyouko8",
-  "description": "Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups (8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws their pictures from your game first.",
+  "description": "Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to 999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60; Capture the Flag and Steal the Bacon points up to 60.\n- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups (8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws their pictures from your game first.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -95,7 +95,7 @@
         "asset": "looseData/systemData.igz",
         "index": 7322,
         "original_sha256": "8b5ca70daefc0ee75a8cb3bd8e45eb73cdf35450d5583ea9a5782df3459920ce",
-        "patched_sha256": "b418f3b0248658120bbd0ba40e83bb2bfafbe52e4c179c3da67522848c73b0f0",
+        "patched_sha256": "688716c7ca141340a9819c08b874814a531ee0568e5d3efb85520d0e1b0626c8",
         "payload": "payloads/systemdata-battle.delta.json"
       }
     ],
@@ -106,7 +106,7 @@
         "asset": "looseData/systemData.igz",
         "index": 7322,
         "original_sha256": "8b5ca70daefc0ee75a8cb3bd8e45eb73cdf35450d5583ea9a5782df3459920ce",
-        "patched_sha256": "f76c7845a706fcf87687f750a2283c9c7dedbd0415b48a2beaeb194073070789",
+        "patched_sha256": "c9f4e41a4d4cc432c423f01d3a80fdf1cb24e34af164f42245d0c5a788f52939",
         "payload": "payloads/systemdata-battle-cups.delta.json"
       },
       {
@@ -203,13 +203,13 @@
     },
     {
       "file": "payloads/systemdata-battle-cups.delta.json",
-      "sha256": "52db21e2d7f7f0022a58d86fda7d8d4ac2bacceec28c8a6651f7089faaa8b62e",
-      "bytes": 13307
+      "sha256": "3d7773a49d2a1318846f2c4f9dd3c27b50fa1284cade69904fa49aa33dbc9052",
+      "bytes": 13475
     },
     {
       "file": "payloads/systemdata-battle.delta.json",
-      "sha256": "5891891aa9b6d76872a09ca96260985f517d988f41ac38b3beb6b027d0826f93",
-      "bytes": 742
+      "sha256": "db983d774bf78dd94f5699f05c8723bc7dd7bdb3892130d7482541de58012df6",
+      "bytes": 918
     },
     {
       "file": "payloads/vueltas-offline.delta.json",

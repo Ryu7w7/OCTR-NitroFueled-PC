@@ -128,7 +128,8 @@ turned off. Their assets are copy deltas (copy-delta-v1, payloads/*.delta.json),
 from the player's own game files, so no game file is in the repository.
   ultimate-customizer  Ultimate Customizer (Kyouko8; formerly Race and Battle Options):
                   laps to 250, three-digit HUD and menus, the long race clock, battle
-                  points/time/lives, the random cup. Option Copas Adicionales (off by
+                  points/time/lives (Capture the Flag and Steal the Bacon
+                  points too: 5.1.1), the random cup. Option Copas Adicionales (off by
                   default): 25 new Arcade cups (8 easy, 9 medium, 8 hard) and their stars.
   custom-cup      Custom Cup 2 (Kyouko8): a cup of 4 to 16 tracks of the player's choice.
                   A track can be chosen more than once. Option Miniaturas en ajustes de

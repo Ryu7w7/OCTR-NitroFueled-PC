@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "Kyouko8",
   "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its tracks' pictures, with their white frames.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
   "requiresCapabilities": [
@@ -96,12 +96,12 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "93ab854450d519d7b4876cf29fdfc0722562f24da4836e8674ed1218776091e6",
+      "sha256": "d67dac50cf1c98671d3c091cb9ad3e2f25f5b78f57d6f629fd69dc7366e503b5",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "f529e0eaba6df1001ca6461bb1690329ddc5f36cdc721a8d317dd53289c466aa",
+      "sha256": "53cfdb330dc90c994b7e33e28354172f6b013cb910fb09d129c2df4599a38171",
       "bytes": 16257
     },
     {

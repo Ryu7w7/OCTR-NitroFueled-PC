@@ -30,6 +30,7 @@ import hashlib
 import json
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import zipfile
@@ -48,6 +49,10 @@ MARKER_TEXT = b'OCTR Mod Package 2\n'
 WINDOW = 32
 SYSTEM = 'looseData/systemData.igz'
 BATTLE = ('SystemData_battleArenaLives', 'SystemData_battleArenaLimitPoints', 'SystemData_battleArenaTimesMinutes')
+# Capture the Flag and Steal the Bacon's points limit: as long as the lives' and minutes' (5.1.1)
+CTF_POINTS = 'SystemData_battleArenaPoints'
+MORE_POINTS = [3, 6, 9, 12, 15, 20, 25, 30, 40, 50, 60]
+UC_VERSION = '5.1.1'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS
 CUP_ASSETS = ('materialinstances/UI/CupSelect_materials.igz',)
 ART_ASSET = 'textures/GuiStandard_diffuse,textures@!ui!Octane!RaceSelect!octane_ui_raceselect_bg_spacecup`tga,101.igz'
 # Ultimate Customizer's patch: the lines of the added cups, by their comment.
@@ -127,6 +132,32 @@ def battle_only(stock, mod):
     return out
 
 
+def more_battle_points(blob):
+    """systemData.igz with the points limit of Capture the Flag and Steal the Bacon
+    (SystemData_battleArenaPoints: 3, 6, 9) as long as the lives' and minutes' (MORE_POINTS);
+    Ultimate Customizer 5.1.0 left it as the game has it."""
+    z = File(blob)
+    o = dict(z.roots()[2])[CTF_POINTS]
+    length = z.u64(o + 0x18) & 0xFFFFFFFF
+    if list(z.sites_in(z.ref(o + 0x20), length)):
+        raise ValueError(f'{CTF_POINTS}: its values hold references')
+    old = list(struct.unpack_from(f'<{length // 4}i', z.data, z.ref(o + 0x20)))
+    if old != [3, 6, 9]:
+        raise ValueError(f'{CTF_POINTS}: expected the game\'s 3, 6, 9, found {old}')
+    at = z.append(struct.pack(f'<{len(MORE_POINTS)}i', *MORE_POINTS))
+    z.set_u32(o + 0xC, len(MORE_POINTS))
+    z.set_u32(o + 0x10, len(MORE_POINTS))
+    z.set_u64(o + 0x18, (z.u64(o + 0x18) & ~0xFFFFFFFF) | 4 * len(MORE_POINTS))
+    z.set_u64(o + 0x20, (z.u64(o + 0x20) & ~MASK) | at)
+    out = z.build()
+    check = File(out)
+    c = dict(check.roots()[2])[CTF_POINTS]
+    got = list(struct.unpack_from(f'<{len(MORE_POINTS)}i', check.data, check.ref(c + 0x20)))
+    if got != MORE_POINTS or check.u32(c + 0xC) != len(MORE_POINTS):
+        raise AssertionError(CTF_POINTS + ' differs')
+    return out
+
+
 def split_patch(xml):
     """(base XML, added cups XML) of Ultimate Customizer's patch, by the lines' comments."""
     head, body = xml.split('<PatchList>', 1)
@@ -190,7 +221,8 @@ def race_options(game, uc, out):
             continue
         if op['asset'] == SYSTEM:
             stock = game_entry(game, op['archive'], op['index'], op['asset'], op['original_sha256'])
-            battle = battle_only(stock, payload)
+            battle = more_battle_points(battle_only(stock, payload))
+            payload = more_battle_points(payload)
             for set_name, data, stem in (('battle', battle, 'systemdata-battle'), ('cups', payload, 'systemdata-battle-cups')):
                 delta = json.dumps(make_delta(stock, data), separators=(',', ':')).encode()
                 path = f'payloads/{stem}.delta.json'
@@ -207,10 +239,11 @@ def race_options(game, uc, out):
     files['patches/copas-adicionales.xml'] = cups_xml.encode('utf-8')
     manifest = {
         'schemaVersion': 2, 'id': m['id'], 'name': 'Ultimate Customizer',
-        'version': m['version'], 'author': m['author'],
+        'version': UC_VERSION, 'author': m['author'],
         'description': 'Built into the launcher: Ultimate Customizer by Kyouko8 (formerly Race and Battle Options).\n'
                        '- Laps 1-12 up to 250, for single races and cups; three-digit menus and HUD; race clock up to '
-                       '999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60.\n'
+                       '999:59:99.\n- Battle points limit 5 to 99, time limit and lives up to 60; Capture the Flag '
+                       'and Steal the Bacon points up to 60.\n'
                        '- Random cup: Square on the cup menu.\n- Copas Adicionales (option): 25 new Arcade cups '
                        '(8 easy, 9 medium, 8 hard), each built around a character, with their stars. Prepare draws '
                        'their pictures from your game first.',
