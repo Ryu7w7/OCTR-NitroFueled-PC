@@ -244,7 +244,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     /* --gpus: one line per Vulkan GPU, "<kind>\t<Vulkan version>\t<name>" (kind: discrete,
-     * integrated, virtual, cpu or other): the launchers' graphics card list (BB_GPU_NAME). */
+     * integrated, virtual, cpu or other): the launchers' graphics card list (BB_GPU_NAME, or the
+     * line's place, BB_GPU_ID, for GPUs that share a name). */
     if (gpus_mode) {
         for (uint32_t i = 0; i < count; ++i) {
             VkPhysicalDeviceProperties props;
