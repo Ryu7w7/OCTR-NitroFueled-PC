@@ -20,10 +20,11 @@ def engine_features(executable,digest):
 
 def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21',game=None):
     from prepare import parse_self
-    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments,optional_game_patch
+    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments,optional_game_patch,tacho_pack_patches
     elf,*_=parse_self(((Path(game) if game is not None else profile/'game')/'eboot.bin').read_bytes())
     settings=read_settings(Path(config))  # run.py passes bbport.ini's path as text without a widescreen layout
-    selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
+    selected=(external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)
+              +tacho_pack_patches(settings,app_version,title_id)+render_patches(settings))
     claims=[]
     for key,path,meta in selected:
         # Built-in render patches have no XML path.

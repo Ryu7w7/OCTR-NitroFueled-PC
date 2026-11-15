@@ -2,9 +2,9 @@
 built into the port with his permission. See scripts/tacho_pack/README.txt.
 
 Two halves:
-- Executable patches in patches/ (RaceLeaders_hud.xml, HudOriginal.xml, ItemsMejorados.xml,
-  NtropyPosicion.xml, SinItemsPortales.xml, BarraReservas.xml), on by default like any bundled
-  patch with isEnabled (scripts/patches.py; the launcher's Patches page turns each off).
+- Executable patches in tacho_pack/patches/ (RaceLeaders_hud.xml, HudOriginal.xml,
+  ItemsMejorados.xml, NtropyPosicion.xml, SinItemsPortales.xml, BarraReservas.xml), always applied
+  (scripts/patches.py tacho_pack_patches): part of the port, not in the launchers' mod lists.
 - Game files (this script): the 8-place race leaders list, the racer HUD and minimap, and the main
   menu's logo and backgrounds, swapped by archive patch (scripts/archive_patch.py), each keeping
   the base patches of its archive. A swap applies only where the game holds the exact file the
@@ -15,7 +15,8 @@ which the game reads last, so it is rebuilt from the pack's menu. Online mode (s
 builds streaming copies of the leaders list from the game's files; stream_replacements() gives
 it the pack's.
 
-bbport.ini tacho_pack = 0 (or BB_TACHO_PACK=0) leaves the whole pack out, patches included.
+It has no launcher setting. bbport.ini tacho_pack = 0 (or BB_TACHO_PACK=0) is a hidden kill
+switch that leaves the whole pack out, patches included, to tell whether a problem comes from it.
 tacho_pack_menu = 1 adds the pack's "Hud Power Charged" and "Barra de reservas" entries to
 Options > Game (another Options page; without it the new HUD and the bar are always on).
 SPDX-License-Identifier: GPL-2.0-or-later

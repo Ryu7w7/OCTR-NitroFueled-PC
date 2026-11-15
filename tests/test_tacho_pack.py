@@ -22,21 +22,25 @@ class TachoPackTests(unittest.TestCase):
             data = (tacho_pack.FOLDER / op['payload']).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), op['patched_sha256'], op['payload'])
 
-    def test_executable_patches_are_bundled_on_by_default(self):
+    def test_executable_patches_are_always_applied_and_not_listed(self):
         self.assertEqual(sorted(tacho_pack.manifest()['patches']), sorted(patches.TACHO_PACK_FILES))
-        found = patches.external_patches(ROOT / 'patches')
-        pack = [key for key, _, _ in found if patches.tacho_pack_patch(key)]
+        # Not in patches/, which the launchers list with the mods.
+        listed = patches.external_patches(ROOT / 'patches')
+        self.assertFalse([key for key, _, _ in listed if patches.tacho_pack_patch(key)])
+        pack = patches.tacho_pack_patches({})
         self.assertEqual(len(pack), 6)
-        chosen = {key for key, _, _ in patches.external_selection(found, None, {})}
-        self.assertTrue(set(pack) <= chosen)
+        # patches.json cannot turn them off, and a copy elsewhere (the old mod) is left out.
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'patches.json'
+            config.write_text('{"disabled": [%s]}' % ','.join('"%s"' % k for k, _, _ in pack), encoding='utf-8')
+            self.assertEqual(len(patches.tacho_pack_patches({})), 6)
+            self.assertFalse(patches.external_selection(pack, config, {}))
         for name in patches.TACHO_PACK_FILES:
-            for line in ET.parse(ROOT / 'patches' / name).getroot().iter('Line'):
+            for line in ET.parse(patches.TACHO_PACK_DIR / name).getroot().iter('Line'):
                 self.assertTrue(line.get('Signature') or line.get('ExpectedSHA256'), name)
 
     def test_the_pack_turns_off_as_a_whole(self):
-        found = patches.external_patches(ROOT / 'patches')
-        chosen = patches.external_selection(found, None, {'tacho_pack': '0'})
-        self.assertFalse([key for key, _, _ in chosen if patches.tacho_pack_patch(key)])
+        self.assertEqual(patches.tacho_pack_patches({'tacho_pack': '0'}), [])
         with tempfile.TemporaryDirectory() as folder:
             ini = Path(folder) / 'bbport.ini'
             ini.write_text('tacho_pack=0\n', encoding='utf-8')

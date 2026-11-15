@@ -14,14 +14,15 @@ What it does:
 - No items near the portals (Spyro Circuit and the space highway track).
 
 Where it lives in the port:
-- patches/RaceLeaders_hud.xml, HudOriginal.xml, ItemsMejorados.xml, NtropyPosicion.xml,
-  SinItemsPortales.xml, BarraReservas.xml: executable patches, on by default. Each can be
-  turned off in the launcher's Patches page.
+- scripts/tacho_pack/patches/RaceLeaders_hud.xml, HudOriginal.xml, ItemsMejorados.xml,
+  NtropyPosicion.xml, SinItemsPortales.xml, BarraReservas.xml: executable patches, always
+  applied. They are part of the port, so they are not listed with the mods.
 - scripts/tacho_pack/manifest.json and payloads/: the game files it swaps
   (scripts/tacho_pack.py applies them).
 
 Settings (bbport.ini):
-- tacho_pack = 0 leaves the whole pack out.
+- tacho_pack = 0 leaves the whole pack out (a hidden switch for diagnosing problems; the
+  launcher has no setting for the pack).
 - tacho_pack_menu = 1 adds "Hud Power Charged" (Yes: new HUD, No: the game's own, from the next
   race) and "Barra de reservas" (Yes/No) to Options > Game.
 

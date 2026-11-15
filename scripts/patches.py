@@ -43,9 +43,11 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
                  'patch_unlock_all':'CrashTeamRacingUnlockAll.xml/Unlock Everything',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
-# Pack Tacho's executable patches (scripts/tacho_pack.py; on unless bbport.ini tacho_pack=0).
+# Pack Tacho's executable patches (scripts/tacho_pack.py): part of the port, always applied (no
+# launcher toggle), from their own folder, which the launchers' patch lists do not read.
 TACHO_PACK_FILES=('RaceLeaders_hud.xml','HudOriginal.xml','ItemsMejorados.xml','NtropyPosicion.xml',
                   'SinItemsPortales.xml','BarraReservas.xml')
+TACHO_PACK_DIR=Path(__file__).resolve().parent/'tacho_pack'/'patches'
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
                'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
@@ -516,10 +518,9 @@ def external_selection(found, config, ini=None):
     if any(selection_key(key) == blur and meta.get('AppVer') == '01.21' for key, _, meta in found):
         enabled.discard(blur)
         disabled.add(blur)
-    # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): off as a whole with its game files.
-    if (ini or {}).get('tacho_pack','1').strip().lower() in ('0','off','no','false') or \
-            os.environ.get('BB_TACHO_PACK','').strip().lower() in ('0','off','no','false'):
-        found=[patch for patch in found if not tacho_pack_patch(patch[0])]
+    # Pack Tacho's patches come from tacho_pack_patches() only: a copy elsewhere (the old Pack Tacho
+    # mod still installed) would apply them twice.
+    found=[patch for patch in found if not tacho_pack_patch(patch[0])]
     return [(key,path,meta) for key,path,meta in found
             if selection_key(key) in enabled
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
@@ -528,6 +529,16 @@ def external_selection(found, config, ini=None):
 def tacho_pack_patch(key):
     """One of Pack Tacho's executable patches (scripts/tacho_pack.py), by its file name."""
     return key.partition('/')[0] in TACHO_PACK_FILES
+
+
+def tacho_pack_patches(ini=None, app_version=APP_VERSION, title_id=TITLE_ID):
+    """Pack Tacho's patches, always selected; none only with the hidden kill switch
+    (bbport.ini tacho_pack=0 or BB_TACHO_PACK=0, for diagnosing a problem)."""
+    off=('0','off','no','false')
+    if (ini or {}).get('tacho_pack','1').strip().lower() in off or \
+            os.environ.get('BB_TACHO_PACK','').strip().lower() in off:
+        return []
+    return [patch for patch in external_patches(TACHO_PACK_DIR,app_version,title_id) if tacho_pack_patch(patch[0])]
 
 
 def optional_game_patch(key):
@@ -662,7 +673,8 @@ def main():
     found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     applied=[]
-    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
+    writes=compile_external(external_selection(found,a.patches_config,settings)
+                            +tacho_pack_patches(settings,a.app_version,a.title_id)+render_patches(settings)
                             +theme_patches(settings)+end_race_patches(),
                             segments,elf,strict=a.strict_overlap,applied=applied)
     write_blob(a.out,writes)
