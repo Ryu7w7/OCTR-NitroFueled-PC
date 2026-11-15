@@ -11,6 +11,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_d3d11.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 
@@ -131,7 +132,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    // Direct3D 11 needs no Vulkan at all (gnmdriver.cpp RegisterLib): a Vulkan window there
+    // stopped PCs without a Vulkan driver, the ones that engine is for (2026-11-15).
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, !BbD3d11::On());
     // On scaled Wayland desktops, window coordinates are logical units. Request a native
     // pixel drawable so the compositor does not enlarge a low-resolution Vulkan surface.
     // The swapchain uses SDL_GetWindowSizeInPixels, including after pixel-size changes.
