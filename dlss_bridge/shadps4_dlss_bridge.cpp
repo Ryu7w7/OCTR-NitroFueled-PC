@@ -42,7 +42,10 @@ void Log(int warning, const char* format, Args... args) {
     if (!state.log)
         return;
     std::array<char, 1024> text{};
-    std::snprintf(text.data(), text.size(), format, args...);
+    if constexpr (sizeof...(Args) == 0)
+        std::snprintf(text.data(), text.size(), "%s", format);
+    else
+        std::snprintf(text.data(), text.size(), format, args...);
     state.log(warning, text.data());
 }
 
