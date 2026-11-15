@@ -41,6 +41,10 @@ std::string ServiceRequest(const char* operation) {
     return "{\"op\":\"" + std::string(operation) + "\",\"data\":\"" + JsonEscape(PathText(g_app.data)) + "\"}";
 }
 bool OpenUrl(const std::string& url) { return SDL_OpenURL(url.c_str()); }
+fs::path PortFolder() {
+    const auto appimage = Env("APPIMAGE");
+    return appimage.empty() ? g_app.root : TextPath(appimage).parent_path();
+}
 void OpenInShell(const fs::path& target) {
     const std::string value = PathText(target);
     if (value.find("://") != std::string::npos) { OpenUrl(value); return; }

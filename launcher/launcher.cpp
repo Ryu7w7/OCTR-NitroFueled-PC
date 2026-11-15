@@ -490,6 +490,7 @@ Captured RunCaptured(const std::wstring& exe, const std::wstring& command_line, 
                      DWORD timeout_ms);
 
 void OpenInShell(const fs::path& target);
+fs::path PortFolder();
 
 std::vector<fs::path> PickFiles(LauncherWindow owner, const wchar_t* title, const wchar_t* filter_name, const wchar_t* filter);
 
@@ -6827,7 +6828,7 @@ void ToolsTab() {
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
     if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenRunLog();
     ImGui::SameLine();
-    if (ImGui::Button(T("Abrir la carpeta del port", "Open the port folder"))) OpenInShell(a.root);
+    if (ImGui::Button(T("Abrir la carpeta del port", "Open the port folder"))) OpenInShell(PortFolder());
     ImGui::SameLine();
     if (ImGui::Button(T("Abrir partidas guardadas", "Open saves"))) {
         std::error_code ec;

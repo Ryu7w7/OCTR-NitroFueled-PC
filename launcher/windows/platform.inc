@@ -200,6 +200,7 @@ Captured RunCaptured(const std::wstring& exe, const std::wstring& command_line, 
 void OpenInShell(const fs::path& target) {
     ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
+fs::path PortFolder() { return g_app.root; }
 
 std::vector<fs::path> PickFiles(LauncherWindow owner, const wchar_t* title, const wchar_t* filter_name, const wchar_t* filter) {
     std::vector<fs::path> result;

@@ -27,6 +27,15 @@ int main(int argc, char** argv) {
     if (data_override.empty()) unsetenv("BB_DATA_DIR");
     else setenv("BB_DATA_DIR", data_override.c_str(), 1);
     {
+        const auto appimage_override = Env("APPIMAGE");
+        unsetenv("APPIMAGE");
+        assert(PortFolder() == g_app.root);
+        setenv("APPIMAGE", PathText(g_app.data / "SacredFire.AppImage").c_str(), 1);
+        assert(PortFolder() == g_app.data);
+        if (appimage_override.empty()) unsetenv("APPIMAGE");
+        else setenv("APPIMAGE", appimage_override.c_str(), 1);
+    }
+    {
         const auto actual_data = g_app.data;
         g_app.data /= "run-log-test";
         fs::remove_all(g_app.data);
