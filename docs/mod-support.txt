@@ -146,6 +146,14 @@ from the player's own game files, so no game file is in the repository.
                   first track's picture (2.0.3).
                   Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
                   (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
+                  Reiniciar (2.1.0, every cup): the end race menu between a cup's races and
+                  after its last one shows Continuar, Reiniciar, Salir. Its cup group's Restart
+                  (CLoadMapNodes::restartCup_VSC: race 0 of the cup's own zone list; the kart
+                  records' reset clears the cup points at a cup's first race) was hidden; the
+                  newest ui/Octane_EndRaceMenu.igz and its root script are changed to show it,
+                  move Continue a row up, link the three, run the Continue script on Continue
+                  (the next race, or the podium after the last one) and take the cup's last
+                  race the same way.
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
                   game's own track pictures): "Prepare" on Ultimate Customizer draws them
                   from the player's game files (scripts/cup_art.py, about a minute; numpy,

@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "author": "Kyouko8",
-  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
+  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Reiniciar between a cup's races and after its last one (every cup: the game's, Ultimate Customizer's added ones and a custom cup): the cup starts again from its first race with the points at 0, its tracks as they were chosen. Continuar, Reiniciar, Salir.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -61,6 +61,24 @@
       "original_sha256": "802d2d5710d4d31e7a8ff6d293767ab14356febbf9423fd7086dd4a3a6aacd56",
       "patched_sha256": "2077f361bb873f2f40887cad0675e46ae712d23d09686c8eade726b78f4e07a9",
       "payload": "payloads/menu-pistas-miniaturas.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update.pak",
+      "asset": "vsc/UI/Octane_EndRaceMenu/Octane_EndRaceMenu_Root.igz",
+      "index": 1029,
+      "original_sha256": "719bef8d92d78a949951354324c3d935627d0ad6a3ded530ce4b91466c207bd1",
+      "patched_sha256": "0a9aa16f9af9b40caaee4ef596ad241463724aa94d98b3ba6a41a74da2a7ec11",
+      "payload": "payloads/fin-carrera-script.delta.json"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_EndRaceMenu.igz",
+      "index": 6369,
+      "original_sha256": "7e378ecaaea31ee78c1e0e2623e157a1eec26ab50cb0005fc114478dd555bdec",
+      "patched_sha256": "33a979e0ebb89ce9316596b4118893ddabafc01108d1ffd306d78368c242ca9d",
+      "payload": "payloads/fin-carrera-menu.delta.json"
     }
   ],
   "patches": [
@@ -96,12 +114,12 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "1205c7887693d11dde9c4b7eb5875bc98354a546b2f4c92cb2678d78c9c00455",
+      "sha256": "4797f9b7415a3095a4611799d9dca0a430099214f89a4385bdb57e901c640a40",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "64a6ff7606893718a9627a6d7906a0d86fb7d3d076950985ee0e1779c83ba94a",
+      "sha256": "911e638b6f39121ed40d2cf2306bb1d81fc221aaebf86186c9a6adb9d1145084",
       "bytes": 16769
     },
     {
@@ -113,6 +131,16 @@
       "file": "payloads/ajustes-carrera-miniaturas.delta.json",
       "sha256": "3ed1725d1910770e96f43a3d993ad489f418d79ee737f4ab4716bc494cc7cbf5",
       "bytes": 16425
+    },
+    {
+      "file": "payloads/fin-carrera-menu.delta.json",
+      "sha256": "a76fdaf6b70da8dfda6036708b221daa9203dfed64cd33435dac307d0e35a0e6",
+      "bytes": 226
+    },
+    {
+      "file": "payloads/fin-carrera-script.delta.json",
+      "sha256": "ac0946bef6b1cfa37fc1b20f91946ce41affabe6f91505551f64da54a0cde6e8",
+      "bytes": 223
     },
     {
       "file": "payloads/menu-pistas-miniaturas.delta.json",
