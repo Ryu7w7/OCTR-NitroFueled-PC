@@ -5,13 +5,14 @@ Two halves:
 - Executable patches in tacho_pack/patches/ (RaceLeaders_hud.xml, HudOriginal.xml,
   ItemsMejorados.xml, NtropyPosicion.xml, SinItemsPortales.xml, BarraReservas.xml), always applied
   (scripts/patches.py tacho_pack_patches): part of the port, not in the launchers' mod lists.
-- Game files (this script): the 8-place race leaders list, the racer HUD and minimap, and the main
-  menu's logo and backgrounds, swapped by archive patch (scripts/archive_patch.py), each keeping
-  the base patches of its archive. A swap applies only where the game holds the exact file the
-  pack was made from (USA 1.21); anything else keeps the game's own file.
+- Game files (this script): the 8-place race leaders list, the racer HUD and minimap, swapped by
+  archive patch (scripts/archive_patch.py), each keeping the base patches of its archive. The
+  pack's Power Charged main-menu logo is left out: the main menu is the game's own. A swap applies
+  only where the game holds the exact file the pack was made from (USA 1.21); anything else keeps
+  the game's own file.
 
 The Graphics tab's update3.pak (scripts/graphics_tab.py) carries its own copy of the main menu,
-which the game reads last, so it is rebuilt from the pack's menu. Online mode (scripts/online_mode.py)
+which the game reads last; it would be rebuilt from a pack copy of a file it carries (none now). Online mode (scripts/online_mode.py)
 builds streaming copies of the leaders list from the game's files; stream_replacements() gives
 it the pack's.
 
@@ -19,8 +20,8 @@ It is fixed: no launcher or bbport.ini setting turns it off or changes it, so ev
 races under the same rules. Its files are checked against SHA256 values written here
 (verify()); a changed or missing file stops the launch until the port is installed again.
 Its Options > Game entries ("Hud Power Charged", "Barra de reservas", as in Pack Tacho 1.3.0) are
-always in: they change only how a player's own HUD looks. The reserves bar starts off
-(src/runtime_reserves_bar.c) and is turned on there, never from the launcher or the overlay.
+always in: they change only how a player's own HUD looks. Both start off
+(src/runtime_reserves_bar.c) and are turned on there, never from the launcher or the overlay.
 SPDX-License-Identifier: GPL-2.0-or-later
 """
 import contextlib
@@ -38,7 +39,7 @@ FOLDER = Path(__file__).resolve().parent / 'tacho_pack'
 FORMAT = 2
 # The pack as shipped: the manifest (which holds every game file's SHA256) and its patches.
 EXPECTED = {
-    'manifest.json': 'b02a256311c3ce84d08e8aac7ccacdd836c380867c34a35783b4181e9a96e82b',
+    'manifest.json': '0def9a284e171fb1533fddb2115fb75edcb5a64a8f62d8ba1351170bd22bb58f',
     'patches/BarraReservas.xml': '3259ce94fbc6c71a71f913e76fc33f7c4455ec63e0624e192b467415de71bafc',
     'patches/HudOriginal.xml': '1b150e56c06b36619fcca5c49e16f07b5633ce45d96320ea891ecc966c0d621d',
     'patches/ItemsMejorados.xml': 'af2146c67bdde0ccbc27cdbbfc28fbab9d05d64e10d6c7348ef2048506329725',

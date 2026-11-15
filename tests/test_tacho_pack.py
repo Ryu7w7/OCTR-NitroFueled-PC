@@ -18,7 +18,7 @@ import tacho_pack  # noqa: E402
 class TachoPackTests(unittest.TestCase):
     def test_every_game_file_is_present_and_intact(self):
         m = tacho_pack.manifest()
-        self.assertEqual(len(m['operations']), 22)
+        self.assertEqual(len(m['operations']), 8)  # no main-menu logo: the game's own menu
         self.assertEqual(len(m['menu_operations']), 1)  # the Options > Game page, always applied
         for op in m['operations'] + m['menu_operations']:
             data = (tacho_pack.FOLDER / op['payload']).read_bytes()
@@ -44,7 +44,7 @@ class TachoPackTests(unittest.TestCase):
     def test_no_setting_turns_it_off(self):
         with mock.patch.dict(os.environ, {'BB_TACHO_PACK': '0', 'BB_TACHO_PACK_MENU': '1'}):
             self.assertEqual(len(patches.tacho_pack_patches({'tacho_pack': '0'})), 6)
-            self.assertEqual(len(tacho_pack.operations()), 23)  # the Options > Game page always in
+            self.assertEqual(len(tacho_pack.operations()), 9)  # the Options > Game page always in
 
     def test_a_changed_file_stops_the_launch(self):
         with tempfile.TemporaryDirectory() as folder:
