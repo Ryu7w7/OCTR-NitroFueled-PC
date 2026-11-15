@@ -151,8 +151,10 @@ def build(game, out, weight):
         print('Online playlist: no archives folder in the game; left as the game has it')
         target.unlink(missing_ok=True)
         return 0
+    import hashlib
     stamp = {'format': FORMAT, 'weight': weight,
-             'archives': [[p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in paks]}
+             'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+             'archives': [[str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns] for p in paks]}
     try:
         if target.is_file() and json.loads(stamp_file.read_text())['stamp'] == stamp:
             return 0

@@ -9,7 +9,8 @@ int runtime_speed_mode_enabled(void) { return active_speed; }
 int runtime_online_mode_private_speed(void) { return 0; }
 int runtime_online_mode_in_private(void) { return 0; }
 void runtime_race_options_leave_room(void) {}
-void runtime_online_mode_leave_cup(void) {}
+static int requested_leave, requested_fresh;
+void runtime_online_mode_request_leave(int fresh) { ++requested_leave; requested_fresh += fresh; }
 void runtime_online_mode_adopt(int speed) { active_speed = speed; }
 int runtime_public_itemless_announce(void) { return 1; }
 void runtime_public_itemless_party_ready(void) {}
@@ -94,7 +95,9 @@ int main(void) {
     pthread_cond_broadcast(&condition);
     pthread_mutex_unlock(&lock);
     assert(await_mode());
+    assert(runtime_room_mode_race_frozen());
     runtime_room_mode_end_race();
+    assert(!runtime_room_mode_race_frozen());
     alarm(0);
     get_body = "mode normal\n";
     assert(!await_mode()); /* Server forgot a host's Itemless publication. */
@@ -131,5 +134,6 @@ int main(void) {
     runtime_room_mode_left();
     follow_update(&peer, 1); /* A response from the old room cannot alter the new one. */
     assert(active_speed == 0 && !runtime_room_mode_following() && !race_frozen);
+    assert(requested_leave>0 && requested_fresh==0); /* Native cleanup is queued, not run on the worker. */
     puts("Room mode: verified loading, frozen CUP rules, stale responses and room leave passed");
 }

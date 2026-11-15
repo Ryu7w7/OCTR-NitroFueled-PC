@@ -172,6 +172,9 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
+        'generators':{name:sha(Path(__file__).with_name(name)) for name in (
+            'mod_content.py','mod_components.py','mod_format.py','mod_overlays.py',
+            'nitro_components.py','nitro_format.py','mod_file_paths.py')},
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]
     # New namespace: old full-game profiles must never be reused by this loader.
@@ -227,6 +230,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             publish_profile(staging,cache,log)
         except BaseException:
             log('Incomplete preparation preserved at '+str(staging));raise
+    from cache_cleanup import prune
+    prune(cache, 'ready.json', r'[0-9a-f]{24}', log)
     # Full PAKs/loose files are read directly from mod storage by the engine.
     registry=json.loads((cache/'registry.json').read_text())['target'].casefold() if (cache/'registry.json').exists() else None
     replacements=[(Path(target),source) for source,target in whole if target.casefold()!=registry]

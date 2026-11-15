@@ -84,6 +84,7 @@ def prepare(game, output, base_patches):
     game, output = Path(game), Path(output)
     output.mkdir(parents=True, exist_ok=True)
     cache = output / 'cache.json'
+    kept = {}
     stamp = stamp_of(game, base_patches)
     try:
         kept = json.loads(cache.read_text(encoding='utf-8'))
@@ -91,6 +92,11 @@ def prepare(game, output, base_patches):
             return [Path(p) for p in kept['normal']], [Path(p) for p in kept['speed']], kept['tracks']
     except (OSError, ValueError, KeyError, TypeError):
         pass
+    from cache_cleanup import discard_files
+    if isinstance(kept, dict):
+        protected = {Path(path).resolve() for path in base_patches}
+        discard_files(output, [path for path in kept.get('normal', []) + kept.get('speed', [])
+                               if Path(path).resolve() not in protected])
     cache.unlink(missing_ok=True)  # a build stopped halfway must not be trusted next time
     normal, speed, tracks = build(game, output, base_patches)
     cache.write_text(json.dumps({'stamp': stamp, 'normal': [str(p) for p in normal],

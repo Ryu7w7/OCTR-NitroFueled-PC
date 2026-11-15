@@ -145,5 +145,7 @@ def ensure_shaders(root,state,game,user,plan,environment,status,prepare_only=Fal
     # Promote only verified, unmodified shader cache; no modded cache is ever reused.
     cache=state/'extensions/vanilla-cache'/plan['engine']
     copy_tree(setup_user/'cache',cache);copy_tree(setup_user/'cache',user/'cache')
+    from cache_cleanup import prune
+    prune(cache,'CUSA13795/profile.bin',r'[0-9a-f]{64}')
     status('preparing','Shader setup complete. Starting your selected mods…')
     return True
