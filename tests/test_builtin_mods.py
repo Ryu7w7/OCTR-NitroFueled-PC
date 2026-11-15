@@ -118,6 +118,12 @@ class SplitTests(unittest.TestCase):
         # it ends going back where the win went before
         self.assertEqual(struct.unpack_from('<i', mbm.SAVE_CODE, len(mbm.SAVE_CODE) - 4)[0]
                          + mbm.SAVE_AT + len(mbm.SAVE_CODE), mbm.WRITE_SKIP)
+        # the sixth way to the unmount (a jmp, after saving) goes to 5.1.0's unmount code too
+        at, value, signature, offset = mbm.UMOUNT_JMP
+        jmp = [l for l in ET.fromstring(cups).iter('Line') if l.get('Address') == f'{at + 0x400000:#x}']
+        self.assertEqual((jmp[0].get('Value'), jmp[0].get('Signature')), (value.hex().upper(), signature))
+        self.assertEqual(bytes.fromhex(signature)[offset - 1], 0xe9)
+        self.assertEqual(struct.unpack('<i', value)[0] + at + 4, 0x2338093)
         with self.assertRaisesRegex(ValueError, 'unexpected code'):
             mbm.save_on_win(self.XML.replace('Value="90" Signature="90"', 'Value="' + '00' * 0x450 + '" Signature="90"'))
 

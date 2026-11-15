@@ -52,9 +52,14 @@ BATTLE = ('SystemData_battleArenaLives', 'SystemData_battleArenaLimitPoints', 'S
 # Capture the Flag and Steal the Bacon's points limit: as long as the lives' and minutes' (5.1.1)
 CTF_POINTS = 'SystemData_battleArenaPoints'
 MORE_POINTS = [3, 6, 9, 12, 15, 20, 25, 30, 40, 50, 60]
-UC_VERSION = '5.1.3'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
+UC_VERSION = '5.1.4'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
 # save_on_win: 5.1.0's code block, the end of its cup win (the jmp's rel32), and the code added
 CAVE, WIN_END, WRITE_SKIP, SAVE_AT = 0x2338000, 0x8f, 0x119def9, 0x2338800
+# The sixth way to the save data unmount (0x1bea988): a tail jmp at 0x14d1ad0, the one the game takes
+# after saving; 5.1.0 hooks the five calls only. Its rel32 now goes to 5.1.0's unmount code
+# (0x2338093), which takes the same rdi and ends in the import as well (5.1.4).
+UMOUNT_JMP = (0x14d1ad1, bytes.fromhex('BE65E600'),
+              '08 5b 41 5e 41 5f 5d e9 b3 8e 71 00 be 02 00 00 00 48 89 c7', 0x8)
 # push rbp..r13, aligned, 0x50 bytes of stack. When STATE (0x2bee700) bit 2 (changed) is set:
 # - not yet loaded (bit 1; 5.1.0 loads at an unmount, which never comes here): read
 #   /savedata0/rbo_cups.bin to the stack and, with its magic, OR its 64 cup bytes into the table
@@ -178,12 +183,13 @@ def more_battle_points(blob):
 
 
 def save_on_win(xml):
-    """Ultimate Customizer 5.1.0's patch with the added cups' stars saved when a cup is won (5.1.2; 5.1.3 loads the file first).
+    """Ultimate Customizer 5.1.0's patch with the added cups' stars kept between sessions (5.1.4).
 
-    5.1.0 writes /savedata0/rbo_cups.bin where the game unmounts its save data; this runtime
-    mounts it once a session and never unmounts it, so the stars were lost on closing the game.
-    The win's code (in the cave, 0x2338000) now goes on to SAVE_CODE at SAVE_AT, which writes the
-    table at once, reading the file first when it was not loaded (the unmount still writes it too)."""
+    5.1.0 writes /savedata0/rbo_cups.bin where the game unmounts its save data, but hooks only
+    five of the six ways there: after saving, the game goes by the sixth (UMOUNT_JMP), so the
+    file was never written. That one is hooked too. And the win's code (in the cave, 0x2338000)
+    goes on to SAVE_CODE at SAVE_AT, which writes the table at once when the save is mounted,
+    reading the file first when it was not loaded."""
     m = re.search(r'(Address="0x%x" Value=")([0-9A-F]+)"' % (CAVE + 0x400000), xml)
     body = bytearray(bytes.fromhex(m.group(2)))
     # lea rsi, [STATE]; or dword ptr [rsi], 2; jmp WRITE_SKIP: the end of the win's code
@@ -195,6 +201,11 @@ def save_on_win(xml):
     line = (f'\n            <!-- Cup stars: winning an added cup saves its table at once -->\n'
             f'            <Line Type="bytes" Address="{SAVE_AT + 0x400000:#x}" Value="{SAVE_CODE.hex().upper()}"\n'
             f'                  ExpectedSHA256="{sha(bytes(len(SAVE_CODE)))}"/>')
+    at, value, signature, offset = UMOUNT_JMP
+    line += (f'\n            <!-- Cup stars: the save data unmount reads and writes the table first (after saving) -->\n'
+             f'            <Line Type="bytes" Address="{at + 0x400000:#x}" Value="{value.hex().upper()}"\n'
+             f'                  Signature="{signature}"\n'
+             f'                  SignatureOffset="{offset:#x}"/>')
     head, tail = xml.rsplit('\n        </PatchList>', 1)
     return head + line + '\n        </PatchList>' + tail
 

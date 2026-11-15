@@ -131,8 +131,9 @@ from the player's own game files, so no game file is in the repository.
                   points/time/lives (Capture the Flag and Steal the Bacon
                   points too: 5.1.1), the random cup. Option Copas Adicionales (off by
                   default): 25 new Arcade cups (8 easy, 9 medium, 8 hard) and their stars,
-                  saved when a cup is won (5.1.3: 5.1.0 saved them only where the game
-                  unmounts its save data, which this runtime never does in a session).
+                  kept in rbo_cups.bin (5.1.4: 5.1.0 hooked five of the six ways to the save
+                  data unmount, not the one the game takes after saving; a win also saves
+                  them when the save is mounted).
   custom-cup      Custom Cup 2 (Kyouko8): a cup of 4 to 16 tracks of the player's choice.
                   A track can be chosen more than once. Option Miniaturas en ajustes de
                   carrera (on by default): the race settings of every cup show its four
