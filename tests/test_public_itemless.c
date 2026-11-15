@@ -61,8 +61,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
-        assert(strstr(target,"&ranked=1"));
+        assert(strstr(target,"&ranked=2"));
         assert(strstr(target,ranked_device()) && strlen(ranked_device())==64);
+        assert(strstr(target,"&collision_rules=1"));
         snprintf(body,size,"ok"); return 200;
     }
     assert(!strcmp(method,"GET"));
@@ -110,12 +111,12 @@ static void ABI merge_event(void *self, uint64_t search, uint64_t from, uint64_t
     memcpy((unsigned char *)self + 0x958, &to, 8);
 }
 static void confirmation_doc(char *out, size_t n, uint64_t room, uint64_t token) {
-    snprintf(out,n,"{\"lobby_id\":%" PRIu64 ",\"octr_itemless_v1\":\"1/%" PRIu64 "/1/%016" PRIx64 "\"}",room,room,token);
+    snprintf(out,n,"{\"lobby_id\":%" PRIu64 ",\"octr_itemless_v1\":\"2/%" PRIu64 "/1/%016" PRIx64 "\"}",room,room,token);
 }
 static void test_full_lobby_confirmation(void) {
     /* Eight solo searches contribute eight request and eight registration tokens. */
     char doc[512];
-    size_t n = (size_t)snprintf(doc, sizeof doc, "{\"octr_itemless_v1\":\"1/42/1/");
+    size_t n = (size_t)snprintf(doc, sizeof doc, "{\"octr_itemless_v1\":\"2/42/1/");
     for (uint64_t i=1; i<=16; ++i)
         n += (size_t)snprintf(doc+n, sizeof doc-n, "%s%016" PRIx64, i==1 ? "" : ",", i);
     snprintf(doc+n, sizeof doc-n, "\"}");
@@ -199,6 +200,7 @@ static void test_installed_hooks(const char *region) {
     assert(result && !strcmp(payload,doc));
     ((Register)(im+sites[1]))(&result,NULL,doc,sizeof doc);
     assert(registration_nonce && strstr(payload,"octr_itemless"));
+    assert(strstr(payload,"\"collision_rules\":1"));
     unsigned char owner[0x960]={0}; uint64_t room=42; char doc2[128];
     memcpy(owner+0x958,&room,8);
     confirmation_doc(doc2,sizeof doc2,room,registration_nonce);
@@ -294,8 +296,11 @@ static void test_ranked(void) {
     assert(result && sent == before + 1 && !rejection[0]);
     assert(strstr(payload, "\"octr_ranked\"") && !strstr(payload, "\"octr_itemless\""));
     assert(strstr(payload, "\"mode\":0"));
+    assert(strstr(payload, "\"version\":2"));
+    assert(!confirmation_mode("{\"octr_ranked_v1\":\"1/91/0/0000000000000001\"}",
+                              "octr_ranked_v1", 91, 1, 0));
     snprintf(confirmation_doc, sizeof confirmation_doc,
-             "{\"octr_ranked_v1\":\"1/91/0/%016" PRIx64 "\"}", request_nonce);
+             "{\"octr_ranked_v1\":\"2/91/0/%016" PRIx64 "\"}", request_nonce);
     assert(accept(owner, room, confirmation_doc, (unsigned)strlen(confirmation_doc)));
     assert(runtime_ranked_active() && !runtime_public_itemless_active());
     runtime_public_itemless_select(1);
@@ -303,16 +308,21 @@ static void test_ranked(void) {
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(result && strstr(payload, "\"octr_ranked\"") && strstr(payload, "\"octr_itemless\""));
     snprintf(confirmation_doc, sizeof confirmation_doc,
-             "{\"octr_ranked_v1\":\"1/91/1/%016" PRIx64 "\",\"octr_itemless_v1\":\"1/91/1/%016" PRIx64 "\"}",
+             "{\"octr_ranked_v1\":\"2/91/1/%016" PRIx64 "\",\"octr_itemless_v1\":\"2/91/1/%016" PRIx64 "\"}",
              request_nonce, request_nonce);
     assert(accept(owner, room, confirmation_doc, (unsigned)strlen(confirmation_doc)));
     assert(runtime_ranked_active() && runtime_public_itemless_active());
+    uint64_t unrelated_room = room + 1;
+    memcpy(owner + 0x958, &unrelated_room, 8);
+    assert(!runtime_ranked_active() && !runtime_public_itemless_active());
+    memcpy(owner + 0x958, &room, 8);
 int mode_before_ui_reset = -1;
 selected = 0;
 assert(runtime_public_itemless_lobby_mode() == 1);
 assert(runtime_ranked_session(NULL, &mode_before_ui_reset) && mode_before_ui_reset == 1);
 selected = 1;
     runtime_public_itemless_reset();
+    assert(!runtime_ranked_active());
     status = 404;
     expire_check();
     int before_unsupported = sent;
@@ -1154,10 +1164,10 @@ int main(void) {
     assert(!accept(owner,room,b,(unsigned)strlen(b)));
     assert(!confirmation(b,room+1,registration_nonce));
     assert(!confirmation(b,room,registration_nonce+1));
-    assert(!confirmation("{\"octr_itemless_v1\":\"2/42/1/0000000000000001\"}",42,1));
-    assert(!confirmation("{\"octr_itemless_v1\":\"1/42/1/0\"}",42,1));
-    assert(!confirmation("{\"nested\":{\"octr_itemless_v1\":\"1/42/1/0000000000000001\"}}",42,1));
-    assert(!confirmation("{\"octr_itemless_v1\":\"1/42/1/0000000000000001\",\"octr_itemless_v1\":\"bad\"}",42,1));
+    assert(!confirmation("{\"octr_itemless_v1\":\"1/42/1/0000000000000001\"}",42,1));
+    assert(!confirmation("{\"octr_itemless_v1\":\"2/42/1/0\"}",42,1));
+    assert(!confirmation("{\"nested\":{\"octr_itemless_v1\":\"2/42/1/0000000000000001\"}}",42,1));
+    assert(!confirmation("{\"octr_itemless_v1\":\"2/42/1/0000000000000001\",\"octr_itemless_v1\":\"bad\"}",42,1));
     runtime_public_itemless_reset();
     runtime_public_itemless_party_ready();
     assert(accept(owner,43,"{}",2) && !runtime_public_itemless_active());

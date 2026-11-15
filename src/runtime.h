@@ -105,6 +105,7 @@ void runtime_online_mode_leave_cup(void);
 void runtime_online_mode_new_session(void); /* game thread: fresh Online menu choice */
 void runtime_online_mode_request_leave(int fresh); /* worker-safe; consumed on game thread */
 int runtime_online_mode_private_speed(void);
+int runtime_online_mode_itemless_collision(void);
 int runtime_online_mode_private_cup(void);
 int runtime_online_mode_private_single_options(void);
 int runtime_online_mode_private_teams(void);
@@ -186,6 +187,7 @@ void runtime_race_options_map_loading(const char *map);
 int runtime_race_options_start(unsigned char *image, size_t size);
 void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
+int runtime_itemless_collisions_disabled(void);
 int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
 /* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
 int runtime_replay_no_crates(void);

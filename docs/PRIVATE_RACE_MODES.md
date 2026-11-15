@@ -3,6 +3,15 @@
 Private Single Race and Cup support Normal and Itemless. Itemless remains active
 through lobby transitions and across Cup races.
 
+In Itemless, the host's native game settings include `COLLISION: OFF / ON`.
+OFF disables kart-to-kart contact for players and AI and places all eight grid
+slots on one line within the track's authored front-row width. Native terrain
+placement and collisions with the track remain active. ON keeps the original
+starting grid and kart collisions, including Itemless's existing protection
+against losing reserves from another kart. The choice applies to the whole room.
+Public Itemless always uses OFF and the aligned start through the same gameplay
+rule; Ranked integration is deferred until its separate change is merged.
+
 Before a private race starts, the host confirms its mode with RyuNET. Guests
 confirm that host mode before loading track assets. A failed confirmation stops
 start/loading instead of using a previous choice. The confirmed mode stays fixed

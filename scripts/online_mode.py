@@ -645,7 +645,67 @@ def private_team_settings(blob, native=None):
     g = Igz(blob)
     for target, source, size in PRIVATE_TEAM_ROWS:
         g.data[target + 0x18:target + 0x18 + size] = g.data[source + 0x18:source + 0x18 + size]
+    add_collision_setting(g)
     return g.build()
+
+
+def remove_cloned_export_refs(g, relocated):
+    # Clones are owned by their new parents, not by the source asset's export list.
+    exports = g.u64(0x20)
+    for i in range(g.u32(0x0c)):
+        original = g.u64(exports + i * 8)
+        clone = relocated(original)
+        if clone != original:
+            g.set_u32(clone + 8, g.u32(clone + 8) - 1)
+
+
+def add_collision_setting(g):
+    """Copy the native Teams row; runtime owns only the marked Collision choice."""
+    for tag in ('RHND', 'RNEX'):
+        g.sites[tag] = g.read_list(tag, unpack_offsets)
+    blocks = ((0x1750, 0x1870), (0x3910, 0x3c50),
+              (0x4918, 0x4998), (0xd798, 0xd7d0))
+    copies = [(lo, hi, g.append(g.data[lo:hi])) for lo, hi in blocks]
+
+    def relocated(value):
+        for lo, hi, new in copies:
+            if lo <= value < hi:
+                return new + value - lo
+        return value
+
+    for tag, sites in g.sites.items():
+        for site in list(sites):
+            target = relocated(site)
+            if target != site:
+                g.add_site(tag, target)
+                if tag == 'ROFS':
+                    g.set_u64(target, relocated(g.u64(site)))
+    group, row, behavior = map(relocated, (0x1750, 0x3910, 0x3a60))
+    for target, name in ((group + 0x28, 'OCTR_COLLISION_LAYOUT'),
+                         (row + 0x28, 'OCTR_COLLISION_ROW'),
+                         (behavior + 0x148, 'COLLISION')):
+        g.set_u64(target, g.string_index(name))
+        g.add_site('RSTT', target)
+    set_options(g, relocated(0x4930), relocated(0x4958), ('OFF', 'ON'))
+    # Runtime collapses this extra layout group outside private Itemless.
+    g.set_u64(group + 0xf0, 0)
+    g.sites['ROFS'].remove(group + 0xf0)
+    struct.pack_into('<3f', g.data, group + 0x60, 0.0, 0.0, 0.0)
+    g.set_u32(row + 12, g.u32(row + 12) | 0x400)
+    g.set_u64(group + 0x40, 0x1750)
+    g.set_u64(0x1630 + 0x40, group)
+    table = g.u64(0x1750 + 0x48)
+    g.set_u64(g.u64(table + 0x20) + 8, group)
+    g.set_u64(row + 0x58, 0x1750)
+    g.set_u64(0x1750 + 0x50, row)
+    g.set_u64(0x3c50 + 0x58, group)
+    g.set_u64(behavior + 0x110, 0x3910)
+    g.set_u64(0x3a60 + 0x118, row)
+    g.set_u64(0x3da0 + 0x110, row)
+    remove_cloned_export_refs(g, relocated)
+    # Both rows own this animation table; native placeable teardown releases it.
+    animations = g.u64(row + 0xf0)
+    g.set_u32(animations + 8, g.u32(animations + 8) + 1)
 
 
 def cup_timer(blob):
@@ -953,6 +1013,7 @@ def add_race_type(g):
     g.set_u32(0xfc0 + 0x10, 3)
     g.set_u64(0xfc0 + 0x18, (1 << 56) | (1 << 52) | 24)
     g.set_u64(0xfc0 + 0x20, children)
+    remove_cloned_export_refs(g, relocated)
 
 
 def rebuild(blob):

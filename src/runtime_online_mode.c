@@ -34,6 +34,8 @@ static void **initialize_type;
 static unsigned char **network;
 static _Thread_local int customized_selector;
 static int private_speed_selected;
+static int private_collision_selected;
+static int collision_refreshing;
 static int selector_mode_index;
 static int matchmaking_return_mode = -1;
 static uint64_t mode_select_updated_ms;
@@ -84,6 +86,11 @@ typedef void (ABI *NativeEvent)(unsigned char *);
 static NativeEvent receive_private_settings;
 static NativeEvent publish_private_track;
 static NativeEvent broadcast_race_settings;
+static NativeEvent receive_race_settings;
+typedef uintptr_t (ABI *MapRaceSettings)(unsigned char *);
+static MapRaceSettings original_map_race_settings;
+typedef uintptr_t (ABI *LapSetter)(void *, void *);
+static LapSetter original_set_laps;
 typedef void (ABI *ResizeList)(void *, int, int);
 static ResizeList resize_list;
 static NativeEvent clear_zone_list;
@@ -261,6 +268,8 @@ static void refresh_team_results(void);
 static int racer_team(unsigned char *racer);
 static void team_color(unsigned char *placeable, int team);
 static void clear_team_selector(void);
+static int collision_selector(const unsigned char *self);
+static void collision_selector_event(unsigned char *self, void *event, unsigned char *owner);
 
 static int private_team_selector_allowed(void) {
     int mode = 0, teams = 1;
@@ -291,6 +300,10 @@ static void normalize_race_teams(void) {
 }
 
 static void ABI team_count_event(unsigned char *self, void *event, void *owner) {
+    if (collision_selector(self)) {
+        collision_selector_event(self, event, owner);
+        return;
+    }
     const int cup = runtime_online_mode_private_cup();
     const int single = is_private() && !battle_selected() && !cup;
     normalize_race_teams();
@@ -353,6 +366,7 @@ void runtime_online_mode_adopt(int speed) {
 }
 
 int runtime_online_mode_private_speed(void) { return private_speed_selected; }
+int runtime_online_mode_itemless_collision(void) { return private_collision_selected; }
 
 static void *pointer_at(const void *object, size_t offset) {
     void *pointer;
@@ -716,7 +730,44 @@ void runtime_online_mode_request_leave(int fresh) {
     __atomic_fetch_or(&pending_online_reset, fresh ? 3u : 1u, __ATOMIC_ACQ_REL);
 }
 
+static unsigned char *ranked_settings_owner;
+static int ranked_previous_laps;
+static unsigned char ranked_previous_ai;
+
+static void ranked_race_rules(int active) {
+    unsigned char *settings = race_settings ? *race_settings : NULL;
+    if (ranked_settings_owner && (!active || settings != ranked_settings_owner)) {
+        if (settings == ranked_settings_owner) {
+            memcpy(settings + 0x0c, &ranked_previous_laps, 4);
+            settings[0x10] = ranked_previous_ai;
+        }
+        ranked_settings_owner = NULL;
+    }
+    if (!active || !settings) return;
+    if (!ranked_settings_owner) {
+        ranked_settings_owner = settings;
+        memcpy(&ranked_previous_laps, settings + 0x0c, 4);
+        ranked_previous_ai = settings[0x10];
+    }
+    const int laps = 5;
+    memcpy(settings + 0x0c, &laps, 4);
+    settings[0x10] = 0;
+}
+
+static uintptr_t ABI map_ranked_race_settings(unsigned char *settings) {
+    uintptr_t result = original_map_race_settings(settings);
+    if (runtime_ranked_active()) ranked_race_rules(1);
+    return result;
+}
+
+static uintptr_t ABI set_ranked_laps(void *context, void *pins) {
+    uintptr_t result = original_set_laps(context, pins);
+    if (runtime_ranked_active()) ranked_race_rules(1);
+    return result;
+}
+
 void runtime_online_mode_new_session(void) {
+    ranked_race_rules(0);
     __atomic_store_n(&pending_online_reset, 0, __ATOMIC_RELEASE);
     runtime_online_mode_leave_cup();
     runtime_online_mode_selector_left();
@@ -795,6 +846,34 @@ static void ABI private_settings_received(unsigned char *event) {
            (const char *)pointer_at(cup, 0x28) : "SINGLE");
 }
 
+/* arenaStartingLives is an igInt32 snapshot field, unused outside Battle.
+ * Borrow it only while serializing; preserve its native value on both peers. */
+#define COLLISION_SETTINGS_TAG 0x434f0000u
+static void ABI broadcast_private_race_settings(unsigned char *settings) {
+    uint32_t lives;
+    memcpy(&lives, settings + 0x38, 4);
+    if (is_private() && !battle_selected() && runtime_speed_mode_enabled() && lives <= 0x7fffu) {
+        const uint32_t tagged = COLLISION_SETTINGS_TAG | lives |
+            ((uint32_t)private_collision_selected << 15);
+        memcpy(settings + 0x38, &tagged, 4);
+    }
+    broadcast_race_settings(settings);
+    memcpy(settings + 0x38, &lives, 4);
+}
+static void ABI collision_settings_received(unsigned char *event) {
+    uint32_t encoded;
+    memcpy(&encoded, event + 0x40, 4);
+    if ((encoded & 0xffff0000u) == COLLISION_SETTINGS_TAG) {
+        private_collision_selected = (encoded >> 15) & 1;
+        const uint32_t lives = encoded & 0x7fffu;
+        memcpy(event + 0x40, &lives, 4);
+    } else {
+        private_collision_selected = 0;
+    }
+    receive_race_settings(event);
+    if (runtime_ranked_active()) ranked_race_rules(1);
+    memcpy(event + 0x40, &encoded, 4);
+}
 static void ABI private_settings_sending(unsigned char *event) {
     int mode = 1;
     if (race_manager && *race_manager)
@@ -807,7 +886,7 @@ static void ABI private_settings_sending(unsigned char *event) {
     /* Native lobby changes broadcast this payload only for Battle. Racing
      * and CUP need the same native event to carry settings to existing/joining peers. */
     if (type == 1 && (mode == 1 || mode == 6) && is_private() && race_settings && *race_settings)
-        broadcast_race_settings(*race_settings);
+        broadcast_private_race_settings(*race_settings);
 }
 
 /* The map loader runs after settings synchronization, on host and peers. Keep
@@ -931,6 +1010,7 @@ static void ABI load_private_map(const char *map, int reason) {
     if (ai_asset_reuse_branch && memcmp(ai_asset_reuse_branch, reuse, sizeof native_ai_asset_reuse) &&
         !write_code(ai_asset_reuse_branch, reuse, sizeof native_ai_asset_reuse))
         fputs("Native private CUP: could not enable fresh AI driver loading\n", stderr);
+    ranked_race_rules(!lobby && runtime_ranked_active());
     original_load_map(map, reason);
     if (incomplete_cup_return || team_return) {
         unsigned char *zone = find_zone(*zone_manager, map);
@@ -1298,6 +1378,10 @@ static void ABI reset_racer_pool(unsigned char *pool) {
 }
 
 static void ABI spawn_cup_ai(unsigned char *manager) {
+    if (runtime_ranked_active()) {
+        ranked_race_rules(1);
+        return;
+    }
     unsigned char *pool = native_racer_pool ? *native_racer_pool : NULL;
     if (cup_transition_pending && !cup_reset_pending && pool) {
         restore_cup_ai_assets(pool);
@@ -2923,6 +3007,88 @@ static unsigned char *row_behavior(unsigned char *row) {
     return count > 0 && items ? pointer_at(items, 0) : NULL;
 }
 
+static int collision_selector(const unsigned char *self) {
+    const char *name = pointer_at(self, 0x148);
+    return name && !strcmp(name, "COLLISION");
+}
+
+static void collision_selector_visibility(unsigned char *self, unsigned char *owner) {
+    if (!owner) return;
+    const int shown = is_private() && !battle_selected() && runtime_speed_mode_enabled();
+    unsigned flags;
+    memcpy(&flags, owner + 12, 4);
+    flags = shown ? ((flags & ~0x1400u) | 0x1000u) : flags | 0x1400u;
+    memcpy(owner + 12, &flags, 4);
+    unsigned char *group = pointer_at(owner, 0x40);
+    if (group) {
+        const float x = shown ? 65.0f : 0.0f;
+        const float height = shown ? 180.0f : 0.0f;
+        float previous_height;
+        memcpy(&previous_height, group + 0x64, 4);
+        /* Track and the selector staircase are separate children of the same panel. */
+        unsigned char *root = group;
+        for (int i = 0; root && i < 9; ++i) root = pointer_at(root, 0x40);
+        unsigned char *panel = root ? pointer_at(root, 0x40) : NULL;
+        unsigned char *children = panel ? pointer_at(panel, 0x48) : NULL;
+        int count = 0;
+        if (children) memcpy(&count, children + 12, 4);
+        void **items = children ? pointer_at(children, 0x20) : NULL;
+        for (int i = 0; items && i < count; ++i) {
+            unsigned char *child = items[i];
+            float y;
+            memcpy(&y, child + 0x64, 4);
+            y -= height - previous_height;
+            memcpy(child + 0x64, &y, 4);
+        }
+        memcpy(group + 0x60, &x, 4);
+        memcpy(group + 0x64, &height, 4);
+    }
+    unsigned char *before = pointer_at(self, 0x110), *after = pointer_at(self, 0x118);
+    unsigned char *previous = row_behavior(before), *next = row_behavior(after);
+    void *down = shown ? owner : after, *up = shown ? owner : before;
+    if (previous) memcpy(previous + 0x118, &down, sizeof down);
+    if (next) memcpy(next + 0x110, &up, sizeof up);
+}
+
+static void collision_selector_event(unsigned char *self, void *event, unsigned char *owner) {
+    GetType type = (GetType)pointer_at(pointer_at(event, 0), 0);
+    void *kind = type(event);
+    if (kind == *initialize_type) {
+        const int selected = runtime_online_mode_itemless_collision();
+        memcpy(self + 0x190, &selected, 4);
+    }
+    if (kind == *selector_changed_type) {
+        if (collision_refreshing) return;
+        int selected;
+        memcpy(&selected, (unsigned char *)event + 0x18, 4);
+        if (!is_private() || battle_selected() || !runtime_speed_mode_enabled() ||
+            runtime_room_mode_following() || (selected != 0 && selected != 1)) return;
+        private_collision_selected = selected;
+        memcpy(self + 0x190, &selected, 4);
+        if (race_settings && *race_settings) broadcast_private_race_settings(*race_settings);
+    }
+    if (kind == *gui_input_type && runtime_room_mode_following()) return;
+    base_event(self, event, owner);
+    collision_selector_visibility(self, owner);
+}
+
+static void ABI team_count_update(unsigned char *self, unsigned char *owner, float dt) {
+    original_selector_update(self, owner, dt);
+    if (collision_selector(self)) {
+        int selected;
+        memcpy(&selected, self + 0x190, 4);
+        if (selected != private_collision_selected) {
+            memcpy(self + 0x190, &private_collision_selected, 4);
+            if (pointer_at(self, 0x198)) {
+                collision_refreshing = 1;
+                refresh_selector(self);
+                collision_refreshing = 0;
+            }
+        }
+        collision_selector_visibility(self, owner);
+    }
+}
+
 static void race_type_visibility(unsigned char *mode, unsigned char *owner, int shown) {
     if (!owner || !pointer_at(mode, 0x118)) return;
     unsigned char *row = pointer_at(owner, 0x58);
@@ -3156,6 +3322,7 @@ static void ABI select_mode(void *sender, int index) {
     }
     const int private = is_private();
     if (!private && index == 2 && runtime_ranked_selected()) return;
+    if (!private) private_collision_selected = 0;
     if (!private && index == 1 && !runtime_public_itemless_available()) return;
     selector_mode_index = index;
     clear_team_selector();
@@ -3199,6 +3366,7 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         memcpy(&items, available + 0x20, sizeof items);
         const int private = is_private();
         mode_select_active = 1;
+        if (!private) private_collision_selected = 0;
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
         const int private_speed = runtime_room_mode_following() ? runtime_speed_mode_enabled() : private_speed_selected;
@@ -3251,6 +3419,57 @@ static int write_code(void *target, const void *data, size_t length) {
 static void jump_to(unsigned char *code, const void *target) {
     memcpy(code, "\xff\x25\0\0\0\0", 6);
     memcpy(code + 6, &target, sizeof target);
+}
+
+typedef unsigned char (ABI *LoopbackSend)(void *, void *);
+typedef unsigned char (ABI *LoopbackReceive)(void *, void *, void *);
+static LoopbackSend native_loopback_send;
+static LoopbackReceive native_loopback_receive;
+static NativeEvent native_loopback_destroy, native_loopback_delete;
+static pthread_mutex_t loopback_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Native enqueue caches the tail across allocation; dequeue can free it meanwhile. */
+static unsigned char ABI loopback_send(void *self, void *message) {
+    pthread_mutex_lock(&loopback_mutex);
+    unsigned char result = native_loopback_send(self, message);
+    pthread_mutex_unlock(&loopback_mutex);
+    return result;
+}
+
+static unsigned char ABI loopback_receive(void *self, void *message, void *reliable) {
+    pthread_mutex_lock(&loopback_mutex);
+    unsigned char result = native_loopback_receive(self, message, reliable);
+    pthread_mutex_unlock(&loopback_mutex);
+    return result;
+}
+
+static void ABI loopback_destroy(unsigned char *self) {
+    pthread_mutex_lock(&loopback_mutex);
+    native_loopback_destroy(self);
+    pthread_mutex_unlock(&loopback_mutex);
+}
+
+static void ABI loopback_delete(unsigned char *self) {
+    pthread_mutex_lock(&loopback_mutex);
+    native_loopback_delete(self);
+    pthread_mutex_unlock(&loopback_mutex);
+}
+
+static int loopback_queue_start(unsigned char *image) {
+    void *slots[5];
+    memcpy(slots, image + 0x2423cc8, sizeof slots);
+    if (slots[0] != image + 0x19f920 || slots[1] != image + 0x19fa20 ||
+        slots[2] != image + 0x19f570 || slots[3] != image + 0x19f580 ||
+        slots[4] != image + 0x19f7a0) return 0;
+    native_loopback_destroy = (NativeEvent)slots[0];
+    native_loopback_delete = (NativeEvent)slots[1];
+    native_loopback_send = (LoopbackSend)slots[3];
+    native_loopback_receive = (LoopbackReceive)slots[4];
+    slots[0] = (void *)loopback_destroy;
+    slots[1] = (void *)loopback_delete;
+    slots[3] = (void *)loopback_send;
+    slots[4] = (void *)loopback_receive;
+    return write_code(image + 0x2423cc8, slots, sizeof slots);
 }
 
 /* Initialize before the native timer creates its UI and replication state. */
@@ -4099,6 +4318,18 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (memcmp(image + 0x9b1fc0, load_prefix, sizeof load_prefix) ||
         memcmp(image + (0xeac310 - shift), timer_prefix, sizeof timer_prefix)) return 0;
     if (memcmp(image + (0xf344e6 - shift), "\x44\x39\xf2\x74\x54", 5)) return 0;
+    const unsigned char map_settings_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x50};
+    const unsigned char set_laps_prefix[] = {0x55,0x48,0x89,0xe5,0x48,0x8b,0x46,0x10,
+        0xba,0x03,0x00,0x00,0x00,0x48,0x8b,0x30};
+    if (memcmp(image + 0xc2f1f0, map_settings_prefix, sizeof map_settings_prefix) ||
+        memcmp(image + 0x119d8d0 - shift, set_laps_prefix, sizeof set_laps_prefix)) return 0;
+    const unsigned char settings_broadcast_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
+        0x48,0x83,0xec,0x10,0x4c,0x8b,0x35,0x66,0x83,0xbd,0x01};
+    if (memcmp(image + 0xc2ed20, settings_broadcast_prefix, sizeof settings_broadcast_prefix)) return 0;
+    const unsigned char settings_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x53,0x50,0x49,0x89,0xff,0x48,0x8b,0x3d,0x24,0xad,0xed,0x01};
+    if (memcmp(image + 0xbf3110, settings_prefix, sizeof settings_prefix)) return 0;
     const unsigned char lap_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x54,0x53,0x48,0x8b,0x5f,0x28,0x41,0x89,0xd6};
     const unsigned char complete_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
@@ -4168,6 +4399,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (handler != (uintptr_t)(image + (0x1277c70 - shift))) return 0;
     memcpy(&handler, image + 0x2773b50, sizeof handler);
     if (handler != (uintptr_t)(image + 0x97dfc0)) return 0;
+    memcpy(&handler, image + 0x2778160, sizeof handler);
+    if (handler != (uintptr_t)(image + 0x97dfc0)) return 0;
     memcpy(&handler, image + 0x27744a8, sizeof handler);
     if (handler != (uintptr_t)(image + (0x127c6b0 - shift))) return 0;
     memcpy(&handler, image + 0x2543218, sizeof handler);
@@ -4178,6 +4411,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (handler != (uintptr_t)(image + (0x128e3a0 - shift))) return 0;
     memcpy(&handler, image + 0x2777738, sizeof handler);
     if (handler != (uintptr_t)(image + (0x128e320 - shift))) return 0;
+    if (!loopback_queue_start(image)) return 0;
 #ifdef _WIN32
     /* Executable from the start: write_code() puts back the protection it found, and a
      * PAGE_READWRITE trampoline crashed the first call to the original season setter (code 3). */
@@ -4328,6 +4562,28 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         original_queue_notice = (QueueNotice)(trampoline + 2432);
         stub_end = 2468;
     }
+    memcpy(trampoline + 2496, settings_prefix, 13);
+    memcpy(trampoline + 2509, "\x48\xbf", 2);
+    void *settings_manager_global = image + 0x2acde48;
+    memcpy(trampoline + 2511, &settings_manager_global, 8);
+    memcpy(trampoline + 2519, "\x48\x8b\x3f", 3);
+    jump_to(trampoline + 2522, image + 0xbf3124);
+    receive_race_settings = (NativeEvent)(trampoline + 2496);
+    memcpy(trampoline + 2560, settings_broadcast_prefix, 11);
+    memcpy(trampoline + 2571, "\x49\xbe", 2);
+    void *broadcast_guard_global = image + 0x2807098;
+    memcpy(trampoline + 2573, &broadcast_guard_global, 8);
+    memcpy(trampoline + 2581, "\x4d\x8b\x36", 3);
+    jump_to(trampoline + 2584, image + 0xc2ed32);
+    memcpy(trampoline + 2624, map_settings_prefix, sizeof map_settings_prefix);
+    jump_to(trampoline + 2624 + sizeof map_settings_prefix,
+            image + 0xc2f1f0 + sizeof map_settings_prefix);
+    original_map_race_settings = (MapRaceSettings)(trampoline + 2624);
+    memcpy(trampoline + 2688, set_laps_prefix, sizeof set_laps_prefix);
+    jump_to(trampoline + 2688 + sizeof set_laps_prefix,
+            image + 0x119d8d0 - shift + sizeof set_laps_prefix);
+    original_set_laps = (LapSetter)(trampoline + 2688);
+    stub_end = 2718;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -4401,7 +4657,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     return_to_lobby = (NoArgument)(image + 0xa9cbe0);
     receive_private_settings = (NativeEvent)(trampoline + 192);
     publish_private_track = (NativeEvent)(image + (0xf4f7c0 - shift));
-    broadcast_race_settings = (NativeEvent)(image + 0xc2ed20);
+    broadcast_race_settings = (NativeEvent)(trampoline + 2560);
     race_settings = (unsigned char **)(image + 0x2ad4e30);
     system_data = (void **)(image + 0x2ad9c38);
     resize_list = (ResizeList)(image + (0x14a6f20 - shift));
@@ -4559,6 +4815,14 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xff11a0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, trampoline + 512);
     if (!write_code(image + (0xeb9ffb - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)map_ranked_race_settings);
+    if (!write_code(image + 0xc2f1f0, jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)set_ranked_laps);
+    if (!write_code(image + 0x119d8d0 - shift, jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)broadcast_private_race_settings);
+    if (!write_code(image + 0xc2ed20, jump, sizeof jump)) return 0;
+    jump_to(jump, (void *)collision_settings_received);
+    if (!write_code(image + 0xbf3110, jump, sizeof jump)) return 0;
     jump_to(jump, (void *)select_mode);
     const EventHandler team_count_replacement = team_count_event;
     if (!write_code(image + 0x2778150, &team_count_replacement, sizeof team_count_replacement)) return 0;
@@ -4568,9 +4832,11 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     const EventHandler lobby_replacement = lobby_event;
     const BehaviorUpdate lobby_update_replacement = lobby_update;
     const BehaviorUpdate selector_update_replacement = selector_update;
+    const BehaviorUpdate collision_update_replacement = team_count_update;
     const EventHandler timer_replacement = timer_event;
     if (!write_code(image + (0x1277e00 - shift), jump, sizeof jump) ||
         !write_code(image + 0x2773b50, &selector_update_replacement, sizeof selector_update_replacement) ||
+        !write_code(image + 0x2778160, &collision_update_replacement, sizeof collision_update_replacement) ||
         !write_code(image + 0x27744a8, &cup_replacement, sizeof cup_replacement) ||
         !write_code(image + 0x2543218, &level_replacement, sizeof level_replacement) ||
         !write_code(image + 0x2778390, &timer_replacement, sizeof timer_replacement) ||

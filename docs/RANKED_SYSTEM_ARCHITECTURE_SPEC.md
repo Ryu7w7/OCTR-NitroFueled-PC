@@ -48,12 +48,18 @@ boot; the mod talks to the server itself, from a worker thread, exactly like spe
 
 ## 3. MATCHMAKING (already shipped)
 
-The queue separation is server-owned: the client injects `{"octr_ranked":{"version":1,
+The queue separation is server-owned: the client injects `{"octr_ranked":{"version":2,
 "mode":0|1,"nonce":"…"}}` into the game's own matchmaking search (`runtime_public_itemless.c`),
 the server reserves the `octr_ranked_version` filter key so ranked searches can only ever match
-ranked rooms, and injects an `octr_ranked_v1` confirmation (`1/<room>/<mode>/<nonces>`) into the
+ranked rooms, and injects an `octr_ranked_v1` confirmation (`2/<room>/<mode>/<nonces>`) into the
 backend lobby document. A room is only joined when that confirmation matches the client's own
 nonce. Parties preflight through the signed `GET /ryunet/ranked-party` first.
+
+Both Ranked modes use exactly five laps on every track and never fill empty seats with AI.
+Ranked Itemless disables racer-to-racer collisions and aligns starting positions. Ranked
+Normal keeps native racer collisions and the native grid. Itemless also requires collision
+rules capability 1 and confirmation version 2. Older Ranked contracts are rejected.
+These fixed race rules do not change private, unranked public, or offline races.
 
 ### Device admission and search timer
 
@@ -146,19 +152,18 @@ mask from `team_racer_finished` / the host's AI-catchup mask for guests). At tha
 `runtime_ranked_active()`:
 
 1. `runtime_online_mode_ranked_order` flattens the order into `{name, finished}` pairs — the
-   in-game name of every human racer (AI fill has no name to report and is skipped).
+   in-game name of every human racer. Ranked never spawns AI.
 2. `runtime_ranked_race_end` hands them to the worker thread (`runtime_ranked.c`, started from
    `runtime_net.c`), which posts:
 
    ```
    POST /ryunet/ranked-result?name=<me>          (X-RyuNET-Proof signed)
    {"room":42,"mode":0,"track":"electron_avenue",
-    "order":[{"name":"A","pos":1,"dnf":false},{"name":"B","pos":4,"dnf":true},
+    "order":[{"name":"A","pos":1,"dnf":false},{"name":"B","pos":2,"dnf":true},
              {"name":"C","pos":3,"dnf":false}]}
    ```
 
-   `pos` is the on-screen finish position: AI fill keeps its slots, so a human who
-   finished 8th behind six AI is recorded and scored 8th — honestly.
+   `pos` is the on-screen finish position and cannot exceed the confirmed human roster size.
 
 3. The server scores the race when **the room's own host reports** — the same authority the
    game itself uses. Guest reports wait (pending) and corroborate or contradict the host's

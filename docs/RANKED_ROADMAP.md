@@ -1,6 +1,10 @@
 # Ranked roadmap
 
-Status reviewed against the current source on 2026-11-13 (Asia/Jakarta).
+Status reviewed against the current source on 2026-11-15 (Asia/Jakarta).
+
+Ranked Normal and Itemless now require protocol v2: human-only races, five laps on every
+track. Ranked Itemless uses collision OFF and aligned starts; Normal keeps native contacts
+and grid. Automated validation covers these rules; live host/guest gameplay remains pending.
 “Shipped” below means implemented in this branch with automated coverage. It does not
 mean deployed to the production server or verified in every live multiplayer scenario.
 

@@ -1687,7 +1687,12 @@ static void test_targeting(void) {
     client=difficulty_manager=manager=racer_manager=ai_data=settings=NULL;
 }
 static void ABI original(unsigned char *self, unsigned char *event, void *owner) {
-    (void)self; (void)owner; ++calls;
+    (void)owner; ++calls;
+    const char *name = ptr(self, 0x148);
+    if (name && !strcmp(name, "COLLISION")) {
+        assert(integer(*settings, 0x28) == 3);
+        return;
+    }
     put_int(*settings, 0x28, integer(event, 0x18) + 1);
 }
 static uint32_t item_clock;
@@ -1799,6 +1804,11 @@ int main(void) {
     team_event(self, event, NULL);
     assert(integer(config, 0x28) == 3 && integer(labels_list, 12) == 4 && drops == 1);
     assert(calls == 5);
+    private_room = 1;
+    put_ptr(self, 0x148, (void *)"COLLISION");
+    team_event(self, event, NULL);
+    assert(calls == 6 && integer(config, 0x28) == 3 && drops == 1);
+    put_ptr(self, 0x148, NULL);
     manager = &default_race_ptr;
     test_ai();
     manager = &default_race_ptr;

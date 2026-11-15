@@ -123,6 +123,7 @@ static void ABI animation_event_mock(void *anim, const char *name) {
     assert(anim == result_anim && !strcmp(name, "OnVictoryLap")); ++animation_calls;
 }
 static int team_settings_broadcasts, broadcast_team_count;
+static uint32_t broadcast_collision, received_lives;
 static int mode_ready = 1, mode_verified = 1, following_host;
 int runtime_private_match_active(void) { return 0; }
 int runtime_room_mode_following(void) { return following_host; }
@@ -144,8 +145,23 @@ static void ABI ready_insert_mock(void *table, void *player, unsigned char *read
 }
 static void ABI assign_ai_teams_mock(void) { ++ai_team_calls; }
 static void ABI broadcast_teams_mock(unsigned char *settings) {
+    memcpy(&broadcast_collision, settings + 0x38, 4);
     ++team_settings_broadcasts;
     memcpy(&broadcast_team_count, settings + 0x28, 4);
+}
+static unsigned char *rules_settings;
+static int map_settings_calls, lap_setter_calls;
+static uintptr_t ABI map_settings_mock(unsigned char *source) {
+    ++map_settings_calls;
+    memcpy(rules_settings + 0x0c, source + 0x18, 4);
+    rules_settings[0x10] = 1;
+    return (uintptr_t)source;
+}
+static uintptr_t ABI lap_setter_mock(void *context, int *value) {
+    assert(context == rules_settings);
+    ++lap_setter_calls;
+    memcpy(rules_settings + 0x0c, value, 4);
+    return (uintptr_t)*value;
 }
 static int ABI racer_faction_mock(unsigned char *racer) {
     int faction;
@@ -394,6 +410,7 @@ static void ABI startup_notice_mock(void *target, void *event, int shown) {
 }
 static int received_mode, received_settings_calls;
 static void ABI receive_settings(unsigned char *event) { ++received_settings_calls; memcpy(&received_mode, event + 0x3c, 4); }
+static void ABI receive_collision_mock(unsigned char *event) { memcpy(&received_lives, event + 0x40, 4); }
 static unsigned char test_zones[4][0x1c0], test_handles[4][48];
 static unsigned char lobby_zone[0x1b8], lobby_data[0x78];
 static void *test_cup, *test_cup_handle;
@@ -457,7 +474,7 @@ static int expected_grid, grid_calls;
 static unsigned char ranking_handle[0x30], panel_handle[0x30], score_handle[0x30], score_project[0x80];
 static unsigned char members_handle[0x30], members_project[0x20], members_root[0x120];
 static unsigned char leaders_handle[0x30], leaders_project[0x20];
-static unsigned char ranking_project[0x20], panel_project[0x20], panel_root[0x20];
+static unsigned char ranking_project[0x20], panel_project[0x20], panel_root[0x100];
 static int panel_opens, panel_events, ranking_events, context_finishes, team_score_opens;
 static const char *expected_ranking;
 static void (ABI *open_race_ui_project)(void **, void *, const char *, void *, int, void *, float);
@@ -859,7 +876,18 @@ static void test_region(size_t shift) {
     memcpy(image + (0xffd9c7 - shift), "\x0f\x85\xf2\x0b\0\0", 6);
     memcpy(image + (0xfff9c2 - shift), "\x0f\x85\xd6\x06\0\0", 6);
     stub(image + (0xf50350 - shift), (void *)private_state);
-    direct_stub(image + 0xc2ed20, broadcast_teams_mock);
+    memcpy(image + 0xc2f1f0, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x50", 14);
+    memcpy(image + 0xc2f1fe, "\x48\x83\xc4\x08\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d", 14);
+    direct_stub(image + 0xc2f20c, map_settings_mock);
+    memcpy(image + (0x119d8d0 - shift), "\x55\x48\x89\xe5\x48\x8b\x46\x10\xba\x03\x00\x00\x00\x48\x8b\x30", 16);
+    image[0x119d8e0 - shift] = 0x5d;
+    direct_stub(image + (0x119d8e1 - shift), lap_setter_mock);
+    memcpy(image + 0xc2ed20, "\x55\x48\x89\xe5\x41\x56\x53\x48\x83\xec\x10\x4c\x8b\x35\x66\x83\xbd\x01", 18);
+    memcpy(image + 0xc2ed32, "\x48\x83\xc4\x10\x5b\x41\x5e\x5d", 8);
+    direct_stub(image + 0xc2ed3a, broadcast_teams_mock);
+    memcpy(image + 0xbf3110, "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x49\x89\xff\x48\x8b\x3d\x24\xad\xed\x01", 20);
+    memcpy(image + 0xbf3124, "\x4c\x89\xff\x48\x83\xc4\x08\x5b\x41\x5e\x41\x5f\x5d", 13);
+    direct_stub(image + 0xbf3131, receive_collision_mock);
     direct_stub(image + (0xff1810 - shift), racer_faction_mock);
     memcpy(image + (0xf382f0 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x8a\x05\x68\xa5\xb5\x01", 16);
     image[0xf382fc - shift] += (unsigned char)shift;
@@ -955,6 +983,8 @@ static void test_region(size_t shift) {
     direct_stub(image + 0xa298c0, results_mock);
     put_pointer(image, 0x254c430, image + 0xa298c0);
     put_pointer(image, 0x2778150, image + (0x1293030 - shift));
+    put_pointer(image, 0x2778160, image + 0x97dfc0);
+    direct_stub(image + 0x97dfc0, leader_update_mock);
     stub(image + (0x1293030 - shift), (void *)base_event);
     put_pointer(image, 0x2ae4a38, (void *)999);
     direct_stub(image + 0x97f160, local_controller_mock);
@@ -1109,7 +1139,14 @@ static void test_region(size_t shift) {
     memcpy(image + 0xa29000, "\x55\x48\x89\xe5\x53\x48\x83\xec\x48\x48\x8b\x1d\x88\xe0\xdd\x01", 16);
     memcpy(image + 0xa29010, "\x48\x83\xc4\x48\x5b\x5d", 6);
     direct_stub(image + 0xa29016, startup_notice_mock);
+    put_pointer(image, 0x2423cc8, image + 0x19f920);
+    put_pointer(image, 0x2423cd0, image + 0x19fa20);
+    put_pointer(image, 0x2423cd8, image + 0x19f570);
+    put_pointer(image, 0x2423ce0, image + 0x19f580);
+    put_pointer(image, 0x2423ce8, image + 0x19f7a0);
     assert(runtime_online_mode_start(image, size));
+    assert(*(void **)(image + 0x2423ce0) != image + 0x19f580);
+    assert(*(void **)(image + 0x2423ce8) != image + 0x19f7a0);
     assert(image[0x195ac4] == !shift);
     test_startup(image, shift);
     unsetenv("BB_ONLINE");
@@ -1150,8 +1187,10 @@ static void test_region(size_t shift) {
     /* A racer from a mod this game lacks shows as Crash; the game's own and this player's mod
      * racers stay; no list (an older launcher) changes nothing. */
     int (ABI *team_gate)(void) = (void *)(image + 0x2000);
-    unsigned char *ready_trampoline = *(void **)(image + 0x9c153f + 6);
-    void (ABI *initialize_ready)(void *, void *, unsigned char *, unsigned) = *(void **)(ready_trampoline + 2);
+    unsigned char *ready_trampoline;
+    void (ABI *initialize_ready)(void *, void *, unsigned char *, unsigned);
+    memcpy(&ready_trampoline, image + 0x9c153f + 6, sizeof ready_trampoline);
+    memcpy(&initialize_ready, ready_trampoline + 2, sizeof initialize_ready);
     unsigned char gate_settings[0x40] = {0};
     put_pointer(image, 0x2ad4e30, gate_settings);
     for (int room = 0; room <= 1; ++room)
@@ -1615,6 +1654,64 @@ static void test_region(size_t shift) {
     int (ABI *check_finished)(void *) = (void *)(image + (0xf34430 - shift));
     void (ABI *receive_results)(unsigned char *);
     memcpy(&receive_results, image + 0x254c430, sizeof receive_results);
+    /* Both confirmed Ranked queues override every track default, never spawn AI,
+     * and restore native settings before returning to an unranked lobby. */
+    void (ABI *ranked_spawn_ai)(void *) = (void *)(image + (0xfff740 - shift));
+    rules_settings = native_settings;
+    unsigned char native_map_settings[0x20] = {0}, lap_pins[0x18] = {0};
+    int lap_value = 0;
+    int *lap_inputs[] = {&lap_value};
+    put_pointer(lap_pins, 0x10, lap_inputs);
+    uintptr_t (ABI *apply_map_settings)(void *) = (void *)(image + 0xc2f1f0);
+    uintptr_t (ABI *apply_lap_setting)(void *, void *) = (void *)(image + 0x119d8d0 - shift);
+    private = 0;
+    for (int itemless = 0; itemless < 2; ++itemless) {
+        public_active = itemless;
+        public_normal_active = !itemless;
+        ranked_score_active = 1;
+        for (int default_laps = 1; default_laps <= 7; ++default_laps) {
+            *(int *)(native_settings + 0x0c) = default_laps;
+            native_settings[0x10] = 1;
+            load_map(maps[default_laps % 4], 8);
+            assert(*(int *)(native_settings + 0x0c) == 5 && !native_settings[0x10]);
+            /* Native map and graph setters run after map-load enforcement. */
+            *(int *)(native_map_settings + 0x18) = default_laps;
+            int before_map_settings = map_settings_calls;
+            assert(apply_map_settings(native_map_settings) == (uintptr_t)native_map_settings);
+            assert(map_settings_calls == before_map_settings + 1);
+            assert(*(int *)(native_settings + 0x0c) == 5 && !native_settings[0x10]);
+            lap_value = default_laps;
+            int before_lap_setter = lap_setter_calls;
+            assert(apply_lap_setting(native_settings, lap_pins) == (uintptr_t)lap_value);
+            assert(lap_setter_calls == before_lap_setter + 1);
+            assert(*(int *)(native_settings + 0x0c) == 5 && !native_settings[0x10]);
+            int before_ai = ai_spawns;
+            ranked_spawn_ai(racers_manager);
+            assert(ai_spawns == before_ai);
+            ranked_score_active = 0;
+            load_map("octane/octane_onlinelobby/octane_onlinelobby", 8);
+            assert(*(int *)(native_settings + 0x0c) == default_laps && native_settings[0x10]);
+            assert(apply_map_settings(native_map_settings) == (uintptr_t)native_map_settings);
+            assert(*(int *)(native_settings + 0x0c) == default_laps && native_settings[0x10]);
+            lap_value = default_laps + 1;
+            assert(apply_lap_setting(native_settings, lap_pins) == (uintptr_t)lap_value);
+            assert(*(int *)(native_settings + 0x0c) == default_laps + 1 && native_settings[0x10]);
+            /* Public Normal and Itemless must retain their own track defaults and AI. */
+            load_map(maps[default_laps % 4], 8);
+            assert(*(int *)(native_settings + 0x0c) == default_laps + 1 && native_settings[0x10]);
+            assert(apply_map_settings(native_map_settings) == (uintptr_t)native_map_settings);
+            assert(*(int *)(native_settings + 0x0c) == default_laps && native_settings[0x10]);
+            before_ai = ai_spawns;
+            ranked_spawn_ai(racers_manager);
+            assert(ai_spawns == before_ai + 1);
+            ranked_score_active = 1;
+        }
+    }
+    ranked_score_active = public_active = public_normal_active = 0;
+    *(int *)(native_settings + 0x0c) = 3;
+    load_map(maps[0], 8);
+    assert(*(int *)(native_settings + 0x0c) == 3 && native_settings[0x10]);
+    private = 1;
     map_loads = cup_advances = lobby_returns = 0;
     guest_schedules = guest_native_returns = 0;
     mode_verified = -1;
@@ -2161,6 +2258,74 @@ static void test_region(size_t shift) {
     send_settings(packet);
     assert(*(int *)(packet + 0x3c) == 6);
     assert(team_settings_broadcasts == 5); /* CUP also replicates race settings. */
+    /* The Collision selector uses its own state, never Teams or Battle lives. */
+    unsigned char collision[0x1c0] = {0}, collision_event[0x48] = {0};
+    void *collision_vtable[] = {panel_event_type};
+    put_pointer(collision, 0x148, "COLLISION");
+    put_pointer(collision_event, 0, collision_vtable);
+    put_pointer(collision_event, 8, (void *)999);
+    void (ABI *collision_event_handler)(void *, void *, void *) = *(void **)(image + 0x2778150);
+    void (ABI *receive_collision)(void *) = (void *)(image + 0xbf3110);
+    speed = 1; following_host = 0;
+    *(int *)(native_settings + 0x38) = 7;
+    const int previous_teams = *(int *)(native_settings + 0x28);
+    for (int selected_collision = 0; selected_collision <= 1; ++selected_collision) {
+        *(int *)(collision_event + 0x18) = selected_collision;
+        collision_event_handler(collision, collision_event, NULL);
+        assert(runtime_online_mode_itemless_collision() == selected_collision);
+        assert(broadcast_collision == (0x434f0007u | ((unsigned)selected_collision << 15)));
+        assert(*(int *)(native_settings + 0x38) == 7);
+        /* Other native selectors broadcast through the same shared hook. */
+        broadcast_collision = 0;
+        ((void (ABI *)(void *))(image + 0xc2ed20))(native_settings);
+        assert(broadcast_collision == (0x434f0007u | ((unsigned)selected_collision << 15)));
+        assert(*(int *)(native_settings + 0x38) == 7);
+        assert(*(int *)(native_settings + 0x28) == previous_teams);
+        *(uint32_t *)(collision_event + 0x40) = broadcast_collision;
+        receive_collision(collision_event);
+        assert(received_lives == 7 && *(uint32_t *)(collision_event + 0x40) == broadcast_collision);
+    }
+    following_host = 1;
+    *(int *)(collision_event + 0x18) = 0;
+    collision_event_handler(collision, collision_event, NULL);
+    assert(runtime_online_mode_itemless_collision() == 1);
+    *(int *)(collision_event + 0x40) = 5;
+    receive_collision(collision_event);
+    assert(received_lives == 5 && runtime_online_mode_itemless_collision() == 0);
+    unsigned char collision_row[0x100] = {0}, collision_group[0x100] = {0};
+    unsigned char settings_parents[9][0x100] = {{0}};
+    put_pointer(collision_group, 0x40, settings_parents[0]);
+    for (int i = 0; i < 8; ++i)
+        put_pointer(settings_parents[i], 0x40, settings_parents[i + 1]);
+    *(float *)(settings_parents[8] + 0x64) = 98.0f;
+    unsigned char settings_panel[0x100] = {0}, track_header[0x100] = {0}, panel_children[0x28] = {0};
+    void *settings_items[] = {track_header, settings_parents[8]};
+    put_pointer(settings_parents[8], 0x40, settings_panel);
+    put_pointer(settings_panel, 0x48, panel_children);
+    *(int *)(panel_children + 12) = 2;
+    put_pointer(panel_children, 0x20, settings_items);
+    *(float *)(track_header + 0x64) = 114.0f;
+    put_pointer(collision_row, 0x40, collision_group);
+    void (ABI *collision_update)(void *, void *, float) = *(void **)(image + 0x2778160);
+    collision_update(collision, collision_row, 0.0f);
+    assert(*(int *)(collision + 0x190) == 0); /* Snapshot arrives after UI initialization. */
+    assert(!(*(unsigned *)(collision_row + 12) & 0x400));
+    assert(*(float *)(collision_group + 0x64) == 180.0f);
+    assert(*(float *)(collision_group + 0x60) == 65.0f);
+    assert(*(float *)(settings_parents[8] + 0x64) == -82.0f);
+    assert(*(float *)(track_header + 0x64) == -66.0f);
+    collision_update(collision, collision_row, 0.0f);
+    assert(*(float *)(settings_parents[8] + 0x64) == -82.0f);
+    assert(*(float *)(track_header + 0x64) == -66.0f);
+    speed = 0;
+    collision_update(collision, collision_row, 0.0f);
+    assert(*(unsigned *)(collision_row + 12) & 0x400);
+    assert(*(float *)(collision_group + 0x64) == 0.0f);
+    assert(*(float *)(collision_group + 0x60) == 0.0f);
+    assert(*(float *)(settings_parents[8] + 0x64) == 98.0f);
+    assert(*(float *)(track_header + 0x64) == 114.0f);
+    following_host = 0;
+
     free_string(NULL, *(char **)(card_name + 0x30) - 16);
     free_string(NULL, *(char **)(card_mode + 0x30) - 16);
     free_string(NULL, *(char **)(label + 0x30) - 16);
@@ -2273,7 +2438,7 @@ static void test_region(size_t shift) {
     assert(*(unsigned *)(members_root + 12) & 0x400); /* Reopen stays hidden. */
     unsigned char selector_behavior[0xa0] = {0}, selector_owner[0x28] = {0};
     unsigned char native_selector_project[0x60] = {0};
-    unsigned char native_selector_root[0x20] = {0};
+    unsigned char native_selector_root[0x100] = {0};
     put_pointer(native_selector_project, 0x10, native_selector_root);
     *(int *)(native_selector_project + 0x48) = 3;
     put_pointer(selector_owner, 0x20, native_selector_project);

@@ -11,6 +11,11 @@ room immediately; solo players and parties of two through seven must find a non-
 outside search. Ranked always requires an outside search and limits each party to four.
 Two compatible solo players suffice; filling all eight seats is not required. Private is unchanged.
 
+Public Itemless disables player/AI kart collisions and places every racer on one
+starting row within the native front-row width. Track and wall collisions remain
+enabled. Ranked Itemless uses the same collision and starting-position policy,
+with its own fixed five-lap, human-only race rules.
+
 ## Parties and compatibility
 
 The server validates every party member as part of the native asynchronous
@@ -57,6 +62,11 @@ Live diagnostic evidence located the teardown callback; the corrected graph path
 USA/EU asset and C regression coverage. Two-client testing confirms Waiting for Host,
 repeated Private entry/exit, Ranked/Public switching, and Private-to-Public/Ranked re-entry.
 Party retention at the 180-second timeout still requires live retesting.
+The client advertises `collision_rules: 1`; the server requires it from the search
+and every party member. The server's `octr_itemless_v1` field uses confirmation
+version 2 for these rules. Older confirmation versions are rejected, so the client
+cannot silently race against older collision/grid rules. This requires the matching
+server update; it does not create a second selectable Itemless queue.
 
 ## Mode lifetime
 

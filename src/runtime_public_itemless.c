@@ -452,7 +452,7 @@ int runtime_public_itemless_announce(void) {
     pthread_mutex_unlock(&mode_lock);
     if (!token) return 0;
     char target[512], body[128];
-    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&ranked=1&release=%s&device=%s", name, token, SACREDFIRE_RELEASE, ranked_device());
+    snprintf(target, sizeof target, "/ryunet/itemless-client?name=%s&version=1&nonce=%016" PRIx64 "&cup=1&teams=1&difficulty=1&collision_rules=1&ranked=2&release=%s&device=%s", name, token, SACREDFIRE_RELEASE, ranked_device());
     int status = runtime_ryunet_request("POST", target, body, sizeof body);
     int accepted = status == 200 && !strcmp(body, "ok");
     pthread_mutex_lock(&mode_lock);
@@ -1111,11 +1111,11 @@ static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, i
     if (out) {
         size_t used = 0;
         if (ranked) used = (size_t)snprintf(out, n + 480,
-            "{\"octr_ranked\":{\"version\":1,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\"},",
+            "{\"octr_ranked\":{\"version\":2,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\"},",
             mode, token);
         else { out[0] = '{'; out[1] = 0; used = 1; }
         if (mode || !ranked) used += (size_t)snprintf(out + used, n + 480 - used,
-            "\"octr_itemless\":{\"version\":1,\"mode\":%d,\"ranked\":1,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\",\"device\":\"%s\"},",
+            "\"octr_itemless\":{\"version\":1,\"mode\":%d,\"ranked\":2,\"private_cup\":1,\"private_teams\":1,\"private_difficulty\":1,\"collision_rules\":1,\"release\":\"%s\",\"nonce\":\"%016" PRIx64 "\",\"device\":\"%s\"},",
             mode, SACREDFIRE_RELEASE, token, ranked_device());
         snprintf(out + used, n + 480 - used, "%s", raw + 1);
     }
@@ -1200,7 +1200,7 @@ static void *ABI leave_lobby(void **result, void *self, uint64_t id) {
 static int confirmation_mode(const char *confirmation_doc, const char *key, uint64_t room, uint64_t token, int mode) {
     const char *value = runtime_json_field(confirmation_doc, key);
     char prefix[80], wanted[17];
-    snprintf(prefix, sizeof prefix, "\"1/%" PRIu64 "/%d/", room, mode);
+    snprintf(prefix, sizeof prefix, "\"2/%" PRIu64 "/%d/", room, mode);
     snprintf(wanted, sizeof wanted, "%016" PRIx64, token);
     if (!value || !token || strncmp(value, prefix, strlen(prefix))) return 0;
     value += strlen(prefix);
