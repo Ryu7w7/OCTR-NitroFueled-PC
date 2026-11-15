@@ -5762,22 +5762,6 @@ void ContentTab() {
     ModHeading(T("General","General"));
     ImGui::Spacing();
     ModCard(master);
-    // The tracks are made by the community: some ask more of the GPU and CPU than the game's own.
-    ImGui::PushStyleColor(ImGuiCol_Text,kYellow);
-    ImGui::TextWrapped("%s", T("Ten en cuenta que algunas pistas pueden ser más exigentes a nivel gráfico y requerir más cómputo "
-                               "del que el juego puede ofrecer: al jugar alguna de ellas, el rendimiento puede verse afectado. "
-                               "Úsalo con precaución y bajo tu propio riesgo.",
-                               "Keep in mind that some tracks can be more demanding on graphics and need more computing power "
-                               "than the game can offer: playing one of them can affect performance. "
-                               "Use it with care and at your own risk."));
-    ImGui::Spacing();
-    ImGui::TextWrapped("%s", T("Algunas pistas no funcionan como se esperaría: se juegan, pero pueden cerrar el juego al cargar la "
-                               "pista siguiente. Cada paquete indica su compatibilidad (completa o parcial). Las pistas creadas "
-                               "con CTR Track Editor para Nitro-Fueled v0.6 en adelante se probaron y funcionan correctamente.",
-                               "Some tracks don't work as expected: they play, but can crash the game when the next track "
-                               "loads. Each package shows its compatibility (full or partial). Tracks made with CTR Track "
-                               "Editor for Nitro-Fueled v0.6 and later were tried and work correctly."));
-    ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0,14));
     const float left=ImGui::GetCursorPosX();
     const float right=ImGui::GetWindowContentRegionMax().x;
@@ -5847,20 +5831,6 @@ void ContentTab() {
                                                      : T("Quitando el paquete...", "Removing the package..."));
     if (c.failed) ImGui::TextColored(kYellow, "%s", T("No se pudo leer custom_content. Revisa el registro.", "Could not read custom_content. Check the log."));
     for (const auto& m : c.messages) ImGui::TextColored(kYellow, "%s", m.c_str());
-    bool clashing = false;
-    for (const auto& k : c.clashes) clashing |= ContentPackageOn(k.a) && ContentPackageOn(k.b);
-    if (clashing) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
-        ImGui::TextWrapped("%s", T("Algunas pistas activadas traen texturas del juego modificadas con su nombre original, "
-                                   "y el juego usa una sola versión para todas: una pista puede verse con las texturas de otra "
-                                   "(por ejemplo, la carretera). Cada paquete afectado lo indica. Si una se ve mal, juégala con "
-                                   "las otras desactivadas, o vuelve a exportarla con texturas de nombre propio.",
-                                   "Some tracks that are on carry changed game textures under their original names, and the "
-                                   "game uses one version for all of them: a track can show another one's textures (its road, "
-                                   "say). Each package concerned says so. If one looks wrong, play it with the others off, or "
-                                   "export it again with textures of its own names."));
-        ImGui::PopStyleColor();
-    }
     std::string remove;
     for (const auto& card : cards) if (ModCard(card)) remove = card.content_id;
     ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0.015f,0.13f,0.32f,0.82f));
@@ -5901,6 +5871,40 @@ void ContentTab() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
     if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
     ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    ImGui::Dummy(ImVec2(0,10));
+    // Warnings last, after the packages and the box: for when a track misbehaves, not to read first.
+    bool clashing = false;
+    for (const auto& k : c.clashes) clashing |= ContentPackageOn(k.a) && ContentPackageOn(k.b);
+    if (clashing) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
+        ImGui::TextWrapped("%s", T("Algunas pistas activadas traen texturas del juego modificadas con su nombre original, "
+                                   "y el juego usa una sola versión para todas: una pista puede verse con las texturas de otra "
+                                   "(por ejemplo, la carretera). Cada paquete afectado lo indica. Si una se ve mal, juégala con "
+                                   "las otras desactivadas, o vuelve a exportarla con texturas de nombre propio.",
+                                   "Some tracks that are on carry changed game textures under their original names, and the "
+                                   "game uses one version for all of them: a track can show another one's textures (its road, "
+                                   "say). Each package concerned says so. If one looks wrong, play it with the others off, or "
+                                   "export it again with textures of its own names."));
+        ImGui::PopStyleColor();
+    }
+    // The tracks are made by the community: some ask more of the GPU and CPU than the game's own.
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text,kYellow);
+    ImGui::TextWrapped("%s", T("Ten en cuenta que algunas pistas pueden ser más exigentes a nivel gráfico y requerir más cómputo "
+                               "del que el juego puede ofrecer: al jugar alguna de ellas, el rendimiento puede verse afectado. "
+                               "Úsalo con precaución y bajo tu propio riesgo.",
+                               "Keep in mind that some tracks can be more demanding on graphics and need more computing power "
+                               "than the game can offer: playing one of them can affect performance. "
+                               "Use it with care and at your own risk."));
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", T("Algunas pistas no funcionan como se esperaría: se juegan, pero pueden cerrar el juego al cargar la "
+                               "pista siguiente. Cada paquete indica su compatibilidad (completa o parcial). Las pistas creadas "
+                               "con CTR Track Editor para Nitro-Fueled v0.6 en adelante se probaron y funcionan correctamente.",
+                               "Some tracks don't work as expected: they play, but can crash the game when the next track "
+                               "loads. Each package shows its compatibility (full or partial). Tracks made with CTR Track "
+                               "Editor for Nitro-Fueled v0.6 and later were tried and work correctly."));
+    ImGui::PopStyleColor();
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar el contenido externo.","Close the game to change external content."));
     ImGui::PopStyleColor(2);
     if (!remove.empty() && !c.action.valid()) ContentAction(L"remove " + Quote(Widen(remove)), false);
