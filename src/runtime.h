@@ -123,6 +123,8 @@ void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
 int runtime_room_mode_following(void);
 void runtime_room_mode_host_name(char out[24]);
+/* Whether this nickname hosts the room on screen (runtime_room_host.c): the room list's crown. */
+int runtime_room_host_is(const char *nick);
 int runtime_room_mode_ready(void);
 /* 1 verified/frozen, 0 rejected, -1 background verification pending. */
 int runtime_room_mode_begin_race(void);

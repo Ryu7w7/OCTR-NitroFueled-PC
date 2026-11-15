@@ -3885,6 +3885,14 @@ static void ranked_member_icons(unsigned char *self) {
         const char *rank = label + (background ? 17 : 15);
         const int icon_mode = rank[0] - '0';
         const int icon_tier = rank[1] == '_' ? atoi(rank + 2) : 0;
+        if (icon_mode == 2) {
+            /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
+            unsigned crown_flags;
+            memcpy(&crown_flags, icon + 12, sizeof crown_flags);
+            const int crown_hidden = !nick || !runtime_room_host_is(nick);
+            if (!!(crown_flags & 0x400) != crown_hidden) hide_placeable(icon, crown_hidden);
+            continue;
+        }
         if (icon_mode < 0 || icon_mode > 1 || icon_tier < 0 || icon_tier > 7) continue;
 
         unsigned flags;

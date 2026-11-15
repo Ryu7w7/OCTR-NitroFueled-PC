@@ -28,7 +28,7 @@ from ranked_ui_assets import (HOF_BACKGROUND_IMAGE, HOF_BACKGROUND_MATERIAL,
                               QUICK_ICON_TEXTURE, RANKED_BACKGROUND_MATERIAL,
                               RANKED_BACKGROUND_NAMESPACE, RANKED_BACKGROUND_PATH,
                               RANKED_BACKGROUND_TEXTURE,
-                              TIERS, asset_replacements,
+                              LOBBY_ICONS, TIERS, asset_replacements,
                               clone_lobby_materials, clone_lobby_rank_materials, tier_icon,
                               menu_asset_replacements,
                               menu_icon, quick_icon_texture)
@@ -183,7 +183,7 @@ def ready_icon_clone(blob):
 
 def ranked_lobby_icons(blob):
     """PNG rank sprites (no decals). Tags OCTR_RANK_ICON_{mode}_{tier} for prebuilt."""
-    from ranked_ui_assets import TIERS, tier_icon, tier_material
+    from ranked_ui_assets import HOST_CROWN, LOBBY_ICONS, tier_icon, tier_material
     g = Igz(blob)
     objects = dict(g.objects())
     names = [off for off, kind in objects.items()
@@ -229,7 +229,7 @@ def ranked_lobby_icons(blob):
     sprite_size = g.sizes[g.u64(sprite_template)]
     material_ids = g.fixup('EXID')
     sprite_exports = {}
-    for mode, tier in TIERS:
+    for mode, tier in LOBBY_ICONS:
         image_name = tier_icon(mode, tier)[1]
         material = tier_material(mode, tier)[2]
         sprite = g.append(g.data[sprite_template:sprite_template + sprite_size])
@@ -262,7 +262,7 @@ def ranked_lobby_icons(blob):
     tw, th = struct.unpack_from('<2f', g.data, template + 0x90)
     iw, ih = abs(tw), abs(th)
     new = []
-    for mode, tier in TIERS:
+    for mode, tier in LOBBY_ICONS:
         for kind, source in (('SHADOW', shadow_template), ('ICON', template)):
             icon = g.append(g.data[source:source + size])
             g.add_site('RVTB', icon)
@@ -287,6 +287,11 @@ def ranked_lobby_icons(blob):
                 x, y = struct.unpack_from('<2f', g.data, template + 0x60)
                 struct.pack_into('<2f', g.data, icon + 0x60, x + 2.0, y + 2.0)
                 struct.pack_into('<4f', g.data, icon + 0xc0, 0.0, 0.0, 0.0, 1.0)
+            if (mode, tier) == HOST_CROWN:
+                # The crown at the row's right end, where the game keeps a hidden icon slot.
+                x, y = 372.0 + (2.0 if kind == 'SHADOW' else 0.0), 14.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                struct.pack_into('<2f', g.data, icon + 0x60, x, y)
+                struct.pack_into('<2f', g.data, icon + 0x90, 40.0, 40.0)
             new.append(icon)
     # Keep the native style slots addressable by their behavior, but never render them.
     for source, kind in objects.items():
@@ -1581,7 +1586,7 @@ def _prepare(game, out, elf, bases):
         package = package_with_rows(package, [('effect', 'vfx/ctr/gui/ctr_gui_wumpa_juiced.igz')] + [
             ('texture', path.lower()) for path in (
                 RANKED_BACKGROUND_TEXTURE, HOF_BACKGROUND_TEXTURE, menu_icon('hof')[2],
-                *(tier_icon(mode, tier)[2] for mode, tier in TIERS))])
+                *(tier_icon(mode, tier)[2] for mode, tier in LOBBY_ICONS))])
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()

@@ -755,7 +755,11 @@ void ChatLine(const RcLine& line) {
     const ImVec4 color = runtime_name_color(line.nick, own) ? ImVec4(own[0], own[1], own[2], 1.0f)
                          : mine                             ? kFriendGreen
                                                             : kMenuYellow;
-    ImGui::TextColored(color, "%s:", line.nick);
+    // The room's host: a crown before the name (DejaVu has the glyph; the room list shows one too).
+    if (runtime_room_host_is(line.nick))
+        ImGui::TextColored(color, "♛ %s:", line.nick);
+    else
+        ImGui::TextColored(color, "%s:", line.nick);
     ImGui::SameLine();
     ImGui::TextWrapped("%s", line.text);
 }

@@ -9,6 +9,10 @@ from ui_texture import ASSETS, IMG_DATA, IMG_W, _objects, texture_igz as _textur
 
 ART = Path(__file__).resolve().parent / 'tier_icon'
 TIERS = tuple((mode, tier) for mode in range(2) for tier in range(0, 8))
+# The room host's crown (scripts/assets/host_crown.png), beside the host's name in the room list:
+# built like a rank icon, as "mode" 2 (src/runtime_online_mode.c shows it on the host's row).
+HOST_CROWN = (2, 0)
+LOBBY_ICONS = TIERS + (HOST_CROWN,)
 QUICK_ICON_TEXTURE = ('textures/GuiStandard_diffuse,'
                       'textures@!ui!Octane!Icons!octane_ui_ico_quick`tga,101.igz')
 RANKED_BACKGROUND_MATERIAL = 'octane_ui_online_bg_pattern_ranked_tga__material'
@@ -33,14 +37,16 @@ def _template(name):
 
 def tier_icon(mode, tier):
     """(PNG path, sprite image name, archive texture path) for one rank."""
-    if (mode, tier) not in TIERS:
-        raise ValueError('ranked tier must be mode 0..1 and tier 0..7')
+    if (mode, tier) not in LOBBY_ICONS:
+        raise ValueError('ranked tier must be mode 0..1 and tier 0..7, or the host crown')
     image = f'octane_ranked_tier_{mode}_{tier}'.ljust(34, '_')
     name = f'{"itemless" if mode else "normal"}_{tier}.png'
     png = ASSETS / name
     if not png.exists():
         png = ART / name
-    if not tier:
+    if (mode, tier) == HOST_CROWN:
+        png = ASSETS / 'host_crown.png'
+    elif not tier:
         png = ASSETS / 'unranked.png'  # Unranked players get the neutral badge.
     return (png,
             f'[{image}.tga]',
@@ -258,7 +264,7 @@ def clone_lobby_rank_materials(blob):
     count = g.u32(name_list + 0x0c)
     named = [g.u64(g.u64(obj_list + 0x20) + i * 8) for i in range(count)]
     names = bytearray(g.data[g.u64(name_list + 0x20):g.u64(name_list + 0x20) + count * 16])
-    for mode, tier in TIERS:
+    for mode, tier in LOBBY_ICONS:
         clone = g.append(g.data[source:end])
         for tag, sites in g.sites.items():
             for site in list(sites):
@@ -361,7 +367,7 @@ def asset_replacements():
     texture = _template('texture_template.igz').read_bytes()
     material = _template('material_template.igz').read_bytes()
     result = {}
-    for mode, tier in TIERS:
+    for mode, tier in LOBBY_ICONS:
         result[tier_icon(mode, tier)[2]] = texture_igz(texture, mode, tier)
         result[tier_material(mode, tier)[1]] = material_igz(material, mode, tier)
     return result

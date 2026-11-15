@@ -322,9 +322,9 @@ class OnlineModeTests(unittest.TestCase):
     def test_ranked_tier_png_textures(self):
         assets = asset_replacements()
         textures = {path: blob for path, blob in assets.items() if path.startswith('textures/')}
-        self.assertEqual(len(textures), 16)
+        self.assertEqual(len(textures), 17)  # 16 ranks and the room host's crown
         self.assertEqual(len({len(blob) for blob in textures.values()}), 1)
-        self.assertEqual(sum(b'octane_ranked_tier_' in blob for blob in textures.values()), 16)
+        self.assertEqual(sum(b'octane_ranked_tier_' in blob for blob in textures.values()), 17)
         for blob in textures.values():
             image = next(off for off, kind in _objects(blob)[0] if kind == 'igImage2')
             self.assertEqual(struct.unpack_from('<HH', blob, image + IMG_W), (256, 256))
@@ -358,7 +358,11 @@ class OnlineModeTests(unittest.TestCase):
                              patched.fixup(tag)[1])
         icons = [off for off, kind in patched.objects()
                  if off >= len(original.data) and kind == 'igGuiPlaceable']
-        self.assertEqual(len(icons), 32)
+        self.assertEqual(len(icons), 34)  # 16 ranks and the room host's crown, each with its shadow
+        crown = icons[-2:]
+        self.assertEqual([patched.string_at(off + 0x28) for off in crown], ['OCTR_RANK_SHADOW_2_0', 'OCTR_RANK_ICON_2_0'])
+        self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x90) == (40.0, 40.0) for off in crown))
+        self.assertEqual(struct.unpack_from('<2f', patched.data, crown[1] + 0x60), (372.0, 14.0))
         name = next(off for off, kind in original.objects()
                     if kind == 'igGuiPlaceable' and original.string_at(off + 0x28) == '[MemberName]')
         self.assertEqual(patched.u64(name + 0x50), original.u64(name + 0x50))
@@ -374,11 +378,11 @@ class OnlineModeTests(unittest.TestCase):
         self.assertTrue(all(struct.unpack_from('<4f', patched.data, off + 0xc0) ==
                             (0.0, 0.0, 0.0, 1.0) for off in icons[::2]))
         self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x90) ==
-                            (32.0, 32.0) for off in icons))
+                            (32.0, 32.0) for off in icons[:-2]))
         self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x60) ==
-                            (64.0, 20.0) for off in icons[::2]))
+                            (64.0, 20.0) for off in icons[:-2:2]))
         self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x60) ==
-                            (62.0, 18.0) for off in icons[1::2]))
+                            (62.0, 18.0) for off in icons[1:-2:2]))
         for off in (0x1090, 0x11b0):
             self.assertEqual(struct.unpack_from('<f', patched.data, off + 0xe0)[0], 0.0)
         handles = patched.fixup('EXNM')
@@ -386,20 +390,20 @@ class OnlineModeTests(unittest.TestCase):
                     struct.iter_unpack('<II', handles[3][:handles[1] * 8]) if b & 0x80000000]
         assets = [external[patched.u64(off + 0x38) & 0x7fffffff] for off in icons]
         expected = [f'OCTR_RANK_{mode}_{tier}_ASSET'
-                    for mode in range(2) for tier in range(0, 8) for _ in range(2)]
+                    for mode in range(2) for tier in range(0, 8) for _ in range(2)] + ['OCTR_RANK_2_0_ASSET'] * 2
         self.assertEqual(assets, expected)
         labels = [patched.string_at(off + 0x28) for off in icons]
         self.assertEqual(labels,
                          [f'OCTR_RANK_{kind}_{mode}_{tier}'
                           for mode in range(2) for tier in range(0, 8)
-                          for kind in ('SHADOW', 'ICON')])
+                          for kind in ('SHADOW', 'ICON')] + ['OCTR_RANK_SHADOW_2_0', 'OCTR_RANK_ICON_2_0'])
         sprites = [off for off, kind in patched.objects()
                    if off >= len(original.data) and kind == 'igGuiSprite']
-        self.assertEqual(len(sprites), 16)
+        self.assertEqual(len(sprites), 17)
         handle_sites = patched.read_list('RHND', unpack_offsets)
         self.assertTrue(all(off + 0x20 in handle_sites for off in sprites))
         materials = list(struct.iter_unpack('<II', patched.fixup('EXID')[3]))
-        _namespace, _path, export = tier_material(1, 7)
+        _namespace, _path, export = tier_material(2, 0)  # the last one: the room host's crown
         self.assertEqual(materials[-1],
                          (fnv1a(export), fnv1a('juice_Octane_LobbyMembers_materials')))
 
@@ -412,8 +416,9 @@ class OnlineModeTests(unittest.TestCase):
             patched = Igz(online_mode.ranked_lobby_icons(iga.read_entry(f, *entry[1:])))
         labels = [patched.string_at(off + 0x28) for off, kind in patched.objects()
                   if kind == 'igGuiPlaceable' and off + 0x28 in patched.sites.get('RSTT', [])]
-        self.assertEqual(sum(label.startswith('OCTR_RANK_ICON_') for label in labels), 16)
-        self.assertEqual(sum(label.startswith('OCTR_RANK_SHADOW_') for label in labels), 16)
+        self.assertEqual(sum(label.startswith('OCTR_RANK_ICON_') for label in labels), 17)  # 16 ranks, the crown
+        self.assertEqual(sum(label.startswith('OCTR_RANK_SHADOW_') for label in labels), 17)
+        self.assertIn('OCTR_RANK_ICON_2_0', labels)  # the room host's crown
 
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires native game dump')
     def test_lobby_rank_materials_use_native_exports_and_textures(self):

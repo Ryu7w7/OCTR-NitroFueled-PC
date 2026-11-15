@@ -245,6 +245,7 @@ int runtime_nsane_mode_enabled(void) { return nsane; }
 int runtime_nsane_race_active(void) { return nsane && room_active; }
 int runtime_nsane_available(void) { return 1; }
 void runtime_nsane_map_loading(const char *map) { (void)map; }
+int runtime_room_host_is(const char *nick) { (void)nick; return 0; }
 static void ABI private_state(unsigned char *yes, unsigned char *no) {
     *yes = (unsigned char)private; *no = (unsigned char)!private;
 }
