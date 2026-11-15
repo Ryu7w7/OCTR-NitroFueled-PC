@@ -5878,32 +5878,34 @@ void ContentTab() {
     if (clashing) {
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
-        ImGui::TextWrapped("%s", T("Algunas pistas activadas traen texturas del juego modificadas con su nombre original, "
-                                   "y el juego usa una sola versión para todas: una pista puede verse con las texturas de otra "
-                                   "(por ejemplo, la carretera). Cada paquete afectado lo indica. Si una se ve mal, juégala con "
-                                   "las otras desactivadas, o vuelve a exportarla con texturas de nombre propio.",
-                                   "Some tracks that are on carry changed game textures under their original names, and the "
-                                   "game uses one version for all of them: a track can show another one's textures (its road, "
-                                   "say). Each package concerned says so. If one looks wrong, play it with the others off, or "
-                                   "export it again with textures of its own names."));
+        ImGui::TextWrapped("%s", T("Texturas compartidas: varias de las pistas activadas modifican texturas del juego sin "
+                                   "cambiarles el nombre, y el juego usa una sola versión para todas, así que una pista puede "
+                                   "verse con las texturas de otra (por ejemplo, la carretera). Cada paquete afectado lo indica; "
+                                   "si una se ve mal, juégala con las demás desactivadas o vuelve a exportarla con texturas de "
+                                   "nombre propio.",
+                                   "Shared textures: several of the tracks that are on change game textures without renaming "
+                                   "them, and the game uses one version for all of them, so a track can show another one's "
+                                   "textures (its road, say). Each package concerned says so; if one looks wrong, play it with "
+                                   "the others off or export it again with textures of its own names."));
         ImGui::PopStyleColor();
     }
     // The tracks are made by the community: some ask more of the GPU and CPU than the game's own.
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text,kYellow);
-    ImGui::TextWrapped("%s", T("Ten en cuenta que algunas pistas pueden ser más exigentes a nivel gráfico y requerir más cómputo "
-                               "del que el juego puede ofrecer: al jugar alguna de ellas, el rendimiento puede verse afectado. "
-                               "Úsalo con precaución y bajo tu propio riesgo.",
-                               "Keep in mind that some tracks can be more demanding on graphics and need more computing power "
-                               "than the game can offer: playing one of them can affect performance. "
-                               "Use it with care and at your own risk."));
+    ImGui::TextWrapped("%s", T("Rendimiento: hay pistas más exigentes a nivel gráfico que pueden requerir más cómputo del que "
+                               "el juego puede ofrecer, y al jugarlas el rendimiento puede verse afectado. Úsalo con precaución "
+                               "y bajo tu propio riesgo.",
+                               "Performance: some tracks are more demanding on graphics and can need more computing power than "
+                               "the game can offer, and playing them can affect performance. Use it with care and at your own "
+                               "risk."));
     ImGui::Spacing();
-    ImGui::TextWrapped("%s", T("Algunas pistas no funcionan como se esperaría: se juegan, pero pueden cerrar el juego al cargar la "
-                               "pista siguiente. Cada paquete indica su compatibilidad (completa o parcial). Las pistas creadas "
-                               "con CTR Track Editor para Nitro-Fueled v0.6 en adelante se probaron y funcionan correctamente.",
-                               "Some tracks don't work as expected: they play, but can crash the game when the next track "
-                               "loads. Each package shows its compatibility (full or partial). Tracks made with CTR Track "
-                               "Editor for Nitro-Fueled v0.6 and later were tried and work correctly."));
+    ImGui::TextWrapped("%s", T("Compatibilidad: no todas las pistas funcionan como se esperaría; se juegan, pero pueden cerrar "
+                               "el juego al cargar la siguiente. Cada paquete indica si su compatibilidad es completa o parcial. "
+                               "Las creadas con CTR Track Editor para Nitro-Fueled v0.6 en adelante se probaron y funcionan "
+                               "correctamente.",
+                               "Compatibility: not every track works as expected; they play, but can crash the game when the "
+                               "next one loads. Each package shows whether its compatibility is full or partial. Tracks made "
+                               "with CTR Track Editor for Nitro-Fueled v0.6 and later were tried and work correctly."));
     ImGui::PopStyleColor();
     if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar el contenido externo.","Close the game to change external content."));
     ImGui::PopStyleColor(2);
