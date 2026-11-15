@@ -238,6 +238,10 @@ void runtime_services_user_change(int user, int login);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_DIR or the user folder */
+/* Pack Tacho's reserves bar starts off (runtime_reserves_bar.c). */
+void runtime_reserves_bar_start(unsigned char *image, size_t size);
+void runtime_reserves_bar_save_closed(void);  /* the game closed its save (runtime_savedata.c) */
+void runtime_reserves_bar_tick(void);         /* the game's thread, every frame */
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */

@@ -18,8 +18,9 @@ it the pack's.
 It is fixed: no launcher or bbport.ini setting turns it off or changes it, so every player
 races under the same rules. Its files are checked against SHA256 values written here
 (verify()); a changed or missing file stops the launch until the port is installed again.
-The pack's optional Options page entries ("Hud Power Charged", "Barra de reservas", which turn
-its HUD off) are left out for the same reason.
+Its Options > Game entries ("Hud Power Charged", "Barra de reservas", as in Pack Tacho 1.3.0) are
+always in: they change only how a player's own HUD looks. The reserves bar starts off
+(src/runtime_reserves_bar.c) and is turned on there, never from the launcher or the overlay.
 SPDX-License-Identifier: GPL-2.0-or-later
 """
 import contextlib
@@ -78,7 +79,9 @@ def manifest():
 
 
 def operations():
-    return manifest()['operations']
+    """Every game file of the pack, its Options > Game page included (Pack Tacho 1.3.0)."""
+    m = manifest()
+    return m['operations'] + m['menu_operations']
 
 
 def payload(op):
