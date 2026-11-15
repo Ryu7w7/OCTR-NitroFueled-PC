@@ -158,6 +158,61 @@ int main(int argc, char** argv) {
     DiscordPresence::Update(true, "test", nullptr);
     assert(DiscordPresence::GetStatus() == DiscordPresence::Status::Error);
     g_app.python = FindPython(g_app.root);
+    {
+        // Run the real Python service and native pipe consumer without contacting Discord.
+        g_app.root = g_app.data / "discord-fixture";
+        fs::create_directories(g_app.root / "launcher/linux");
+        std::ofstream(g_app.root / "launcher/linux/services.py") << R"PY(import runpy, sys, types
+class Client:
+    joined = False
+    def update(self, enabled, app_id, activity):
+        assert not self.accept_requests
+        if activity:
+            assert activity.details == 'Playing "CTR" café'
+        self.state = app_id if enabled else 'off'
+    def status(self):
+        return self.state, 'RPC "failure" café 🎮' if self.state == 'error' else ''
+    def take_join(self):
+        if self.state == 'connected' and not self.joined:
+            self.joined = True
+            return 'ctr1|test.invalid|Host'
+    def shutdown(self):
+        pass
+sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=types.SimpleNamespace)
+)PY" << "runpy.run_path(\"" << JsonEscape(PathText(actual_root / "launcher/linux/services.py"))
+             << "\", run_name='__main__')\n";
+        auto wait_status = [&](DiscordPresence::Status expected) {
+            for (int i = 0; i < 300 && DiscordPresence::GetStatus() != expected; ++i) SleepMs(10);
+            assert(DiscordPresence::GetStatus() == expected);
+        };
+        DiscordPresence::SetAcceptJoinRequests(false);
+        DiscordPresence::Activity activity;
+        activity.details = "Playing \"CTR\" café";
+        DiscordPresence::Update(true, "connected", &activity);
+        wait_status(DiscordPresence::Status::Connected);
+        std::string secret;
+        assert(DiscordPresence::TakeJoin(secret) && secret == "ctr1|test.invalid|Host");
+        assert(!DiscordPresence::TakeJoin(secret));
+        g_app.game.Set("online_server", "test.invalid");
+        g_app.game_running = true;
+        OnDiscordJoin(secret);
+        assert(g_app.game.Flag("online", false) && ListHas(g_app.game.Get("online_friends"), "Host"));
+        assert(ReadText(GameIni().parent_path() / "ryunet_join.txt").find("host=Host\n") != std::string::npos);
+        g_app.game_running = false;
+        DiscordPresence::Update(true, "no_app_id", nullptr);
+        wait_status(DiscordPresence::Status::NoAppId);
+        DiscordPresence::Update(true, "no_discord", nullptr);
+        wait_status(DiscordPresence::Status::NoDiscord);
+        DiscordPresence::Update(true, "error", nullptr);
+        wait_status(DiscordPresence::Status::Error);
+        assert(DiscordPresence::LastError() == "RPC \"failure\" café 🎮");
+        DiscordPresence::Update(false, "", nullptr);
+        wait_status(DiscordPresence::Status::Off);
+        assert(DiscordPresence::LastError().empty());
+        DiscordPresence::Shutdown();
+        DiscordPresence::SetAcceptJoinRequests(true);
+        g_app.root = actual_root;
+    }
     g_app.launcher.Set("discord_rpc", "0");
     g_app.game.Set("online", "0");
     g_app.game.Set("perf_reports", "0");

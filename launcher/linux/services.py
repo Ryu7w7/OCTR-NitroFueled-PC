@@ -208,7 +208,7 @@ def presence():
             client.update(request.get("enabled", False), request.get("app_id", ""),
                           discord_ipc.Activity(**activity) if activity else None)
             status, error = client.status()
-            print(json.dumps({"status": status, "error": error, "join": client.take_join() or ""}), flush=True)
+            print(json.dumps({"status": status, "error": error, "join": client.take_join() or ""}, separators=(",", ":")), flush=True)
     finally:
         client.shutdown()
 
