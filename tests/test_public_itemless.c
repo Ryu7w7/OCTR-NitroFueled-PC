@@ -891,6 +891,7 @@ static void test_native_party_menu_return(void) {
     *(void **)(party+0x18)=session;*(void **)(session+0x10)=connection;
     *(int *)(connection+0x118)=1;party[0x6c]=1;
     party_guest=0;menu_party_returned=0;
+    party_at_entry=2; /* a party of two searched together */
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=99;
     selected=ranked_selected=1;
     struct SearchPoll *job=calloc(1,sizeof *job);
@@ -935,6 +936,19 @@ static void test_native_party_menu_return(void) {
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
     int attempts=timeout_attempts;runtime_public_itemless_update();
     assert(timeout_attempts==attempts && search_timeout_pending);
+    /* A host who came alone (no party before the room): leaving brings none of the room's
+     * players along; a party that came together goes back together. */
+    *(int *)(connection+0x118)=1;party_guest=0;
+    {
+        const int returns=party_returns;
+        menu_party_returned=0;party_at_entry=1;
+        runtime_public_itemless_menu_return();
+        assert(party_returns==returns);
+        menu_party_returned=0;party_at_entry=2;
+        runtime_public_itemless_menu_return();
+        assert(party_returns==returns+1);
+        party_at_entry=1;
+    }
     runtime_public_itemless_reset();
     party_guest=saved_guest;party_manager=saved_party;network_manager=saved_network;
     native_party_return=saved_return;native_stop_matchmaking=saved_stop;

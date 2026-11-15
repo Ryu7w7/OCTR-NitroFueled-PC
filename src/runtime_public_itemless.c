@@ -72,7 +72,15 @@ static uint64_t matchmaking_room;
 static unsigned char *matchmaking_owner;
 static int matchmaking_search, matchmaking_created;
 static int menu_party_returned = 1;
+/* The player's own party when they last entered a lobby session (a search, a private room),
+ * before any room member joined it: 1 when they went alone. */
+static int party_at_entry = 1;
 static int ranked_party_size(void);
+/* Entering a lobby session: from now on, going back to the menus may bring the party along. */
+static void arm_party_return(void) {
+    if (__atomic_exchange_n(&menu_party_returned,0,__ATOMIC_SEQ_CST))
+        __atomic_store_n(&party_at_entry,ranked_party_size(),__ATOMIC_SEQ_CST);
+}
 static void (ABI *native_party_return)(void *);
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
 static int search_elapsed_base, search_timeout = 180, search_range, search_is_ranked;
@@ -195,9 +203,17 @@ void runtime_public_itemless_menu_return(void) {
     unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
     int role = 0;
     if (connection) memcpy(&role, connection + 0x118, sizeof role);
-    if (role == 1 && native_party_return) {
+    /* Native Quit with Party takes everyone in the session along: the room's members too. Only a
+     * party that existed before the room (friends who searched or came in together) goes back
+     * together; a player who came alone leaves the room's players behind (2026-11-15: after a
+     * private, public or Ranked room everyone stayed grouped with its host). */
+    const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
+    if (role == 1 && native_party_return && before > 1) {
         native_party_return(party);
-        printf("Online party: return notification queued; members=%d\n",ranked_party_size());
+        printf("Online party: return notification queued; members=%d (party of %d before the room)\n",
+               ranked_party_size(), before);
+    } else if (role == 1) {
+        printf("Online party: no party before the room; its players are not brought along\n");
     }
 }
 void runtime_public_itemless_select(int enabled) {
@@ -337,7 +353,7 @@ static void *search_poll(void *arg) {
         if (valid) {
             search_timeout=timeout;search_range=range;search_policy_at=now;
             if (!strncmp(state,"\"searching\"",11) || !strncmp(state,"\"timed_out\"",11)) {
-                __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
+                arm_party_return();
                 search_server_active=1;search_mark=now;search_elapsed_base=elapsed;
                 search_is_ranked=ranked && !strncmp(ranked,"true",4);
             } else if (!strncmp(state,"\"matched\"",9)) {
@@ -940,7 +956,7 @@ static void native_return_focus(void *node, int ancestors) {
             const char *name = vsc_graph_name(items[i]);
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root"))) {
-                __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
+                arm_party_return();
                 return;
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
@@ -1061,7 +1077,7 @@ static void ABI placeable_event(void *self, void *event) {
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
-                    if (confirm) { ranked_selected = 0; __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST); }
+                    if (confirm) { ranked_selected = 0; arm_party_return(); }
                     if (gain) runtime_online_mode_selector_left();
                 }
                 if (confirm && ranked_selected && !private_room && name &&
@@ -1152,7 +1168,7 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     pthread_mutex_unlock(&mode_lock);
     runtime_public_itemless_reset();
     pthread_mutex_lock(&mode_lock);
-    __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
+    arm_party_return();
     search_mark=previous_mark ? previous_mark : check_clock();
     search_elapsed_base=previous_mark ? previous_elapsed : 0;
     search_is_ranked=!!ranked_selected;
@@ -1257,7 +1273,7 @@ static int accept_entry(void *owner, uint64_t room, const char *confirmation_doc
         confirmed_itemless = confirmed_ranked = 0;
     }
     if (valid) {
-        __atomic_store_n(&menu_party_returned,0,__ATOMIC_SEQ_CST);
+        arm_party_return();
         matchmaking_room = room;
         matchmaking_owner = owner;
         matchmaking_search = 0;
