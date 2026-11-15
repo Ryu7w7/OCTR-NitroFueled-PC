@@ -134,6 +134,8 @@ from the player's own game files, so no game file is in the repository.
                   A track can be chosen more than once. Option Miniaturas en ajustes de
                   carrera (on by default): the race settings of every cup show its four
                   tracks' pictures (ui/Octane_MainMenu_RaceSetting.igz and its materials).
+                  Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
+                  (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
                   game's own track pictures): "Prepare" on Ultimate Customizer draws them
                   from the player's game files (scripts/cup_art.py, about a minute; numpy,

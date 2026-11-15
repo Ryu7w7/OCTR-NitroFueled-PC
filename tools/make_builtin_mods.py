@@ -249,6 +249,10 @@ def custom_cup(game, cc, out):
     sets = {name: deltas(operations) for name, operations in m.get('operationSets', {}).items()}
     xml = (folder / m['patches'][0]).read_text(encoding='utf-8')
     files['patches/custom-cup.xml'] = re.sub(r'isEnabled="[^"]*"', 'isEnabled="true"', xml).encode('utf-8')
+    # its options' patches (Copas Extendidas), as they are: an option turns them on
+    for rule in m.get('configuration', {}).values():
+        for name in {p for paths in rule.get('patches', {}).values() for p in paths}:
+            files[name] = (folder / name).read_bytes()
     manifest = {k: v for k, v in m.items() if k not in ('files', 'operations', 'patches', 'operationSets')}
     manifest.update(name='Custom Cup', operations=ops, patches=['patches/custom-cup.xml'],
                     description='Built into the launcher, from Custom Cup by Kyouko8.\n' + m['description'])

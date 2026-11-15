@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "1.5.4",
+  "version": "1.9.0",
   "author": "Kyouko8",
-  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its four races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its four tracks' pictures in the same row, with their white frames.",
+  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of four tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the four tracks; on the single race track menu it turns the choosing on, and again (\"Cancelar copa\") cancels it.\n- While choosing, Cross adds the focused track: its label says \"Pista n de 4\" and the chosen tracks' pictures show in a row at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross four times. The fourth track opens the cup's race settings (laps, difficulty), then its four races with the cup standings, as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its four races in order.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of every cup (laps, difficulty) show its tracks' pictures, with their white frames.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing. The thumbnails are a grid of 4 x 4.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -24,6 +24,18 @@
       "useOperations": {
         "true": [
           "race-thumbnails"
+        ],
+        "false": []
+      }
+    },
+    "extended-cups": {
+      "type": "boolean",
+      "label": "Copas Extendidas",
+      "default": true,
+      "description": "Custom cups of 4 to 16 tracks: L1 / R1 (Cantidad) while choosing.",
+      "patches": {
+        "true": [
+          "patches/copas-extendidas.xml"
         ],
         "false": []
       }
@@ -47,7 +59,7 @@
       "asset": "ui/Octane_LevelSelect_Proto.igz",
       "index": 3622,
       "original_sha256": "802d2d5710d4d31e7a8ff6d293767ab14356febbf9423fd7086dd4a3a6aacd56",
-      "patched_sha256": "d2e815ca22fe2833441e9639ce76b21581a1cb3e5eda86b77511c786fee730b9",
+      "patched_sha256": "2077f361bb873f2f40887cad0675e46ae712d23d09686c8eade726b78f4e07a9",
       "payload": "payloads/menu-pistas-miniaturas.delta.json"
     }
   ],
@@ -62,7 +74,7 @@
         "asset": "ui/Octane_MainMenu_RaceSetting.igz",
         "index": 3210,
         "original_sha256": "0751567cdebff0893a05ee96fa7ebb3b53233de260b239ddba626777a373a7e3",
-        "patched_sha256": "d24602b538bdf500e4147d43634c9acd7dcc2d97ee87a3ef702c7778ac9fc8b8",
+        "patched_sha256": "17e3e9357c19b5f253c4032803dd1240d96bf8482eeb89a7723c9f130e25ef09",
         "payload": "payloads/ajustes-carrera-miniaturas.delta.json"
       },
       {
@@ -83,9 +95,14 @@
       "bytes": 19
     },
     {
+      "file": "patches/copas-extendidas.xml",
+      "sha256": "d454600d8f936df605e099053324772daf92a7fc7dafe8f001ef8659583f9c85",
+      "bytes": 903
+    },
+    {
       "file": "patches/custom-cup.xml",
-      "sha256": "c84e76d8d6a6d369b295282915d34d052f45db1e4010a0495f966e0f89bf092f",
-      "bytes": 14499
+      "sha256": "c2bf61d00785110b98cc340daa96a0b5e4fc0268daeb5a9854724715319be388",
+      "bytes": 15203
     },
     {
       "file": "payloads/ajustes-carrera-materiales.delta.json",
@@ -94,13 +111,13 @@
     },
     {
       "file": "payloads/ajustes-carrera-miniaturas.delta.json",
-      "sha256": "4ddfd7f5cdc4b99bcd76603f9c3a49099da1ae3309ca8d23763e29a89f0d825c",
-      "bytes": 7399
+      "sha256": "3ed1725d1910770e96f43a3d993ad489f418d79ee737f4ab4716bc494cc7cbf5",
+      "bytes": 16425
     },
     {
       "file": "payloads/menu-pistas-miniaturas.delta.json",
-      "sha256": "1fb9c3396fc658e2ed4795f6b8fcd23c9f78204e1ff3de335bf75e9c9b07c527",
-      "bytes": 2975
+      "sha256": "63341283f730e1116aca1b3ad6a9249c089952fb6061591d8dd1fc1578df76d2",
+      "bytes": 14765
     }
   ]
 }
