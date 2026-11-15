@@ -6772,6 +6772,34 @@ void ImportPopup() {
     ImGui::EndPopup();
 }
 
+fs::path LatestRunLog() {
+    fs::path latest;
+    fs::file_time_type newest = fs::file_time_type::min();
+    for (const auto& folder : {g_app.data, g_app.data / L"logs"}) {
+        std::error_code ec;
+        for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = PathText(it->path().filename());
+            if (it->path().extension() != L".log" ||
+                (folder == g_app.data && name != "last_run.log" && name.rfind("last_run_", 0) != 0)) continue;
+            std::error_code file_ec;
+            if (!it->is_regular_file(file_ec)) continue;
+            const auto modified = it->last_write_time(file_ec);
+            if (!file_ec && (latest.empty() || modified > newest)) {
+                latest = it->path();
+                newest = modified;
+            }
+        }
+    }
+    return latest;
+}
+
+void OpenRunLog() {
+    const auto path = LatestRunLog();
+    if (!path.empty()) OpenInShell(path);
+    else g_app.notice = T("Todavía no hay registro. Inicia el juego primero.",
+                          "No run log yet. Start the game first.");
+}
+
 void ToolsTab() {
     App& a = g_app;
     UpdateSection();
@@ -6797,7 +6825,7 @@ void ToolsTab() {
                  "Copies the settings, controls, nickname, game folder, saves, trophies and DLC of another folder of the "
                  "port (an older release's, say) into this one. The other folder is left as it is."));
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
-    if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenInShell(a.data / L"last_run.log");
+    if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenRunLog();
     ImGui::SameLine();
     if (ImGui::Button(T("Abrir la carpeta del port", "Open the port folder"))) OpenInShell(a.root);
     ImGui::SameLine();

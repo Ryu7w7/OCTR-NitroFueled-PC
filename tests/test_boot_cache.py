@@ -266,8 +266,10 @@ assert os.environ['BB_RESTART_EXIT_CODE']=='75'
 assert 'BB_RESTART_COMMAND' not in os.environ
 marker=data/'restarted'
 if not marker.exists():
+    print('first launch', flush=True)
     marker.write_text('yes')
     sys.exit(75)
+print('restart error detail', file=sys.stderr, flush=True)
 sys.exit(0)
 ''')
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/launch_lock.py'), '--run', str(self.root),
@@ -275,6 +277,30 @@ sys.exit(0)
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / 'restarted').exists())
+        self.assertEqual((self.root / 'last_run.log').read_text(),
+                         'first launch\nrestart error detail\n')
+        self.assertEqual(result.stdout, 'first launch\nrestart error detail\n')
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX run.sh supervisor')
+    def test_run_sh_logs_early_failure_with_or_without_detailed_logging(self):
+        config = self.root / 'bbport.ini'
+        config.write_text('online=0\n')
+        for detailed in ('', '1'):
+            with self.subTest(detailed=detailed):
+                (self.root / 'last_run.log').write_text('previous launch\n')
+                env = {**os.environ, 'BB_PREBUILT': '1', 'BB_DATA_DIR': str(self.root),
+                       'BB_GAME_DIR': str(self.root / 'missing-game'), 'BB_CONFIG': str(config),
+                       'BB_SAVE_LOG': detailed, 'PYTHON': sys.executable}
+                env.pop('BB_LAUNCH_LOCK_FD', None)
+                result = subprocess.run(['bash', str(ROOT / 'run.sh')], env=env,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                log = (self.root / 'last_run.log').read_text()
+                self.assertIn('No eboot.bin', log)
+                self.assertNotIn('previous launch', log)
+                if detailed:
+                    self.assertTrue(any('No eboot.bin' in path.read_text()
+                                        for path in (self.root / 'logs').glob('*.log')))
 
     @unittest.skipIf(os.name == 'nt', 'POSIX run.sh supervisor')
     def test_stop_supervisor_releases_session_after_stopping_child(self):
@@ -284,6 +310,7 @@ sys.exit(0)
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
             try:
                 self.assertEqual(process.stdout.readline().strip(), 'ready')
+                self.assertEqual((self.root / 'last_run.log').read_text(), 'ready\n')
                 process.terminate()
                 process.communicate(timeout=10)
                 self.assertEqual(process.returncode, 143)

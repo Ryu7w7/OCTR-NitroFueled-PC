@@ -26,6 +26,33 @@ int main(int argc, char** argv) {
     assert(DataRoot(g_app.root) == g_app.data);
     if (data_override.empty()) unsetenv("BB_DATA_DIR");
     else setenv("BB_DATA_DIR", data_override.c_str(), 1);
+    {
+        const auto actual_data = g_app.data;
+        g_app.data /= "run-log-test";
+        fs::remove_all(g_app.data);
+        assert(LatestRunLog().empty());
+        OpenRunLog();
+        assert(!g_app.notice.empty());
+        g_app.notice.clear();
+        fs::create_directories(g_app.data / "logs");
+        const auto plain = g_app.data / "last_run.log";
+        const auto named = g_app.data / "last_run_Player.log";
+        const auto detailed = g_app.data / "logs/20261115_120000.log";
+        const auto now = fs::file_time_type::clock::now();
+        for (const auto& path : {plain, named, detailed}) std::ofstream(path) << "run output";
+        fs::last_write_time(plain, now - std::chrono::seconds(3));
+        fs::last_write_time(named, now - std::chrono::seconds(2));
+        fs::last_write_time(detailed, now - std::chrono::seconds(1));
+        std::ofstream(g_app.data / "unrelated.log") << "ignore";
+        fs::create_directories(g_app.data / "last_run_directory.log");
+        assert(LatestRunLog() == detailed);
+        fs::remove(detailed);
+        assert(LatestRunLog() == named);
+        fs::remove(named);
+        assert(LatestRunLog() == plain);
+        fs::remove_all(g_app.data);
+        g_app.data = actual_data;
+    }
     Ini legacy;
     for (const char* value : {"0", "no", "No", "false", "FALSE", "off"}) {
         legacy.Set("flag", value);
@@ -270,6 +297,7 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
         const auto preferences_override = Env("BB_LAUNCHER_CONFIG");
         const auto preferences = GameIni();
         const auto session = g_app.data / "mod-session.ini";
+        fs::remove(session);
         Ini effective;
         assert(effective.Load(preferences));
         effective.Set("volume", "10");
