@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -98,6 +99,27 @@ class SplitTests(unittest.TestCase):
     def test_a_line_without_its_comment_stops_the_split(self):
         with self.assertRaisesRegex(ValueError, 'every line needs its comment'):
             mbm.split_patch(self.XML.replace('<!-- Lap menu: lap counts with 3 digits -->', ''))
+
+    def test_a_cup_win_saves_the_stars_at_once(self):
+        # 5.1.0's code block: the end of its cup win, lea rsi; or [rsi], 2; jmp WRITE_SKIP
+        cave = bytearray(0x450)
+        end = mbm.WIN_END
+        cave[end - 11:end] = bytes.fromhex('488d3575668b00830e02e9')
+        struct.pack_into('<i', cave, end, mbm.WRITE_SKIP - (mbm.CAVE + end + 4))
+        xml = self.XML.replace('Address="0x2738000" Value="90"', f'Address="0x2738000" Value="{cave.hex().upper()}"')
+        base, cups = mbm.split_patch(mbm.save_on_win(xml))
+        # the win goes on to the code that writes the file; that code is the cups' own line
+        lines = {l.get('Address'): l.get('Value') for l in ET.fromstring(base).iter('Line')}
+        code = bytes.fromhex(lines['0x2738000'])
+        self.assertEqual(struct.unpack_from('<i', code, end)[0] + mbm.CAVE + end + 4, mbm.SAVE_AT)
+        added = [l for l in ET.fromstring(cups).iter('Line') if l.get('Address') == f'{mbm.SAVE_AT + 0x400000:#x}']
+        self.assertEqual(bytes.fromhex(added[0].get('Value')), mbm.SAVE_CODE)
+        self.assertEqual(added[0].get('ExpectedSHA256'), mbm.sha(bytes(len(mbm.SAVE_CODE))))
+        # it ends going back where the win went before
+        self.assertEqual(struct.unpack_from('<i', mbm.SAVE_CODE, len(mbm.SAVE_CODE) - 4)[0]
+                         + mbm.SAVE_AT + len(mbm.SAVE_CODE), mbm.WRITE_SKIP)
+        with self.assertRaisesRegex(ValueError, 'unexpected code'):
+            mbm.save_on_win(self.XML.replace('Value="90" Signature="90"', 'Value="' + '00' * 0x450 + '" Signature="90"'))
 
 
 class LibraryTests(unittest.TestCase):

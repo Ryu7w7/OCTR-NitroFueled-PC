@@ -5634,9 +5634,9 @@ std::string ClashText(const std::string& id) {
     return std::string(T("Comparte texturas del juego con el mismo nombre y distinto contenido con: ",
                          "Shares game textures of the same name and different contents with: ")) + with +
            T(". Activadas juntas, el juego usa una sola versión y esta pista puede verse con la carretera o el minimapa "
-             "de otra. Suele pasar con pistas exportadas juntas: exportadas por separado no comparten nada.",
+             "de otra. Puede pasar con pistas exportadas juntas: exportadas por separado no comparten nada.",
              ". On together, the game uses one version and this track can show another one's road or minimap. It "
-             "usually comes from tracks exported together: exported one by one they share nothing.");
+             "can come from tracks exported together: exported one by one they share nothing.");
 }
 
 // What a package's compatibility (scripts/content_compat.py) means, for its card. `sharing`: it
@@ -5953,13 +5953,13 @@ void ContentTab() {
         ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
         ImGui::TextWrapped("%s", T("Texturas compartidas: varias de las pistas activadas modifican texturas del juego sin "
                                    "cambiarles el nombre, y el juego usa una sola versión para todas, así que una pista puede "
-                                   "verse con la carretera, el minimapa u otras texturas de otra. Suele pasar con las pistas "
+                                   "verse con la carretera, el minimapa u otras texturas de otra. Puede pasar con las pistas "
                                    "exportadas juntas desde el editor (varias en un mismo mod): su compatibilidad pasa a parcial, "
                                    "con problemas visuales menores. Se recomienda exportar cada pista por separado; mientras "
                                    "tanto, juega la que se vea mal con las demás desactivadas. Cada paquete afectado lo indica.",
                                    "Shared textures: several of the tracks that are on change game textures without renaming "
                                    "them, and the game uses one version for all of them, so a track can show another one's "
-                                   "road, minimap or other textures. It usually comes from tracks exported together from the "
+                                   "road, minimap or other textures. It can come from tracks exported together from the "
                                    "editor (several in one mod): their compatibility becomes partial, with minor visual "
                                    "problems. Exporting each track on its own is recommended; meanwhile, play the one that "
                                    "looks wrong with the others off. Each package concerned says so."));

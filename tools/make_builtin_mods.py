@@ -52,7 +52,18 @@ BATTLE = ('SystemData_battleArenaLives', 'SystemData_battleArenaLimitPoints', 'S
 # Capture the Flag and Steal the Bacon's points limit: as long as the lives' and minutes' (5.1.1)
 CTF_POINTS = 'SystemData_battleArenaPoints'
 MORE_POINTS = [3, 6, 9, 12, 15, 20, 25, 30, 40, 50, 60]
-UC_VERSION = '5.1.1'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS
+UC_VERSION = '5.1.2'  # the built-in: Ultimate Customizer 5.1.0 with MORE_POINTS and save_on_win
+# save_on_win: 5.1.0's code block, the end of its cup win (the jmp's rel32), and the code added
+CAVE, WIN_END, WRITE_SKIP, SAVE_AT = 0x2338000, 0x8f, 0x119def9, 0x2338800
+# push rbp..r12 (aligned); if STATE (0x2bee700) & 3 == 3 (loaded, changed): BUF (0x2bee710) =
+# "RBOCUPS1" + the table, open("/savedata0/rbo_cups.bin", 0x601, 0x1b6), pwrite 0x48 bytes, clear
+# bit 2 when all are written, close; pop; jmp WRITE_SKIP. The strings are 5.1.0's (0x23383cf,
+# 0x23383fd); open, pwrite and close its imports (0x1beab78, 0x1bea868, 0x1beaa38).
+SAVE_CODE = bytes.fromhex(
+    '554889e5505152565741504151415241535341544883e4f0488d1de15e8b008b0383e00383f8037555488b059ffbffff'
+    '488d0dd95e8b00488901488d3dbcfbffffbe01060000bab6010000e828238bff4189c44585e478264489e7488d35ae5e'
+    '8b00ba4800000031c9e8fa1f8bff83f84875038323fd4489e7e8ba218bff488d65a8415c5b415b415a415941585f5e5a'
+    '59585de96156e6fe')
 CUP_ASSETS = ('materialinstances/UI/CupSelect_materials.igz',)
 ART_ASSET = 'textures/GuiStandard_diffuse,textures@!ui!Octane!RaceSelect!octane_ui_raceselect_bg_spacecup`tga,101.igz'
 # Ultimate Customizer's patch: the lines of the added cups, by their comment.
@@ -158,6 +169,28 @@ def more_battle_points(blob):
     return out
 
 
+def save_on_win(xml):
+    """Ultimate Customizer 5.1.0's patch with the added cups' stars saved when a cup is won (5.1.2).
+
+    5.1.0 writes /savedata0/rbo_cups.bin where the game unmounts its save data; this runtime
+    mounts it once a session and never unmounts it, so the stars were lost on closing the game.
+    The win's code (in the cave, 0x2338000) now goes on to SAVE_CODE at SAVE_AT, which writes the
+    table at once when it is loaded and changed (the unmount still does it too)."""
+    m = re.search(r'(Address="0x%x" Value=")([0-9A-F]+)"' % (CAVE + 0x400000), xml)
+    body = bytearray(bytes.fromhex(m.group(2)))
+    # lea rsi, [STATE]; or dword ptr [rsi], 2; jmp WRITE_SKIP: the end of the win's code
+    if bytes(body[WIN_END - 11:WIN_END]) != bytes.fromhex('488d3575668b00830e02e9') or \
+            struct.unpack_from('<i', body, WIN_END)[0] + CAVE + WIN_END + 4 != WRITE_SKIP:
+        raise ValueError('Ultimate Customizer: unexpected code at the end of a cup win')
+    struct.pack_into('<i', body, WIN_END, SAVE_AT - (CAVE + WIN_END + 4))
+    xml = xml[:m.start(2)] + body.hex().upper() + xml[m.end(2):]
+    line = (f'\n            <!-- Cup stars: winning an added cup saves its table at once -->\n'
+            f'            <Line Type="bytes" Address="{SAVE_AT + 0x400000:#x}" Value="{SAVE_CODE.hex().upper()}"\n'
+            f'                  ExpectedSHA256="{sha(bytes(len(SAVE_CODE)))}"/>')
+    head, tail = xml.rsplit('\n        </PatchList>', 1)
+    return head + line + '\n        </PatchList>' + tail
+
+
 def split_patch(xml):
     """(base XML, added cups XML) of Ultimate Customizer's patch, by the lines' comments."""
     head, body = xml.split('<PatchList>', 1)
@@ -234,7 +267,7 @@ def race_options(game, uc, out):
         (sets['cups'] if op['asset'] in CUP_ASSETS else base_ops).append(new)
     if stock is None:
         raise ValueError('Ultimate Customizer: no systemData.igz operation')
-    base_xml, cups_xml = split_patch((folder / m['patches'][0]).read_text(encoding='utf-8'))
+    base_xml, cups_xml = split_patch(save_on_win((folder / m['patches'][0]).read_text(encoding='utf-8')))
     files['patches/ultimate-customizer.xml'] = base_xml.encode('utf-8')
     files['patches/copas-adicionales.xml'] = cups_xml.encode('utf-8')
     manifest = {
