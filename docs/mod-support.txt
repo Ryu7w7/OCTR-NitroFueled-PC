@@ -131,12 +131,18 @@ from the player's own game files, so no game file is in the repository.
                   points/time/lives, the random cup. Option Copas Adicionales (off by
                   default): 25 new Arcade cups (8 easy, 9 medium, 8 hard) and their stars.
   custom-cup      Custom Cup (Kyouko8): a cup of four tracks of the player's choice.
+                  A track can be chosen more than once. Option Miniaturas en ajustes de
+                  carrera (on by default): the race settings of every cup show its four
+                  tracks' pictures (ui/Octane_MainMenu_RaceSetting.igz and its materials).
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
                   game's own track pictures): "Prepare" on Ultimate Customizer draws them
                   from the player's game files (scripts/cup_art.py, about a minute; numpy,
                   which the portable build bundles) into mod-state/builtin. Copas
                   Adicionales can be turned on only after that, and the pictures are used
                   only with them.
+Two built-ins changing one game file (Custom Cup's race settings thumbnails and Ultimate
+Customizer's lap list) become one merged entry the same way (merge_builtins); a change
+that cannot be merged is left out of that session, the first built-in's version stays.
 A community mod never stops on a built-in mod (scripts/builtin_coexist.py):
 - A game file (a .pak entry) both change: the built-in's change is merged over the
   community mod's version (scripts/igz_rebase.py: the named objects the built-in changed

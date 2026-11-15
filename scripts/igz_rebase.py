@@ -41,6 +41,10 @@ class Prints:
         self.names = {o: n for n, o in f.roots()[2]}
         self.offsets = {n: o for o, n in self.names.items()}
         self.memo = {}  # object -> fingerprint, for objects outside every cycle
+        # The file's ROOT and ONAM lists are its index, not content: the ROOT list is at offset 0,
+        # so a null pointer field (an empty list's data) reads as a reference to it, and naming
+        # an object (it grows) must not change every object with such a field.
+        self.index = set(f.roots()[:2])
 
     def object(self, off):
         return self.walk(off, {}, ())[0]
@@ -76,7 +80,9 @@ class Prints:
                 value = f.u64(site)
                 raw[at:at + 8] = struct.pack('<Q', value & ~MASK)
                 ref = value & MASK
-                if ref in f.typed:
+                if ref in self.index:
+                    out.append(b'L%d:%d' % (at, ref))
+                elif ref in f.typed:
                     if ref in self.names:
                         out.append(b'N%d:' % at + self.names[ref].encode())
                     else:
@@ -116,6 +122,8 @@ class Prints:
                 if tag not in POINTERS:
                     continue
                 ref = f.u64(site) & MASK
+                if ref in self.index:
+                    continue
                 if ref in f.typed:
                     if ref not in self.names and ref not in found:
                         found.add(ref)
@@ -181,12 +189,14 @@ def replace(t, source, src, old):
     return File(t.build())
 
 
-def add(t, source, src, name):
+def add(t, source, items):
+    """Named objects [(src, name)] of `source` added to `t`, with one copier: added objects that
+    refer to each other (a chain of new placeables) are each copied once."""
     copier = Copier(source, t)
-    new = copier.object(src)
+    new = [copier.object(src) for src, _ in items]
     root, names, _ = t.roots()
-    t.grow(root, [new])
-    t.grow(names, [name], 16)
+    t.grow(root, new)
+    t.grow(names, [name for _, name in items], 16)
     return File(t.build())
 
 
@@ -220,11 +230,13 @@ def rebase(stock, ours, theirs):
             todo_added.append(n)
         if not todo_changed and not todo_added:
             return bytes(theirs)
+        # The added objects first: a changed object that refers to one (a placeable table with new
+        # children) then finds it by its name instead of copying it again, unnamed.
         result = T
+        if todo_added:
+            result = add(result, O, [(PO.offsets[n], n) for n in todo_added])
         for n in todo_changed:
             result = replace(result, O, PO.offsets[n], Prints(result).offsets[n])
-        for n in todo_added:
-            result = add(result, O, PO.offsets[n], n)
         # The check: ours' objects as ours has them, every other named object as theirs has it.
         PR = Prints(result)
         for n in changed + added:

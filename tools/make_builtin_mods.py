@@ -234,16 +234,26 @@ def race_options(game, uc, out):
 
 def custom_cup(game, cc, out):
     folder, m = cc
-    ops, files = [], {}
-    for op in m['operations']:
-        new, path, data = as_delta(game, op, (folder / op['payload']).read_bytes())
-        ops.append(new)
-        files[path] = data
+    files = {}
+
+    def deltas(operations):
+        out = []
+        for op in operations:
+            new, path, data = as_delta(game, op, (folder / op['payload']).read_bytes())
+            out.append(new)
+            files[path] = data
+        return out
+
+    ops = deltas(m['operations'])
+    # its options' operations (the race settings thumbnails: Miniaturas en ajustes de carrera)
+    sets = {name: deltas(operations) for name, operations in m.get('operationSets', {}).items()}
     xml = (folder / m['patches'][0]).read_text(encoding='utf-8')
     files['patches/custom-cup.xml'] = re.sub(r'isEnabled="[^"]*"', 'isEnabled="true"', xml).encode('utf-8')
-    manifest = {k: v for k, v in m.items() if k not in ('files', 'operations', 'patches')}
+    manifest = {k: v for k, v in m.items() if k not in ('files', 'operations', 'patches', 'operationSets')}
     manifest.update(name='Custom Cup', operations=ops, patches=['patches/custom-cup.xml'],
                     description='Built into the launcher, from Custom Cup by Kyouko8.\n' + m['description'])
+    if sets:
+        manifest['operationSets'] = sets
     write_package(out / 'custom-cup', manifest, files)
 
 

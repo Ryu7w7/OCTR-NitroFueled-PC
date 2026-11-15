@@ -207,7 +207,9 @@ class Copier:
             elif tag in ('ROFS', 'RPID'):
                 value = s.u64(site)
                 ref = value & MASK
-                if ref in s.typed:
+                if ref == 0:
+                    pass  # a null field (an empty list's data): offset 0 is the ROOT list, not copied
+                elif ref in s.typed:
                     ref = self.object(ref)
                 elif kind and site - off >= 8 and s.block_at(ref, s.u64(site - 8) & 0xFFFFFFFF):
                     # An object's memory field: {u64 size and flags, u64 data}; lists keep theirs

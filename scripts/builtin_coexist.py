@@ -140,6 +140,47 @@ def archive_entries(path):
     return {k.casefold(): (k, v) for k, v in read_archive(path).items()}
 
 
+def merge_builtins(store, game, builtins, log=print):
+    """Built-ins changing one archive entry (Custom Cup's race menu thumbnails and Ultimate
+    Customizer's lap list, both in ui/Octane_MainMenu_RaceSetting.igz): each later change is
+    rebased over the first one's version, as one operation of the first built-in.
+
+    builtins: [(name, [(operation, folder)])] in load order. Returns ({id(operation): (merged
+    operation, folder)}, {id(operation) left out}); a change that cannot be merged is left out
+    (and logged) and the first built-in's version stays."""
+    from igz_rebase import Unmergeable, rebase
+    entries = Entries(game)
+    first, swap, gone = {}, {}, set()
+    for name, operations in builtins:
+        for op, folder in operations:
+            if op['kind'] != 'archive_asset':
+                continue
+            key = (op['archive'].casefold(), op['asset'].casefold())
+            if key not in first:
+                first[key] = (name, op, folder)
+                continue
+            owner, base, base_folder = first[key]
+            stock = entries.stock(op)
+            current, current_folder = swap.get(id(base), (base, base_folder))
+            try:
+                result = rebase(stock, payload_bytes(op, folder, stock), payload_bytes(current, current_folder, stock))
+            except Unmergeable as error:
+                gone.add(id(op))
+                log(f'OCTR mods: {name} leaves out its change of {op["asset"]}: {owner} changes it too ({error})')
+                continue
+            digest = sha_bytes(result)
+            target = under(store, digest + '.igz')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file():
+                target.write_bytes(result)
+            swap[id(base)] = ({'kind': 'archive_asset', 'archive': base['archive'], 'asset': base['asset'],
+                               'index': base['index'], 'original_sha256': base['original_sha256'],
+                               'patched_sha256': digest, 'payload': digest + '.igz'}, Path(store))
+            gone.add(id(op))
+            log('OCTR mods: merged ' + op['asset'] + ': ' + owner + ' + ' + name)
+    return swap, gone
+
+
 def merge_entries(plan, store, game, builtins, community, archives, log=print):
     """Merges of the built-ins' archive_asset operations with the community mods' versions of
     those entries.

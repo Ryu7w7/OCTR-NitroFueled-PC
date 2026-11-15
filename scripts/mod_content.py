@@ -90,6 +90,8 @@ def conflicts(root,config,settings=None,options=None):
         for key,source in claims(package_folder(root,name),settings,saved_options.get(name)):
             for prior,owner in owners:
                 if apart(owner,name):continue
+                # Two built-ins changing one archive entry are merged (builtin_coexist.merge_builtins).
+                if owner in builtins and name in builtins and key.startswith('archives/'):continue
                 if key==prior or key.startswith(prior+'::') or prior.startswith(key+'::'):
                     problems.append(key+': '+owner+' / '+name)
             owners.append((key,name))
@@ -247,6 +249,12 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             merged=racer_registry.prepare(game,staging/'files',sources,log)
             if merged:save_json(staging/'registry.json',{'target':merged})
             if builtins:
+                # Built-ins changing one archive entry: one merged operation of the first.
+                swap,gone=builtin_coexist.merge_builtins(state/'extensions/merged',game,
+                    [(n,owned.get(n,[])) for n in builtins if n in names],log)
+                if swap or gone:
+                    operations=[swap.get(id(op),(op,f)) for op,f in operations if id(op) not in gone]
+                    owned={n:[swap.get(id(op),(op,f)) for op,f in ops if id(op) not in gone] for n,ops in owned.items()}
                 # What a built-in shares with a community mod: merged, else it steps aside.
                 community=[(n,op,f) for n in names if n not in builtins for op,f in owned.get(n,[])
                     if op['kind'] in ('archive_asset','localized_strings')]

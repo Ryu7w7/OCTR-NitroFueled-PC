@@ -21,9 +21,10 @@ TYPES = ['igObjectList', 'igNameList', 'COutfitMaterialPackageList', 'COutfitMat
 ASSET = 'ui/Menu.igz'
 
 
-def menu(points=('1', '2'), label='Hello', extra=None, orphan=None):
+def menu(points=('1', '2'), label='Hello', extra=None, orphan=None, extra_in_points=False):
     """A file with named objects: Points (a list of objects with a text), Label; Extra when
-    given; an object nothing refers to when orphan is given."""
+    given (one of Points' items too with extra_in_points); an object nothing refers to when orphan
+    is given."""
     b = Builder(TYPES)
     named = []
     items = []
@@ -31,13 +32,17 @@ def menu(points=('1', '2'), label='Hello', extra=None, orphan=None):
         p = b.obj('COutfitMaterialPackage')
         b.string(p + 0x10, value)
         items.append(p)
+    e = None
+    if extra is not None:
+        e = b.obj('COutfitMaterialPackage')
+        b.string(e + 0x10, extra)
+        if extra_in_points:
+            items.append(e)
     named.append(('Points', b.lst('COutfitMaterialPackageList', items)))
     lab = b.obj('COutfitMaterialPackage')
     b.string(lab + 0x10, label)
     named.append(('Label', lab))
-    if extra is not None:
-        e = b.obj('COutfitMaterialPackage')
-        b.string(e + 0x10, extra)
+    if e is not None:
         named.append(('Extra', e))
     if orphan is not None:
         o = b.obj('COutfitMaterialPackage')
@@ -67,6 +72,15 @@ class RebaseTests(unittest.TestCase):
     def test_added_object(self):
         merged = igz_rebase.rebase(menu(), menu(extra='new'), menu(label='Hola'))
         self.assertEqual(read(merged), {'Points': ['1', '2'], 'Label': 'Hola', 'Extra': 'new'})
+
+    def test_added_object_a_changed_one_refers_to(self):
+        # a placeable table with a new named child: the child is added once, by its name
+        ours = menu(extra='new', extra_in_points=True)
+        merged = igz_rebase.rebase(menu(), ours, menu(label='Hola'))
+        self.assertEqual(read(merged), {'Points': ['1', '2', 'new'], 'Label': 'Hola', 'Extra': 'new'})
+        f = File(merged)
+        extra = dict((n, o) for n, o in f.roots()[2])['Extra']
+        self.assertEqual(f.items(dict((n, o) for n, o in f.roots()[2])['Points'])[-1], extra)
 
     def test_same_change_twice(self):
         ours = menu(points=('1', '2', '3'))
@@ -177,6 +191,46 @@ class MergeEntriesTests(unittest.TestCase):
         plan = bc.Plan()
         bc.declared(plan, ['custom-cup'], {'custom-cup': {}, 'cups': {'conflicts': ['custom-cup']}})
         self.assertEqual(list(plan.frozen), ['custom-cup'])
+
+
+class MergeBuiltinsTests(unittest.TestCase):
+    """Two built-ins changing one entry (Custom Cup's race menu thumbnails and Ultimate
+    Customizer's lap list): one merged operation of the first."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.mods = Mods(self.temporary.name)
+        self.stock = menu()
+        self.mods.archive('update2.pak', {ASSET: self.stock})
+        self.game = self.mods.root / 'game'
+        self.logged = []
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_both_changes_in_one_operation(self):
+        uc = self.mods.op('uc', self.stock, menu(points=('1', '2', '3')))
+        cc = self.mods.op('cc', self.stock, menu(extra='thumbnails'))
+        swap, gone = bc.merge_builtins(self.mods.root / 'merged', self.game, [(bc.UC, [uc]), ('custom-cup', [cc])],
+                                       self.logged.append)
+        self.assertEqual(gone, {id(cc[0])})
+        op, folder = swap[id(uc[0])]
+        self.assertEqual(read((folder / op['payload']).read_bytes()),
+                         {'Points': ['1', '2', '3'], 'Label': 'Hello', 'Extra': 'thumbnails'})
+        self.assertEqual(self.logged, ['OCTR mods: merged ' + ASSET + ': ' + bc.UC + ' + custom-cup'])
+
+    def test_a_change_that_cannot_be_merged_is_left_out(self):
+        uc = self.mods.op('uc', self.stock, menu(points=('1', '2', '3')))
+        cc = self.mods.op('cc', self.stock, menu(points=('9',)))
+        swap, gone = bc.merge_builtins(self.mods.root / 'merged', self.game, [(bc.UC, [uc]), ('custom-cup', [cc])],
+                                       self.logged.append)
+        self.assertEqual((swap, gone), ({}, {id(cc[0])}))
+        self.assertIn('custom-cup leaves out its change of ' + ASSET, self.logged[0])
+
+    def test_different_entries_are_left_alone(self):
+        uc = self.mods.op('uc', self.stock, menu(points=('1', '2', '3')))
+        self.assertEqual(bc.merge_builtins(self.mods.root / 'merged', self.game, [(bc.UC, [uc]), ('custom-cup', [])]),
+                         ({}, set()))
 
 
 if __name__ == '__main__':
