@@ -84,8 +84,8 @@
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "cbd2cf8e36ba1ce8563940eba4f5a1ce8d9b84f43e6aa39a1380466bfb897668",
-      "bytes": 13385
+      "sha256": "55104f637107981132db2e3f0df9c746b67320d2cc4dec83fc1f8a726c7c30e6",
+      "bytes": 13925
     },
     {
       "file": "payloads/ajustes-carrera-materiales.delta.json",
