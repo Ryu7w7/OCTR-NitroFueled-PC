@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
         if (!direct) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "SacredFire", error.what(), nullptr);
         return 1;
     }
+    if (g_app.launcher.Flag("discord_rpc", true)) RegisterDiscordLaunch(DiscordAppId());
     if (direct) {
         if (g_app.worker.joinable()) g_app.worker.join();
         if (g_app.probe.joinable()) g_app.probe.join();

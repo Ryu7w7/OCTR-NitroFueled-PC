@@ -166,9 +166,14 @@ int main(int argc, char** argv) {
 class Client:
     joined = False
     def update(self, enabled, app_id, activity):
-        assert not self.accept_requests
+        if app_id == 'connected' and not self.joined:
+            assert self.accept_requests
+        elif app_id == 'no_app_id':
+            assert not self.accept_requests
         if activity:
             assert activity.details == 'Playing "CTR" café'
+            assert (activity.party_id, activity.party_size, activity.party_max) == ('ctr:test.invalid:host', 1, 8)
+            assert activity.join_secret == 'ctr1|test.invalid|Host'
         self.state = app_id if enabled else 'off'
     def status(self):
         return self.state, 'RPC "failure" café 🎮' if self.state == 'error' else ''
@@ -185,9 +190,13 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
             for (int i = 0; i < 300 && DiscordPresence::GetStatus() != expected; ++i) SleepMs(10);
             assert(DiscordPresence::GetStatus() == expected);
         };
-        DiscordPresence::SetAcceptJoinRequests(false);
+        DiscordPresence::SetAcceptJoinRequests(true);
         DiscordPresence::Activity activity;
         activity.details = "Playing \"CTR\" café";
+        activity.party_id = "ctr:test.invalid:host";
+        activity.party_size = 1;
+        activity.party_max = 8;
+        activity.join_secret = "ctr1|test.invalid|Host";
         DiscordPresence::Update(true, "connected", &activity);
         wait_status(DiscordPresence::Status::Connected);
         std::string secret;
@@ -199,6 +208,7 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
         assert(g_app.game.Flag("online", false) && ListHas(g_app.game.Get("online_friends"), "Host"));
         assert(ReadText(GameIni().parent_path() / "ryunet_join.txt").find("host=Host\n") != std::string::npos);
         g_app.game_running = false;
+        DiscordPresence::SetAcceptJoinRequests(false);
         DiscordPresence::Update(true, "no_app_id", nullptr);
         wait_status(DiscordPresence::Status::NoAppId);
         DiscordPresence::Update(true, "no_discord", nullptr);
@@ -213,6 +223,10 @@ sys.modules['discord_ipc'] = types.SimpleNamespace(Presence=Client, Activity=typ
         DiscordPresence::SetAcceptJoinRequests(true);
         g_app.root = actual_root;
     }
+    RegisterDiscordLaunch(DiscordAppId());
+    const auto discord_handler = ReadText(g_app.data / "xdg-data/applications" / ("discord-" + DiscordAppId() + ".desktop"));
+    assert(discord_handler.find("MimeType=x-scheme-handler/discord-" + DiscordAppId() + ";") != std::string::npos);
+    assert(discord_handler.find(" %u\n") != std::string::npos && discord_handler.find("--play") == std::string::npos);
     g_app.launcher.Set("discord_rpc", "0");
     g_app.game.Set("online", "0");
     g_app.game.Set("perf_reports", "0");

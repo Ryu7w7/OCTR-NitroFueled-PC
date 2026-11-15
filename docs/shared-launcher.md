@@ -70,6 +70,12 @@ copied to the XDG icon directory so they remain available after an AppImage unmo
 | Minimize to tray | Native notification icon | Ayatana GLib tray on desktops with a StatusNotifier/AppIndicator host |
 | MangoHud, Linux validation and environment options | Not shown | Linux settings section |
 
+Linux registers a per-user `discord-<app id>://` handler on startup, so an accepted invite can
+open the native launcher when it is closed. The handler uses the persistent AppImage command
+and preserves the selected data directory and explicit configuration/save paths. Discord delivers
+the pending invite over IPC after the launcher subscribes, using the same flow as Windows.
+Registration uses GIO, supplied by GLib in the launcher shell and AppImage.
+
 Both EOS builds require the Epic SDK and product configuration. When these are not packaged,
 direct RyuNET remains available. Linux uses its own bridge executable; it does not require Wine.
 D3D11 remains Windows-specific; adding a compatibility renderer would require a separate project. HDR support still depends on the display,

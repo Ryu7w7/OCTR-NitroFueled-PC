@@ -195,7 +195,11 @@ void StopGame() {
     if (g_app.process) { g_stop_requested = Ticks(); kill(-g_app.process, SIGTERM); }
 }
 void ReleaseGameProcess() { g_app.process = 0; }
-void RegisterDiscordLaunch(const std::string&) {} // Discord IPC works without Windows' URL-protocol registration.
+void RegisterDiscordLaunch(const std::string& app_id) {
+    const auto answer = RunService("{\"op\":\"discord_register\",\"data\":\"" + JsonEscape(PathText(g_app.data)) +
+                                   "\",\"app_id\":\"" + JsonEscape(app_id) + "\"}");
+    if (!JsonBool(answer, "ok")) AddLog("Could not register Discord invite launch: " + JsonText(answer, "error"));
+}
 void BringLauncherToFront() {
     if (!g_app.hwnd) return;
     SDL_Event event{}; event.type = SDL_EVENT_USER; event.user.code = 3; SDL_PushEvent(&event);

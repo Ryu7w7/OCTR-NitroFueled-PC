@@ -125,6 +125,37 @@ def steam():
     return {"ok": True, "message": "Added to Steam. Restart Steam to see the shortcut."}
 
 
+def desktop_value(text):
+    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def desktop_arg(text):
+    # Desktop Entry Exec quoting is distinct from shell quoting.
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
+    return '"' + desktop_value(escaped) + '"'
+
+
+def discord_register(app_id, data):
+    import steam_shortcuts
+    from host_environment import host_environment
+    if not app_id or any(c not in "0123456789" for c in app_id):
+        raise ValueError("Invalid Discord application ID")
+    exe, cwd, _ = steam_shortcuts.launcher_command()
+    paths = {k: v for k, v in host_environment(for_restart=True).items() if k.startswith("BB_")}
+    paths["BB_DATA_DIR"] = str(Path(data).resolve())
+    command = " ".join(desktop_arg(arg) for arg in ["env", *(f"{k}={v}" for k, v in paths.items()), exe])
+    scheme = f"x-scheme-handler/discord-{app_id}"
+    directory = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "applications"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"discord-{app_id}.desktop"
+    path.write_text(f"[Desktop Entry]\nType=Application\nName=SacredFire\nNoDisplay=true\n"
+                    f"Exec={command} %u\nPath={desktop_value(cwd)}\nMimeType={scheme};\n")
+    result = subprocess.run(["gio", "mime", scheme, path.name], capture_output=True, text=True)
+    if result.returncode:
+        raise OSError(result.stderr.strip() or "Could not register Discord invite launch")
+    return {"ok": True}
+
+
 def desktop():
     import steam_shortcuts
     exe, cwd, _ = steam_shortcuts.launcher_command()
@@ -134,13 +165,9 @@ def desktop():
         desktop_dir = str(Path.home() / "Desktop")
     directory = Path(desktop_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    # Desktop Entry Exec quoting is distinct from shell quoting.
-    escaped = exe.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
-    def value(text):
-        return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     path = directory / "io.github.sacredfire.Launcher.desktop"
-    path.write_text(f'[Desktop Entry]\nType=Application\nName=SacredFire\nExec="{value(escaped)}" --play\n'
-                    f'Path={value(cwd)}\nIcon={value(install_icon())}\nTerminal=false\nCategories=Game;\n')
+    path.write_text(f'[Desktop Entry]\nType=Application\nName=SacredFire\nExec={desktop_arg(exe)} --play\n'
+                    f'Path={desktop_value(cwd)}\nIcon={desktop_value(install_icon())}\nTerminal=false\nCategories=Game;\n')
     path.chmod(0o755)
     return {"ok": True}
 
@@ -171,6 +198,8 @@ def dispatch(request):
         return steam()
     if operation == "desktop":
         return desktop()
+    if operation == "discord_register":
+        return discord_register(request["app_id"], data)
     if operation == "restart":
         from host_environment import host_environment
         executable = Path(request["executable"])

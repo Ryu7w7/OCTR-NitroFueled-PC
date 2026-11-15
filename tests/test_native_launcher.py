@@ -152,6 +152,41 @@ class NativeLauncherTests(unittest.TestCase):
             self.assertIn("fullscreen=1", game.read_text())
             self.assertIn("render_res=1440", game.read_text())
 
+    def test_discord_launch_registration_preserves_paths_and_updates_handler(self):
+        import steam_shortcuts
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(root / "xdg"),
+                    "BB_CONFIG": str(root / "custom settings.ini"), "BB_USER_DIR": str(root / "saves")}), \
+                    mock.patch.object(steam_shortcuts, "launcher_command", return_value=("/games/100% $CTR.AppImage", "/games", "--play")) as command, \
+                    mock.patch.object(services.subprocess, "run", return_value=services.subprocess.CompletedProcess([], 0, "", "")) as register:
+                request = {"op": "discord_register", "app_id": "123456", "data": str(root / "data")}
+                self.assertTrue(services.dispatch(request)["ok"])
+                path = root / "xdg/applications/discord-123456.desktop"
+                contents = path.read_text()
+                self.assertIn('"/games/100%% \\\\$CTR.AppImage" %u', contents)
+                self.assertIn('"BB_DATA_DIR=' + str(root / "data") + '"', contents)
+                self.assertIn('"BB_CONFIG=' + str(root / "custom settings.ini") + '"', contents)
+                self.assertIn('"BB_USER_DIR=' + str(root / "saves") + '"', contents)
+                self.assertIn("NoDisplay=true\n", contents)
+                self.assertIn("MimeType=x-scheme-handler/discord-123456;\n", contents)
+                self.assertNotIn("--play", contents)
+                register.assert_called_with(["gio", "mime", "x-scheme-handler/discord-123456", path.name],
+                                            capture_output=True, text=True)
+                command.return_value = ("/games/new.AppImage", "/games", "--play")
+                self.assertTrue(services.dispatch(request)["ok"])
+                self.assertIn('"/games/new.AppImage" %u', path.read_text())
+                self.assertNotIn("100%%", path.read_text())
+
+    def test_discord_launch_registration_rejects_invalid_id(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp}), \
+                mock.patch.object(services.subprocess, "run") as register:
+            for app_id in ("", "../123", "123\nExec=bad", "１２３"):
+                with self.subTest(app_id=app_id), self.assertRaises(ValueError):
+                    services.discord_register(app_id, tmp)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+            register.assert_not_called()
+
     def test_appimage_restart_drops_old_libraries_but_keeps_user_paths(self):
         with mock.patch.dict(os.environ, {"APPIMAGE": "/old.AppImage", "FONTCONFIG_FILE": "/nix/store/old/fonts.conf",
                 "PYTHONPATH": "/nix/store/old/python", "BB_DATA_DIR": "/custom/data", "BB_CONFIG": "/custom/game.ini",
