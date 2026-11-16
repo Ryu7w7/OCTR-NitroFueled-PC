@@ -335,7 +335,7 @@ void NoteServerClock(HINTERNET req, const std::string& token) {
 
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
                         const std::string& form, int timeout_ms, bool register_key,
-                        const std::string& with_key) {
+                        const std::string& with_key, size_t max_body) {
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
@@ -371,7 +371,7 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
             answered = true;
             NoteServerClock(req, token);
             DWORD avail = 0;
-            while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
+            while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < max_body) {
                 std::string chunk(avail, '\0');
                 DWORD got = 0;
                 if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;

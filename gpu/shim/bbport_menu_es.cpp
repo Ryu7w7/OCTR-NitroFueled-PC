@@ -345,6 +345,7 @@ const char* Spanish(const char* english) {
     {"Picture and performance", "Imagen y rendimiento"},
     {"Quit game###quit_game", "Salir del juego###quit_game"},           // el boton busca la clave con su ###id
     {"Exit game###confirm_quit", "Salir del juego###confirm_quit"},
+    {"Your picture is the one on your Discord account.", "Tu foto es la de tu cuenta de Discord."},
     };
     const auto it = table.find(english);
     return it == table.end() ? english : it->second;

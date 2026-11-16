@@ -203,7 +203,56 @@ static int read_input(const char *kind) {
     return 0;
 }
 
+/* --watch-pad: no window; prints "pad <SDL button name>" (lefttrigger/righttrigger for the
+ * triggers) for every gamepad button pressed, on any controller SDL knows (DualShock and DualSense
+ * included, which XInput does not see), until its output closes or 10 minutes pass. The Windows
+ * launcher's Gamepad page reads it to map buttons and move through the list with the controller. */
+static int watch_pad(void) {
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (!SDL_Init(SDL_INIT_GAMEPAD)) {
+        fprintf(stderr, "watch-pad: %s\n", SDL_GetError());
+        return 1;
+    }
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&count);
+    for (int i = 0; ids && i < count; ++i) SDL_OpenGamepad(ids[i]);
+    SDL_free(ids);
+    int trigger_down[2] = {0, 0};
+    const Uint64 end = SDL_GetTicks() + 600000;
+    printf("ready\n");
+    fflush(stdout);
+    while (SDL_GetTicks() < end) {
+        SDL_Event e;
+        if (!SDL_WaitEventTimeout(&e, 200)) {
+            /* the launcher went away: writing fails once the pipe is closed */
+            if (printf("tick\n") < 0 || fflush(stdout) != 0) break;
+            continue;
+        }
+        const char *name = NULL;
+        if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
+            SDL_OpenGamepad(e.gdevice.which);
+        } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+            name = SDL_GetGamepadStringForButton((SDL_GamepadButton)e.gbutton.button);
+        } else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+                   (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+            const int t = e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+            if (!trigger_down[t] && e.gaxis.value > 16000) {
+                trigger_down[t] = 1;
+                name = t ? "righttrigger" : "lefttrigger";
+            } else if (trigger_down[t] && e.gaxis.value < 8000) {
+                trigger_down[t] = 0;
+            }
+        }
+        if (name && (printf("pad %s\n", name) < 0 || fflush(stdout) != 0)) break;
+    }
+    SDL_Quit();
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--watch-pad")) {
+        return watch_pad();
+    }
     if (argc > 1 && !strcmp(argv[1], "--read-input")) {
         return read_input(argc > 2 ? argv[2] : "any");
     }

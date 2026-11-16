@@ -937,11 +937,21 @@ ID3D11DepthStencilState* GetDepthState(u32 ctl, u32 refmask, u32 ops) {
 
 constexpr int kDimsCube = 4;  // a slot the shader declares TextureCube
 
+// This frame read a render target nothing was drawn to yet: a new D3D11 texture is black, where
+// the PS4's memory would still hold the target's last picture. Seen as a one-frame black flash
+// when a race loads (issues #247, #251); GfxSnapshot shows the last picture again instead.
+bool g_sampled_empty = false;
+u64 g_sampled_empty_target = 0;
+
 ID3D11ShaderResourceView* GetTexture(const u32* tsharp, int dims) {
     if (!tsharp) return dims == kDimsCube ? nullptr : dims == 3 ? g_placeholder.srv_array.Get() : g_placeholder.srv.Get();
     TSharp t = DecodeTSharp(tsharp);
     auto it = g_surfaces.find(t.base);
     if (it != g_surfaces.end() && it->second.srv) {
+        if (!it->second.rendered && !it->second.dsv) {
+            g_sampled_empty = true;
+            g_sampled_empty_target = t.base;
+        }
         if (Current(it->second)) {
             if (dims == kDimsCube) return nullptr;  // no cube targets
             return dims == 3 ? it->second.srv_array.Get() : it->second.srv.Get();
@@ -2768,7 +2778,8 @@ std::vector<std::pair<std::string, std::vector<u8>>> g_record_queue;
 // CTR_GLITCH_TRAP=1, which keeps only the frames that turn suddenly dark (and the one before each),
 // logged as "glitch trap" - a long recorded drive without such lines has no single-frame glitches
 u32 kRecordW = 1280, kRecordH = 720;
-const bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
+// Shift+F12 turns it on in play (RecordFrame): a long recording that keeps only those frames.
+bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
 
 void RecordWriter() {
     for (;;) {
@@ -2832,6 +2843,31 @@ void RecordFrame(ID3D11ShaderResourceView* picture) {
         return GetEnvironmentVariableA("CTR_RECORD_AT", v, sizeof(v)) ? strtoull(v, nullptr, 10) : 0ull;
     }();
     static bool record_fired = false;
+    // F12 with the game in front: the next 120 frames at 960x540 (CTR_RECORD_FRAMES/_SIZE change it).
+    // Shift+F12: the glitch trap, recording for hours and keeping only frames that turn dark.
+    static bool f12_held = false;
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        const bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F12) & 0x8000);
+        if (down && !f12_held && left <= 0) {
+            char v[32] = {};
+            int frames = 120;
+            if (GetEnvironmentVariableA("CTR_RECORD_FRAMES", v, sizeof(v))) frames = atoi(v);
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+                g_glitch_trap = true;
+                frames = 1000000;
+                LOG("gfx: glitch trap on: frames that turn dark are saved");
+            }
+            if (!scaled) {
+                kRecordW = 960, kRecordH = 540;
+                if (GetEnvironmentVariableA("CTR_RECORD_SIZE", v, sizeof(v))) sscanf(v, "%ux%u", &kRecordW, &kRecordH);
+            }
+            LOG("gfx: F12 pressed");
+            g_record_request = frames;
+        }
+        f12_held = down;
+    }
     if (record_at && g_frame >= record_at && !record_fired) {
         record_fired = true;
         char v[32] = {};
@@ -2982,7 +3018,31 @@ u32 GfxSnapshot(u64 addr) {
     }
     if (!g_dev || !addr) return 0;
     auto it = g_surfaces.find(addr);
-    if (it == g_surfaces.end() || !it->second.tex || !it->second.srv) return 0;
+    if (it == g_surfaces.end() || !it->second.tex || !it->second.srv) {
+        static u64 missed = 0;
+        if (missed++ % 600 == 0)
+            LOG("gfx: flip of %llx, a buffer this renderer has no picture of (%llu so far)", (unsigned long long)addr,
+                (unsigned long long)missed);
+        return 0;
+    }
+    // A frame that read an empty render target (g_sampled_empty) is not shown: the last picture is
+    // shown again (GfxPresent). At most 3 frames in a row, so a target that stays empty (some path
+    // this renderer does not draw) cannot freeze the screen. BB_D3D11_SHOW_EMPTY=1: shown anyway.
+    {
+        static const bool show_empty = GetEnvironmentVariableA("BB_D3D11_SHOW_EMPTY", nullptr, 0) > 0;
+        static int held_in_a_row = 0;
+        static u64 held = 0;
+        const bool empty = std::exchange(g_sampled_empty, false);
+        if (empty && !show_empty && held_in_a_row < 3) {
+            held_in_a_row++;
+            if (held++ < 32 || held % 600 == 0)
+                LOG("gfx: frame %llu read target %llx before anything was drawn to it: the last picture "
+                    "shown again (%llu so far)",
+                    (unsigned long long)g_frame, (unsigned long long)g_sampled_empty_target, (unsigned long long)held);
+            return 0;
+        }
+        if (!empty) held_in_a_row = 0;
+    }
     D3D11_TEXTURE2D_DESC want;
     it->second.tex->GetDesc(&want);
     const u32 slot = g_next_snapshot++ % kSnapshots;
@@ -3011,6 +3071,30 @@ u32 GfxSnapshot(u64 addr) {
     g_ctx->CopyResource(s.tex.Get(), it->second.tex.Get());
     s.addr = addr;
     return slot + 1;
+}
+
+void GfxTrapFinal(ID3D11Texture2D* back_buffer) {
+    if (!g_glitch_trap || !back_buffer || !g_dev) return;
+    static ComPtr<ID3D11Texture2D> copy;
+    static ComPtr<ID3D11ShaderResourceView> view;
+    D3D11_TEXTURE2D_DESC want;
+    back_buffer->GetDesc(&want);
+    D3D11_TEXTURE2D_DESC have{};
+    if (copy) copy->GetDesc(&have);
+    if (!copy || have.Width != want.Width || have.Height != want.Height || have.Format != want.Format) {
+        copy.Reset(), view.Reset();
+        D3D11_TEXTURE2D_DESC d = want;
+        d.Usage = D3D11_USAGE_DEFAULT, d.BindFlags = D3D11_BIND_SHADER_RESOURCE, d.CPUAccessFlags = 0, d.MiscFlags = 0;
+        d.MipLevels = d.ArraySize = 1, d.SampleDesc.Count = 1, d.SampleDesc.Quality = 0;
+        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &copy)) ||
+            FAILED(g_dev->CreateShaderResourceView(copy.Get(), nullptr, &view))) {
+            copy.Reset(), view.Reset();
+            return;
+        }
+        LOG("gfx: glitch trap watches the final picture (%ux%u, format %d)", want.Width, want.Height, (int)want.Format);
+    }
+    g_ctx->CopyResource(copy.Get(), back_buffer);
+    RecordFrame(view.Get());
 }
 
 void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
@@ -3112,11 +3196,31 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
         g_capture = true;
         LOG("cap: capturing frame %llu", (unsigned long long)g_frame);
     }
-    auto it = g_surfaces.find(addr);
-    // the copy made at the flip, while it still holds this buffer (not taken over by a later flip)
-    ID3D11ShaderResourceView* picture = it != g_surfaces.end() ? it->second.srv.Get() : nullptr;
-    if (snapshot >= 1 && snapshot <= kSnapshots && g_snapshots[snapshot - 1].addr == addr && g_snapshots[snapshot - 1].srv)
+    // The copy made at the flip, while it still holds this buffer (not taken over by a later flip).
+    // Without one (the swap thread presents more often than the game flips, so a ring slot was
+    // reused, or the game flipped a buffer this renderer never drew), the last picture shown is
+    // shown again: the live buffer may be half redrawn with a later frame and no picture is a
+    // black screen, both seen as flicker (issues #247, #251). BB_D3D11_LIVE_FALLBACK=1: as before.
+    static const bool live_fallback = GetEnvironmentVariableA("BB_D3D11_LIVE_FALLBACK", nullptr, 0) > 0;
+    static ComPtr<ID3D11ShaderResourceView> last_shown;
+    static u64 shown_copy = 0, shown_again = 0, shown_live = 0, shown_none = 0;
+    ID3D11ShaderResourceView* picture = nullptr;
+    if (snapshot >= 1 && snapshot <= kSnapshots && g_snapshots[snapshot - 1].addr == addr && g_snapshots[snapshot - 1].srv) {
         picture = g_snapshots[snapshot - 1].srv.Get();
+        last_shown = picture;
+        shown_copy++;
+    } else if (last_shown && !live_fallback) {
+        picture = last_shown.Get();
+        shown_again++;
+    } else {
+        auto it = g_surfaces.find(addr);
+        picture = it != g_surfaces.end() ? it->second.srv.Get() : nullptr;
+        (picture ? shown_live : shown_none)++;
+    }
+    if ((shown_copy + shown_again + shown_live + shown_none) % 600 == 0)
+        LOG("gfx: presented %llu flipped copies, %llu repeats of the last one, %llu live buffers, %llu without a picture",
+            (unsigned long long)shown_copy, (unsigned long long)shown_again, (unsigned long long)shown_live,
+            (unsigned long long)shown_none);
     float black[4] = {0, 0, 0, 1};
     g_ctx->OMSetRenderTargets(1, g_swap_rtv.GetAddressOf(), nullptr);
     g_ctx->ClearRenderTargetView(g_swap_rtv.Get(), black);
@@ -3149,7 +3253,7 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
         g_ctx->PSSetShaderResources(0, 1, &picture);
         g_ctx->PSSetSamplers(0, 1, g_samp_linear.GetAddressOf());
         g_ctx->Draw(3, 0);
-        RecordFrame(picture);
+        if (!g_glitch_trap) RecordFrame(picture);  // the trap watches the final picture (GfxTrapFinal)
     }
     // CTR_SCREENSHOT=<n>: every n-th frame; =<first>+<count>: that many frames in a row (flicker)
     static u64 shot_frame = 0, shot_count = 0;

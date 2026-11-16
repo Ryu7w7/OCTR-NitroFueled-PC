@@ -39,6 +39,9 @@ u32 GfxSnapshot(u64 addr);
 /// that buffer, into `target`, holding GfxMutex.
 void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot = 0);
 
+/// The glitch trap (Shift+F12) watches the final picture, the overlay included: the back buffer just
+/// before Present, holding GfxMutex. Nothing without the trap.
+void GfxTrapFinal(ID3D11Texture2D* back_buffer);
 /// Something else used the device context (the overlay), holding GfxMutex: the renderer's record
 /// of what is bound no longer holds.
 void GfxForgetState();

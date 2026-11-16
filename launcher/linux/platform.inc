@@ -112,7 +112,8 @@ std::string Sha256Hex(const std::string& msg, const std::string& key) {
     return hex;
 }
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
-                        const std::string& form, int timeout_ms, bool register_key, const std::string& with_key) {
+                        const std::string& form, int timeout_ms, bool register_key, const std::string& with_key,
+                        size_t max_body) {
     std::string bridge, ip, peers;
     EosBridgeGameEnv(server, bridge, ip, peers, timeout_ms);
     const auto answer = RunService("{\"op\":\"http\",\"data\":\"" + JsonEscape(PathText(g_app.data)) +
@@ -125,7 +126,7 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
     int offset = 0;
     if (JsonNumber(answer, "clock_offset", offset)) g_server_clock_offset = offset;
     if (JsonBool(answer, "clock_stamps")) g_server_stamps = true;
-    return answer;
+    return answer.substr(0, max_body);
 }
 std::string HttpsPostJson(const std::string& host, const std::wstring&, const std::string& json,
                           uint16_t) {
