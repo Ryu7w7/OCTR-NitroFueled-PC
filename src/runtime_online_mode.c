@@ -2775,6 +2775,7 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     refresh_lobby_card(owner);
     refresh_lobby_members_visibility();
     runtime_public_itemless_update();
+    runtime_party_experiment_tick();
     if (runtime_private_party_update()) return;
     resume_private_map();
 }

@@ -4,6 +4,7 @@
  * /tmp/test-loopback out/eboot.elf
  */
 #include "../src/runtime_online_mode.c"
+void runtime_party_experiment_tick(void) {}
 #include <errno.h>
 #include <sched.h>
 #include <stdatomic.h>

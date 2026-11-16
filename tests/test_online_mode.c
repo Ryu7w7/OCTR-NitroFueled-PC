@@ -69,6 +69,7 @@ void runtime_public_itemless_new_session(void) { public_selected=public_active=p
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_update(void) {}
+void runtime_party_experiment_tick(void) {}
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
 int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
     *elapsed=search_test_elapsed;*timeout=180;*range=search_test_range;*ranked=search_test_ranked;

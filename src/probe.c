@@ -1375,6 +1375,7 @@ int main(int argc, char **argv) {
     if (!runtime_itemless_start(image, size)) fail("native Itemless collision callback could not be installed");
     runtime_replay_start(image, size); /* spectator build: native race recording (BB_REPLAY=0 off) */
     runtime_reserves_bar_start(image, size);
+    if (!runtime_party_experiment_start(image, size)) puts("Host experiment: not available in this executable");
     /* After the replays: N.Sane chains through their item-box hook (runtime_nsane.c). */
     if (!runtime_nsane_start(image, size)) fail("native N.Sane item callbacks could not be installed");
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
