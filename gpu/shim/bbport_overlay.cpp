@@ -30,6 +30,7 @@
 #include <miniz.h>
 #include "bbport_perf.h"
 #include "bbport_settings.h"
+#include "bbport_voice.h"
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_http.h"
 #include "../../src/runtime_spectate.h"
@@ -1055,6 +1056,163 @@ void RoomTab() {
                                                    "со старой версией пинга нет."));
 }
 
+/// A loudspeaker with sound waves, `size` high, at `at` (top left): who is talking (voice chat).
+void SpeakerIcon(ImDrawList* dl, ImVec2 at, float size, ImU32 color) {
+    const float s = size;
+    const ImVec2 box0(at.x, at.y + s * 0.35f), box1(at.x + s * 0.25f, at.y + s * 0.65f);
+    dl->AddRectFilled(box0, box1, color, s * 0.04f);
+    dl->AddTriangleFilled(ImVec2(at.x + s * 0.2f, at.y + s * 0.35f), ImVec2(at.x + s * 0.5f, at.y + s * 0.1f),
+                          ImVec2(at.x + s * 0.5f, at.y + s * 0.9f), color);
+    dl->AddRectFilled(ImVec2(at.x + s * 0.2f, at.y + s * 0.35f), ImVec2(at.x + s * 0.5f, at.y + s * 0.65f), color);
+    const ImVec2 c(at.x + s * 0.5f, at.y + s * 0.5f);
+    dl->PathArcTo(c, s * 0.22f, -0.8f, 0.8f, 8);
+    dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
+    dl->PathArcTo(c, s * 0.4f, -0.8f, 0.8f, 10);
+    dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
+}
+
+/// Who is talking now (voice chat), on the left of the screen: a loudspeaker and the name.
+void VoiceBadge(const std::vector<std::string>& speaking) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad, viewport->WorkPos.y + viewport->WorkSize.y * 0.3f),
+                            ImGuiCond_Always, ImVec2(0.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.45f);
+    ImGui::Begin("##voice", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    const float line = ImGui::GetTextLineHeight();
+    for (const std::string& nick : speaking) {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        SpeakerIcon(ImGui::GetWindowDrawList(), at, line, IM_COL32(110, 230, 140, 255));
+        ImGui::Dummy(ImVec2(line * 1.1f, line));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(nick.c_str());
+    }
+    ImGui::End();
+}
+
+/// The Voice tab: voice chat on or off, push to talk or open microphone, the microphone, its
+/// level and a test, the others' volume.
+void VoiceTab() {
+    auto& s = BbSettings::Get();
+    MenuSection(BbSettings::MenuText("Voice chat", "Голосовой чат"));
+    Checkbox(BbSettings::MenuText("Voice chat in private rooms", "Голосовой чат в частных комнатах"), s.voice_enabled);
+    Hint(BbSettings::MenuText("Everyone in the room needs it turned on to hear each other. The voice goes through "
+                              "the RyuNET server, only to the players of your room.",
+                              "Чтобы слышать друг друга, его должны включить все в комнате. Голос идёт через "
+                              "сервер RyuNET только игрокам вашей комнаты."));
+    const char* state = "";
+    ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+    switch (BbVoice::Now()) {
+    case BbVoice::State::Off: state = BbSettings::MenuText("Off", "Выключен"); break;
+    case BbVoice::State::NoRoom:
+        state = BbSettings::MenuText("On: join a private room to talk", "Включён: войдите в частную комнату");
+        break;
+    case BbVoice::State::Joining:
+        state = BbSettings::MenuText("Connecting to the room's voice...", "Подключение к голосу комнаты...");
+        break;
+    case BbVoice::State::Connected:
+        state = BbSettings::MenuText("Connected: the room hears you", "Подключено: комната вас слышит");
+        color = ImVec4(0.45f, 0.85f, 0.5f, 1.0f);
+        break;
+    case BbVoice::State::NoServer:
+        state = BbSettings::MenuText("No connection to the server", "Нет связи с сервером");
+        color = ImVec4(1.0f, 0.75f, 0.3f, 1.0f);
+        break;
+    case BbVoice::State::NoMicrophone:
+        state = BbSettings::MenuText("No microphone found", "Микрофон не найден");
+        color = ImVec4(1.0f, 0.75f, 0.3f, 1.0f);
+        break;
+    }
+    ImGui::TextColored(color, "%s", state);
+
+    MenuSection(BbSettings::MenuText("How you talk", "Как говорить"));
+    bool open = s.voice_open_mic;
+    if (ImGui::RadioButton(BbSettings::MenuText("Push to talk", "Нажать и говорить"), !open)) Store(s.voice_open_mic, false, true);
+    ImGui::SameLine();
+    if (ImGui::RadioButton(BbSettings::MenuText("Open microphone", "Открытый микрофон"), open)) Store(s.voice_open_mic, true, true);
+    static bool waiting_key = false;
+    if (!s.voice_open_mic) {
+        const char* key_name = SDL_GetScancodeName(SDL_Scancode(s.voice_key.load()));
+        ImGui::Text("%s: %s", BbSettings::MenuText("Talk key", "Клавиша"), key_name && *key_name ? key_name : "?");
+        ImGui::SameLine();
+        if (waiting_key) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s",
+                               BbSettings::MenuText("Press a key... (Esc cancels)", "Нажмите клавишу... (Esc — отмена)"));
+            int count = 0;
+            const bool* keys = SDL_GetKeyboardState(&count);
+            for (int k = SDL_SCANCODE_A; keys && k < count; ++k) {
+                if (!keys[k]) continue;
+                if (k != SDL_SCANCODE_ESCAPE) Store(s.voice_key, k, true);
+                waiting_key = false;
+                break;
+            }
+        } else if (ImGui::SmallButton(BbSettings::MenuText("Change", "Изменить"))) {
+            waiting_key = true;
+        }
+    } else {
+        waiting_key = false;
+    }
+
+    MenuSection(BbSettings::MenuText("Microphone", "Микрофон"));
+    {
+        std::string current;
+        {
+            std::lock_guard lk{BbSettings::PortsMutex()};
+            current = s.voice_input.data();
+        }
+        const char* system = BbSettings::MenuText("System default", "Системный по умолчанию");
+        if (ImGui::BeginCombo("##voice_input", current.empty() ? system : current.c_str())) {
+            const auto pick = [&](const std::string& name) {
+                std::lock_guard lk{BbSettings::PortsMutex()};
+                std::snprintf(s.voice_input.data(), s.voice_input.size(), "%s", name.c_str());
+                dirty = true;
+            };
+            if (ImGui::Selectable(system, current.empty())) pick("");
+            for (const std::string& name : BbVoice::InputDevices())
+                if (ImGui::Selectable(name.c_str(), name == current)) pick(name);
+            ImGui::EndCombo();
+        }
+    }
+    {
+        int gain = int(s.voice_mic_gain * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Microphone volume", "Громкость микрофона"), &gain, 0,
+                                              400, "%d%%");
+        Store(s.voice_mic_gain, std::clamp(gain, 0, 400) / 100.0f, changed);
+    }
+    // the level, with the open microphone's threshold marked on it
+    const float level = BbVoice::MicLevel();
+    ImGui::ProgressBar(std::clamp(level, 0.0f, 1.0f), ImVec2(ImGui::GetFontSize() * 14.0f, 0.0f), "");
+    if (s.voice_open_mic) {
+        const ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+        const float x = r0.x + (r1.x - r0.x) * std::clamp(s.voice_threshold.load(), 0.0f, 1.0f);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(x, r0.y), ImVec2(x, r1.y), IM_COL32(255, 200, 60, 255), 2.0f);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(BbSettings::MenuText("Level", "Уровень"));
+    if (s.voice_open_mic) {
+        int threshold = int(s.voice_threshold * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Opens at", "Срабатывает от"), &threshold, 1, 60,
+                                              "%d%%");
+        Store(s.voice_threshold, std::clamp(threshold, 1, 60) / 100.0f, changed);
+    }
+    const bool testing = BbVoice::Testing();
+    if (ImGui::Button(testing ? BbSettings::MenuText("Stop the test", "Остановить проверку")
+                              : BbSettings::MenuText("Test the microphone", "Проверить микрофон"))) {
+        BbVoice::SetTest(!testing);
+    }
+    Hint(BbSettings::MenuText("You hear yourself; nothing is sent.", "Вы слышите себя; ничего не отправляется."));
+
+    MenuSection(BbSettings::MenuText("Others", "Другие"));
+    {
+        int volume = int(s.voice_volume * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Others' volume", "Громкость других"), &volume, 0, 200,
+                                              "%d%%");
+        Store(s.voice_volume, std::clamp(volume, 0, 200) / 100.0f, changed);
+    }
+}
+
 void ReportTab() {
     static RfView view;
     static unsigned seen = ~0u;
@@ -1888,6 +2046,7 @@ void Menu() {
     g_show_report_tab = false;
     const bool friends_page = SideTab("\xE2\x98\xBA", BbSettings::MenuText("Friends", "Друзья"));       // carita
     const bool room_page = SideTab("\xE2\x9A\x91", BbSettings::MenuText("Room", "Комната"));            // bandera
+    const bool voice_page = SideTab("\xE2\x99\xAA", BbSettings::MenuText("Voice", "Голос"));             // nota
     const bool replays_page = SideTab("\xE2\x96\xB6", BbSettings::MenuText("Replays", "Повторы"));      // play
     const bool report_page = SideTab("\xE2\x9A\xA0", report_label);                                     // aviso
     const bool settings_page = SideTab("\xE2\x98\x80", BbSettings::MenuText("Picture and performance",
@@ -1981,6 +2140,8 @@ void Menu() {
 
     if (friends_page) FriendsTab();
     if (room_page) RoomTab();
+    if (voice_page) VoiceTab();
+    else if (BbVoice::Testing()) BbVoice::SetTest(false); // the test ends with the tab
     if (replays_page) ReplaysTab();
     if (report_page) ReportTab();
 
@@ -3054,6 +3215,7 @@ bool HandleEvent(const SDL_Event& event) {
 
 bool Visible() {
     PollFriends();
+    BbVoice::Start(); // once: the voice thread (it waits while voice is off)
     if (initialized && !ultrawide_prompt_checked) {
         // Once, at the first presented frame: the first start, or every start with ultrawide_ask.
         ultrawide_prompt_checked = true;
@@ -3070,7 +3232,8 @@ bool Visible() {
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
                            BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
-                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
+                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing() ||
+                           !BbVoice::Speaking().empty());
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -3182,6 +3345,9 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     }
     if (const int viewers = runtime_spectate_viewers(); viewers > 0 && !menu_open) {
         SpectatorBadge(viewers);
+    }
+    if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
+        VoiceBadge(speaking);
     }
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
         ReplayResults(replay);

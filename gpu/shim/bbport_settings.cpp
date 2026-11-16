@@ -66,6 +66,21 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.show_fps = i != 0;
     } else if (key == "show_ping") {
         v.show_ping = i != 0;
+    } else if (key == "voice_enabled") {
+        v.voice_enabled = i != 0;
+    } else if (key == "voice_open_mic") {
+        v.voice_open_mic = i != 0;
+    } else if (key == "voice_key") {
+        v.voice_key = std::clamp(i, 4, 511);
+    } else if (key == "voice_volume") {
+        v.voice_volume = Clamp(f, 0.0f, 2.0f);
+    } else if (key == "voice_mic_gain") {
+        v.voice_mic_gain = Clamp(f, 0.0f, 4.0f);
+    } else if (key == "voice_threshold") {
+        v.voice_threshold = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "voice_input") {
+        std::lock_guard lk{PortsMutex()};
+        std::snprintf(v.voice_input.data(), v.voice_input.size(), "%s", value.c_str());
     } else if (key == "split_auto") {
         v.split_auto = i != 0;
     } else if (key == "friends_hide_activity") {
@@ -433,6 +448,16 @@ void Save() {
     put("debug_view", std::to_string(v.debug_view.load()));
     put("show_fps", flag(v.show_fps));
     put("show_ping", flag(v.show_ping));
+    put("voice_enabled", flag(v.voice_enabled));
+    put("voice_open_mic", flag(v.voice_open_mic));
+    put("voice_key", std::to_string(v.voice_key.load()));
+    put("voice_volume", fixed(v.voice_volume, 2));
+    put("voice_mic_gain", fixed(v.voice_mic_gain, 2));
+    put("voice_threshold", fixed(v.voice_threshold, 3));
+    {
+        std::lock_guard lk{PortsMutex()};
+        put("voice_input", std::string(v.voice_input.data()));
+    }
     put("friends_hide_activity", flag(v.friends_hide_activity));
     put("friends_hide_me", flag(v.friends_hide_me));
     put("friends_no_notices", flag(v.friends_no_notices));
