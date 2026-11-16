@@ -288,8 +288,9 @@ def ranked_lobby_icons(blob):
                 struct.pack_into('<2f', g.data, icon + 0x60, x + 2.0, y + 2.0)
                 struct.pack_into('<4f', g.data, icon + 0xc0, 0.0, 0.0, 0.0, 1.0)
             if (mode, tier) == HOST_CROWN:
-                # The crown at the row's right end, where the game keeps a hidden icon slot.
-                x, y = 372.0 + (2.0 if kind == 'SHADOW' else 0.0), 14.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                # The crown just left of the name ([MemberName] starts at x 10; icons are placed by
+                # their centre), so it reads as the host's mark; the right end keeps the rank icons.
+                x, y = -12.0 + (2.0 if kind == 'SHADOW' else 0.0), 14.0 + (2.0 if kind == 'SHADOW' else 0.0)
                 struct.pack_into('<2f', g.data, icon + 0x60, x, y)
                 struct.pack_into('<2f', g.data, icon + 0x90, 40.0, 40.0)
             new.append(icon)

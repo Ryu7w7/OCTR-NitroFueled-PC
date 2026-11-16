@@ -362,7 +362,7 @@ class OnlineModeTests(unittest.TestCase):
         crown = icons[-2:]
         self.assertEqual([patched.string_at(off + 0x28) for off in crown], ['OCTR_RANK_SHADOW_2_0', 'OCTR_RANK_ICON_2_0'])
         self.assertTrue(all(struct.unpack_from('<2f', patched.data, off + 0x90) == (40.0, 40.0) for off in crown))
-        self.assertEqual(struct.unpack_from('<2f', patched.data, crown[1] + 0x60), (372.0, 14.0))
+        self.assertEqual(struct.unpack_from('<2f', patched.data, crown[1] + 0x60), (-12.0, 14.0))
         name = next(off for off, kind in original.objects()
                     if kind == 'igGuiPlaceable' and original.string_at(off + 0x28) == '[MemberName]')
         self.assertEqual(patched.u64(name + 0x50), original.u64(name + 0x50))
