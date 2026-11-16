@@ -37,6 +37,9 @@
 #include "../../src/runtime_name_colors.h"
 #include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
+#include "../../src/runtime_avatars.h"
+#include <cctype>
+#include <map>
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -69,6 +72,7 @@ extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
+extern "C" const char* runtime_np_get_online_name(void); // the player's nickname (src/runtime_np_online.c)
 
 namespace BbOverlay {
 
@@ -193,6 +197,61 @@ bool DecodePngTo(const unsigned char* png, size_t size, std::vector<unsigned cha
 
 bool DecodePng(const unsigned char* png, size_t size, std::vector<unsigned char>& out) {
     return DecodePngTo(png, size, out, kIconSize, kIconSize);
+}
+
+// Tacho: the players' Discord pictures (src/runtime_avatars.c; the server sends Discord's default
+// one to players without a picture). Made into textures on the drawing thread, kept for the session.
+constexpr int kAvatarSize = 64;
+struct AvatarPicture {
+    std::unique_ptr<ImTextureData> texture; // null: none to show (an initial in a circle instead)
+};
+std::map<std::string, AvatarPicture> avatar_pictures; // by lower-case nickname; imgui_mutex
+
+void TakeAvatars() {
+    char who[RA_NAME];
+    unsigned char* png = nullptr;
+    size_t size = 0;
+    for (int n = 0; n < 8 && runtime_avatar_take(who, &png, &size); ++n) {  // a few per frame
+        AvatarPicture& pic = avatar_pictures[who];
+        std::vector<unsigned char> rgba;
+        if (png && DecodePngTo(png, size, rgba, kAvatarSize, kAvatarSize)) {
+            pic.texture = std::make_unique<ImTextureData>();
+            pic.texture->Create(ImTextureFormat_RGBA32, kAvatarSize, kAvatarSize);
+            std::memcpy(pic.texture->GetPixels(), rgba.data(), rgba.size());
+            pic.texture->UsedRect = {0, 0, (unsigned short)kAvatarSize, (unsigned short)kAvatarSize};
+            ImGui::RegisterUserTexture(pic.texture.get());
+        }
+        runtime_avatar_free(png);
+    }
+}
+
+/// The player's picture in a circle of `size` pixels at the cursor (a line's height when 0), then
+/// SameLine. Until it arrives, or with none, a coloured circle with the nickname's initial.
+void Avatar(const char* name, float size = 0.0f) {
+    if (!name || !*name) return;
+    if (size <= 0.0f) size = ImGui::GetFrameHeight();
+    std::string key(name);
+    for (char& c : key) c = (char)std::tolower((unsigned char)c);
+    auto it = avatar_pictures.find(key);
+    if (it == avatar_pictures.end()) runtime_avatar_want(name);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(size, size));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 q(p.x + size, p.y + size), mid(p.x + size * 0.5f, p.y + size * 0.5f);
+    if (it != avatar_pictures.end() && it->second.texture) {
+        dl->AddImageRounded(ImTextureRef(it->second.texture->GetTexRef()), p, q, ImVec2(0, 0), ImVec2(1, 1),
+                            IM_COL32_WHITE, size * 0.5f);
+    } else {
+        unsigned hash = 2166136261u;
+        for (char c : key) hash = (hash ^ (unsigned char)c) * 16777619u;
+        static const ImU32 colors[] = {IM_COL32(88, 101, 242, 255), IM_COL32(117, 126, 138, 255), IM_COL32(59, 165, 93, 255),
+                                       IM_COL32(250, 166, 26, 255), IM_COL32(237, 66, 69, 255), IM_COL32(235, 69, 158, 255)};
+        dl->AddCircleFilled(mid, size * 0.5f, colors[hash % 6]);
+        char initial[2] = {(char)std::toupper((unsigned char)name[0]), 0};
+        const ImVec2 t = ImGui::CalcTextSize(initial);
+        dl->AddText(ImVec2(mid.x - t.x * 0.5f, mid.y - t.y * 0.5f), IM_COL32_WHITE, initial);
+    }
+    ImGui::SameLine();
 }
 
 // Tacho: fondo del menu (Insert / L3+R3): <BB_ART_DIR>/ctr-overlay-background.png (el lanzador pone BB_ART_DIR = su
@@ -753,7 +812,7 @@ void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
 
 /// The players in the room the game talks to, with their round trip (src/runtime_net_ping.h), as
 /// lines of text: in the Room tab and in the corner counter (show_ping). Their count.
-int PingLines() {
+int PingLines(bool pictures = false) {
     PingPeer peers[PING_MAX_PEERS];
     const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
     int older = 0;
@@ -764,6 +823,10 @@ int PingLines() {
             continue;
         }
         const char* name = p.name[0] ? p.name : "...";
+        if (pictures && p.name[0]) {   // Tacho: la foto de Discord del jugador (menu, apartado Sala)
+            ImGui::AlignTextToFramePadding();
+            Avatar(p.name);
+        }
         if (p.ms == PING_NO_ANSWER) {
             ImGui::TextColored(kMenuGrey, "%s  -", name);
             continue;
@@ -978,7 +1041,7 @@ void RoomTab() {
         ImGui::TextDisabled("%s", BbSettings::MenuText("You are not in an online room right now.",
                                                        "Сейчас вы не в онлайн-комнате."));
     } else {
-        PingLines();
+        PingLines(true);
     }
     ImGui::Spacing();
     bool ping = s.show_ping;
@@ -1190,6 +1253,16 @@ void FriendsTab() {
         ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("The server is not answering; retrying...",
                                                                    "Сервер не отвечает; повтор..."));
     }
+    // Tacho: tu foto de Discord y tu apodo arriba.
+    if (const char* me = runtime_np_get_online_name(); me && *me) {
+        Avatar(me, ImGui::GetFrameHeight() * 1.6f);
+        ImGui::BeginGroup();
+        ImGui::TextUnformatted(me);
+        ImGui::TextColored(kMenuGrey, "%s", BbSettings::MenuText("Your picture is the one on your Discord account.",
+                                                                 "Ваше фото — из вашего аккаунта Discord."));
+        ImGui::EndGroup();
+        ImGui::Spacing();
+    }
     if (view.result[0] && !last_action.empty()) {
         char line[160];
         std::snprintf(line, sizeof line, FriendResultText(last_action, view.result), view.result_who);
@@ -1206,6 +1279,7 @@ void FriendsTab() {
             ImGui::BeginChild("##invite", ImVec2(0.0f, ImGui::GetFrameHeight() * 1.9f), ImGuiChildFlags_AlwaysUseWindowPadding,
                               ImGuiWindowFlags_NoScrollbar);
             ImGui::AlignTextToFramePadding();
+            Avatar(inv.from);
             ImGui::Text(BbSettings::MenuText("%s invites you to their room", "%s зовёт вас в комнату"), inv.from);
             char join[64];
             std::snprintf(join, sizeof join, "\xE2\x96\xB6  %s###join", BbSettings::MenuText("Join", "Войти"));
@@ -1295,6 +1369,7 @@ void FriendsTab() {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding();
+                Avatar(f.name);
                 StatusDot(f.online);
                 ImGui::SameLine();
                 ImGui::TextUnformatted(f.name);
@@ -1385,6 +1460,7 @@ void FriendsTab() {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::AlignTextToFramePadding();
+                    Avatar(view.incoming[i]);
                     ImGui::TextUnformatted(view.incoming[i]);
                     ImGui::TableNextColumn();
                     std::snprintf(label, sizeof label, "\xE2\x9C\x94  %s###accept", BbSettings::MenuText("Accept", "Принять"));
@@ -1402,6 +1478,7 @@ void FriendsTab() {
             for (int i = 0; i < view.outgoing_count; ++i) {
                 ImGui::PushID(2000 + i);
                 ImGui::AlignTextToFramePadding();
+                Avatar(view.outgoing[i]);
                 ImGui::TextUnformatted(view.outgoing[i]);
                 ImGui::SameLine();
                 if (ImGui::SmallButton(BbSettings::MenuText("Cancel", "Отменить"))) act("remove", view.outgoing[i]);
@@ -1432,6 +1509,7 @@ void FriendsTab() {
             const std::string relation = p.relation;
             ImGui::PushID(1000 + i);
             ImGui::AlignTextToFramePadding();
+            Avatar(p.name);
             StatusDot(p.online);
             ImGui::SameLine();
             ImGui::TextUnformatted(p.name);
@@ -1512,6 +1590,7 @@ void Menu() {
         return;
     }
     DrawMenuBackground();   // Tacho: la imagen del CTR detras de pestanas y texto
+    TakeAvatars();          // Tacho: fotos de Discord que llegaron (Amigos, Sala)
     // Moved: remembered (saved with the settings when the menu closes).
     if (!ImGui::IsWindowAppearing() && viewport->WorkSize.x > 0.0f && viewport->WorkSize.y > 0.0f) {
         const ImVec2 at = ImGui::GetWindowPos();

@@ -27,6 +27,7 @@
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <array>
 #include <cmath>
 #include <cwctype>
 #include <atomic>
@@ -83,6 +84,8 @@ struct LauncherArtwork {
 LauncherArtwork g_hero_art;
 LauncherArtwork g_logo_art;
 LauncherArtwork g_menu_background;
+LauncherArtwork g_pad_xbox_art;  // art/pad-xbox.png, art/pad-playstation.png: the Gamepad page's picture
+LauncherArtwork g_pad_ps_art;
 ImFont* g_ctr_font = nullptr;
 RECT g_titlebar_drag{};
 float g_ui_scale = 1.0f;
@@ -1467,7 +1470,7 @@ std::string ProofHeader(const std::string& key_hash, const char* method, const s
 /// background threads. with_key signs with another of this PC's keys (KnownKeys).
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
                         const std::string& form = {}, int timeout_ms = 3000, bool register_key = false,
-                        const std::string& with_key = {}) {
+                        const std::string& with_key = {}, size_t max_body = 4096) {
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
@@ -1503,7 +1506,7 @@ std::string HttpRequest(const std::string& server, const wchar_t* method, const 
             answered = true;
             NoteServerClock(req, token);
             DWORD avail = 0;
-            while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
+            while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < max_body) {
                 std::string chunk(avail, '\0');
                 DWORD got = 0;
                 if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;
@@ -3131,6 +3134,82 @@ std::string Describe(const FolderInfo& f) {
     return {};
 }
 
+// The settings pages are laid out as a form: each name on the left and every control lined up in
+// one column at g_form_column, all of the same width. 0 (the other pages): ImGui's own layout,
+// label after the control. FormBegin/FormEnd switch it on and off.
+float g_form_column = 0.0f;
+
+void FormBegin() { g_form_column = ImGui::GetCursorPosX() + ImGui::GetFontSize() * 14.0f; }
+void FormEnd() { g_form_column = 0.0f; }
+float FormControlWidth() { return ImGui::GetFontSize() * 16.0f; }
+
+/// In a form, draws the name on the left, moves to the control column and sizes the next
+/// control; returns the hidden ID to give that control. Outside a form, returns the label as is.
+const char* FormLabel(const char* label) {
+    if (g_form_column <= 0.0f) return label;
+    static std::string id;
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(g_form_column - ImGui::GetStyle().ItemSpacing.x);
+    ImGui::TextUnformatted(label);
+    ImGui::PopTextWrapPos();
+    ImGui::SameLine(g_form_column);
+    ImGui::SetNextItemWidth(FormControlWidth());
+    id = std::string("##") + label;
+    return id.c_str();
+}
+
+/// A grey note under a control: in a form it starts at the control column.
+void FormNote(const char* text) {
+    if (g_form_column > 0.0f) ImGui::SetCursorPosX(g_form_column);
+    ImGui::PushStyleColor(ImGuiCol_Text, kGrey);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+
+/// A section title: the heading font in the launcher's cyan over a line that fades out, with air above.
+void FormSection(const char* title) {
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.45f));
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.1f);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.88f, 1.0f, 1.0f));
+    ImGui::TextUnformatted(title);
+    ImGui::PopStyleColor();
+    if (g_font_heading) ImGui::PopFont();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::GetWindowDrawList()->AddRectFilledMultiColor(ImVec2(p.x, p.y - 2.0f), ImVec2(p.x + w, p.y),
+                                                        IM_COL32(97, 224, 255, 200), IM_COL32(97, 224, 255, 0),
+                                                        IM_COL32(97, 224, 255, 0), IM_COL32(97, 224, 255, 200));
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.25f));
+}
+
+/// An on/off switch the height of a checkbox (forms use it instead of checkboxes).
+bool FormToggle(const char* id, bool& on) {
+    const float h = ImGui::GetFrameHeight() * 0.86f, w = h * 1.9f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float y = p.y + (ImGui::GetFrameHeight() - h) * 0.5f;
+    const bool changed = ImGui::InvisibleButton(id, ImVec2(w, ImGui::GetFrameHeight()));
+    if (changed) on = !on;
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const bool hovered = ImGui::IsItemHovered();
+    const ImU32 track = on ? (hovered ? IM_COL32(70, 214, 255, 255) : IM_COL32(48, 196, 247, 255))
+                           : (hovered ? IM_COL32(72, 94, 130, 255) : IM_COL32(58, 79, 117, 255));
+    const ImU32 knob = on ? IM_COL32(10, 34, 70, 255) : IM_COL32(190, 210, 240, 255);
+    d->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + w, y + h), track, h * 0.5f);
+    const float r = h * 0.5f - 3.0f;
+    d->AddCircleFilled(ImVec2(on ? p.x + w - h * 0.5f : p.x + h * 0.5f, y + h * 0.5f), r, knob);
+    if (ImGui::IsItemFocused())
+        d->AddRect(ImVec2(p.x - 2, y - 2), ImVec2(p.x + w + 2, y + h + 2), ImGui::GetColorU32(ImGuiCol_Text), h * 0.5f + 2.0f);
+    return changed;
+}
+
+/// A checkbox, or in a form a switch in the control column.
+bool FormCheckbox(const char* label, bool& on) {
+    if (g_form_column <= 0.0f) return ImGui::Checkbox(label, &on);
+    return FormToggle(FormLabel(label), on);
+}
+
 void HelpMarker(const char* text) {
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
@@ -3146,7 +3225,7 @@ const char* PerfReportsText();  // the performance diagnostic's explanation (Per
 
 void GameFlag(const char* key, const char* label, bool fallback, const char* help = nullptr) {
     bool v = g_app.game.Flag(key, fallback);
-    if (ImGui::Checkbox(label, &v)) {
+    if (FormCheckbox(label, v)) {
         g_app.game.Set(key, v ? "1" : "0");
         SaveGameIni();
     }
@@ -3155,7 +3234,7 @@ void GameFlag(const char* key, const char* label, bool fallback, const char* hel
 
 void LauncherFlag(const char* key, const char* label, bool fallback, const char* help = nullptr) {
     bool v = g_app.launcher.Flag(key, fallback);
-    if (ImGui::Checkbox(label, &v)) {
+    if (FormCheckbox(label, v)) {
         g_app.launcher.Set(key, v ? "1" : "0");
         SaveLauncher();
     }
@@ -3168,7 +3247,7 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
     const Choice* selected = &choices[0];
     for (const auto& c : choices)
         if (current == c.value) selected = &c;
-    if (ImGui::BeginCombo(label, T(selected->es, selected->en))) {
+    if (ImGui::BeginCombo(FormLabel(label), T(selected->es, selected->en))) {
         for (const auto& c : choices) {
             if (ImGui::Selectable(T(c.es, c.en), &c == selected)) {
                 g_app.launcher.Set(key, c.value);
@@ -3181,7 +3260,7 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
 
 bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
-void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s, ImU32 cut = IM_COL32(6, 39, 89, 255));
 
 /// "Add to Steam" and its confirmation (Steam is closed first), on the Play tab and in Settings.
 void SteamButton() {
@@ -3243,7 +3322,7 @@ bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
 void PlayTab() {
     App& a = g_app;
     const bool busy = a.job != Job::None;
-    ImGui::SeparatorText(T("Juego", "Game"));
+    FormSection(T("Juego", "Game"));
 
     const bool ready = a.game_info.kind == Kind::Complete && a.game_checked && a.game_ok;
     if (!a.python) {
@@ -3530,7 +3609,7 @@ bool GameChoiceCombo(const char* label, const char* key, const Choice (&choices)
         if (current == c.value) selected = &c;
     bool changed = false;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * width_em);
-    if (ImGui::BeginCombo(label, T(selected->es, selected->en))) {
+    if (ImGui::BeginCombo(FormLabel(label), T(selected->es, selected->en))) {
         for (const auto& c : choices) {
             if (ImGui::Selectable(T(c.es, c.en), &c == selected) && &c != selected) {
                 a.game.Set(key, c.value);
@@ -3549,7 +3628,7 @@ void RenderResCombo() {
     for (const auto& r : kRenderRes)
         if (current == r.value) selected = &r;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-    if (ImGui::BeginCombo(T("Resolución interna", "Internal resolution"), T(selected->es, selected->en))) {
+    if (ImGui::BeginCombo(FormLabel(T("Resolución interna", "Internal resolution")), T(selected->es, selected->en))) {
         for (const auto& r : kRenderRes) {
             if (ImGui::Selectable(T(r.es, r.en), &r == selected)) {
                 a.game.Set("render_res", r.value);
@@ -3633,7 +3712,7 @@ void GpuCombo() {
         if (chosen(i)) { preview = GpuLabel(a.gpus, i); listed = true; }
     if (!current.empty() && !listed) preview = current + T(" (no detectada)", " (not detected)");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
-    if (ImGui::BeginCombo(T("Tarjeta gráfica", "Graphics card"), preview.c_str())) {
+    if (ImGui::BeginCombo(FormLabel(T("Tarjeta gráfica", "Graphics card")), preview.c_str())) {
         if (ImGui::Selectable(T("Automática", "Automatic"), current.empty())) {
             a.launcher.Set("gpu", "");
             a.launcher.Erase("gpu_nth");
@@ -3674,7 +3753,7 @@ void AspectRatioSettings() {
     const char* preview = "16:9";
     for (const auto& c : ratios) if (mode == c.value) preview = T(c.es, c.en);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-    if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
+    if (ImGui::BeginCombo(FormLabel(T("Relación de aspecto", "Aspect ratio")), preview)) {
         for (const auto& c : ratios) {
             if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
                 mode = c.value;
@@ -3712,7 +3791,7 @@ void AspectRatioSettings() {
     bool changed;
     if (mode == "16x10") {
         changed = GameChoiceCombo(label, "aspect_output", tall, output.empty() ? "1920x1200" : output.c_str(), 16.0f);
-        ImGui::TextColored(kGrey, "%s", T("16:10: pantalla y cámara adaptadas; efectos del HUD alineados. "
+        FormNote(T("16:10: pantalla y cámara adaptadas; efectos del HUD alineados. "
             "Actualización 1.21, USA o Europa. Sin FSR ni DLSS. Requiere reiniciar.",
             "16:10 display and camera; aligned HUD effects. USA or Europe 1.21. "
             "No FSR or DLSS. Requires a restart."));
@@ -3727,18 +3806,115 @@ void AspectRatioSettings() {
         if (mode == "21x9" || mode == "32x9") a.game.Set("widescreen_output", a.game.Get("aspect_output"));
         SaveGameIni();
     }
-    if (mode != "16x10") ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
+    if (mode != "16x10") FormNote(T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
         "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
         "Corrected menus, backgrounds and a centered HUD. Online or offline, with the 1.21 update, USA or Europe "
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
 }
 
-void SettingsTab() {
+/// Player 1's controller, the buttons the game shows, and split screen (Gamepad page).
+void ControllerSettings() {
     App& a = g_app;
-    ImGui::TextColored(kGrey, "%s", T("Se aplican al pulsar Jugar. El menú del juego (Insert o L3+R3) cambia los mismos ajustes.",
-                                      "Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings."));
+    {
+        std::scoped_lock lock{a.mutex};
+        const std::string current = a.launcher.Get("gamepad");
+        std::string preview = T("El primero conectado", "First connected");
+        bool listed = current.empty();
+        for (const auto& [guid, name] : a.gamepads)
+            if (guid == current) {
+                preview = name;
+                listed = true;
+            }
+        if (!listed) preview = a.launcher.Get("gamepad_name", current) + T(" (no conectado)", " (not connected)");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+        if (ImGui::BeginCombo(FormLabel(T("Mando", "Controller")), preview.c_str())) {
+            if (ImGui::Selectable(T("El primero conectado", "First connected"), current.empty())) {
+                a.launcher.Set("gamepad", "");
+                a.launcher.Set("gamepad_name", "");
+                SaveLauncher();
+            }
+            for (const auto& [guid, name] : a.gamepads) {
+                ImGui::PushID(guid.c_str());
+                if (ImGui::Selectable(name.c_str(), guid == current)) {
+                    a.launcher.Set("gamepad", guid);
+                    a.launcher.Set("gamepad_name", name);
+                    SaveLauncher();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!a.probe_done && a.probe.joinable());
+    if (ImGui::Button(T("Buscar mandos", "Refresh"))) {
+        if (a.probe.joinable()) a.probe.join();
+        StartProbe();
+    }
+    ImGui::EndDisabled();
+    // bbport.ini button_prompts (scripts/button_prompts.py): the buttons the game shows.
+    {
+        static constexpr Choice kButtonPrompts[] = {
+            {"PlayStation", "PlayStation", "playstation"},
+            {"Xbox", "Xbox", "xbox"},
+        };
+        if (GameChoiceCombo(T("Iconos de botones", "Button prompts"), "button_prompts", kButtonPrompts, "playstation", 12.0f))
+            SaveGameIni();
+        HelpMarker(T("Los botones que muestra el juego en menús y avisos. Xbox: A, B, X, Y, LB, RB, LT, RT y View. "
+                     "Se aplica al pulsar Jugar.",
+                     "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. "
+                     "Applies when you press Play."));
+    }
 
-    ImGui::SeparatorText(T("Rendimiento", "Performance"));
+    FormSection(T("Pantalla dividida", "Split screen"));
+    GameFlag("split_auto", T("Asignar los mandos automáticamente", "Assign controllers automatically"), true,
+             T("Para jugar de 2 a 4 con varios mandos: cada mando que conectes es el siguiente jugador (el primero, el "
+               "jugador 1). Desactivado, una persona puede cambiar de mando cuando quiera, y los mandos de los jugadores "
+               "2-4 se eligen en el menú del juego (Insert o L3+R3), Controllers.",
+               "For 2 to 4 players with several controllers: each controller you connect is the next player (the first "
+               "one, player 1). Off, one person can switch controllers at will, and players 2-4's controllers are chosen "
+               "in the in-game menu (Insert or L3+R3), Controllers."));
+    FormNote(T("Más mandos para la pantalla dividida: menú del juego (Insert o L3+R3), Controllers. "
+               "Quién juega con el teclado se elige en la página Teclado.",
+               "More controllers for split screen: in-game menu (Insert or L3+R3), Controllers. "
+               "Who plays on the keyboard is chosen on the Keyboard page."));
+}
+
+/// bbport.ini port.N=keyboard (N 2..4): that split-screen player plays on the keyboard and player 1
+/// on the controller alone (src/runtime_pad.c). None: the keyboard drives player 1 too (Keyboard page).
+void KeyboardPlayerSetting() {
+    App& a = g_app;
+    const auto port_key = [](int n) { return "port." + std::to_string(n); };
+    int current = 1;
+    for (int n = 2; n <= 4; ++n)
+        if (Lower(Trim(a.game.Get(port_key(n)))) == "keyboard") current = n;
+    const auto name = [](int n) {
+        return n == 1 ? std::string(T("Jugador 1 (junto al mando)", "Player 1 (with the controller)"))
+                      : std::string(T("Jugador ", "Player ")) + std::to_string(n);
+    };
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+    if (ImGui::BeginCombo(FormLabel(T("El teclado juega como", "The keyboard plays as")), name(current).c_str())) {
+        for (int n = 1; n <= 4; ++n) {
+            if (!ImGui::Selectable(name(n).c_str(), n == current) || n == current) continue;
+            for (int k = 2; k <= 4; ++k)
+                if (Lower(Trim(a.game.Get(port_key(k)))) == "keyboard") a.game.Set(port_key(k), "");
+            if (n > 1) a.game.Set(port_key(n), "keyboard");
+            SaveGameIni();
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker(T("Para jugar dos en pantalla dividida, uno con teclado y otro con mando, elige Jugador 2: el mando "
+                 "queda para el jugador 1 y el teclado para el 2 (Espacio es X). Si juegas solo con teclado, déjalo "
+                 "en Jugador 1. También se cambia en el menú del juego (Insert o L3+R3).",
+                 "For two players in split screen, one on the keyboard and one on a controller, choose Player 2: "
+                 "the controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on "
+                 "the keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."));
+}
+
+/// Settings > Graphics: the engine, the frame rate and the image quality.
+void GraphicsSettings() {
+    App& a = g_app;
+    FormSection(T("Rendimiento", "Performance"));
     {
         // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
         // shaders from the player's game the first time)
@@ -3755,6 +3931,7 @@ void SettingsTab() {
                      "builds its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 or "
                      "DLSS (FSR 1 works). If something goes wrong, go back to Vulkan (shadPS4)."));
     }
+    GpuCombo();
     {
         int limit = a.game.Int("fps_limit", 60);
         auto name = [](int v) -> std::string {
@@ -3762,7 +3939,7 @@ void SettingsTab() {
             return std::to_string(v) + " FPS";
         };
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-        if (ImGui::BeginCombo(T("Límite de FPS", "FPS limit"), name(limit).c_str())) {
+        if (ImGui::BeginCombo(FormLabel(T("Límite de FPS", "FPS limit")), name(limit).c_str())) {
             for (int v : kFpsLimits) {
                 if (ImGui::Selectable(name(v).c_str(), v == limit)) {
                     a.game.Set("fps_limit", std::to_string(v));
@@ -3776,31 +3953,19 @@ void SettingsTab() {
                      "With the 60 FPS patch the game runs as fast as your PC allows. On a 144 Hz screen without "
                      "G-Sync/FreeSync, 72 divides the refresh evenly."));
     }
-    GameFlag("async_pipelines", T("Compilar shaders en segundo plano (experimental)", "Compile shaders in the background (experimental)"), false,
-             T("Menos tirones la primera vez que aparece un efecto; a veces un efecto tarda un fotograma en verse.",
-               "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
+    GameFlag("async_pipelines", T("Shaders en segundo plano (experimental)", "Background shaders (experimental)"), false,
+             T("Compila los shaders en segundo plano: menos tirones la primera vez que aparece un efecto; a veces un "
+               "efecto tarda un fotograma en verse.",
+               "Compiles shaders in the background: fewer hitches when an effect is first seen; an effect may show up "
+               "a frame late."));
 
-    ImGui::SeparatorText(T("Pantalla", "Display"));
+    FormSection(T("Calidad de imagen", "Image quality"));
     const std::string temporal = GameTemporal();
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
     RenderResCombo();
     ImGui::EndDisabled();
-    if (dlss_sized) {
-        ImGui::SameLine();
-        ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
-    }
-    AspectRatioSettings();
-    GameFlag("skip_intro", T("Saltar los vídeos de inicio", "Skip intro videos"), false,
-             T("Sin los logos de Activision y Beenox al arrancar el juego.",
-               "Skips the Activision and Beenox logo videos when the game starts."));
-    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4: bordes más limpios en la vegetación. En NVIDIA ya no dibuja "
-               "líneas punteadas en el cielo; en otras gráficas puede que sí. Cuesta algo de "
-               "rendimiento en gráficas modestas. Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing: cleaner foliage edges. On NVIDIA it no longer draws dotted "
-               "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
-               "Needs a restart."));
+    if (dlss_sized) FormNote(T("La resolución interna la decide la calidad de DLSS.", "The internal resolution is set by the DLSS quality."));
     {
         // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time. FSR 4 runs with its
         // model files (Fsr4FilesPresent); without them the line below says what is missing.
@@ -3826,27 +3991,6 @@ void SettingsTab() {
             a.game.Erase("fsr3");
             SaveGameIni();
         }
-        if (native && (temporal == "fsr3" || temporal == "fsr4")) {
-            ImGui::TextColored(kGrey, "%s", T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
-                                              "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
-        } else if (temporal == "dlss" && !DlssFilesPresent()) {
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
-            ImGui::TextColored(kGrey, "%s", T("DLSS necesita sacredfire_dlss.dll y nvngx_dlss.dll en la carpeta bin, "
-                                              "que no están en esta copia. Mientras falten, el juego no usa DLSS.",
-                                              "DLSS needs sacredfire_dlss.dll and nvngx_dlss.dll in the bin folder, "
-                                              "which this copy does not have. While they are missing, the game does "
-                                              "not use DLSS."));
-            ImGui::PopTextWrapPos();
-        } else if (temporal == "fsr4" && !fsr4) {
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
-            ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
-                                              "fsr4_shaders junto al launcher. Mientras falten, se usa FSR 3. También "
-                                              "necesita una gráfica con soporte INT8.",
-                                              "FSR 4 needs its files, which do not come with the game: put the "
-                                              "fsr4_shaders folder next to the launcher. While they are missing, FSR 3 "
-                                              "is used. It also needs a GPU with INT8 support."));
-            ImGui::PopTextWrapPos();
-        }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
                      "del juego, y a la misma resolución también suavizan los bordes. DLSS necesita una tarjeta NVIDIA "
@@ -3856,34 +4000,23 @@ void SettingsTab() {
                      "rebuild detail over several frames from the game's depth and motion, and smooth edges even at the "
                      "same resolution. DLSS needs an NVIDIA RTX card and FSR 4 a GPU with INT8 support and its files "
                      "(FSR 3 runs otherwise). Experimental: switch to FSR 1 if you see trails or shimmering."));
-    }
-    LauncherFlag("hdr", T("HDR del juego", "The game's HDR"), false,
-                 T("La salida HDR propia del juego (HDR10). Activa también el HDR de Windows y apaga el "
-                   "RTX HDR para este juego. Experimental.",
-                   "The game's own HDR output (HDR10). Also turn on Windows HDR and turn off RTX HDR for "
-                   "this game. Experimental."));
-    if (a.launcher.Flag("hdr", false)) {
-        static constexpr Choice kHdrPeak[] = {{"Como el juego", "As the game", "0"},
-                                              {"400 nits", "400 nits", "400"},
-                                              {"450 nits", "450 nits", "450"},
-                                              {"600 nits", "600 nits", "600"},
-                                              {"800 nits", "800 nits", "800"},
-                                              {"1000 nits", "1000 nits", "1000"}};
-        ChoiceCombo(T("Brillo máximo HDR", "HDR peak brightness"), "hdr_peak", kHdrPeak, "0");
-        HelpMarker(T("El brillo máximo de tu pantalla (el de la calibración HDR de Windows): las partes "
-                     "más brillantes del juego se ajustan a él en vez de quemarse.",
-                     "Your display's peak brightness (from the Windows HDR calibration): the game's "
-                     "brightest parts are fitted to it instead of clipping."));
-        static constexpr Choice kHdrGain[] = {{"60%", "60%", "0.6"},   {"70%", "70%", "0.7"},
-                                              {"80%", "80%", "0.8"},   {"90%", "90%", "0.9"},
-                                              {"100% (el juego)", "100% (the game)", "1"},
-                                              {"115%", "115%", "1.15"}, {"130%", "130%", "1.3"}};
-        ChoiceCombo(T("Blanco de referencia HDR", "HDR paper white"), "hdr_gain", kHdrGain, "1");
-        HelpMarker(T("Cuánto brillan los blancos normales (menús, textos, cielo) frente a lo que el juego "
-                     "pone. Bájalo si los menús se ven quemados; los brillos fuertes siguen limitados al "
-                     "brillo máximo.",
-                     "How bright ordinary whites (menus, text, sky) are against what the game puts out. "
-                     "Lower it if menus look blown out; strong highlights stay within the peak brightness."));
+        if (native && (temporal == "fsr3" || temporal == "fsr4")) {
+            FormNote(T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
+                       "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "dlss" && !DlssFilesPresent()) {
+            FormNote(T("DLSS necesita sacredfire_dlss.dll y nvngx_dlss.dll en la carpeta bin, "
+                       "que no están en esta copia. Mientras falten, el juego no usa DLSS.",
+                       "DLSS needs sacredfire_dlss.dll and nvngx_dlss.dll in the bin folder, "
+                       "which this copy does not have. While they are missing, the game does "
+                       "not use DLSS."));
+        } else if (temporal == "fsr4" && !fsr4) {
+            FormNote(T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
+                       "fsr4_shaders junto al launcher. Mientras falten, se usa FSR 3. También "
+                       "necesita una gráfica con soporte INT8.",
+                       "FSR 4 needs its files, which do not come with the game: put the "
+                       "fsr4_shaders folder next to the launcher. While they are missing, FSR 3 "
+                       "is used. It also needs a GPU with INT8 support."));
+        }
     }
     if (temporal == "dlss") {
         static constexpr Choice kQuality[] = {
@@ -3919,24 +4052,26 @@ void SettingsTab() {
     if (temporal == "fsr3" || temporal == "fsr4") {
         float sharp = float(std::atof(a.game.Get("fsr3_sharpness", "0.30").c_str()));
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        if (ImGui::SliderFloat(T("Nitidez de FSR", "FSR sharpness"), &sharp, 0.0f, 1.0f, "%.2f")) {
+        if (ImGui::SliderFloat(FormLabel(T("Nitidez de FSR", "FSR sharpness")), &sharp, 0.0f, 1.0f, "%.2f")) {
             char text[16];
             std::snprintf(text, sizeof text, "%.2f", sharp);
             a.game.Set("fsr3_sharpness", text);
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
     }
-    GameFlag("fullscreen", T("Pantalla completa", "Fullscreen"), false);
-    GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
-             T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
-    GameFlag("show_fps", T("Contador de FPS en la esquina", "FPS counter in the corner"), false);
-    GameFlag("show_ping", T("Contador de ping en la esquina", "Ping counter in the corner"), false,
-             T("En una sala online, el ping de cada jugador en ms, debajo del contador de FPS. También en el menú "
-               "del juego (Insert o L3+R3), pestaña Sala.",
-               "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
-               "(Insert or L3+R3), Room tab."));
-    GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
-             PerfReportsText());
+    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
+             T("El antialiasing 2x de la PS4: bordes más limpios en la vegetación. En NVIDIA ya no dibuja "
+               "líneas punteadas en el cielo; en otras gráficas puede que sí. Cuesta algo de "
+               "rendimiento en gráficas modestas. Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing: cleaner foliage edges. On NVIDIA it no longer draws dotted "
+               "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
+               "Needs a restart."));
+}
+
+/// Settings > Display: the window, the screen shape, HDR and the counters drawn over the game.
+void DisplaySettings() {
+    App& a = g_app;
+    FormSection(T("Ventana", "Window"));
     {
         std::scoped_lock lock{a.mutex};
         const std::string current = a.launcher.Get("display");
@@ -3944,7 +4079,7 @@ void SettingsTab() {
         for (const auto& [value, label] : a.displays)
             if (value == current) preview = label;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
-        if (ImGui::BeginCombo(T("Monitor", "Monitor"), preview.c_str())) {
+        if (ImGui::BeginCombo(FormLabel(T("Monitor", "Monitor")), preview.c_str())) {
             if (ImGui::Selectable(T("Principal", "Primary"), current.empty())) {
                 a.launcher.Set("display", "");
                 SaveLauncher();
@@ -3958,15 +4093,62 @@ void SettingsTab() {
             ImGui::EndCombo();
         }
     }
-    GpuCombo();
+    GameFlag("fullscreen", T("Pantalla completa", "Fullscreen"), false);
+    GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
+             T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
     ChoiceCombo(T("Presentación", "Presentation"), "present_mode", kPresentModes, "Mailbox");
 
-    ImGui::SeparatorText(T("Sonido", "Sound"));
+    FormSection(T("Formato de pantalla", "Screen shape"));
+    AspectRatioSettings();
+
+    FormSection("HDR");
+    LauncherFlag("hdr", T("HDR del juego", "The game's HDR"), false,
+                 T("La salida HDR propia del juego (HDR10). Activa también el HDR de Windows y apaga el "
+                   "RTX HDR para este juego. Experimental.",
+                   "The game's own HDR output (HDR10). Also turn on Windows HDR and turn off RTX HDR for "
+                   "this game. Experimental."));
+    if (a.launcher.Flag("hdr", false)) {
+        static constexpr Choice kHdrPeak[] = {{"Como el juego", "As the game", "0"},
+                                              {"400 nits", "400 nits", "400"},
+                                              {"450 nits", "450 nits", "450"},
+                                              {"600 nits", "600 nits", "600"},
+                                              {"800 nits", "800 nits", "800"},
+                                              {"1000 nits", "1000 nits", "1000"}};
+        ChoiceCombo(T("Brillo máximo HDR", "HDR peak brightness"), "hdr_peak", kHdrPeak, "0");
+        HelpMarker(T("El brillo máximo de tu pantalla (el de la calibración HDR de Windows): las partes "
+                     "más brillantes del juego se ajustan a él en vez de quemarse.",
+                     "Your display's peak brightness (from the Windows HDR calibration): the game's "
+                     "brightest parts are fitted to it instead of clipping."));
+        static constexpr Choice kHdrGain[] = {{"60%", "60%", "0.6"},   {"70%", "70%", "0.7"},
+                                              {"80%", "80%", "0.8"},   {"90%", "90%", "0.9"},
+                                              {"100% (el juego)", "100% (the game)", "1"},
+                                              {"115%", "115%", "1.15"}, {"130%", "130%", "1.3"}};
+        ChoiceCombo(T("Blanco de referencia HDR", "HDR paper white"), "hdr_gain", kHdrGain, "1");
+        HelpMarker(T("Cuánto brillan los blancos normales (menús, textos, cielo) frente a lo que el juego "
+                     "pone. Bájalo si los menús se ven quemados; los brillos fuertes siguen limitados al "
+                     "brillo máximo.",
+                     "How bright ordinary whites (menus, text, sky) are against what the game puts out. "
+                     "Lower it if menus look blown out; strong highlights stay within the peak brightness."));
+    }
+
+    FormSection(T("En pantalla", "On screen"));
+    GameFlag("show_fps", T("Contador de FPS", "FPS counter"), false,
+             T("Los FPS en la esquina de la pantalla.", "The FPS in the corner of the screen."));
+    GameFlag("show_ping", T("Contador de ping", "Ping counter"), false,
+             T("En una sala online, el ping de cada jugador en ms, debajo del contador de FPS. También en el menú "
+               "del juego (Insert o L3+R3), pestaña Sala.",
+               "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
+               "(Insert or L3+R3), Room tab."));
+}
+
+/// Settings > Game: sound, language and the start of the game.
+void GameSettings() {
+    App& a = g_app;
+    FormSection(T("Sonido", "Sound"));
     {
         int volume = std::clamp(a.game.Int("volume", 100), 0, 200);
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        if (ImGui::SliderInt(T("Volumen del juego", "Game volume"), &volume, 0, 200, "%d%%")) {
+        if (ImGui::SliderInt(FormLabel(T("Volumen del juego", "Game volume")), &volume, 0, 200, "%d%%")) {
             a.game.Set("volume", std::to_string(volume));
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
@@ -3976,100 +4158,7 @@ void SettingsTab() {
                      "distorting. While you play it can also be changed in the in-game menu (Insert or L3+R3)."));
     }
 
-    ImGui::SeparatorText(T("Mando", "Controller"));
-    {
-        std::scoped_lock lock{a.mutex};
-        const std::string current = a.launcher.Get("gamepad");
-        std::string preview = T("El primero conectado", "First connected");
-        bool listed = current.empty();
-        for (const auto& [guid, name] : a.gamepads)
-            if (guid == current) {
-                preview = name;
-                listed = true;
-            }
-        if (!listed) preview = a.launcher.Get("gamepad_name", current) + T(" (no conectado)", " (not connected)");
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
-        if (ImGui::BeginCombo(T("Mando", "Controller"), preview.c_str())) {
-            if (ImGui::Selectable(T("El primero conectado", "First connected"), current.empty())) {
-                a.launcher.Set("gamepad", "");
-                a.launcher.Set("gamepad_name", "");
-                SaveLauncher();
-            }
-            for (const auto& [guid, name] : a.gamepads) {
-                ImGui::PushID(guid.c_str());
-                if (ImGui::Selectable(name.c_str(), guid == current)) {
-                    a.launcher.Set("gamepad", guid);
-                    a.launcher.Set("gamepad_name", name);
-                    SaveLauncher();
-                }
-                ImGui::PopID();
-            }
-            ImGui::EndCombo();
-        }
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!a.probe_done && a.probe.joinable());
-    if (ImGui::Button(T("Buscar mandos", "Refresh"))) {
-        if (a.probe.joinable()) a.probe.join();
-        StartProbe();
-    }
-    ImGui::EndDisabled();
-    {
-        // bbport.ini port.N=keyboard (N 2..4): that split-screen player plays on the keyboard and
-        // player 1 on the controller alone (src/runtime_pad.c). None: the keyboard drives player 1 too.
-        const auto port_key = [](int n) { return "port." + std::to_string(n); };
-        int current = 1;
-        for (int n = 2; n <= 4; ++n)
-            if (Lower(Trim(a.game.Get(port_key(n)))) == "keyboard") current = n;
-        const auto name = [](int n) {
-            return n == 1 ? std::string(T("Jugador 1 (junto al mando)", "Player 1 (with the controller)"))
-                          : std::string(T("Jugador ", "Player ")) + std::to_string(n);
-        };
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        if (ImGui::BeginCombo(T("Teclado", "Keyboard"), name(current).c_str())) {
-            for (int n = 1; n <= 4; ++n) {
-                if (!ImGui::Selectable(name(n).c_str(), n == current) || n == current) continue;
-                for (int k = 2; k <= 4; ++k)
-                    if (Lower(Trim(a.game.Get(port_key(k)))) == "keyboard") a.game.Set(port_key(k), "");
-                if (n > 1) a.game.Set(port_key(n), "keyboard");
-                SaveGameIni();
-            }
-            ImGui::EndCombo();
-        }
-        HelpMarker(T("Para jugar dos en pantalla dividida, uno con teclado y otro con mando, elige Jugador 2: el mando "
-                     "queda para el jugador 1 y el teclado para el 2 (Espacio es X). Si juegas solo con teclado, déjalo "
-                     "en Jugador 1. También se cambia en el menú del juego (Insert o L3+R3).",
-                     "For two players in split screen, one on the keyboard and one on a controller, choose Player 2: "
-                     "the controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on "
-                     "the keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."));
-    }
-    // bbport.ini button_prompts (scripts/button_prompts.py): the buttons the game shows.
-    {
-        static constexpr Choice kButtonPrompts[] = {
-            {"PlayStation", "PlayStation", "playstation"},
-            {"Xbox", "Xbox", "xbox"},
-        };
-        if (GameChoiceCombo(T("Iconos de botones", "Button prompts"), "button_prompts", kButtonPrompts, "playstation", 12.0f))
-            SaveGameIni();
-        HelpMarker(T("Los botones que muestra el juego en menús y avisos. Xbox: A, B, X, Y, LB, RB, LT, RT y View. "
-                     "Se aplica al pulsar Jugar.",
-                     "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. "
-                     "Applies when you press Play."));
-    }
-    GameFlag("split_auto", T("Pantalla dividida: asignar los mandos automáticamente", "Split screen: assign controllers automatically"),
-             true,
-             T("Para jugar de 2 a 4 con varios mandos: cada mando que conectes es el siguiente jugador (el primero, el "
-               "jugador 1). Desactivado, una persona puede cambiar de mando cuando quiera, y los mandos de los jugadores "
-               "2-4 se eligen en el menú del juego (Insert o L3+R3), Controllers.",
-               "For 2 to 4 players with several controllers: each controller you connect is the next player (the first "
-               "one, player 1). Off, one person can switch controllers at will, and players 2-4's controllers are chosen "
-               "in the in-game menu (Insert or L3+R3), Controllers."));
-    ImGui::TextColored(kGrey, "%s", T("Más mandos para la pantalla dividida: menú del juego (Insert o L3+R3), Controllers.",
-                                      "More controllers for split screen: in-game menu (Insert or L3+R3), Controllers."));
-
-    ImGui::SeparatorText(T("Consola", "Console"));
-    if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    FormSection(T("Idioma", "Language"));
     if (IsEuGame()) {
         ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguagesEU, DefaultGameLanguage());
         HelpMarker(T("Los idiomas que trae la versión europea (CUSA14876): inglés, español de España, francés, alemán, "
@@ -4088,13 +4177,53 @@ void SettingsTab() {
                      "Spain's Spanish, German, Italian and Arabic). Applied when you press Play."));
     }
 
-    ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
-    LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
+    FormSection(T("Inicio", "Start"));
+    GameFlag("skip_intro", T("Saltar los vídeos de inicio", "Skip intro videos"), false,
+             T("Sin los logos de Activision y Beenox al arrancar el juego.",
+               "Skips the Activision and Beenox logo videos when the game starts."));
+}
+
+/// Settings > Launcher: what the launcher does while the game runs, and the diagnostic.
+void LauncherSettings() {
+    FormSection(T("Al jugar", "While playing"));
+    LauncherFlag("hide_on_play", T("Ocultar el launcher mientras juegas", "Hide the launcher while playing"), false,
                  T("Oculta completamente la ventana del launcher mientras juegas y la restaura automáticamente al salir.",
                    "Hides the launcher window completely while playing and restores it automatically when exiting."));
-    LauncherFlag("close_on_play", T("Cerrar launcher tras jugar", "Close launcher after playing"), false,
+    LauncherFlag("close_on_play", T("Cerrar el launcher al salir del juego", "Close the launcher after playing"), false,
                  T("Cierra el launcher por completo una vez que sales del juego.",
                    "Closes the launcher completely once you exit the game."));
+
+    FormSection(T("Privacidad", "Privacy"));
+    GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
+             PerfReportsText());
+}
+
+/// One page of Settings: its own scrolling area under the page tabs, laid out as a form.
+void SettingsPage(const char* title, void (*draw)()) {
+    if (!ImGui::BeginTabItem(title)) return;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::BeginChild("settings_page", ImVec2(0, 0), ImGuiChildFlags_None);
+    FormBegin();
+    draw();
+    FormEnd();
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.5f));
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndTabItem();
+}
+
+void SettingsTab() {
+    App& a = g_app;
+    if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
+    FormNote(T("Se aplican al pulsar Jugar. El menú del juego (Insert o L3+R3) cambia los mismos ajustes.",
+               "Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings."));
+    ImGui::Spacing();
+    if (!ImGui::BeginTabBar("settings_pages")) return;
+    SettingsPage(T("Gráficos", "Graphics"), GraphicsSettings);
+    SettingsPage(T("Pantalla", "Display"), DisplaySettings);
+    SettingsPage(T("Juego", "Game"), GameSettings);
+    SettingsPage("Launcher", LauncherSettings);
+    ImGui::EndTabBar();
 }
 
 /// Linking the nickname to the player's Discord account, so that a reinstall or another PC
@@ -4435,6 +4564,59 @@ void LinkedAccountLine(bool steam, const std::string& name) {
                                        who).c_str());
 }
 
+// Tacho: tu foto de Discord junto a tu apodo. El servidor la manda en PNG (GET /ryunet/avatar,
+// ryunet_avatar.go; la de Discord por defecto si no tienes); se pide una vez por servidor y apodo.
+ID3D11ShaderResourceView* PngTexture(const std::string& png);
+struct OwnAvatarState {
+    std::mutex mutex;
+    std::string id;   // server|nick it is for
+    std::string png;  // the answer, while the texture is not made
+    bool ready = false;
+    ID3D11ShaderResourceView* texture = nullptr;
+};
+OwnAvatarState g_own_avatar;
+
+ID3D11ShaderResourceView* OwnAvatar() {
+    const std::string nick = CurrentNick();
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    if (NickProblem(nick) || server.empty()) return nullptr;
+    const std::string id = server + "|" + nick;
+    std::scoped_lock lock{g_own_avatar.mutex};
+    if (g_own_avatar.id != id) {
+        g_own_avatar.id = id;
+        g_own_avatar.png.clear();
+        g_own_avatar.ready = false;
+        if (g_own_avatar.texture) g_own_avatar.texture->Release();
+        g_own_avatar.texture = nullptr;
+        std::thread([server, nick, id] {
+            const std::wstring path = L"/ryunet/avatar?name=" + Widen(nick) + L"&who=" + Widen(nick);  // [A-Za-z0-9_-]
+            std::string png = HttpRequest(server, L"GET", path, {}, 8000, false, {}, 256 << 10);
+            if (png.size() < 8 || png.compare(0, 4, "\x89PNG") != 0) png.clear();
+            std::scoped_lock lock{g_own_avatar.mutex};
+            if (g_own_avatar.id != id) return;
+            g_own_avatar.png = std::move(png);
+            g_own_avatar.ready = true;
+        }).detach();
+    }
+    if (g_own_avatar.ready && !g_own_avatar.texture && !g_own_avatar.png.empty()) {
+        g_own_avatar.texture = PngTexture(g_own_avatar.png);
+        g_own_avatar.png.clear();
+    }
+    return g_own_avatar.texture;
+}
+
+/// The picture in a circle, `size` pixels, at the cursor; then SameLine. Nothing when there is none.
+void OwnAvatarImage(float size) {
+    ID3D11ShaderResourceView* texture = OwnAvatar();
+    if (!texture) return;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(size, size));
+    ImGui::GetWindowDrawList()->AddImageRounded(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(texture))), p,
+                                                ImVec2(p.x + size, p.y + size), ImVec2(0, 0), ImVec2(1, 1),
+                                                IM_COL32_WHITE, size * 0.5f);
+    ImGui::SameLine();
+}
+
 /// Under the nickname: its Discord and Steam accounts, and Link / Recover / Unlink.
 void DiscordAccountSection() {
     if (NickProblem(CurrentNick())) {
@@ -4536,7 +4718,7 @@ void EosBridgeSection(bool settings) {
         const std::string mode = EosBridgeMode();
         int current = mode == "on" ? 1 : mode == "off" ? 2 : 0;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
-        if (ImGui::Combo(T("Conexión por Epic Online Services", "Connection through Epic Online Services"), &current, labels, 3)) {
+        if (ImGui::Combo(FormLabel(T("Conexión por Epic Online Services", "Connection through Epic Online Services")), &current, labels, 3)) {
             a.launcher.Set("eos_bridge", values[current]);
             SaveLauncher();
         }
@@ -5017,201 +5199,284 @@ void AccountSection() {
     }
 }
 
-void OnlineTab() {
+/// The player's picture in a circle, `size` pixels: the Discord one (OwnAvatar), or the initial of
+/// the nickname on a coloured disc while there is none.
+void ProfileAvatar(float size) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(size, size));
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImVec2 c{p.x + size * 0.5f, p.y + size * 0.5f};
+    if (ID3D11ShaderResourceView* texture = OwnAvatar()) {
+        d->AddImageRounded(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(texture))), p,
+                           ImVec2(p.x + size, p.y + size), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, size * 0.5f);
+    } else {
+        d->AddCircleFilled(c, size * 0.5f, IM_COL32(18, 104, 168, 255));
+        const std::string nick = CurrentNick();
+        char initial[2] = {nick.empty() ? '?' : char(std::toupper(static_cast<unsigned char>(nick[0]))), 0};
+        ImFont* font = ImGui::GetFont();
+        const float font_size = size * 0.48f;
+        const ImVec2 t = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, initial);
+        d->AddText(font, font_size, ImVec2(c.x - t.x * 0.5f, c.y - t.y * 0.5f), IM_COL32(235, 248, 255, 255), initial);
+    }
+    d->AddCircle(c, size * 0.5f, IM_COL32(97, 232, 255, 200), 0, 2.0f);
+}
+
+/// The Online page's head: picture, nickname, account and server, always in sight.
+void OnlineProfileCard() {
     App& a = g_app;
-    ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
-                                      "Online play through a RyuNET server. Applied when you press Play."));
+    const bool online = a.game.Flag("online", true);
+    const std::string nick = CurrentNick();
+    const bool has_nick = !NickProblem(nick);
+    BeginCard("online_profile");
+    ProfileAvatar(ImGui::GetFrameHeight() * 2.6f);
+    ImGui::SameLine(0.0f, ImGui::GetFontSize() * 0.9f);
+    ImGui::BeginGroup();
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.35f);
+    ImGui::TextUnformatted(has_nick ? nick.c_str() : T("Sin apodo", "No nickname"));
+    if (g_font_heading) ImGui::PopFont();
+    if (!online) {
+        ImGui::TextColored(kGrey, "%s", T("Modo online desactivado (pestaña Servidor).", "Online mode is off (Server tab)."));
+    } else if (SignedIn()) {
+        const NickCheck::Result info = NickInfo();
+        ImGui::TextColored(kGreen, "%s", info.discord.empty()
+                                             ? T("Sesión iniciada", "Logged in")
+                                             : Format(T("Sesión iniciada · Discord: %s", "Logged in · Discord: %s"), info.discord).c_str());
+    } else if (has_nick) {
+        ImGui::TextColored(kYellow, "%s", T("Sin cuenta: inicia sesión para no perder tu apodo.",
+                                            "No account: log in to keep your nickname."));
+    } else {
+        ImGui::TextColored(kYellow, "%s", T("Inicia sesión o elige un apodo en Cuenta.", "Log in or pick a nickname in Account."));
+    }
+    ImGui::TextColored(kGrey, "%s", Format(T("Servidor: %s", "Server: %s"), Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"))).c_str());
+    if (online) EosBridgeSection(false);  // the connection, one line
+    ImGui::EndGroup();
+    EndCard();
+}
 
-    ImGui::SeparatorText(T("Servidor", "Server"));
-    {
-        GameFlag("online", T("Habilitar modo online", "Enable online mode"), true,
-                 T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
-                   "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
-
-        const bool online_on = a.game.Flag("online", true);
-        ImGui::BeginDisabled(!online_on);
-
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20.0f);
-        if (ImGui::InputText(T("Servidor RyuNET (Server)", "RyuNET Server"), a.online_server_buf, sizeof(a.online_server_buf))) {
-            a.game.Set("online_server", a.online_server_buf);
+/// Online > Account: logging in, the nickname and its Discord account.
+void OnlineAccountPage() {
+    App& a = g_app;
+    const bool online = a.game.Flag("online", true);
+    if (!online) FormNote(T("El modo online está desactivado: actívalo en la pestaña Servidor.",
+                            "Online mode is off: turn it on in the Server tab."));
+    ImGui::BeginDisabled(!online);
+    FormSection(T("Cuenta", "Account"));
+    AccountSection();
+    // Without an account: a nickname typed here, which Link with Discord or Steam turns into one
+    // (the way in when the site does not open on this network).
+    const NickCheck::Result policy = NickInfo();
+    const bool required = policy.account_required || policy.account_deadline;
+    if (SignedIn()) {
+        FormSection(T("Cuentas vinculadas", "Linked accounts"));
+        if (online) DiscordAccountSection();
+    } else {
+        FormSection(required ? T("Crear la cuenta desde aquí", "Create the account from here")
+                             : T("Jugar sin cuenta", "Play without an account"));
+        FormNote(required ? T("Elige un apodo y vincúlalo con Discord o Steam.", "Pick a nickname and link it with Discord or Steam.")
+                          : T("Escribe tu apodo a mano.", "Type your nickname by hand."));
+        // A nickname linked to this player's Discord or Steam account is their identity: it is
+        // changed by unlinking it first (DiscordAccountSection), not by typing over it.
+        const NickCheck::Result nick_info = NickInfo();
+        const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
+        ImGui::BeginDisabled(nick_locked);
+        NickInput(FormLabel(T("Apodo", "Nickname")));
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        ImGui::EndDisabled();
+        HelpMarker(nick_locked
+                       ? T("Este apodo está vinculado a tu cuenta de Discord o Steam y queda fijo. Para cambiarlo, pulsa "
+                           "Desvincular abajo.",
+                           "This nickname is linked to your Discord or Steam account and stays fixed. To change it, press "
+                           "Unlink below.")
+                       : T("Tu nombre en el online, obligatorio: de 3 a 16 letras, números, _ o -. Cada apodo es una cuenta "
+                           "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
+                           "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
+                           "on the server (coins, Pit Stop items), so do not use someone else's."));
+        if (const char* problem = NickProblem(CurrentNick())) {
+            ImGui::TextColored(kYellow, "%s", problem);
+        } else if (online) {
+            NickAvailabilityLine();
+            DiscordAccountSection();
         }
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            if (Trim(a.online_server_buf).empty()) {
-                std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
-                a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
-                a.game.Set("online_server", a.online_server_buf);
-            }
-            SaveGameIni();
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton(T("Por defecto", "Default"))) {
+    }
+    FormSection(T("Amigos", "Friends"));
+    // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
+    // the names of the old Friends field (online_friends) get friend requests once.
+    FormNote(T("Tus amigos se buscan, agregan e invitan dentro del juego: menú (Insert / L3+R3) > Amigos.",
+               "Friends are found, added and invited in the game: menu (Insert / L3+R3) > Friends."));
+    ImGui::EndDisabled();
+}
+
+/// Online > Server: the server and the connection to it.
+void OnlineServerPage() {
+    App& a = g_app;
+    FormSection(T("Servidor", "Server"));
+    GameFlag("online", T("Modo online", "Online mode"), true,
+             T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
+               "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
+    const bool online_on = a.game.Flag("online", true);
+    ImGui::BeginDisabled(!online_on);
+    if (ImGui::InputText(FormLabel(T("Servidor RyuNET", "RyuNET server")), a.online_server_buf, sizeof(a.online_server_buf))) {
+        a.game.Set("online_server", a.online_server_buf);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (Trim(a.online_server_buf).empty()) {
             std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
             a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
             a.game.Set("online_server", a.online_server_buf);
-            SaveGameIni();
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("127.0.0.1")) {
-            std::strncpy(a.online_server_buf, "127.0.0.1", sizeof(a.online_server_buf) - 1);
-            a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
-            a.game.Set("online_server", a.online_server_buf);
-            SaveGameIni();
-        }
-        HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
-                     "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
-        EosBridgeSection(false);  // its state, one line
-        if (ImGui::TreeNode(T("Conexión: tipo de NAT y Epic Online Services", "Connection: NAT type and Epic Online Services"))) {
-            NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
-            EosBridgeSection(true);
-            ImGui::TreePop();
-        }
-        ImGui::EndDisabled();
+        SaveGameIni();
     }
-
-    ImGui::SeparatorText(T("Cuenta", "Account"));
-    {
-        ImGui::BeginDisabled(!a.game.Flag("online", true));
-
-        AccountSection();
-        // Without an account: a nickname typed here, which Link with Discord turns into one (the
-        // way in when the site does not open on this network).
-        const NickCheck::Result policy = NickInfo();
-        const bool required = policy.account_required || policy.account_deadline;
-        if (SignedIn()) {
-            if (a.game.Flag("online", true)) DiscordAccountSection();
-        } else if (ImGui::TreeNode(required ? T("Crear la cuenta desde aquí: elige un apodo y vincúlalo con Discord o Steam",
-                                                "Create the account from here: pick a nickname and link it with Discord or Steam")
-                                            : T("Jugar sin cuenta: escribir el apodo a mano",
-                                                "Play without an account: type the nickname by hand"))) {
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-            // A nickname linked to this player's Discord account is their identity: it is changed by
-            // unlinking it first (DiscordAccountSection), not by typing over it.
-            const NickCheck::Result nick_info = NickInfo();
-            const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
-            ImGui::BeginDisabled(nick_locked);
-            NickInput(T("Apodo (Nickname)", "Nickname"));
-            if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
-            ImGui::EndDisabled();
-            HelpMarker(nick_locked
-                           ? T("Este apodo está vinculado a tu cuenta de Discord y queda fijo. Para cambiarlo, pulsa "
-                               "Desvincular abajo.",
-                               "This nickname is linked to your Discord account and stays fixed. To change it, press "
-                               "Unlink below.")
-                           : T("Tu nombre en el online, obligatorio: de 3 a 16 letras, números, _ o -. Cada apodo es una cuenta "
-                               "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
-                               "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
-                               "on the server (coins, Pit Stop items), so do not use someone else's."));
-            if (const char* problem = NickProblem(CurrentNick())) {
-                ImGui::TextColored(kYellow, "%s", problem);
-            } else if (a.game.Flag("online", true)) {
-                NickAvailabilityLine();
-                DiscordAccountSection();
-            }
-
-            ImGui::TreePop();
-        }
-
-        ImGui::EndDisabled();
+    HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
+                 "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
+    ImGui::SetCursorPosX(g_form_column > 0.0f ? g_form_column : ImGui::GetCursorPosX());
+    if (ImGui::SmallButton(T("Por defecto", "Default"))) {
+        std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
+        a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+        a.game.Set("online_server", a.online_server_buf);
+        SaveGameIni();
     }
-
-    ImGui::SeparatorText(T("Progreso online", "Online progress"));
-    {
-        ImGui::BeginDisabled(!a.game.Flag("online", true));
-        // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
-        // the names of the old Friends field (online_friends) get friend requests once.
-        ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
-                                          "Friends: in the game, menu (Insert / L3+R3) > Friends."));
-
-        // Which Pit Stop items (characters, skins, karts) count as yours online: the server's,
-        // bought with coins and tied to the nickname, or the save's (run.py sends it at login).
-        ImGui::Spacing();
-        ImGui::TextUnformatted(T("Personajes, skins y karts en online:", "Characters, skins and karts online:"));
-        const bool from_save = Lower(Trim(a.game.Get("online_inventory", "server"))) == "save";
-        if (ImGui::RadioButton(T("Progresión en el servidor", "Progress on the server"), !from_save)) {
-            a.game.Set("online_inventory", "server");
-            SaveGameIni();
-        }
-        HelpMarker(T("Lo consigues jugando: ganas monedas en las carreras y compras en el Pit Stop. Lo que compras "
-                     "queda guardado en el servidor, ligado a tu apodo.",
-                     "You earn it by playing: races give coins and you buy in the Pit Stop. What you buy is kept on "
-                     "the server, tied to your nickname."));
-        if (ImGui::RadioButton(T("Progresión de guardado local", "Local save progress"), from_save)) {
-            a.game.Set("online_inventory", "save");
-            SaveGameIni();
-        }
-        HelpMarker(T("Online tienes lo mismo que en tu partida guardada, por ejemplo una partida al 100% importada en "
-                     "la pestaña Guardados. El Pit Stop no vende nada en este modo: no gastas monedas en objetos que no "
-                     "verías.",
-                     "Online you have what your save has, for example a 100% save imported in the Saves tab. The Pit "
-                     "Stop sells nothing in this mode: no coins are spent on items you would not see."));
-
-        ImGui::EndDisabled();
-    }
-
-    // The rules of the online, and where to report and appeal.
-    ImGui::SeparatorText(T("Reglas del online", "Online rules"));
-    for (const char* rule : {T("Nada de trampas: hacks, trainers, modificaciones de velocidad u objetos, ni tiempos falsos en los récords. Arruinan la partida de todos.", "No cheating: hacks, trainers, speed or item modifications, or fake leaderboard times. They ruin the game for everyone."), T("Respeta a los demás: sin apodos ofensivos, insultos ni acoso.", "Respect others: no offensive nicknames, insults or harassment."), T("No sabotees partidas ni abandones a propósito para molestar.", "Do not sabotage races or quit on purpose to annoy others."), T("Usa tu propio apodo: no te hagas pasar por otra persona.", "Use your own nickname: do not impersonate anyone."), T("¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.", "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.")}) {
-        ImGui::Bullet();
-        ImGui::TextWrapped("%s", rule);
-    }
-    ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
-    CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
-    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords", "Crash Team Rank: validate your records"));
     ImGui::SameLine();
-    if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
+    if (ImGui::SmallButton(T("Local (127.0.0.1)", "Local (127.0.0.1)"))) {
+        std::strncpy(a.online_server_buf, "127.0.0.1", sizeof(a.online_server_buf) - 1);
+        a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+        a.game.Set("online_server", a.online_server_buf);
+        SaveGameIni();
+    }
 
-    ImGui::SeparatorText("Discord");
+    FormSection(T("Conexión", "Connection"));
+    EosBridgeSection(false);  // its state, one line
+    ImGui::Spacing();
+    NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
+    ImGui::Spacing();
+    EosBridgeSection(true);
+    ImGui::EndDisabled();
+}
+
+/// Online > Progress: which Pit Stop items count as yours online.
+void OnlineProgressPage() {
+    App& a = g_app;
+    ImGui::BeginDisabled(!a.game.Flag("online", true));
+    // The server's, bought with coins and tied to the nickname, or the save's (run.py sends it at login).
+    FormSection(T("Personajes, skins y karts en online", "Characters, skins and karts online"));
+    const bool from_save = Lower(Trim(a.game.Get("online_inventory", "server"))) == "save";
+    if (ImGui::RadioButton(T("Progresión en el servidor", "Progress on the server"), !from_save)) {
+        a.game.Set("online_inventory", "server");
+        SaveGameIni();
+    }
+    FormNote(T("Ganas monedas en las carreras y compras en el Pit Stop; queda en el servidor, ligado a tu apodo.",
+               "Races give coins and you buy in the Pit Stop; kept on the server, tied to your nickname."));
+    ImGui::Spacing();
+    if (ImGui::RadioButton(T("Progresión de guardado local", "Local save progress"), from_save)) {
+        a.game.Set("online_inventory", "save");
+        SaveGameIni();
+    }
+    FormNote(T("Online tienes lo mismo que en tu partida guardada (pestaña Guardados).",
+               "Online you have what your save has (Saves tab)."));
+    ImGui::EndDisabled();
+
+    FormSection("Crash Team Rank");
+    // Record validation now; ranked play with ranks and MMR, tied to the server, later.
+    FormNote(T("Valida tus récords (próximamente, competitivo con rangos y MMR).",
+               "Validate your records (ranked play with MMR coming)."));
+    if (g_form_column > 0.0f) ImGui::SetCursorPosX(g_form_column);
+    if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
+}
+
+/// Online > Discord: the status shown on Discord and joining through it.
+void OnlineDiscordPage() {
+    App& a = g_app;
+    FormSection(T("Estado en Discord", "Discord status"));
     LauncherFlag("discord_rpc", T("Mostrar actividad en Discord", "Show activity on Discord"), true,
                  T("Mientras juegas, tu estado de Discord muestra CTR Nitro-Fueled, si juegas online o sin conexión, "
                    "tu apodo y el tiempo de juego. Necesita la aplicación de Discord abierta en este PC.",
                    "While you play, your Discord status shows CTR Nitro-Fueled, whether you play online or offline, "
                    "your nickname and the time played. Needs the Discord app running on this PC."));
-    if (a.launcher.Flag("discord_rpc", true)) {
-        const char* status = "";
-        ImVec4 color = kGrey;
-        switch (DiscordPresence::GetStatus()) {
-        case DiscordPresence::Status::Connected:
-            status = T("Conectado a Discord.", "Connected to Discord.");
-            color = ImVec4(0.45f, 0.8f, 0.45f, 1.0f);
-            break;
-        case DiscordPresence::Status::NoDiscord:
-            status = T("Discord no está abierto; se conectará solo cuando lo abras.",
-                       "Discord is not running; it connects on its own once you open it.");
-            break;
-        case DiscordPresence::Status::NoAppId:
-            status = T("Falta el ID de la aplicación de Discord (discord_app_id en launcher.ini).",
-                       "The Discord application ID is missing (discord_app_id in launcher.ini).");
-            color = kYellow;
-            break;
-        case DiscordPresence::Status::Error:
-            status = T("Discord rechazó la conexión:", "Discord refused the connection:");
-            color = kYellow;
-            break;
-        case DiscordPresence::Status::Off:
-            status = T("Conectando...", "Connecting...");
-            break;
-        }
-        ImGui::TextColored(color, "%s", status);
-        if (DiscordPresence::GetStatus() == DiscordPresence::Status::Error) {
-            ImGui::SameLine();
-            ImGui::TextColored(kGrey, "%s", DiscordPresence::LastError().c_str());
-        }
-
-        LauncherFlag("discord_accept_requests", T("Aceptar a quien pida unirse", "Accept people who ask to join"), true,
-                     T("Cuando alguien pulsa \"Pedir unirse\" en tu perfil, se le acepta solo: recibe lo mismo que con "
-                       "una invitación tuya (tu apodo y tu servidor).",
-                       "When someone presses \"Ask to Join\" on your profile, they are accepted automatically: they "
-                       "get the same as from an invite of yours (your nickname and your server)."));
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(kGrey, "%s",
-                           T("Invitar a una privada o a tu grupo: mientras juegas online, en un chat de Discord pulsa "
-                             "+ y elige \"Invitar a jugar\". Quien acepte te tendrá en sus amigos y se le abrirá el "
-                             "juego; dentro, abre Amigos y únete a ti. Hace falta este launcher y Discord en los dos PC.",
-                             "Invite to a private match or your party: while you play online, press + in a Discord "
-                             "chat and choose \"Invite to play\". Whoever accepts gets you as a friend and their game "
-                             "starts; in it, they open Friends and join you. Both PCs need this launcher and Discord."));
-        ImGui::PopTextWrapPos();
+    if (!a.launcher.Flag("discord_rpc", true)) return;
+    const char* status = "";
+    ImVec4 color = kGrey;
+    switch (DiscordPresence::GetStatus()) {
+    case DiscordPresence::Status::Connected:
+        status = T("Conectado a Discord.", "Connected to Discord.");
+        color = ImVec4(0.45f, 0.8f, 0.45f, 1.0f);
+        break;
+    case DiscordPresence::Status::NoDiscord:
+        status = T("Discord no está abierto; se conectará solo cuando lo abras.",
+                   "Discord is not running; it connects on its own once you open it.");
+        break;
+    case DiscordPresence::Status::NoAppId:
+        status = T("Falta el ID de la aplicación de Discord (discord_app_id en launcher.ini).",
+                   "The Discord application ID is missing (discord_app_id in launcher.ini).");
+        color = kYellow;
+        break;
+    case DiscordPresence::Status::Error:
+        status = T("Discord rechazó la conexión:", "Discord refused the connection:");
+        color = kYellow;
+        break;
+    case DiscordPresence::Status::Off:
+        status = T("Conectando...", "Connecting...");
+        break;
     }
+    if (g_form_column > 0.0f) ImGui::SetCursorPosX(g_form_column);
+    ImGui::TextColored(color, "%s", status);
+    if (DiscordPresence::GetStatus() == DiscordPresence::Status::Error) {
+        ImGui::SameLine();
+        ImGui::TextColored(kGrey, "%s", DiscordPresence::LastError().c_str());
+    }
+
+    FormSection(T("Invitaciones", "Invites"));
+    LauncherFlag("discord_accept_requests", T("Aceptar a quien pida unirse", "Accept people who ask to join"), true,
+                 T("Cuando alguien pulsa \"Pedir unirse\" en tu perfil, se le acepta solo: recibe lo mismo que con "
+                   "una invitación tuya (tu apodo y tu servidor).",
+                   "When someone presses \"Ask to Join\" on your profile, they are accepted automatically: they "
+                   "get the same as from an invite of yours (your nickname and your server)."));
+    FormNote(T("Invitar a una privada o a tu grupo: mientras juegas online, en un chat de Discord pulsa "
+               "+ y elige \"Invitar a jugar\". Quien acepte te tendrá en sus amigos y se le abrirá el "
+               "juego; dentro, abre Amigos y únete a ti. Hace falta este launcher y Discord en los dos PC.",
+               "Invite to a private match or your party: while you play online, press + in a Discord "
+               "chat and choose \"Invite to play\". Whoever accepts gets you as a friend and their game "
+               "starts; in it, they open Friends and join you. Both PCs need this launcher and Discord."));
+}
+
+/// Online > Rules: the rules of the online, and where to report and appeal.
+void OnlineRulesPage() {
+    FormSection(T("Reglas del online", "Online rules"));
+    for (const char* rule : {T("Nada de trampas: hacks, trainers, modificaciones de velocidad u objetos, ni tiempos falsos en los récords. Arruinan la partida de todos.", "No cheating: hacks, trainers, speed or item modifications, or fake leaderboard times. They ruin the game for everyone."), T("Respeta a los demás: sin apodos ofensivos, insultos ni acoso.", "Respect others: no offensive nicknames, insults or harassment."), T("No sabotees partidas ni abandones a propósito para molestar.", "Do not sabotage races or quit on purpose to annoy others."), T("Usa tu propio apodo: no te hagas pasar por otra persona.", "Use your own nickname: do not impersonate anyone."), T("¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.", "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.")}) {
+        ImGui::Bullet();
+        ImGui::TextWrapped("%s", rule);
+    }
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
+    ImGui::PopTextWrapPos();
+    FormSection(T("Ayuda", "Help"));
+    CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
+}
+
+/// One page of Online, like the Settings ones but without the form's column (the account's
+/// buttons and messages run the whole width).
+void OnlinePage(const char* title, void (*draw)(), bool form) {
+    if (!ImGui::BeginTabItem(title)) return;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::BeginChild("online_page", ImVec2(0, 0), ImGuiChildFlags_None);
+    if (form) FormBegin();
+    draw();
+    FormEnd();
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.5f));
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndTabItem();
+}
+
+void OnlineTab() {
+    OnlineProfileCard();
+    ImGui::Spacing();
+    if (!ImGui::BeginTabBar("online_pages")) return;
+    OnlinePage(T("Cuenta", "Account"), OnlineAccountPage, true);
+    OnlinePage(T("Servidor", "Server"), OnlineServerPage, true);
+    OnlinePage(T("Progreso", "Progress"), OnlineProgressPage, false);
+    OnlinePage("Discord", OnlineDiscordPage, true);
+    OnlinePage(T("Reglas", "Rules"), OnlineRulesPage, false);
+    ImGui::EndTabBar();
 }
 
 std::string PackagePatchId(const PatchInfo& patch) {
@@ -5831,7 +6096,7 @@ void CloudRestore(int id) {
 
 void CloudSavesSection() {
     App& a = g_app;
-    ImGui::SeparatorText(T("Partidas en la nube", "Cloud saves"));
+    FormSection(T("Partidas en la nube", "Cloud saves"));
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kGrey, "%s", T("Al terminar de jugar online, tu partida se sube a tu cuenta (las 5 últimas versiones). Desde aquí "
                                       "puedes traer una a este PC: la que tienes ahora se guarda antes como copia.",
@@ -5905,6 +6170,24 @@ void CloudSavesSection() {
     }
 }
 
+/// A table column as wide as `sample` in the current font, plus the cell padding.
+float ColumnWidthFor(const char* sample) {
+    return ImGui::CalcTextSize(sample).x + ImGui::GetStyle().CellPadding.x * 2.0f + 6.0f;
+}
+
+/// A button in the launcher's cyan, for the main action of a section.
+bool AccentButton(const char* label) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.56f, 0.82f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.17f, 0.68f, 0.92f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.78f, 0.98f, 1.0f));
+    const bool pressed = ImGui::Button(label);
+    ImGui::PopStyleColor(3);
+    return pressed;
+}
+
+void SavesListPage();
+void SavesBackupsPage();
+
 void SavesTab() {
     App& a = g_app;
     if (a.saves_dirty) {
@@ -5912,20 +6195,42 @@ void SavesTab() {
         a.backups = ListBackups();
         a.saves_dirty = false;
     }
-    const bool locked = a.game_running;
-    if (locked) {
+    if (a.game_running) {
         ImGui::TextColored(kYellow, "%s", T("Cierra el juego para copiar, importar o restaurar partidas.",
                                             "Close the game to back up, import or restore saves."));
     }
-    ImGui::SeparatorText(T("Partidas", "Saves"));
+    if (!ImGui::BeginTabBar("saves_pages")) return;
+    SettingsPage(T("Partidas", "Saves"), SavesListPage);
+    // "###": the tab keeps its identity while the count in its name changes
+    const std::string backups_tab = (a.backups.empty() ? std::string(T("Copias de seguridad", "Backups"))
+                                                       : Format(T("Copias de seguridad (%s)", "Backups (%s)"),
+                                                                std::to_string(a.backups.size()))) +
+                                    "###saves_backups";
+    SettingsPage(backups_tab.c_str(), SavesBackupsPage);
+    SettingsPage(T("En la nube", "Cloud"), CloudSavesSection);
+    ImGui::EndTabBar();
+}
+
+/// Saves > Saves: what is on this PC, and backing it up, exporting and importing.
+void SavesListPage() {
+    App& a = g_app;
+    const bool locked = a.game_running;
+    FormSection(T("Partidas en este PC", "Saves on this PC"));
     ImGui::TextColored(kGrey, "%s", PathText(SaveRoot()).c_str());
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Abrir carpeta", "Open folder"))) {
+        std::error_code ec;
+        fs::create_directories(SaveRoot(), ec);
+        OpenInShell(SaveRoot());
+    }
+    ImGui::Spacing();
     if (a.saves.empty()) {
         ImGui::TextUnformatted(T("Todavía no hay partidas guardadas.", "No saves yet."));
-    } else if (ImGui::BeginTable("saves", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn(T("Ranura", "Slot"), ImGuiTableColumnFlags_WidthFixed);
+    } else if (ImGui::BeginTable("saves", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn(T("Ranura", "Slot"), ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor("RaceReplay0"));
         ImGui::TableSetupColumn(T("Descripción", "Description"), ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn(T("Tamaño", "Size"), ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn(T("Modificada", "Modified"), ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn(T("Tamaño", "Size"), ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor("000.0 MB"));
+        ImGui::TableSetupColumn(T("Modificada", "Modified"), ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor("2026-11-15 23:59"));
         ImGui::TableHeadersRow();
         for (const auto& s : a.saves) {
             ImGui::TableNextRow();
@@ -5935,7 +6240,9 @@ void SavesTab() {
             std::string text = s.title;
             if (!s.subtitle.empty()) text += (text.empty() ? "" : " - ") + s.subtitle;
             if (!s.detail.empty()) text += (text.empty() ? "" : " - ") + s.detail;
+            ImGui::PushTextWrapPos(0.0f);  // a long description wraps in its column
             ImGui::TextUnformatted(text.empty() ? "-" : text.c_str());
+            ImGui::PopTextWrapPos();
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(FormatSize(s.bytes).c_str());
             ImGui::TableNextColumn();
@@ -5943,9 +6250,10 @@ void SavesTab() {
         }
         ImGui::EndTable();
     }
+    ImGui::Spacing();
     ImGui::BeginDisabled(locked);
     ImGui::BeginDisabled(a.saves.empty());
-    if (ImGui::Button(T("Hacer copia de seguridad", "Back up now"))) {
+    if (AccentButton(T("Hacer copia de seguridad", "Back up now"))) {
         fs::path made;
         const std::string error = BackupSaves(nullptr, &made);
         a.notice = error.empty() ? std::string(T("Copia creada: ", "Backup created: ")) + PathText(made.filename()) : error;
@@ -5977,21 +6285,28 @@ void SavesTab() {
                  "save (Apollo Save Tool, Save Wizard: a folder with sce_sys\\param.sfo). Your saves are backed up "
                  "before importing."));
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button(T("Abrir carpeta", "Open folder"))) {
-        std::error_code ec;
-        fs::create_directories(SaveRoot(), ec);
-        OpenInShell(SaveRoot());
-    }
+    FormNote(T("Copia de seguridad: guarda una copia aquí mismo (pestaña Copias de seguridad). Exportar: una copia en la "
+               "carpeta que elijas. Importar: trae una partida de otro PC o de PS4.",
+               "Back up: keeps a copy here (Backups tab). Export: a copy in the folder you pick. Import: brings a save "
+               "from another PC or a PS4."));
+}
 
-    ImGui::SeparatorText(T("Copias de seguridad", "Backups"));
+/// Saves > Backups: the copies made here, to restore or delete.
+void SavesBackupsPage() {
+    App& a = g_app;
+    const bool locked = a.game_running;
+    FormSection(T("Copias de seguridad", "Backups"));
+    FormNote(T("Se hacen al pulsar Hacer copia de seguridad y antes de importar o restaurar, para que nunca pierdas una partida.",
+               "Made when you press Back up now and before importing or restoring, so a save is never lost."));
+    ImGui::Spacing();
     if (a.backups.empty()) {
         ImGui::TextColored(kGrey, "%s", T("Todavía no hay copias.", "No backups yet."));
-    } else if (ImGui::BeginTable("backups", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+    } else if (ImGui::BeginTable("backups", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn(T("Copia", "Backup"), ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn(T("Tamaño", "Size"), ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn(T("Tamaño", "Size"), ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor("000.0 MB"));
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor(T("Restaurar", "Restore")) + 12.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ColumnWidthFor(T("Borrar", "Delete")) + 12.0f);
+        ImGui::TableHeadersRow();
         for (const auto& b : a.backups) {
             ImGui::PushID(b.name.c_str());
             ImGui::TableNextRow();
@@ -6180,7 +6495,7 @@ void DlcTab() {
     const bool enabled = a.launcher.Flag("dlc", true);
     std::vector<std::string> disabled = SplitList(a.launcher.Get("dlc_disabled"));
 
-    ImGui::SeparatorText(T("DLC encontrados", "DLC found"));
+    FormSection(T("DLC encontrados", "DLC found"));
     if (a.dlc.empty()) ImGui::TextColored(kGrey, "%s", T("No hay DLC en la carpeta dlc.", "No DLC in the dlc folder."));
     ImGui::BeginDisabled(!enabled);
     for (const auto& d : a.dlc) {
@@ -6530,14 +6845,180 @@ std::vector<std::string> SplitKeys(const std::string& value) {
     return keys;
 }
 
-void KeyboardTab() {
+
+// ---- The keyboard picture (Keyboard page) ----
+// A full-size keyboard's main block and arrows, each bound key coloured and labelled with what it
+// does (bbport.ini key.*); the rest of the bindings (keypad, mouse, F keys) are listed under it.
+
+int g_key_hover_input = -1;  // the table row under the mouse (last frame): its keys light up
+
+/// A keyboard input's job, as short as fits on a key cap.
+std::string KeyRoleShort(const std::string& id) {
+    static const std::map<std::string, std::pair<const char*, const char*>> roles = {
+        {"move_up", {"Stick ↑", "Stick ↑"}},       {"move_down", {"Stick ↓", "Stick ↓"}},
+        {"move_left", {"Girar ←", "Steer ←"}},     {"move_right", {"Girar →", "Steer →"}},
+        {"cross", {"Acelerar", "Gas"}},            {"square", {"Frenar", "Brake"}},
+        {"circle", {"Círculo", "Circle"}},         {"triangle", {"Triáng.", "Triangle"}},
+        {"r1", {"Salto R1", "Hop R1"}},            {"l1", {"Salto L1", "Hop L1"}},
+        {"r2", {"Mirar atrás", "Look back"}},      {"l2", {"Objeto", "Item"}},
+        {"l3", {"L3", "L3"}},                      {"r3", {"R3", "R3"}},
+        {"options", {"Pausa", "Pause"}},           {"touchpad", {"Panel", "Pad"}},
+        {"touchpad_right", {"Panel der.", "Pad R"}},
+        {"up", {"Cruceta ↑", "D-pad ↑"}},          {"down", {"Cruceta ↓", "D-pad ↓"}},
+        {"left", {"Cruceta ←", "D-pad ←"}},        {"right", {"Cruceta →", "D-pad →"}},
+        {"look_up", {"Stick D ↑", "R stick ↑"}},   {"look_down", {"Stick D ↓", "R stick ↓"}},
+        {"look_left", {"Stick D ←", "R stick ←"}}, {"look_right", {"Stick D →", "R stick →"}},
+    };
+    const auto it = roles.find(id);
+    return it == roles.end() ? id : std::string(T(it->second.first, it->second.second));
+}
+
+struct KeyCap {
+    const char* sdl;  // nullptr: a gap
+    const char* es;   // the cap's text (nullptr: the SDL name)
+    const char* en;
+    float w;          // in key units
+};
+
+void KeyboardDiagram() {
     App& a = g_app;
-    ImGui::TextWrapped("%s", T("Teclas del jugador 1. El teclado funciona a la vez que el mando. Pulsa \"Cambiar\" y luego la "
-                               "tecla; cada acción admite hasta 4 teclas. Se guarda en bbport.ini y vale desde el próximo arranque.",
-                               "Player 1's keys. The keyboard works together with the controller. Press \"Change\", then the key; "
-                               "each action takes up to 4 keys. Saved in bbport.ini, used from the next start."));
-    ImGui::TextColored(kGrey, "%s", T("Insert abre el menú del juego y Esc cancela, por eso no se pueden asignar.",
-                                      "Insert opens the in-game menu and Esc cancels, so they cannot be bound."));
+    std::map<std::string, std::vector<int>> by_key;
+    for (int i = 0; i < int(std::size(kKeyInputs)); ++i) {
+        const std::string key = std::string("key.") + kKeyInputs[i].id;
+        const bool custom = a.game.values.count(key) > 0;
+        for (const auto& k : SplitKeys(custom ? a.game.Get(key) : kKeyInputs[i].fallback)) by_key[k].push_back(i);
+    }
+    static const std::vector<std::vector<KeyCap>> rows = {
+        {{"`", nullptr, nullptr, 1}, {"1", nullptr, nullptr, 1}, {"2", nullptr, nullptr, 1}, {"3", nullptr, nullptr, 1},
+         {"4", nullptr, nullptr, 1}, {"5", nullptr, nullptr, 1}, {"6", nullptr, nullptr, 1}, {"7", nullptr, nullptr, 1},
+         {"8", nullptr, nullptr, 1}, {"9", nullptr, nullptr, 1}, {"0", nullptr, nullptr, 1}, {"-", nullptr, nullptr, 1},
+         {"=", nullptr, nullptr, 1}, {"Backspace", "Retroceso", "Backspace", 2},
+         {nullptr, nullptr, nullptr, 0.5f}, {"Insert", "Ins (menú)", "Ins (menu)", 1}, {"Home", "Inicio", "Home", 1},
+         {"PageUp", "RePág", "PgUp", 1}},
+        {{"Tab", nullptr, nullptr, 1.5f}, {"Q", nullptr, nullptr, 1}, {"W", nullptr, nullptr, 1}, {"E", nullptr, nullptr, 1},
+         {"R", nullptr, nullptr, 1}, {"T", nullptr, nullptr, 1}, {"Y", nullptr, nullptr, 1}, {"U", nullptr, nullptr, 1},
+         {"I", nullptr, nullptr, 1}, {"O", nullptr, nullptr, 1}, {"P", nullptr, nullptr, 1}, {"[", nullptr, nullptr, 1},
+         {"]", nullptr, nullptr, 1}, {"\\", nullptr, nullptr, 1.5f},
+         {nullptr, nullptr, nullptr, 0.5f}, {"Delete", "Supr", "Del", 1}, {"End", "Fin", "End", 1},
+         {"PageDown", "AvPág", "PgDn", 1}},
+        {{"CapsLock", "Bloq Mayús", "Caps", 1.75f}, {"A", nullptr, nullptr, 1}, {"S", nullptr, nullptr, 1},
+         {"D", nullptr, nullptr, 1}, {"F", nullptr, nullptr, 1}, {"G", nullptr, nullptr, 1}, {"H", nullptr, nullptr, 1},
+         {"J", nullptr, nullptr, 1}, {"K", nullptr, nullptr, 1}, {"L", nullptr, nullptr, 1}, {";", nullptr, nullptr, 1},
+         {"'", nullptr, nullptr, 1}, {"Return", "Enter", "Enter", 2.25f}},
+        {{"Left Shift", "Mayús", "Shift", 2.25f}, {"Z", nullptr, nullptr, 1}, {"X", nullptr, nullptr, 1},
+         {"C", nullptr, nullptr, 1}, {"V", nullptr, nullptr, 1}, {"B", nullptr, nullptr, 1}, {"N", nullptr, nullptr, 1},
+         {"M", nullptr, nullptr, 1}, {",", nullptr, nullptr, 1}, {".", nullptr, nullptr, 1}, {"/", nullptr, nullptr, 1},
+         {"Right Shift", "Mayús", "Shift", 2.75f},
+         {nullptr, nullptr, nullptr, 1.5f}, {"Up", "↑", "↑", 1}},
+        {{"Left Ctrl", "Ctrl", "Ctrl", 1.5f}, {nullptr, nullptr, nullptr, 1.25f}, {"Left Alt", "Alt", "Alt", 1.5f},
+         {"Space", "Espacio", "Space", 6.5f}, {"Right Alt", "Alt Gr", "Alt Gr", 1.5f}, {nullptr, nullptr, nullptr, 1.25f},
+         {"Right Ctrl", "Ctrl", "Ctrl", 1.5f},
+         {nullptr, nullptr, nullptr, 0.5f}, {"Left", "←", "←", 1}, {"Down", "↓", "↓", 1}, {"Right", "→", "→", 1}},
+    };
+    const float units = 18.5f;
+    const float width = std::max(ImGui::GetContentRegionAvail().x, 560.0f);
+    const float u = std::min(width / units, 58.0f * g_ui_scale);
+    const float gap = std::max(2.0f, u * 0.07f);
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float x_start = o.x + (width - u * units) * 0.5f;
+    ImGui::InvisibleButton("key_picture", ImVec2(width, u * 5.0f));
+    const bool picture_hovered = ImGui::IsItemHovered();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+    std::vector<std::string> lit;
+    if (g_key_hover_input >= 0 && g_key_hover_input < int(std::size(kKeyInputs))) {
+        const KeyInput& in = kKeyInputs[g_key_hover_input];
+        const std::string key = std::string("key.") + in.id;
+        lit = SplitKeys(a.game.values.count(key) ? a.game.Get(key) : in.fallback);
+    }
+    ImFont* font = ImGui::GetFont();
+    const float cap_size = std::min(ImGui::GetFontSize() * 0.78f, u * 0.32f);
+    const float role_size = std::min(ImGui::GetFontSize() * 0.66f, u * 0.27f);
+    std::string hovered;
+    for (size_t r = 0; r < rows.size(); ++r) {
+        float x = x_start;
+        const float y = o.y + float(r) * u;
+        for (const KeyCap& k : rows[r]) {
+            const float w = k.w * u;
+            if (!k.sdl) {
+                x += w;
+                continue;
+            }
+            const ImVec2 p0{x + gap * 0.5f, y + gap * 0.5f}, p1{x + w - gap * 0.5f, y + u - gap * 0.5f};
+            x += w;
+            const std::string sdl = k.sdl;
+            const auto it = by_key.find(sdl);
+            const bool bound = it != by_key.end();
+            const bool reserved = sdl == "Insert";  // the in-game menu
+            const bool hover = picture_hovered && mouse.x >= p0.x && mouse.x < p1.x && mouse.y >= p0.y && mouse.y < p1.y;
+            if (hover) hovered = sdl;
+            const bool hot = hover || std::find(lit.begin(), lit.end(), sdl) != lit.end();
+            const ImU32 fill = bound ? IM_COL32(22, 118, 178, 255) : reserved ? IM_COL32(70, 52, 30, 255) : IM_COL32(10, 42, 80, 255);
+            d->AddRectFilled(ImVec2(p0.x, p0.y + 2), ImVec2(p1.x, p1.y + 2), IM_COL32(2, 14, 32, 200), u * 0.12f);  // shadow
+            d->AddRectFilled(p0, p1, fill, u * 0.12f);
+            d->AddRect(p0, p1, hot ? IM_COL32(255, 205, 90, 255) : bound ? IM_COL32(110, 225, 255, 230) : IM_COL32(60, 110, 160, 160),
+                       u * 0.12f, 0, hot ? 2.5f : 1.0f);
+            const char* cap = k.es ? T(k.es, k.en) : k.sdl;
+            d->PushClipRect(p0, p1, true);
+            d->AddText(font, cap_size, ImVec2(p0.x + u * 0.1f, p0.y + u * 0.06f),
+                       bound ? IM_COL32(240, 250, 255, 255) : IM_COL32(160, 190, 220, 220), cap);
+            if (bound) {
+                std::string role;
+                for (const int i : it->second) role += (role.empty() ? "" : " / ") + KeyRoleShort(kKeyInputs[i].id);
+                const ImVec2 t = font->CalcTextSizeA(role_size, FLT_MAX, 0.0f, role.c_str());
+                d->AddText(font, role_size, ImVec2(std::max(p0.x + 3.0f, (p0.x + p1.x - t.x) * 0.5f), p1.y - role_size - u * 0.08f),
+                           IM_COL32(255, 232, 150, 255), role.c_str());
+            }
+            d->PopClipRect();
+        }
+    }
+    if (!hovered.empty()) {
+        std::string what;
+        if (const auto it = by_key.find(hovered); it != by_key.end())
+            for (const int i : it->second) what += (what.empty() ? "" : "\n") + std::string(T(kKeyInputs[i].es, kKeyInputs[i].en));
+        if (hovered == "Insert") what = T("Abre el menú del juego (no se puede asignar)", "Opens the in-game menu (cannot be bound)");
+        ImGui::SetTooltip("%s\n%s", KeyLabel(hovered).c_str(), what.empty() ? T("Sin uso en el juego", "Not used in the game") : what.c_str());
+    }
+
+    // Bindings the picture has no key for: keypad, mouse, F keys and the like.
+    std::set<std::string> drawn;
+    for (const auto& row : rows)
+        for (const KeyCap& k : row)
+            if (k.sdl) drawn.insert(k.sdl);
+    std::string others;
+    for (const auto& [key, inputs] : by_key) {
+        if (drawn.count(key)) continue;
+        for (const int i : inputs)
+            others += (others.empty() ? "" : "   ·   ") + KeyLabel(key) + ": " + KeyRoleShort(kKeyInputs[i].id);
+    }
+    if (!others.empty()) FormNote((std::string(T("Fuera del dibujo:  ", "Not on the picture:  ")) + others).c_str());
+    FormNote(T("Azul: tecla con uso en el juego. Pasa el ratón por una tecla o una fila para verla.",
+               "Blue: a key the game uses. Hover a key or a row to see it."));
+}
+
+/// The width of a table row's Change / Clear / Default buttons in the current font (the CTR one is
+/// wider than a fixed size allowed: the last button was cut off).
+float RowButtonsWidth() {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    return ImGui::CalcTextSize(T("Cambiar", "Change")).x + ImGui::CalcTextSize(T("Quitar", "Clear")).x +
+           ImGui::CalcTextSize(T("Original", "Default")).x + style.FramePadding.x * 6.0f + style.ItemSpacing.x * 2.0f + 4.0f;
+}
+
+void KeyboardTab() {    App& a = g_app;
+    FormBegin();
+    FormSection(T("Pantalla dividida", "Split screen"));
+    KeyboardPlayerSetting();
+    FormEnd();
+    FormSection(T("Controles", "Controls"));
+    FormNote(T("El teclado funciona a la vez que el mando. Pulsa \"Cambiar\" y luego la tecla; cada acción admite "
+               "hasta 4 teclas. Vale desde el próximo arranque. Insert abre el menú del juego y Esc cancela, por eso "
+               "no se pueden asignar.",
+               "The keyboard works together with the controller. Press \"Change\", then the key; each action takes up "
+               "to 4 keys. Used from the next start. Insert opens the in-game menu and Esc cancels, so they cannot be "
+               "bound."));
+    KeyboardDiagram();
+    ImGui::Spacing();
     const int capturing = g_key_capture;
     if (capturing >= 0) {
         const unsigned got = g_key_captured.exchange(0);
@@ -6566,11 +7047,11 @@ void KeyboardTab() {
         }
     }
 
-    ImGui::SeparatorText(T("Controles", "Controls"));
+    int key_row = -1;
     if (ImGui::BeginTable("keys", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn(T("Acción", "Action"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn(T("Teclas", "Keys"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, RowButtonsWidth());
         ImGui::TableHeadersRow();
         for (int i = 0; i < int(std::size(kKeyInputs)); ++i) {
             const KeyInput& in = kKeyInputs[i];
@@ -6580,6 +7061,7 @@ void KeyboardTab() {
             ImGui::PushID(i);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
+            const float row_top = ImGui::GetCursorScreenPos().y;
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(T(in.es, in.en));
             ImGui::TableNextColumn();
@@ -6616,10 +7098,14 @@ void KeyboardTab() {
             }
             ImGui::EndDisabled();
             ImGui::EndDisabled();
+            if (ImGui::IsWindowHovered() && ImGui::GetIO().MousePos.y >= row_top &&
+                ImGui::GetIO().MousePos.y < ImGui::GetItemRectMax().y + ImGui::GetStyle().CellPadding.y)
+                key_row = i;
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
+    g_key_hover_input = key_row;
     ImGui::Spacing();
     ImGui::BeginDisabled(capturing >= 0);
     if (ImGui::Button(T("Restaurar todas las teclas", "Restore all keys"))) {
@@ -6747,18 +7233,649 @@ const char* PollGamepadButton() {
     return nullptr;
 }
 
+// ---- The controller, read through SDL while the Gamepad page is open ----
+// bb-gpu-capabilities --watch-pad prints "pad <button>" for every press on any controller SDL
+// knows: PlayStation pads too, which XInput (PollGamepadButton) does not see. The page uses it to
+// assign buttons and to move through the list with the controller.
+struct PadWatchState {
+    std::mutex mutex;
+    std::deque<std::string> presses;
+    HANDLE process = nullptr;
+    std::thread reader;
+    std::atomic<bool> running{false};
+};
+PadWatchState g_pad_watch;
+
+void PadWatchStop() {
+    PadWatchState& w = g_pad_watch;
+    if (w.process) {
+        TerminateProcess(w.process, 0);
+        CloseHandle(w.process);
+        w.process = nullptr;
+    }
+    if (w.reader.joinable()) w.reader.join();
+    w.running = false;
+    std::scoped_lock lock{w.mutex};
+    w.presses.clear();
+}
+
+void PadWatchStart() {
+    PadWatchState& w = g_pad_watch;
+    if (w.running) return;
+    PadWatchStop();  // a watcher that ended (its 10 minutes): start another
+    const fs::path tool = g_app.bin / L"bb-gpu-capabilities.exe";
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE read = nullptr, write = nullptr;
+    if (!CreatePipe(&read, &write, &sa, 0)) return;
+    SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
+    // Only its output pipe is inherited (as RunCaptured: nothing of the launcher's stays open in it).
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    HANDLE inherit[1] = {write};
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit,
+                                                    nullptr, nullptr);
+    STARTUPINFOEXW six{};
+    six.StartupInfo.cb = sizeof six;
+    six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdOutput = write;
+    six.StartupInfo.hStdError = write;
+    six.lpAttributeList = attrs_ok ? attrs : nullptr;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = Quote(tool.wstring()) + L" --watch-pad";
+    const BOOL ok = CreateProcessW(tool.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+                                   g_app.bin.c_str(), &six.StartupInfo, &pi);
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
+    CloseHandle(write);
+    if (!ok) {
+        CloseHandle(read);
+        return;
+    }
+    CloseHandle(pi.hThread);
+    w.process = pi.hProcess;
+    w.running = true;
+    w.reader = std::thread([read] {
+        PadWatchState& w = g_pad_watch;
+        std::string pending;
+        char buf[512];
+        DWORD n = 0;
+        while (ReadFile(read, buf, sizeof buf, &n, nullptr) && n) {
+            pending.append(buf, n);
+            for (size_t nl; (nl = pending.find('\n')) != std::string::npos;) {
+                const std::string line = Trim(pending.substr(0, nl));
+                pending.erase(0, nl + 1);
+                // presses count only while the launcher is in front (not while playing)
+                if (line.rfind("pad ", 0) == 0 && GetForegroundWindow() == g_app.hwnd) {
+                    std::scoped_lock lock{w.mutex};
+                    if (w.presses.size() < 16) w.presses.push_back(line.substr(4));
+                }
+            }
+        }
+        CloseHandle(read);
+        w.running = false;
+    });
+}
+
+bool PadWatchTake(std::string& button) {
+    std::scoped_lock lock{g_pad_watch.mutex};
+    if (g_pad_watch.presses.empty()) return false;
+    button = std::move(g_pad_watch.presses.front());
+    g_pad_watch.presses.pop_front();
+    return true;
+}
+
+int g_pad_cursor = -1;           // the row the controller is on (-1: none yet)
+bool g_pad_cursor_moved = false;  // scroll it into view this frame
+
 std::atomic<int> g_pad_capture{-1};
 bool g_pad_waiting_release = false;
 
+// ---- The controller picture (Gamepad page) ----
+// An Xbox or PlayStation pad drawn with ImDrawList, each physical button labelled with what it
+// does in the game under the current bbport.ini pad.* mapping. While a row waits for a button
+// ("Change"), clicking a button on the picture assigns it.
+
+int g_pad_hover_input = -1;  // the table row under the mouse (last frame): its buttons light up
+std::string g_pad_menu_button;  // the button whose menu is open (a click on the picture)
+
+/// What a game input does, short; nullptr when its button name says it all.
+const char* InputRole(const std::string& id) {
+    static const std::map<std::string, std::pair<const char*, const char*>> roles = {
+        {"cross", {"Acelerar", "Accelerate"}},       {"square", {"Frenar", "Brake"}},
+        {"l1", {"Salto / Derrape", "Hop / Drift"}},  {"r1", {"Salto / Derrape", "Hop / Drift"}},
+        {"l2", {"Usar objeto", "Use item"}},         {"r2", {"Mirar atrás", "Look back"}},
+        {"options", {"Pausa", "Pause"}},
+    };
+    const auto it = roles.find(id);
+    return it == roles.end() ? nullptr : T(it->second.first, it->second.second);
+}
+
+/// The game's name for an input's button, in the pad's style.
+std::string GameButtonName(const std::string& id, bool xbox) {
+    static const std::map<std::string, std::array<const char*, 3>> names = {  // xbox, es, en
+        {"cross", {"A", "Cruz", "Cross"}},          {"circle", {"B", "Círculo", "Circle"}},
+        {"square", {"X", "Cuadrado", "Square"}},    {"triangle", {"Y", "Triángulo", "Triangle"}},
+        {"l1", {"LB", "L1", "L1"}},                 {"r1", {"RB", "R1", "R1"}},
+        {"l2", {"LT", "L2", "L2"}},                 {"r2", {"RT", "R2", "R2"}},
+        {"l3", {"LS", "L3", "L3"}},                 {"r3", {"RS", "R3", "R3"}},
+        {"options", {"Menu", "Options", "Options"}}, {"touchpad", {"View", "Touchpad", "Touchpad"}},
+        {"up", {nullptr, "Cruceta ↑", "D-pad ↑"}},  {"down", {nullptr, "Cruceta ↓", "D-pad ↓"}},
+        {"left", {nullptr, "Cruceta ←", "D-pad ←"}}, {"right", {nullptr, "Cruceta →", "D-pad →"}},
+    };
+    const auto it = names.find(id);
+    if (it == names.end()) return id;
+    if (xbox && it->second[0]) return it->second[0];
+    return T(it->second[1], it->second[2]);
+}
+
+/// A physical button's name on this pad.
+std::string PhysicalButtonName(const std::string& sdl, bool xbox) {
+    static const std::map<std::string, std::array<const char*, 3>> names = {  // xbox, es, en (PlayStation)
+        {"a", {"A", "Cruz", "Cross"}},            {"b", {"B", "Círculo", "Circle"}},
+        {"x", {"X", "Cuadrado", "Square"}},       {"y", {"Y", "Triángulo", "Triangle"}},
+        {"leftshoulder", {"LB", "L1", "L1"}},     {"rightshoulder", {"RB", "R1", "R1"}},
+        {"lefttrigger", {"LT", "L2", "L2"}},      {"righttrigger", {"RT", "R2", "R2"}},
+        {"leftstick", {"LS", "L3", "L3"}},        {"rightstick", {"RS", "R3", "R3"}},
+        {"start", {"Menu", "Options", "Options"}}, {"back", {"View", "Share", "Share"}},
+        {"touchpad", {"Touchpad", "Touchpad", "Touchpad"}},
+        {"dpup", {nullptr, "↑", "↑"}},  {"dpdown", {nullptr, "↓", "↓"}},
+        {"dpleft", {nullptr, "←", "←"}}, {"dpright", {nullptr, "→", "→"}},
+    };
+    const auto it = names.find(sdl);
+    if (it == names.end()) return sdl;
+    if (xbox && it->second[0]) return it->second[0];
+    return T(it->second[1], it->second[2]);
+}
+
+/// Xbox or PlayStation: by the chosen (or first) controller's name, else by the button prompts.
+bool PadLooksXbox() {
+    App& a = g_app;
+    std::string name;
+    {
+        std::scoped_lock lock{a.mutex};
+        const std::string chosen = a.launcher.Get("gamepad");
+        for (const auto& [guid, n] : a.gamepads)
+            if (chosen.empty() ? name.empty() : guid == chosen) name = n;
+    }
+    name = Lower(name);
+    for (const char* ps : {"dualsense", "dualshock", "playstation", "ps4", "ps5", "wireless controller"})
+        if (name.find(ps) != std::string::npos) return false;
+    for (const char* xb : {"xbox", "xinput", "x-box"})
+        if (name.find(xb) != std::string::npos) return true;
+    return Lower(Trim(g_app.game.Get("button_prompts", "playstation"))) == "xbox";
+}
+
+struct PadSpot {
+    const char* sdl;
+    float u, v;    // centre, in the pad's square
+    float hw, hh;  // half size (both: the radius of a round one)
+    bool round;
+};
+
+void DrawPadGlyph(ImDrawList* d, const std::string& sdl, ImVec2 c, float r, bool xbox) {
+    if (xbox) {
+        const ImU32 color = sdl == "a" ? IM_COL32(96, 190, 80, 255) : sdl == "b" ? IM_COL32(225, 64, 64, 255)
+                          : sdl == "x" ? IM_COL32(60, 130, 230, 255) : IM_COL32(240, 192, 40, 255);
+        const char text[2] = {char(std::toupper(static_cast<unsigned char>(sdl[0]))), 0};
+        ImFont* font = ImGui::GetFont();
+        const ImVec2 t = font->CalcTextSizeA(r * 1.2f, FLT_MAX, 0.0f, text);
+        d->AddText(font, r * 1.2f, ImVec2(c.x - t.x * 0.5f, c.y - t.y * 0.5f), color, text);
+        return;
+    }
+    const float w = std::max(1.5f, r * 0.16f);
+    if (sdl == "y") {
+        d->AddTriangle(ImVec2(c.x, c.y - r * 0.5f), ImVec2(c.x - r * 0.5f, c.y + r * 0.34f),
+                       ImVec2(c.x + r * 0.5f, c.y + r * 0.34f), IM_COL32(64, 214, 176, 255), w);
+    } else if (sdl == "b") {
+        d->AddCircle(c, r * 0.45f, IM_COL32(244, 92, 100, 255), 0, w);
+    } else if (sdl == "a") {
+        const ImU32 blue = IM_COL32(120, 160, 245, 255);
+        d->AddLine(ImVec2(c.x - r * 0.42f, c.y - r * 0.42f), ImVec2(c.x + r * 0.42f, c.y + r * 0.42f), blue, w);
+        d->AddLine(ImVec2(c.x + r * 0.42f, c.y - r * 0.42f), ImVec2(c.x - r * 0.42f, c.y + r * 0.42f), blue, w);
+    } else {
+        d->AddRect(ImVec2(c.x - r * 0.4f, c.y - r * 0.4f), ImVec2(c.x + r * 0.4f, c.y + r * 0.4f),
+                   IM_COL32(236, 128, 206, 255), 0.0f, 0, w);
+    }
+}
+
+void PadDiagram() {
+    App& a = g_app;
+    const bool xbox = PadLooksXbox();
+    const int capturing = g_pad_capture;
+
+    // Which inputs each physical button drives now.
+    std::map<std::string, std::vector<int>> by_button;
+    for (int i = 0; i < int(std::size(kPadInputs)); ++i) {
+        const std::string key = std::string("pad.") + kPadInputs[i].id;
+        const bool custom = a.game.values.count(key) > 0;
+        for (const auto& b : SplitKeys(custom ? a.game.Get(key) : kPadInputs[i].fallback)) by_button[b].push_back(i);
+    }
+    const auto identity = [](int i, const std::string& sdl) {  // the input's own button, nothing to say
+        if (InputRole(kPadInputs[i].id)) return false;
+        for (const auto& b : SplitKeys(kPadInputs[i].fallback))
+            if (b == sdl) return true;
+        return false;
+    };
+    const auto actions = [&](const std::string& sdl, bool all) {
+        std::string text;
+        const auto it = by_button.find(sdl);
+        if (it == by_button.end()) return text;
+        for (const int i : it->second) {
+            if (!all && identity(i, sdl)) continue;
+            const char* role = InputRole(kPadInputs[i].id);
+            const std::string what = role ? role : GameButtonName(kPadInputs[i].id, xbox);
+            if (text.find(what) == std::string::npos) text += (text.empty() ? "" : ", ") + what;
+        }
+        return text;
+    };
+
+    // The picture's frame: labels on both sides, the pad in the middle third.
+    const float width = std::max(ImGui::GetContentRegionAvail().x, 560.0f);
+    const float height = std::min(width * 0.46f, 420.0f * g_ui_scale);
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("pad_picture", ImVec2(width, height));
+    const bool picture_hovered = ImGui::IsItemHovered();
+    const bool clicked = ImGui::IsItemClicked();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const LauncherArtwork& art = xbox ? g_pad_xbox_art : g_pad_ps_art;
+    const bool picture = art.texture && art.width > 0 && art.height > 0;
+    float qw = std::min(width * 0.44f, height), qh = qw;
+    if (picture) {
+        const float aspect = float(art.width) / float(art.height);
+        qw = std::min(width * 0.46f, height * aspect);
+        qh = qw / aspect;
+    }
+    const float side = qw;  // sizes are in the picture's width
+    const ImVec2 p0{o.x + (width - qw) * 0.5f, o.y + (height - qh) * 0.5f};
+    const auto at = [&](float u, float v) { return ImVec2(p0.x + u * qw, p0.y + v * qh); };
+
+    // Body, from the real pads' outline: a dark Xbox one, or a white DualSense with its black middle.
+    // Each outline is cubic curves in the pad's square (start, then control, control, end).
+    const auto shape = [&](ImVec2 start, std::initializer_list<std::array<ImVec2, 3>> curves) {
+        std::vector<ImVec2> points{at(start.x, start.y)};
+        ImVec2 p = start;
+        for (const auto& c : curves) {
+            for (int k = 1; k <= 16; ++k) {
+                const float t = k / 16.0f, s = 1.0f - t;
+                const float x = s * s * s * p.x + 3 * s * s * t * c[0].x + 3 * s * t * t * c[1].x + t * t * t * c[2].x;
+                const float y = s * s * s * p.y + 3 * s * s * t * c[0].y + 3 * s * t * t * c[1].y + t * t * t * c[2].y;
+                points.push_back(at(x, y));
+            }
+            p = c[2];
+        }
+        points.pop_back();  // back at the start
+        return points;
+    };
+    const ImU32 ink = IM_COL32(18, 20, 26, 255);
+    const ImU32 body = xbox ? IM_COL32(56, 60, 68, 255) : IM_COL32(242, 244, 248, 255);
+    const ImU32 trigger = xbox ? IM_COL32(36, 38, 44, 255) : IM_COL32(24, 26, 32, 255);
+    const ImU32 key_fill = xbox ? IM_COL32(30, 32, 37, 255) : IM_COL32(248, 249, 251, 255);
+    const ImU32 key_edge = xbox ? IM_COL32(84, 90, 102, 255) : ink;
+    const ImU32 part_text = IM_COL32(232, 238, 246, 255);
+    const float stroke = std::max(1.5f, side * 0.009f);
+
+    const float dp = 0.026f, arm = 0.045f;  // the d-pad's half width and arm offset
+    std::vector<PadSpot> spots;
+    const auto dpad = [&](float u, float v) {
+        spots.push_back({"dpup", u, v - arm, dp, dp, false});
+        spots.push_back({"dpdown", u, v + arm, dp, dp, false});
+        spots.push_back({"dpleft", u - arm, v, dp, dp, false});
+        spots.push_back({"dpright", u + arm, v, dp, dp, false});
+    };
+    const auto faces = [&](float u, float v, float gap, float r) {
+        spots.push_back({"y", u, v - gap, r, r, true});
+        spots.push_back({"x", u - gap, v, r, r, true});
+        spots.push_back({"b", u + gap, v, r, r, true});
+        spots.push_back({"a", u, v + gap, r, r, true});
+    };
+    std::vector<ImVec2> outline, middle;
+    if (xbox) {
+        spots.push_back({"lefttrigger", 0.24f, 0.085f, 0.06f, 0.035f, false});
+        spots.push_back({"righttrigger", 0.76f, 0.085f, 0.06f, 0.035f, false});
+        spots.push_back({"leftshoulder", 0.22f, 0.16f, 0.09f, 0.022f, false});
+        spots.push_back({"rightshoulder", 0.78f, 0.16f, 0.09f, 0.022f, false});
+        spots.push_back({"leftstick", 0.28f, 0.35f, 0.06f, 0.06f, true});
+        dpad(0.43f, 0.50f);
+        spots.push_back({"rightstick", 0.60f, 0.50f, 0.06f, 0.06f, true});
+        faces(0.75f, 0.35f, 0.062f, 0.03f);
+        spots.push_back({"back", 0.42f, 0.28f, 0.018f, 0.018f, true});
+        spots.push_back({"start", 0.58f, 0.28f, 0.018f, 0.018f, true});
+        outline = shape({0.25f, 0.17f}, {{{{0.38f, 0.12f}, {0.62f, 0.12f}, {0.75f, 0.17f}}},
+                                         {{{0.86f, 0.20f}, {0.92f, 0.30f}, {0.95f, 0.45f}}},
+                                         {{{0.98f, 0.58f}, {0.97f, 0.68f}, {0.90f, 0.70f}}},
+                                         {{{0.84f, 0.72f}, {0.80f, 0.64f}, {0.74f, 0.58f}}},
+                                         {{{0.66f, 0.53f}, {0.34f, 0.53f}, {0.26f, 0.58f}}},
+                                         {{{0.20f, 0.64f}, {0.16f, 0.72f}, {0.10f, 0.70f}}},
+                                         {{{0.03f, 0.68f}, {0.02f, 0.58f}, {0.05f, 0.45f}}},
+                                         {{{0.08f, 0.30f}, {0.14f, 0.20f}, {0.25f, 0.17f}}}});
+    } else {
+        spots.push_back({"lefttrigger", 0.22f, 0.095f, 0.06f, 0.03f, false});
+        spots.push_back({"righttrigger", 0.78f, 0.095f, 0.06f, 0.03f, false});
+        spots.push_back({"leftshoulder", 0.21f, 0.15f, 0.075f, 0.018f, false});
+        spots.push_back({"rightshoulder", 0.79f, 0.15f, 0.075f, 0.018f, false});
+        dpad(0.22f, 0.31f);
+        faces(0.78f, 0.31f, 0.066f, 0.03f);
+        spots.push_back({"touchpad", 0.5f, 0.255f, 0.165f, 0.095f, false});
+        spots.push_back({"back", 0.296f, 0.20f, 0.010f, 0.022f, false});
+        spots.push_back({"start", 0.704f, 0.20f, 0.010f, 0.022f, false});
+        spots.push_back({"leftstick", 0.356f, 0.445f, 0.05f, 0.05f, true});
+        spots.push_back({"rightstick", 0.644f, 0.445f, 0.05f, 0.05f, true});
+        outline = shape({0.30f, 0.145f}, {{{{0.40f, 0.14f}, {0.60f, 0.14f}, {0.70f, 0.145f}}},
+                                          {{{0.80f, 0.135f}, {0.88f, 0.15f}, {0.91f, 0.22f}}},
+                                          {{{0.95f, 0.32f}, {0.97f, 0.52f}, {0.95f, 0.66f}}},
+                                          {{{0.94f, 0.73f}, {0.87f, 0.76f}, {0.83f, 0.72f}}},
+                                          {{{0.78f, 0.66f}, {0.74f, 0.58f}, {0.68f, 0.545f}}},
+                                          {{{0.62f, 0.525f}, {0.38f, 0.525f}, {0.32f, 0.545f}}},
+                                          {{{0.26f, 0.58f}, {0.22f, 0.66f}, {0.17f, 0.72f}}},
+                                          {{{0.13f, 0.76f}, {0.06f, 0.73f}, {0.05f, 0.66f}}},
+                                          {{{0.03f, 0.52f}, {0.05f, 0.32f}, {0.09f, 0.22f}}},
+                                          {{{0.12f, 0.15f}, {0.20f, 0.135f}, {0.30f, 0.145f}}}});
+        middle = shape({0.33f, 0.35f}, {{{{0.45f, 0.35f}, {0.55f, 0.35f}, {0.67f, 0.35f}}},
+                                        {{{0.72f, 0.36f}, {0.76f, 0.42f}, {0.78f, 0.50f}}},
+                                        {{{0.80f, 0.58f}, {0.81f, 0.64f}, {0.83f, 0.70f}}},
+                                        {{{0.79f, 0.68f}, {0.75f, 0.60f}, {0.69f, 0.555f}}},
+                                        {{{0.63f, 0.53f}, {0.37f, 0.53f}, {0.31f, 0.555f}}},
+                                        {{{0.25f, 0.60f}, {0.21f, 0.68f}, {0.17f, 0.70f}}},
+                                        {{{0.19f, 0.64f}, {0.20f, 0.58f}, {0.22f, 0.50f}}},
+                                        {{{0.24f, 0.42f}, {0.28f, 0.36f}, {0.33f, 0.35f}}}});
+    }
+    if (picture) {
+        // Measured on the pictures without their black outline (639 x 444 and 454 x 312); the
+        // outline adds the same margin on every side.
+        const float base_w = xbox ? 639.0f : 454.0f;
+        const float iw = float(art.width), ih = float(art.height), margin = std::max(0.0f, (iw - base_w) * 0.5f);
+        const auto px = [&](const char* sdl, float x, float y, float rx, float ry, bool round) {
+            return PadSpot{sdl, (x + margin) / iw, (y + margin) / ih, rx / iw, ry / iw, round};
+        };
+        if (xbox) {
+            spots = {px("lefttrigger", 150, 10, 46, 12, false),  px("righttrigger", 490, 10, 46, 12, false),
+                     px("leftshoulder", 150, 34, 60, 10, false), px("rightshoulder", 490, 34, 60, 10, false),
+                     px("leftstick", 155, 120, 40, 40, true),    px("rightstick", 405, 215, 40, 40, true),
+                     px("back", 270, 120, 13, 13, true),         px("start", 365, 120, 13, 13, true),
+                     px("y", 487, 75, 22, 22, true),             px("x", 440, 120, 22, 22, true),
+                     px("b", 532, 120, 22, 22, true),            px("a", 487, 163, 22, 22, true),
+                     px("dpup", 232, 193, 16, 16, false),        px("dpdown", 232, 258, 16, 16, false),
+                     px("dpleft", 198, 225, 16, 16, false),      px("dpright", 266, 225, 16, 16, false)};
+        } else {
+            spots = {px("lefttrigger", 88, 6, 30, 6, false),     px("righttrigger", 366, 6, 30, 6, false),
+                     px("leftshoulder", 88, 20, 34, 7, false),   px("rightshoulder", 366, 20, 34, 7, false),
+                     px("back", 120, 42, 6, 11, false),          px("start", 331, 42, 6, 11, false),
+                     px("touchpad", 227, 58, 86, 42, false),
+                     px("dpup", 87, 66, 11, 11, false),          px("dpdown", 87, 110, 11, 11, false),
+                     px("dpleft", 65, 88, 11, 11, false),        px("dpright", 109, 88, 11, 11, false),
+                     px("y", 369, 52, 16, 16, true),             px("x", 336, 88, 16, 16, true),
+                     px("b", 401, 88, 16, 16, true),             px("a", 369, 124, 16, 16, true),
+                     px("leftstick", 155, 150, 23, 23, true),    px("rightstick", 296, 150, 23, 23, true)};
+        }
+        d->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(art.texture))), p0, ImVec2(p0.x + qw, p0.y + qh));
+    }
+    // Triggers and bumpers first: the body covers their lower edge.
+    for (const auto& s : spots) {
+        if (picture) break;
+        const std::string sdl = s.sdl;
+        if (sdl.find("trigger") == std::string::npos && sdl.find("shoulder") == std::string::npos) continue;
+        const ImVec2 c = at(s.u, s.v);
+        const float hw = s.hw * side, hh = s.hh * side;
+        d->AddRectFilled(ImVec2(c.x - hw, c.y - hh), ImVec2(c.x + hw, c.y + hh), trigger, std::min(hw, hh) * 0.9f);
+    }
+    if (!picture) d->AddConcavePolyFilled(outline.data(), int(outline.size()), body);
+    if (!picture && !middle.empty()) d->AddConcavePolyFilled(middle.data(), int(middle.size()), ink);
+    if (!picture) d->AddPolyline(outline.data(), int(outline.size()), xbox ? IM_COL32(96, 104, 118, 255) : ink, ImDrawFlags_Closed, stroke * 1.4f);
+    if (picture) {
+    } else if (xbox) {  // the guide button
+        d->AddCircleFilled(at(0.5f, 0.19f), side * 0.04f, key_fill);
+        d->AddCircle(at(0.5f, 0.19f), side * 0.04f, IM_COL32(200, 210, 222, 255), 0, stroke);
+    } else {  // the microphone's dots and the PS button
+        for (int k = -2; k <= 2; ++k) d->AddCircleFilled(at(0.5f + k * 0.012f, 0.385f), side * 0.004f, IM_COL32(220, 224, 232, 255));
+        d->AddRectFilled(at(0.485f, 0.47f), at(0.515f, 0.478f), IM_COL32(220, 224, 232, 255), side * 0.004f);
+    }
+
+    // The button under the mouse, and the ones the hovered table row uses.
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    std::string hovered;
+    for (const auto& s : spots) {
+        const ImVec2 c = at(s.u, s.v);
+        const float hw = s.hw * side, hh = s.hh * side;
+        const bool in = s.round ? (mouse.x - c.x) * (mouse.x - c.x) + (mouse.y - c.y) * (mouse.y - c.y) <= hw * hw
+                                : std::fabs(mouse.x - c.x) <= hw && std::fabs(mouse.y - c.y) <= hh;
+        if (picture_hovered && in) hovered = s.sdl;
+    }
+    std::vector<std::string> lit;
+    if (g_pad_hover_input >= 0 && g_pad_hover_input < int(std::size(kPadInputs))) {
+        const PadInput& in = kPadInputs[g_pad_hover_input];
+        const std::string key = std::string("pad.") + in.id;
+        lit = SplitKeys(a.game.values.count(key) ? a.game.Get(key) : in.fallback);
+    }
+    const auto is_lit = [&](const std::string& sdl) {
+        return sdl == hovered || std::find(lit.begin(), lit.end(), sdl) != lit.end();
+    };
+    const ImU32 glow = IM_COL32(255, 205, 90, 255);
+
+    for (const auto& s : spots) {
+        const std::string sdl = s.sdl;
+        const ImVec2 c = at(s.u, s.v);
+        const float hw = s.hw * side, hh = s.hh * side;
+        const bool hot = is_lit(sdl);
+        if (picture) {  // the image has the buttons: only the light on the ones in play
+            if (hot && s.round) d->AddCircle(c, hw + 3.0f, glow, 0, 3.0f);
+            else if (hot) d->AddRect(ImVec2(c.x - hw - 3, c.y - hh - 3), ImVec2(c.x + hw + 3, c.y + hh + 3), glow, 5.0f, 0, 3.0f);
+            continue;
+        }
+        const bool shoulder = sdl.find("trigger") != std::string::npos || sdl.find("shoulder") != std::string::npos;
+        if (sdl == "leftstick" || sdl == "rightstick") {
+            d->AddCircleFilled(c, hw, xbox ? IM_COL32(22, 24, 28, 255) : IM_COL32(40, 43, 52, 255));
+            d->AddCircle(c, hw, xbox ? IM_COL32(90, 96, 108, 255) : IM_COL32(236, 238, 244, 255), 0, stroke * 1.4f);
+            d->AddCircle(c, hw * 0.66f, xbox ? IM_COL32(70, 76, 88, 255) : IM_COL32(120, 126, 140, 255), 0, stroke);
+        } else if (s.round) {
+            d->AddCircleFilled(c, hw, key_fill);
+            d->AddCircle(c, hw, key_edge, 0, stroke);
+            if (sdl.size() == 1) DrawPadGlyph(d, sdl, c, hw, xbox);
+        } else if (sdl == "touchpad") {
+            d->AddRectFilled(ImVec2(c.x - hw, c.y - hh), ImVec2(c.x + hw, c.y + hh), key_fill, side * 0.03f);
+            d->AddRect(ImVec2(c.x - hw, c.y - hh), ImVec2(c.x + hw, c.y + hh), ink, side * 0.03f, 0, stroke * 1.4f);
+        } else if (!shoulder) {  // d-pad arms, Share and Options
+            const bool small = sdl == "back" || sdl == "start";
+            d->AddRectFilled(ImVec2(c.x - hw, c.y - hh), ImVec2(c.x + hw, c.y + hh), small && !xbox ? ink : key_fill,
+                             std::min(hw, hh) * (small ? 1.0f : 0.45f));
+            if (!small || xbox)
+                d->AddRect(ImVec2(c.x - hw, c.y - hh), ImVec2(c.x + hw, c.y + hh), key_edge, std::min(hw, hh) * 0.45f, 0, stroke);
+        }
+        if (shoulder || sdl == "leftstick" || sdl == "rightstick") {
+            const std::string name = PhysicalButtonName(sdl, xbox);
+            ImFont* font = ImGui::GetFont();
+            const float fs = std::min(ImGui::GetFontSize() * 0.8f, std::max(hh * 1.5f, 10.0f));
+            const ImVec2 t = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, name.c_str());
+            d->AddText(font, fs, ImVec2(c.x - t.x * 0.5f, c.y - t.y * 0.5f), part_text, name.c_str());
+        }
+        if (hot) {
+            if (s.round) d->AddCircle(c, hw + 3.0f, glow, 0, 2.5f);
+            else d->AddRect(ImVec2(c.x - hw - 3, c.y - hh - 3), ImVec2(c.x + hw + 3, c.y + hh + 3), glow, 4.0f, 0, 2.5f);
+        }
+    }
+
+    // Labels: one per button (one for the whole d-pad), stacked on its side without overlapping.
+    struct Callout {
+        std::vector<std::string> sdls;
+        ImVec2 anchor;
+        bool left;
+        std::string text;
+    };
+    std::vector<Callout> callouts;
+    for (const auto& s : spots) {
+        const std::string sdl = s.sdl;
+        if (sdl.rfind("dp", 0) == 0) continue;
+        Callout c;
+        c.sdls = {sdl};
+        c.anchor = at(s.u, s.v);
+        c.left = s.u < 0.5f || (sdl == "touchpad");
+        const std::string what = actions(sdl, false);
+        c.text = PhysicalButtonName(sdl, xbox) + (what.empty() ? "" : "  ·  " + what);
+        if (by_button.find(sdl) == by_button.end()) c.text += T("  ·  (nada)", "  ·  (nothing)");
+        callouts.push_back(c);
+    }
+    {
+        Callout c;
+        c.sdls = {"dpup", "dpdown", "dpleft", "dpright"};
+        float u = 0, v = 0;  // the d-pad's centre: the middle of its four arms
+        for (const auto& s : spots)
+            if (std::string(s.sdl).rfind("dp", 0) == 0) { u += s.u * 0.25f; v += s.v * 0.25f; }
+        c.anchor = at(u, v);
+        c.left = true;
+        std::string text;
+        for (const char* dir : {"dpup", "dpdown", "dpleft", "dpright"}) {
+            const std::string what = actions(dir, false);
+            if (!what.empty()) text += (text.empty() ? "" : ", ") + PhysicalButtonName(dir, false) + " " + what;
+        }
+        c.text = std::string(T("Cruceta", "D-pad")) + (text.empty() ? "" : "  ·  " + text);
+        callouts.push_back(c);
+    }
+    const float line_h = ImGui::GetTextLineHeight() + 8.0f;
+    for (const bool left : {true, false}) {
+        std::vector<Callout*> column;
+        for (auto& c : callouts)
+            if (c.left == left) column.push_back(&c);
+        // top to bottom; at the same height the button nearer the labels first, so lines do not cross
+        std::sort(column.begin(), column.end(), [left](const Callout* x, const Callout* y) {
+            if (std::fabs(x->anchor.y - y->anchor.y) > 2.0f) return x->anchor.y < y->anchor.y;
+            return left ? x->anchor.x < y->anchor.x : x->anchor.x > y->anchor.x;
+        });
+        float y = o.y;
+        std::vector<float> ys;
+        for (const Callout* c : column) {
+            y = std::max(y, c->anchor.y - line_h * 0.5f);
+            ys.push_back(y);
+            y += line_h + 3.0f;
+        }
+        // pushed past the bottom: slide the column up
+        const float over = (ys.empty() ? 0.0f : ys.back() + line_h) - (o.y + height);
+        if (over > 0)
+            for (float& v : ys) v -= over;
+        const float edge = left ? p0.x - side * 0.02f : p0.x + side * 1.02f;
+        for (size_t k = 0; k < column.size(); ++k) {
+            const Callout& c = *column[k];
+            const ImVec2 t = ImGui::CalcTextSize(c.text.c_str());
+            const float x0 = left ? std::max(o.x, edge - t.x - 16.0f) : edge;
+            const float x1 = left ? edge : std::min(o.x + width, edge + t.x + 16.0f);
+            const ImVec2 r0{x0, ys[k]}, r1{x1, ys[k] + line_h};
+            bool hot = false;
+            for (const auto& sdl : c.sdls) hot = hot || is_lit(sdl);
+            const bool label_hovered = picture_hovered && mouse.x >= r0.x && mouse.x <= r1.x && mouse.y >= r0.y && mouse.y <= r1.y;
+            if (label_hovered && c.sdls.size() == 1) hovered = c.sdls[0];
+            hot = hot || label_hovered;
+            const ImVec2 joint{left ? x1 : x0, ys[k] + line_h * 0.5f};
+            d->AddLine(joint, c.anchor, hot ? glow : IM_COL32(120, 210, 245, 150), hot ? 2.0f : 1.2f);
+            d->AddCircleFilled(c.anchor, 3.0f, hot ? glow : IM_COL32(120, 210, 245, 220));
+            d->AddRectFilled(r0, r1, IM_COL32(6, 36, 74, 235), line_h * 0.5f);
+            d->AddRect(r0, r1, hot ? glow : IM_COL32(110, 200, 240, 140), line_h * 0.5f, 0, hot ? 2.0f : 1.0f);
+            d->PushClipRect(r0, r1, true);
+            d->AddText(ImVec2(r0.x + 8.0f, r0.y + 4.0f), IM_COL32(232, 246, 255, 255), c.text.c_str());
+            d->PopClipRect();
+        }
+    }
+
+    if (!hovered.empty()) {
+        const std::string what = actions(hovered, true);
+        ImGui::SetTooltip("%s: %s", PhysicalButtonName(hovered, xbox).c_str(),
+                          what.empty() ? T("no hace nada en el juego", "does nothing in the game") : what.c_str());
+        if (capturing >= 0 && clicked) {
+            a.game.Set(std::string("pad.") + kPadInputs[capturing].id, hovered);
+            SaveGameIni();
+            g_pad_capture = -1;
+        } else if (clicked) {  // no row waiting: choose what this button does
+            g_pad_menu_button = hovered;
+            ImGui::OpenPopup("pad_button_menu");
+        }
+    }
+    // The button's menu: each action of the game; the one picked moves to this button (the action's
+    // other buttons are dropped, as "Change" in the table does).
+    if (ImGui::BeginPopup("pad_button_menu")) {
+        const std::string sdl = g_pad_menu_button;
+        ImGui::TextColored(ImVec4(0.42f, 0.88f, 1.0f, 1.0f), "%s",
+                           Format(T("¿Qué hace %s?", "What does %s do?"), PhysicalButtonName(sdl, xbox)).c_str());
+        ImGui::Separator();
+        for (int i = 0; i < int(std::size(kPadInputs)); ++i) {
+            const PadInput& in = kPadInputs[i];
+            const std::string key = std::string("pad.") + in.id;
+            const auto now = SplitKeys(a.game.values.count(key) ? a.game.Get(key) : in.fallback);
+            const bool here = std::find(now.begin(), now.end(), sdl) != now.end();
+            if (ImGui::Selectable(T(in.es, in.en), here) && !here) {
+                a.game.Set(key, sdl);
+                SaveGameIni();
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Selectable(T("Nada (quitarle sus acciones)", "Nothing (drop its actions)"))) {
+            for (const auto& in : kPadInputs) {
+                const std::string key = std::string("pad.") + in.id;
+                auto now = SplitKeys(a.game.values.count(key) ? a.game.Get(key) : in.fallback);
+                const auto end = std::remove(now.begin(), now.end(), sdl);
+                if (end == now.end()) continue;
+                now.erase(end, now.end());
+                std::string value;
+                for (const auto& b : now) value += (value.empty() ? "" : ",") + b;
+                a.game.Set(key, value);
+            }
+            SaveGameIni();
+        }
+        ImGui::EndPopup();
+    }
+    FormNote(capturing >= 0 ? T("Esperando botón: púlsalo en tu mando o haz clic en el dibujo.",
+                                "Waiting for a button: press it on your controller or click it on the picture.")
+                            : xbox ? T("Mando de Xbox (según tu mando o los iconos de botones). Haz clic en un botón del dibujo para elegir qué hace.",
+                                       "Xbox controller (from your controller or the button prompts). Click a button on the picture to choose what it does.")
+                                   : T("Mando de PlayStation (según tu mando o los iconos de botones). Haz clic en un botón del dibujo para elegir qué hace.",
+                                       "PlayStation controller (from your controller or the button prompts). Click a button on the picture to choose what it does."));
+}
+
 void GamepadTab() {
     App& a = g_app;
-    ImGui::TextWrapped("%s", T("Mapeo de botones del mando (Jugador 1). Compatible con mandos de Xbox, PlayStation (DualShock / DualSense), Switch Pro y mandos genéricos. "
-                               "Pulsa \"Cambiar\" y presiona el botón en tu mando o selecciónalo en la pantalla. Se guarda en bbport.ini y se aplica en el próximo inicio.",
-                               "Player 1 gamepad button mapping. Supports Xbox, PlayStation (DualShock / DualSense), Switch Pro and generic controllers. "
-                               "Press \"Change\" and press the button on your controller or choose it on screen. Saved to bbport.ini, applies on next launch."));
+    FormBegin();
+    FormSection(T("Mando", "Controller"));
+    ControllerSettings();
+    FormEnd();
+    FormSection(T("Mapa del mando", "Controller map"));
+    PadDiagram();
+    FormSection(T("Botones del mando", "Gamepad buttons"));
+    FormNote(T("Botones del jugador 1. Sirve con mandos de Xbox, PlayStation (DualShock / DualSense), Switch Pro y genéricos. "
+               "Pulsa \"Cambiar\" y presiona el botón en tu mando o elígelo en la pantalla. Se aplica en el próximo inicio.",
+               "Player 1's buttons. Works with Xbox, PlayStation (DualShock / DualSense), Switch Pro and generic controllers. "
+               "Press \"Change\" and press the button on your controller or choose it on screen. Applies on next launch."));
+
+    PadWatchStart();
+    const int rows = int(std::size(kPadInputs));
+    for (std::string pressed; PadWatchTake(pressed);) {
+        const int waiting = g_pad_capture;
+        if (waiting >= 0) {  // any button, the d-pad and Circle / B included, is the new one
+            a.game.Set(std::string("pad.") + kPadInputs[waiting].id, pressed);
+            SaveGameIni();
+            g_pad_capture = -1;
+            g_pad_cursor = waiting;
+        } else if (pressed == "dpdown" || pressed == "dpup") {
+            g_pad_cursor = g_pad_cursor < 0 ? 0 : std::clamp(g_pad_cursor + (pressed == "dpdown" ? 1 : -1), 0, rows - 1);
+            g_pad_cursor_moved = true;
+        } else if (g_pad_cursor >= 0 && pressed == "a") {  // Change
+            g_pad_capture = g_pad_cursor;
+        } else if (g_pad_cursor >= 0 && pressed == "y") {  // Default
+            a.game.Erase(std::string("pad.") + kPadInputs[g_pad_cursor].id);
+            SaveGameIni();
+        } else if (g_pad_cursor >= 0 && pressed == "x") {  // Clear
+            a.game.Set(std::string("pad.") + kPadInputs[g_pad_cursor].id, "");
+            SaveGameIni();
+        }
+    }
+    FormNote(g_pad_watch.running
+                 ? T("Con el mando: cruceta ↑ ↓ elige una fila, A / Cruz la cambia (luego pulsa el botón nuevo), "
+                     "Y / Triángulo vuelve al original, X / Cuadrado la deja sin botón.",
+                     "With the controller: d-pad ↑ ↓ picks a row, A / Cross changes it (then press the new button), "
+                     "Y / Triangle restores the default, X / Square clears it.")
+                 : T("No se pudo leer el mando con SDL: solo funcionan los mandos de Xbox (XInput).",
+                     "Could not read the controller through SDL: only Xbox (XInput) controllers work."));
 
     const int capturing = g_pad_capture;
-    if (capturing >= 0) {
+    if (capturing >= 0 && !g_pad_watch.running) {
         const char* polled = PollGamepadButton();
         if (g_pad_waiting_release) {
             if (!polled) g_pad_waiting_release = false;
@@ -6817,11 +7934,11 @@ void GamepadTab() {
         ImGui::Spacing();
     }
 
-    ImGui::SeparatorText(T("Botones del mando", "Gamepad buttons"));
+    int pad_row = -1;
     if (ImGui::BeginTable("pad_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn(T("Acción", "Action"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn(T("Botón asignado", "Assigned button"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, RowButtonsWidth());
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < int(std::size(kPadInputs)); ++i) {
@@ -6832,7 +7949,15 @@ void GamepadTab() {
 
             ImGui::PushID(i + 200);
             ImGui::TableNextRow();
+            if (i == g_pad_cursor) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(40, 150, 210, 110));
+            }
             ImGui::TableNextColumn();
+            const float row_top = ImGui::GetCursorScreenPos().y;
+            if (i == g_pad_cursor && g_pad_cursor_moved) {
+                ImGui::SetScrollHereY(0.5f);
+                g_pad_cursor_moved = false;
+            }
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(T(in.es, in.en));
 
@@ -6868,13 +7993,18 @@ void GamepadTab() {
             }
             ImGui::EndDisabled();
             ImGui::EndDisabled();
+            if (ImGui::IsWindowHovered() && ImGui::GetIO().MousePos.y >= row_top &&
+                ImGui::GetIO().MousePos.y < ImGui::GetItemRectMax().y + ImGui::GetStyle().CellPadding.y)
+                pad_row = i;
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
+    g_pad_hover_input = pad_row >= 0 ? pad_row : g_pad_cursor;
 
-    ImGui::Spacing();
-    ImGui::SeparatorText(T("Preajustes rápidos", "Quick presets"));
+    FormNote(T("Gris: asignación por defecto. Blanco: botón personalizado.",
+               "Grey: default binding. White: custom binding."));
+    FormSection(T("Preajustes rápidos", "Quick presets"));
     ImGui::BeginDisabled(capturing >= 0);
     if (ImGui::Button(T("Cruceta Abajo = L2 (Usar Ítem)", "D-pad Down = L2 (Use Item)"))) {
         a.game.Set("pad.l2", "dpdown");
@@ -6893,9 +8023,6 @@ void GamepadTab() {
                      "All gamepad buttons restored to defaults.");
     }
     ImGui::EndDisabled();
-    ImGui::Spacing();
-    ImGui::TextColored(kGrey, "%s", T("Gris: asignación por defecto. Blanco: botón personalizado guardado en bbport.ini.",
-                                      "Grey: default binding. White: custom binding saved to bbport.ini."));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7622,9 +8749,18 @@ void UpdateBanner() {
     }
 }
 
+void UpdateStatus();
+
 void UpdateSection() {
     App& a = g_app;
-    ImGui::SeparatorText(T("Actualizaciones", "Updates"));
+    ImGui::Spacing();
+    BeginCard("update_card");
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.25f);
+    ImGui::Text("%s %s", T("Versión instalada:", "Installed version:"), a.version.c_str());
+    if (g_font_heading) ImGui::PopFont();
+    UpdateStatus();
+    EndCard();
+    FormSection(T("Actualizaciones", "Updates"));
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kGrey, "%s",
                        T("Descarga la última versión publicada en GitHub y la instala encima. Tus ajustes, amigos, apodo, "
@@ -7634,7 +8770,20 @@ void UpdateSection() {
                          "friends, nickname, own patches, saves, backups, DLC and logs are kept: the update only changes "
                          "the port's files. If anything fails, everything is put back."));
     ImGui::PopTextWrapPos();
-    ImGui::Text("%s %s", T("Versión instalada:", "Installed version:"), a.version.c_str());
+    ImGui::Spacing();
+    LauncherFlag("update_check", T("Buscar al abrir el launcher", "Check when the launcher opens"), true,
+                 T("Una consulta pequeña a GitHub al abrir. No descarga nada sin tu permiso, salvo que actives la opción de abajo.",
+                   "A small request to GitHub at start. Nothing is downloaded without your say, unless the option below is on."));
+    LauncherFlag("update_auto", T("Instalar automáticamente", "Install automatically"), false,
+                 T("Al abrir el launcher, si hay una versión nueva se descarga e instala sola y el launcher se reinicia. "
+                   "Nunca mientras juegas. Si abres el juego directo (acceso directo o Steam), no se actualiza.",
+                   "When the launcher opens and a new version is out, it is downloaded and installed and the launcher "
+                   "restarts. Never while you play. Starting straight into the game (shortcut, Steam) does not update."));
+}
+
+/// The update's state and buttons (inside the Updates card).
+void UpdateStatus() {
+    App& a = g_app;
     const int stage = g_update.stage;
     ImGui::BeginDisabled(UpdateBusy());
     if (ImGui::Button(T("Comprobar actualizaciones", "Check for updates"))) StartUpdateCheck(false);
@@ -7670,14 +8819,6 @@ void UpdateSection() {
     } else if (stage != UpdateState::Idle) {
         ImGui::TextColored(kGrey, "%s", T("Mira el aviso de arriba.", "See the notice at the top."));
     }
-    LauncherFlag("update_check", T("Buscar actualizaciones al abrir el launcher", "Check for updates when the launcher opens"), true,
-                 T("Una consulta pequeña a GitHub al abrir. No descarga nada sin tu permiso, salvo que actives la opción de abajo.",
-                   "A small request to GitHub at start. Nothing is downloaded without your say, unless the option below is on."));
-    LauncherFlag("update_auto", T("Instalar las actualizaciones automáticamente", "Install updates automatically"), false,
-                 T("Al abrir el launcher, si hay una versión nueva se descarga e instala sola y el launcher se reinicia. "
-                   "Nunca mientras juegas. Si abres el juego directo (acceso directo o Steam), no se actualiza.",
-                   "When the launcher opens and a new version is out, it is downloaded and installed and the launcher "
-                   "restarts. Never while you play. Starting straight into the game (shortcut, Steam) does not update."));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -8334,10 +9475,10 @@ void ImportPopup() {
     ImGui::EndPopup();
 }
 
-void ToolsTab() {
+/// Tools > Data: another installation's settings, the folders, the log and the shader cache.
+void ToolsDataPage() {
     App& a = g_app;
-    UpdateSection();
-    ImGui::SeparatorText(T("Otra instalación", "Another installation"));
+    FormSection(T("Otra instalación", "Another installation"));
     ImGui::BeginDisabled(g_import.state == ImportState::Copying || a.game_running);
     if (ImGui::Button(T("Traer ajustes de otra instalación...", "Bring settings from another installation..."))) {
         if (const auto dir = PickFolder(a.hwnd, L"Otra instalación del port / Another installation of the port",
@@ -8358,7 +9499,7 @@ void ToolsTab() {
                  "otra carpeta del port (por ejemplo, la de una versión anterior). La otra carpeta no se toca.",
                  "Copies the settings, controls, nickname, game folder, saves, trophies and DLC of another folder of the "
                  "port (an older release's, say) into this one. The other folder is left as it is."));
-    ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
+    FormSection(T("Carpetas y registro", "Folders and log"));
     if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenInShell(a.root / L"last_run.log");
     ImGui::SameLine();
     if (ImGui::Button(T("Abrir la carpeta del port", "Open the port folder"))) OpenInShell(a.root);
@@ -8368,12 +9509,25 @@ void ToolsTab() {
         fs::create_directories(a.root / L"user", ec);
         OpenInShell(a.root / L"user");
     }
-    LauncherFlag("save_log", T("Guardar registro detallado (logs\\, con estadísticas de fotogramas)",
-                               "Save a detailed log (logs\\, with frame statistics)"), false,
-                 T("Para reportar fallos o tirones: adjunta el archivo de logs\\ en un issue.",
-                   "To report crashes or stutter: attach the file from logs\\ to an issue."));
+    LauncherFlag("save_log", T("Registro detallado", "Detailed log"), false,
+                 T("Guarda en logs\\ un registro con estadísticas de fotogramas. Para reportar fallos o tirones: "
+                   "adjunta ese archivo en un issue.",
+                   "Saves a log with frame statistics in logs\\. To report crashes or stutter: attach that file to an issue."));
 
-    ImGui::SeparatorText(T("Accesos directos", "Shortcuts"));
+    FormSection(T("Caché de shaders", "Shader cache"));
+    FormNote(T("Los shaders se guardan para que los siguientes arranques vayan fluidos. Bórrala solo si "
+               "actualizaste el driver de la GPU o ves fallos gráficos.",
+               "Shaders are kept so later sessions run smoothly. Clear it only after a GPU driver "
+               "update or if you see graphics glitches."));
+    ImGui::BeginDisabled(a.game_running);
+    if (ImGui::Button(T("Borrar la caché de shaders", "Clear the shader cache"))) a.confirm_clear_cache = true;
+    ImGui::EndDisabled();
+}
+
+/// Tools > Shortcuts: the Desktop and Steam.
+void ToolsShortcutsPage() {
+    App& a = g_app;
+    FormSection(T("Accesos directos", "Shortcuts"));
     if (ImGui::Button(T("Crear acceso directo en el Escritorio", "Create Desktop Shortcut"))) {
         std::string err;
         if (CreateDesktopShortcut(err)) {
@@ -8392,32 +9546,30 @@ void ToolsTab() {
                  "Adds it to your Steam library as a non-Steam game, with its artwork. It opens the game "
                  "directly, without the launcher window, so Steam's recording and overlay see the game. Your "
                  "settings, online and mods still apply."));
+}
 
-    ImGui::SeparatorText(T("Caché de shaders", "Shader cache"));
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(kGrey, "%s", T("Los shaders se guardan para que los siguientes arranques vayan fluidos. Bórrala solo si "
-                                      "actualizaste el driver de la GPU o ves fallos gráficos.",
-                                      "Shaders are kept so later sessions run smoothly. Clear it only after a GPU driver "
-                                      "update or if you see graphics glitches."));
-    ImGui::PopTextWrapPos();
-    ImGui::BeginDisabled(a.game_running);
-    if (ImGui::Button(T("Borrar la caché de shaders", "Clear the shader cache"))) a.confirm_clear_cache = true;
-    ImGui::EndDisabled();
-
-    ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
+/// Tools > Language: the launcher's own language.
+void ToolsLanguagePage() {
+    FormSection(T("Idioma del launcher", "Launcher language"));
     const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
                                     "Deutsch", "Italiano", "日本語", "简体中文", "Русский", "Bahasa Indonesia"};
     const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru", "id"};
     constexpr int language_count = int(sizeof language_codes / sizeof *language_codes);
     int selected_language = 0;
     for (int i = 0; i < language_count; ++i) if (g_language == language_codes[i]) selected_language = i;
-    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, language_count)) {
+    if (ImGui::Combo(FormLabel(T("Idioma", "Language")), &selected_language, language_names, language_count)) {
         g_language = language_codes[selected_language];
         ApplyLauncherLanguage();
         SaveLauncher();
     }
+    FormNote(T("Solo el launcher. El idioma del juego está en Ajustes > Juego.",
+               "The launcher only. The game's language is in Settings > Game."));
+}
 
-    ImGui::SeparatorText(T("Acerca de", "About"));
+/// Tools > About: credits, licences and links.
+void ToolsAboutPage() {
+    App& a = g_app;
+    FormSection(T("Acerca de", "About"));
     ImGui::Text("CTR-NitroFueled-PC %s", a.version.c_str());
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextUnformatted(T("Fork de Windows de SacredFire (T3CHNOLOG1C), basado en bbport (deadinside28), el port de Windows "
@@ -8457,6 +9609,16 @@ void ToolsTab() {
     ImGui::SameLine();
     if (ImGui::TextLink(kRepoUrl)) OpenInShell(fs::path(Widen(kRepoUrl)));
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());
+}
+
+void ToolsTab() {
+    if (!ImGui::BeginTabBar("tools_pages")) return;
+    SettingsPage(T("Actualizaciones", "Updates"), UpdateSection);
+    SettingsPage(T("Datos y carpetas", "Data and folders"), ToolsDataPage);
+    SettingsPage(T("Accesos directos", "Shortcuts"), ToolsShortcutsPage);
+    SettingsPage(T("Idioma", "Language"), ToolsLanguagePage);
+    SettingsPage(T("Acerca de", "About"), ToolsAboutPage);
+    ImGui::EndTabBar();
 }
 
 void ClearShaderCache() {
@@ -8579,45 +9741,93 @@ void LoadArtwork() {
     LoadArtworkFile(art / L"ctr-hero.png", g_hero_art);
     LoadArtworkFile(art / L"ctr-logo.png", g_logo_art);
     LoadArtworkFile(art / L"ctr-menu-background.png", g_menu_background);
+    LoadArtworkFile(art / L"pad-xbox.png", g_pad_xbox_art);
+    LoadArtworkFile(art / L"pad-playstation.png", g_pad_ps_art);
 }
 
 void ReleaseArtwork() {
-    for (auto* a : {&g_hero_art, &g_logo_art, &g_menu_background}) {
+    for (auto* a : {&g_hero_art, &g_logo_art, &g_menu_background, &g_pad_xbox_art, &g_pad_ps_art}) {
         if (a->texture) a->texture->Release();
         *a = {};
     }
 }
 
-void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s, ImU32 cut) {
     const ImU32 navy = IM_COL32(6, 39, 89, 255);
     auto line = [&](ImVec2 a, ImVec2 b, float t = 2.2f) { d->AddLine(a, b, navy, t * s); d->AddLine(a, b, ink, t * s * 0.58f); };
+    // icons 1-9: solid shapes in a 20 x 20 box, details cut out in the entry's own colour
+    const auto P = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
     if (id == 0) { // checkered flag / race
         line({c.x-7*s,c.y+8*s},{c.x-7*s,c.y-8*s},2.5f); d->AddRectFilled({c.x-5*s,c.y-8*s},{c.x+8*s,c.y+1*s},ink,1.5f*s);
         d->AddRectFilled({c.x-2*s,c.y-8*s},{c.x+1*s,c.y-3.5f*s},navy); d->AddRectFilled({c.x+4*s,c.y-3.5f*s},{c.x+7*s,c.y+1*s},navy);
     } else if (id == 1) { // gear
-        d->AddCircleFilled(c,7*s,navy,12); d->AddCircleFilled(c,5.5f*s,ink,12); d->AddCircleFilled(c,2*s,navy,12);
-        for (int i=0;i<8;++i) { float a=float(i)*0.785398f; ImVec2 p{c.x+7*s*std::cos(a),c.y+7*s*std::sin(a)}; d->AddCircleFilled(p,1.6f*s,ink,8); }
-    } else if (id == 2) { // wireless
-        d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(navy,0,4*s); d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(ink,0,2.2f*s);
-        d->PathArcTo({c.x,c.y+5*s},5*s,3.85f,5.58f,18); d->PathStroke(ink,0,2*s); d->AddCircleFilled({c.x,c.y+5*s},1.7f*s,ink,10);
+        for (int i = 0; i < 8; ++i) {
+            const float a = float(i) * 0.785398f, ca = std::cos(a), sa = std::sin(a);
+            const auto R = [&](float r, float t) { return P(ca * r - sa * t, sa * r + ca * t); };
+            d->AddQuadFilled(R(5.0f, -1.9f), R(9.2f, -1.5f), R(9.2f, 1.5f), R(5.0f, 1.9f), ink);
+        }
+        d->AddCircleFilled(c, 6.8f * s, ink, 20);
+        d->AddCircleFilled(c, 2.8f * s, cut, 16);
+    } else if (id == 2) { // globe
+        const float t = 1.7f * s;
+        d->AddCircle(c, 8.5f * s, ink, 24, t);
+        d->AddEllipse(c, ImVec2(3.6f * s, 8.5f * s), ink, 0.0f, 20, t);
+        d->AddLine(P(-8.5f, 0), P(8.5f, 0), ink, t);
+        d->AddLine(P(-7.2f, -4.4f), P(7.2f, -4.4f), ink, t * 0.8f);
+        d->AddLine(P(-7.2f, 4.4f), P(7.2f, 4.4f), ink, t * 0.8f);
     } else if (id == 3) { // gamepad
-        d->AddRect({c.x-9*s,c.y-5*s},{c.x+9*s,c.y+6*s},navy,5*s,0,3*s); d->AddRect({c.x-8*s,c.y-4*s},{c.x+8*s,c.y+5*s},ink,4*s,0,2*s);
-        line({c.x-5*s,c.y},{c.x-1*s,c.y},2); line({c.x-3*s,c.y-2*s},{c.x-3*s,c.y+2*s},2); d->AddCircleFilled({c.x+4*s,c.y-1*s},1.4f*s,navy); d->AddCircleFilled({c.x+6*s,c.y+2*s},1.4f*s,navy);
+        d->AddRectFilled(P(-9.5f, -5.5f), P(9.5f, 3.0f), ink, 4.5f * s);
+        d->AddEllipseFilled(P(-6.3f, 3.6f), ImVec2(3.6f * s, 4.4f * s), ink, 0.35f);
+        d->AddEllipseFilled(P(6.3f, 3.6f), ImVec2(3.6f * s, 4.4f * s), ink, -0.35f);
+        d->AddRectFilled(P(-7.6f, -1.9f), P(-3.0f, -0.5f), cut);  // d-pad
+        d->AddRectFilled(P(-6.0f, -3.5f), P(-4.6f, 1.1f), cut);
+        d->AddCircleFilled(P(4.6f, -2.6f), 1.2f * s, cut, 10);
+        d->AddCircleFilled(P(6.8f, -0.4f), 1.2f * s, cut, 10);
     } else if (id == 4) { // keyboard
-        d->AddRectFilled({c.x-9*s,c.y-6*s},{c.x+9*s,c.y+6*s},navy,2*s); d->AddRectFilled({c.x-7*s,c.y-4*s},{c.x+7*s,c.y+4*s},ink,1*s);
-        for(int r=0;r<2;++r) for(int col=0;col<5;++col) d->AddRectFilled({c.x-6*s+col*2.5f*s,c.y-3*s+r*3*s},{c.x-4.5f*s+col*2.5f*s,c.y-1.8f*s+r*3*s},navy,0.4f*s);
-    } else if (id == 5) { // patch badge
-        const ImVec2 pts[]={{c.x,c.y-9*s},{c.x+8*s,c.y-6*s},{c.x+7*s,c.y+3*s},{c.x,c.y+9*s},{c.x-7*s,c.y+3*s},{c.x-8*s,c.y-6*s}};
-        d->AddConvexPolyFilled(pts,6,navy); const ImVec2 in[]={{c.x,c.y-7*s},{c.x+6*s,c.y-4.5f*s},{c.x+5*s,c.y+2*s},{c.x,c.y+7*s},{c.x-5*s,c.y+2*s},{c.x-6*s,c.y-4.5f*s}}; d->AddConvexPolyFilled(in,6,ink);
-        line({c.x-3*s,c.y},{c.x-0.5f*s,c.y+2.5f*s},2.4f); line({c.x-0.5f*s,c.y+2.5f*s},{c.x+4*s,c.y-3*s},2.4f);
-    } else if (id == 6) { // save card
-        d->AddRectFilled({c.x-7*s,c.y-9*s},{c.x+7*s,c.y+9*s},navy,1*s); d->AddRectFilled({c.x-5.5f*s,c.y-7*s},{c.x+5.5f*s,c.y+7*s},ink,0.8f*s);
-        d->AddRectFilled({c.x-3.5f*s,c.y-6*s},{c.x+3.5f*s,c.y-2*s},navy); d->AddRectFilled({c.x-3.5f*s,c.y+1*s},{c.x+3.5f*s,c.y+5*s},navy,0.6f*s);
-    } else if (id == 7) { // crate
-        d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
-        d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
-    } else { // crossed tools
-        line({c.x-7*s,c.y-7*s},{c.x+7*s,c.y+7*s},3); line({c.x+7*s,c.y-7*s},{c.x-7*s,c.y+7*s},3); d->AddCircleFilled(c,2.5f*s,ink,12);
+        d->AddRectFilled(P(-10, -6.5f), P(10, 6.5f), ink, 2.2f * s);
+        for (int r = 0; r < 2; ++r)
+            for (int k = 0; k < 6; ++k) {
+                const float x = -7.6f + k * 2.9f - r * 0.0f, y = -4.2f + r * 3.0f;
+                d->AddRectFilled(P(x, y), P(x + 1.9f, y + 1.9f), cut, 0.4f * s);
+            }
+        d->AddRectFilled(P(-5.0f, 2.4f), P(5.0f, 4.2f), cut, 0.5f * s);  // space bar
+    } else if (id == 5) { // puzzle piece (mods)
+        d->AddRectFilled(P(-8, -5), P(5, 8), ink, 1.5f * s);
+        d->AddCircleFilled(P(-1.5f, -6.2f), 3.0f * s, ink, 14);
+        d->AddCircleFilled(P(6.2f, 1.5f), 3.0f * s, ink, 14);
+        d->AddCircleFilled(P(-8.0f, 1.5f), 2.4f * s, cut, 14);  // the left socket
+    } else if (id == 6) { // floppy disk
+        const ImVec2 body[] = {P(-8.5f, -8.5f), P(5.5f, -8.5f), P(8.5f, -5.5f), P(8.5f, 8.5f), P(-8.5f, 8.5f)};
+        d->AddConvexPolyFilled(body, 5, ink);
+        d->AddRectFilled(P(-5.0f, -8.5f), P(4.0f, -3.0f), cut, 0.6f * s);   // shutter
+        d->AddRectFilled(P(1.0f, -7.5f), P(3.0f, -4.0f), ink);
+        d->AddRectFilled(P(-5.5f, 1.0f), P(5.5f, 8.5f), cut, 0.8f * s);     // label
+        d->AddLine(P(-3.5f, 3.8f), P(3.5f, 3.8f), ink, 1.0f * s);
+        d->AddLine(P(-3.5f, 6.0f), P(3.5f, 6.0f), ink, 1.0f * s);
+    } else if (id == 7) { // gift box (DLC)
+        d->AddRectFilled(P(-7.5f, -1.5f), P(7.5f, 8.5f), ink, 1.0f * s);
+        d->AddRectFilled(P(-9.0f, -5.0f), P(9.0f, -1.0f), ink, 1.0f * s);
+        d->AddRectFilled(P(-1.1f, -5.0f), P(1.1f, 8.5f), cut);              // ribbon
+        d->AddLine(P(-9.0f, -1.2f), P(9.0f, -1.2f), cut, 0.9f * s);
+        d->AddEllipse(P(-3.2f, -7.0f), ImVec2(3.0f * s, 1.8f * s), ink, 0.35f, 14, 1.6f * s);  // bow
+        d->AddEllipse(P(3.2f, -7.0f), ImVec2(3.0f * s, 1.8f * s), ink, -0.35f, 14, 1.6f * s);
+    } else if (id == 8) { // trophy
+        const ImVec2 cup[] = {P(-6.5f, -8.5f), P(6.5f, -8.5f), P(6.0f, -4.0f), P(3.5f, 0.5f), P(0, 1.8f), P(-3.5f, 0.5f), P(-6.0f, -4.0f)};
+        d->AddConvexPolyFilled(cup, 7, ink);
+        d->PathArcTo(P(-6.2f, -4.8f), 3.2f * s, 1.57f, 4.71f, 12);
+        d->PathStroke(ink, 0, 1.7f * s);
+        d->PathArcTo(P(6.2f, -4.8f), 3.2f * s, -1.57f, 1.57f, 12);
+        d->PathStroke(ink, 0, 1.7f * s);
+        d->AddRectFilled(P(-1.3f, 1.0f), P(1.3f, 5.5f), ink);
+        d->AddRectFilled(P(-5.5f, 5.5f), P(5.5f, 8.8f), ink, 1.0f * s);
+        d->AddCircleFilled(P(0, -4.5f), 1.6f * s, cut, 10);                 // a gem on the cup
+    } else { // wrench (tools)
+        d->AddLine(P(-6.5f, 6.5f), P(3.0f, -3.0f), ink, 3.6f * s);
+        d->AddCircleFilled(P(-6.5f, 6.5f), 1.8f * s, ink, 12);
+        d->AddCircleFilled(P(4.6f, -4.6f), 4.6f * s, ink, 18);
+        const ImVec2 jaw[] = {P(4.2f, -5.0f), P(7.0f, -10.0f), P(11.0f, -6.0f), P(5.0f, -4.2f)};
+        d->AddConvexPolyFilled(jaw, 4, cut);                                 // the open jaw
+        d->AddCircleFilled(P(-6.5f, 6.5f), 0.8f * s, cut, 8);
     }
 }
 
@@ -8654,7 +9864,8 @@ bool MenuEntry(int id, const char* label, bool selected, float width) {
         }
     }
     const ImVec2 icon{a.x+31.0f+slide,a.y+size.y*0.5f};
-    DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),0.75f);
+    DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),id==0?0.75f:0.92f,
+                 selected?IM_COL32(234,250,255,248):(hovered?IM_COL32(7,65,130,255):IM_COL32(6,55,113,255)));
     ImFont* label_font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
     const float label_font_size = ImGui::GetFontSize();
     const ImVec2 text_size=label_font->CalcTextSizeA(label_font_size, FLT_MAX, 0.0f, label);
@@ -8710,6 +9921,7 @@ void Frame() {
         if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
             a.active_page = i;
             if (i != 3) g_pad_capture = -1;
+            if (i != 3) PadWatchStop();
             if (i != 4) g_key_capture = -1;
         }
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
@@ -8736,6 +9948,15 @@ void Frame() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 17.0f));
     ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
+    if (a.active_page > 0 && a.active_page < 10) {  // the page's name on top (Play has its banner)
+        ImFont* title_font = g_ctr_font ? g_ctr_font : g_font_heading;
+        if (title_font) ImGui::PushFont(title_font, ImGui::GetStyle().FontSizeBase * 1.6f);
+        ImGui::TextUnformatted(pages[a.active_page]);
+        if (title_font) ImGui::PopFont();
+        ImGui::Spacing();
+    }
+    if (a.active_page == 3) ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    else ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     switch (a.active_page) {
     case 0: PlayTab(); break;
     case 1: SettingsTab(); break;
@@ -9293,6 +10514,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.17f, 0.71f, 0.87f, 1.0f);
     style.Colors[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.91f, 1.0f, 1.0f);
     style.Colors[ImGuiCol_Header] = ImVec4(0.05f, 0.35f, 0.60f, 0.9f);
+    style.Colors[ImGuiCol_Tab] = ImVec4(0.04f, 0.24f, 0.43f, 0.90f);
+    style.Colors[ImGuiCol_TabHovered] = ImVec4(0.11f, 0.55f, 0.76f, 1.0f);
+    style.Colors[ImGuiCol_TabSelected] = ImVec4(0.12f, 0.58f, 0.80f, 1.0f);
+    style.Colors[ImGuiCol_TabSelectedOverline] = ImVec4(0.38f, 0.91f, 1.0f, 1.0f);
+    style.Colors[ImGuiCol_TabDimmed] = ImVec4(0.04f, 0.24f, 0.43f, 0.90f);
+    style.Colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.12f, 0.58f, 0.80f, 1.0f);
     style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.11f, 0.55f, 0.76f, 1.0f);
     style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.16f, 0.68f, 0.84f, 1.0f);
     style.FontSizeBase = 17.0f;
@@ -9398,6 +10625,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    PadWatchStop();
     ReleaseArtwork();
     CleanupDevice();
     DestroyWindow(hwnd);
