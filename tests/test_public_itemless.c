@@ -584,8 +584,8 @@ static void test_ranked_season_gate(void) {
     private_room = 1;
     menu_party_returned = 1; party_at_entry = 5;
     placeable_event(button, event);
-    assert(!menu_party_returned && party_at_entry == ranked_party_size());
-    private_room = 0;
+    assert(!menu_party_returned && party_at_entry == ranked_party_size() && entry_private);
+    private_room = 0; entry_private = 0;
 }
 
 static void test_hall_of_fame_button_event(void) {
@@ -955,6 +955,12 @@ static void test_native_party_menu_return(void) {
         menu_party_returned=0;party_at_entry=2;
         runtime_public_itemless_menu_return();
         assert(party_returns==returns+1);
+        /* A private room: nobody comes along, not even a party that came in together. */
+        menu_party_returned=0;party_at_entry=2;entry_private=1;
+        runtime_public_itemless_menu_return();
+        assert(party_returns==returns+1);
+        /* The next search is not a private room any more. */
+        arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;
     }
     runtime_public_itemless_reset();

@@ -75,11 +75,20 @@ static int menu_party_returned = 1;
 /* The player's own party when they last entered a lobby session (a search, a private room),
  * before any room member joined it: 1 when they went alone. */
 static int party_at_entry = 1;
+/* That session is a private room: leaving it never brings anyone along, not even a party that
+ * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
+static int entry_private;
 static int ranked_party_size(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
 static void arm_party_return(void) {
-    if (__atomic_exchange_n(&menu_party_returned,0,__ATOMIC_SEQ_CST))
+    if (__atomic_exchange_n(&menu_party_returned,0,__ATOMIC_SEQ_CST)) {
         __atomic_store_n(&party_at_entry,ranked_party_size(),__ATOMIC_SEQ_CST);
+        __atomic_store_n(&entry_private,0,__ATOMIC_SEQ_CST);
+    }
+}
+static void arm_private_room(void) {
+    arm_party_return();
+    __atomic_store_n(&entry_private,1,__ATOMIC_SEQ_CST);
 }
 static void (ABI *native_party_return)(void *);
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
@@ -208,7 +217,9 @@ void runtime_public_itemless_menu_return(void) {
      * together; a player who came alone leaves the room's players behind (2026-11-15: after a
      * private, public or Ranked room everyone stayed grouped with its host). */
     const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
-    if (role == 1 && native_party_return && before > 1) {
+    if (role == 1 && __atomic_load_n(&entry_private, __ATOMIC_SEQ_CST)) {
+        puts("Online party: left a private room; nobody is brought along");
+    } else if (role == 1 && native_party_return && before > 1) {
         native_party_return(party);
         printf("Online party: return notification queued; members=%d (party of %d before the room)\n",
                ranked_party_size(), before);
@@ -1082,14 +1093,14 @@ static void ABI placeable_event(void *self, void *event) {
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
-                    if (confirm) { ranked_selected = 0; arm_party_return(); }
+                    if (confirm) { ranked_selected = 0; arm_private_room(); }
                     if (gain) runtime_online_mode_selector_left();
                 }
                 /* Back into the private room from the mode screen (after leaving it): the party is
                  * the one this player has now, before anyone joins the room. */
                 if (confirm && private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton"))
-                    arm_party_return();
+                    arm_private_room();
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     if (!ranked_entry_allowed()) return;
