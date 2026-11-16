@@ -143,7 +143,7 @@ static struct {
     int speed, paused, scrubbing;
     float time;                 /* play time, s since GO */
     uint64_t buttons;
-    int unghost_frames;
+    double unghost_frames;
     void *player;               /* the local CPlayer whose character the replay changed */
     char *driver, *kart_name;   /* its own character and kart (game strings) */
     void *outfit;
@@ -155,7 +155,8 @@ static struct {
     int32_t look[4];
     /* start sequence (the mod's menu.c) */
     enum { STEP_NONE, STEP_KART, STEP_LOAD } step;
-    int wait, frames_waited, cast_in;
+    double wait, frames_waited;
+    int cast_in;
     int last_frame;
     char request[64];           /* a file asked for by the menu (any thread), taken by the game's thread */
     pthread_mutex_t lock;
@@ -184,7 +185,7 @@ static struct {
     int skip_set, flyby_seen;          /* skip_intro(): the cutscene manager's flag is ours; the fly-over came anyway */
     uint8_t skip_was;
     uint32_t world_id;                  /* the replay's level's world (give_back waits for another) */
-    int back_frames;
+    double back_frames;
     int ghosts_later;                   /* live, loaded before the friend's GO: the ghosts are made at GO */
     int option_set;                     /* skip_intro(): the game's auto-skip fly-by option is ours */
     uint8_t option_was;
@@ -235,8 +236,8 @@ int runtime_replay_no_crates(void) {
 static int live_open(void) { return P.live && !__atomic_load_n(&P.live_ended, __ATOMIC_ACQUIRE); }
 
 /* ---- loading ---- */
-#define GAP 6
-#define STILL (RR_RATE / 2)
+#define GAP 0.2f
+#define STILL 1.0f
 static void clean(int r) {
     for (uint32_t i = 1; i < P.count; i++)
         for (int steering = 0; steering < 2 && P.header.racer[r].kind == RR_REMOTE; steering++) {
@@ -244,8 +245,8 @@ static void clean(int r) {
 #define EMPTY(s) (steering ? (s)->steer == -64 : !(s)->buttons)
             if (!EMPTY(&P.frames[i].racer[r]) || EMPTY(a)) continue;
             uint32_t k = i;
-            while (k < P.count && k < i + GAP && EMPTY(&P.frames[k].racer[r])) k++;
-            if (k == i + GAP || k >= P.count) continue;
+            while (k < P.count && P.frames[k].time - P.frames[i].time < GAP && EMPTY(&P.frames[k].racer[r])) k++;
+            if (k >= P.count || P.frames[k].time - P.frames[i].time >= GAP) continue;
             for (uint32_t j = i; j < k; j++) {
                 struct rr_sample *s = &P.frames[j].racer[r];
                 s->buttons = a->buttons, s->steer = a->steer, s->ghost_bits = a->ghost_bits;
@@ -260,7 +261,9 @@ static void clean(int r) {
             for (int c = 0; c < 3; c++) d += b->position[c] > s->position[c] ? b->position[c] - s->position[c] : s->position[c] - b->position[c];
             if (d > 2 * (int)RR_POSITION) break;
         }
-        for (uint32_t j = i; k - i >= STILL && j < k && P.frames[i].time > P.header.go_time; j++) {
+        const float end = k < P.count ? P.frames[k].time : P.frames[k - 1].time +
+            (k > 1 ? P.frames[k - 1].time - P.frames[k - 2].time : 0.0f);
+        for (uint32_t j = i; end - P.frames[i].time >= STILL && j < k && P.frames[i].time > P.header.go_time; j++) {
             struct rr_sample *b = &P.frames[j].racer[r];
             b->velocity[0] = b->velocity[1] = b->velocity[2] = 0;
             if (P.header.racer[r].kind != RR_LOCAL) b->buttons = 0, b->steer = 0, b->ghost_bits = 0;
@@ -708,16 +711,17 @@ static void *with_ghosts(int on) {
     return list;
 }
 
-static const struct rr_frame *frame_now(void) {
-    const float t = P.time + RACE_START;
+static const struct rr_frame *frame_at(float t) {
     uint32_t lo = 0, hi = P.count - 1;
     while (hi - lo > 1) {
         const uint32_t mid = (lo + hi) / 2;
-        if (ghost_time(&P.frames[mid]) <= t) lo = mid;
+        if (P.frames[mid].time <= t) lo = mid;
         else hi = mid;
     }
-    return &P.frames[ghost_time(&P.frames[hi]) <= t ? hi : lo];
+    return &P.frames[P.frames[hi].time <= t ? hi : lo];
 }
+
+static const struct rr_frame *frame_now(void) { return frame_at(P.time + P.header.go_time); }
 
 static void drive(float time) {
     char *manager = rr_ptr(RR_D_GHOST_MANAGER), *frame = rr_ptr(RR_D_FRAME), *racers = rr_ptr(RR_D_RACER_MANAGER);
@@ -812,9 +816,15 @@ static void follow(void) {
     P.target = target;
 }
 
-static void unghost(void) {
-    if (++P.unghost_frames < 60) return;
-    P.unghost_frames = 0;
+/* Count elapsed 30 FPS frames; preserve the original cadence at lower rates. */
+static double replay_frame_step(float dt) {
+    return dt > 0.0f && dt < 1.0f / 30.0f ? (double)dt * 30.0 : 1.0;
+}
+
+static void unghost(float dt) {
+    P.unghost_frames += replay_frame_step(dt);
+    if (P.unghost_frames < 60) return;
+    P.unghost_frames -= 60;
     for (int i = 0; i < RR_RACERS; i++) {
         void *kart = P.attached[i] ? kart_of_racer(i) : 0;
         /* A replay plays as a Single Race, where karts have no ghost look. In a Time Trial the others were
@@ -1109,7 +1119,7 @@ static uint32_t pad_bits(void) {
     if (s->ghost_bits & 0x1000) pad |= 1u << 2;     /* second jump: L1 */
     if (s->steer < -RR_STEER / 10) pad |= 1u << 10;
     if (s->steer > RR_STEER / 10) pad |= 1u << 11;
-    const struct rr_frame *before = f - (f - P.frames > RR_RATE / 4 ? RR_RATE / 4 : f - P.frames);
+    const struct rr_frame *before = frame_at(f->time - 0.5f);
     if (s->item_uses != before->racer[P.watch].item_uses) pad |= 1u << 6;   /* an item used: Circle */
     return pad;
 }
@@ -1328,19 +1338,20 @@ static void racer_names(void) {
     }
 }
 
-/* Speed over the ground in km/h (world units are centimetres): the average of the last half second, worked
+/* Speed over the ground in km/h (world units are centimetres): the 30 FPS reference's one-second average, worked
  * out 3 times a second, changed only by 2 km/h or more */
 static void speed_now(float dt) {
     P.speed_clock += dt;
     if (P.speed_clock < 0.33f && P.speed_watch == P.watch) return;
     const struct rr_frame *f = frame_now();
-    int n = 0;
-    float sum = 0.0f;
-    for (const struct rr_frame *g = f; g >= P.frames && n < RR_RATE / 2; g--, n++) {
+    float span = 0.0f, sum = 0.0f;
+    for (const struct rr_frame *g = f; g > P.frames && span < 1.0f; g--) {
+        const float step = fminf(g->time - (g - 1)->time, 1.0f - span);
         const float x = g->racer[P.watch].velocity[0], y = g->racer[P.watch].velocity[1];
-        sum += sqrtf(x * x + y * y);
+        sum += sqrtf(x * x + y * y) * step;
+        span += step;
     }
-    const int kmh = n && !ended() && !P.paused ? (int)(sum / n / RR_VELOCITY * 0.036f + 0.5f) : 0;
+    const int kmh = span > 0.0f && !ended() && !P.paused ? (int)(sum / span / RR_VELOCITY * 0.036f + 0.5f) : 0;
     if (kmh == 0 || abs(kmh - P.shown_speed) >= 2 || P.speed_watch != P.watch) P.shown_speed = kmh;
     P.speed_clock = 0.0f;
     P.speed_watch = P.watch;
@@ -1633,8 +1644,9 @@ static struct {
     int told;
 } IT;
 
-#define HIT_NEAR (RR_RATE * 2 / 5)      /* frames around a recorded hit a real one counts for: 0.4 s */
-#define HIT_WAIT (RR_RATE * 7 / 20)     /* a recorded hit waits 0.35 s for its real one */
+/* Preserve the windows observed in 30 FPS recordings, regardless of sample density. */
+#define HIT_NEAR 0.8f
+#define HIT_WAIT 0.7f
 
 static int items_running(void) { return IT.ready && P.pending == 2; }
 
@@ -1660,8 +1672,9 @@ int ABI runtime_replay_take_damage(void *damage, int type) {
         void *kart = kart_of_racer(r);
         if (!kart || !meta || rr_find_component(kart, meta) != damage) continue;
         const uint32_t now = frame_index(), n = frames_now();
-        for (uint32_t i = now > HIT_NEAR ? now - HIT_NEAR : 1; i <= now + HIT_NEAR && i < n && !ok; i++)
-            if (i > IT.hit_used[r] && hit_starts(r, i)) {
+        const uint32_t first = (uint32_t)(frame_at(P.frames[now].time - HIT_NEAR) - P.frames);
+        for (uint32_t i = first ? first : 1; i < n && P.frames[i].time <= P.frames[now].time + HIT_NEAR && !ok; i++)
+            if (P.frames[i].time >= P.frames[now].time - HIT_NEAR && i > IT.hit_used[r] && hit_starts(r, i)) {
                 ok = 1;
                 IT.hit_used[r] = i;
                 if (IT.hit_frame[r] == i) IT.hit_frame[r] = 0;
@@ -1670,10 +1683,10 @@ int ABI runtime_replay_take_damage(void *damage, int type) {
     return ok;
 }
 
-/* The item racer r holds next (within 6 s of frame i), or -1 */
+/* The next held item within the 30 FPS reference's 12-second window, or -1. */
 static int next_item(int r, uint32_t i) {
     const uint32_t n = frames_now();
-    for (uint32_t k = i; k < n && k < i + RR_RATE * 6; k++)
+    for (uint32_t k = i; k < n && P.frames[k].time < P.frames[i].time + 12.0f; k++)
         if (P.frames[k].racer[r].item >= 0) return P.frames[k].racer[r].item;
     return -1;
 }
@@ -1885,7 +1898,7 @@ static int went_off(const float *at, uint32_t k, uint32_t now, int owner) {
                 d += x * x;
             }
             if (hit_starts(r, j) && d < HIT_RANGE * HIT_RANGE) return 1;
-            if (d < OVER_RANGE * OVER_RANGE && (r != owner || j > k + RR_RATE * 2)) return 1;
+            if (d < OVER_RANGE * OVER_RANGE && (r != owner || P.frames[j].time - P.frames[k].time > 4.0f)) return 1;
         }
     return 0;
 }
@@ -1894,13 +1907,14 @@ static int went_off(const float *at, uint32_t k, uint32_t now, int owner) {
  * from the kart; dropped ones are put where they were dropped a few frames later (an item comes out after its use). */
 static void restore_items(uint32_t now) {
     TRACK.dropped_count = 0;
+    const uint32_t first = (uint32_t)(frame_at(P.frames[now].time - 180.0f) - P.frames);
     for (int r = 0; r < RR_RACERS; r++) {
         void *kart = kart_of_racer(r), *controller = items_of(kart);
         if (!controller) continue;
-        for (uint32_t k = now > 90 * RR_RATE ? now - 90 * RR_RATE : 1; k <= now; k++) {
+        for (uint32_t k = first ? first : 1; k <= now; k++) {
             const struct rr_sample *a = &P.frames[k - 1].racer[r], *b = &P.frames[k].racer[r];
             if (b->item_uses == a->item_uses || a->item < 0 || a->item >= 13 ||
-                (now - k) / RR_RATE >= (uint32_t)thrown_seconds(a->item))
+                P.frames[now].time - P.frames[k].time >= 2.0f * thrown_seconds(a->item))
                 continue;
             const int dropped = a->item == 2 || a->item == 3;
             float at[3];
@@ -1908,7 +1922,7 @@ static void restore_items(uint32_t now) {
             /* thrown forward (launch 1: forward + 1), it landed somewhere ahead the recording does not tell: only while
              * it can still be in the air */
             const unsigned launch = (b->flags & RS_LAUNCH_MASK) >> RS_LAUNCH_SHIFT;
-            if (dropped && launch == 1 && now - k > (uint32_t)RR_RATE * 2) continue;
+            if (dropped && launch == 1 && P.frames[now].time - P.frames[k].time > 4.0f) continue;
             if (dropped && (went_off(at, k, now, r) || TRACK.dropped_count >= DROPPED)) continue;
             use_item(kart, a->item, b->flags);
             if (dropped && launch != 1) {
@@ -2013,7 +2027,7 @@ static void guide_items(uint32_t now) {
         void *kart = kart_of_racer(r);
         if (!kart) continue;
         if (!GUIDE.racer[r].slot) {
-            for (uint32_t k = now + 1; k < n && k < now + (uint32_t)(GUIDE_TIME * RR_RATE); k++)
+            for (uint32_t k = now + 1; k < n && P.frames[k].time < P.frames[now].time + 2.0f * GUIDE_TIME; k++)
                 if (hit_starts(r, k) && P.frames[k].racer[r].damage == 2 + 1 && k > GUIDE.hit[r] && k > IT.hit_used[r]) {
                     GUIDE.hit[r] = k;
                     guide_start(r, kart, k);
@@ -2065,7 +2079,7 @@ static void items_frame(void) {
     const struct rr_frame *f = frame_now();
     const uint32_t now = (uint32_t)(f - P.frames), last = IT.last;
     IT.last = now;
-    const int forward = !P.paused && !P.scrubbing && now > last && now - last <= RR_RATE / 2;
+    const int forward = !P.paused && !P.scrubbing && now > last && P.frames[now].time - P.frames[last].time <= 1.0f;
     char *racers = rr_ptr(RR_D_RACER_MANAGER);
     for (int r = 0; r < RR_RACERS; r++) {
         void *kart = kart_of_racer(r);
@@ -2100,7 +2114,7 @@ static void items_frame(void) {
             if (hit_starts(r, i) && i > IT.hit_used[r]) IT.hit_frame[r] = i;
         }
         const uint32_t wait = IT.hit_frame[r];
-        if (wait && now >= wait + HIT_WAIT) {
+        if (wait && P.frames[now].time - P.frames[wait].time >= HIT_WAIT) {
             IT.hit_frame[r] = 0;
             if (wait > IT.hit_used[r]) {
                 IT.hit_used[r] = wait;
@@ -2150,7 +2164,7 @@ static struct {
     event_new_fn *spawn;
     int sent, tries, told;
     void *manager, *owner;
-    uint32_t frames;
+    double frames;
 } TAGS;
 
 static void *behavior_owner;            /* find_behavior: the placeable that holds what it found */
@@ -2172,10 +2186,12 @@ static void *find_behavior(void *placeable, size_t vtable, int depth) {
     return find_behavior(content(placeable), vtable, depth + 1);
 }
 
-static void nicknames(void) {
+static void nicknames(float dt) {
     TAGS.spawn = TAGS_SPAWN;
     if (!TAGS.spawn || !P.kart || !P.started) return;
-    if (++TAGS.frames % 15) return;                     /* 4 times a second are enough */
+    TAGS.frames += replay_frame_step(dt);
+    if (TAGS.frames < 15) return;                       /* twice a second at the 30 FPS reference */
+    TAGS.frames -= 15;
     void *meta = rr_ptr(D_HUD_META);
     void *hud = meta ? rr_find_component(P.kart, meta) : 0;
     void *project = hud ? rr_handle_object(&RR_AT(hud, 0x38, void *)) : 0;
@@ -2270,10 +2286,10 @@ void runtime_replay_play_frame(void) {
     const float dt = frame ? RR_AT(frame, 0x18, float) : 0.0f;
     if (P.started && !(frame && RR_AT(frame, 0x28, uint8_t))) read_buttons(dt);
     drive(P.started ? P.time + RACE_START : RACE_START - 0.2f);
-    unghost();
+    unghost(dt);
     follow();
     items_frame();
-    nicknames();
+    nicknames(dt);
     hud();
     speed_now(dt);
     publish_view();
@@ -2413,6 +2429,7 @@ void ABI runtime_replay_tick(void) {
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
     if (number == P.last_frame) return;
     P.last_frame = number;
+    const double frame_step = replay_frame_step(frame ? RR_AT(frame, 0x18, float) : 0.0f);
     char path[sizeof P.request];
     pthread_mutex_lock(&P.lock);
     snprintf(path, sizeof path, "%s", P.request);
@@ -2496,11 +2513,12 @@ void ABI runtime_replay_tick(void) {
      * world's components (a null world: guest 0x3dbfad called from 0xda8eb1, code 3 on leaving a replay) */
     if (P.give_back && !P.pending && !ai && rr_world() && rr_world_id() != P.world_id) {
         /* (the race's world stays until the next level is loaded: not while it goes, the same crash) */
-        if (++P.back_frames >= 30) give_back();
+        P.back_frames += frame_step;
+        if (P.back_frames >= 30) give_back();
     }
     if (P.step != STEP_NONE) {
-        /* the map loads 1.5 s after the player's kart is made (at most 10 s) */
-        if (P.wait) P.wait--;
+        /* Preserve the 30 FPS delays: 3 s after the kart is ready, a 20 s readiness timeout. */
+        if (P.wait > 0) P.wait = fmax(0.0, P.wait - (P.step == STEP_LOAD ? frame_step : 1.0));
         else if (P.step == STEP_LOAD) {
             /* the recording player's character is asked as the map starts loading (the frames do not count
              * while it loads: 5 frames later came after the level start), and again 5 frames later */
@@ -2511,7 +2529,7 @@ void ABI runtime_replay_tick(void) {
             fflush(stdout);
             P.step = STEP_NONE, P.cast_in = 5;
         }
-        else if (direct_ready() || ++P.frames_waited > 600) P.step = STEP_LOAD, P.wait = 90;
+        else if (direct_ready() || (P.frames_waited += frame_step) > 600) P.step = STEP_LOAD, P.wait = 90;
         return;
     }
     if (P.cast_in && !--P.cast_in) {

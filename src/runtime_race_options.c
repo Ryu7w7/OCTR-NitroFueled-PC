@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <math.h>
+#include <float.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -110,6 +111,7 @@ static _Thread_local void *pending_item_use;
 static void trace_native_controls(void *self);
 static void register_ai_physics(void *self);
 static void reset_ai_physics(void);
+static atomic_uint acceleration_epoch;
 static void update_ai_catchup(void *self);
 typedef void *(ABI *NetContext)(void);
 typedef unsigned char (ABI *OwnsObject)(void *, void *);
@@ -144,6 +146,7 @@ void runtime_race_options_leave_room(void) {
 
 void runtime_race_options_map_loading(const char *map) {
     if (!map) return;
+    atomic_fetch_add_explicit(&acceleration_epoch,1,memory_order_relaxed);
     reset_ai_physics();
     const int lobby = !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
     if (!lobby) {
@@ -233,6 +236,16 @@ static float real(const void *p, size_t offset) {
     float value;
     memcpy(&value, (const unsigned char *)p + offset, 4);
     return value;
+}
+
+static void **timestep_clock;
+static float timestep_frame_dt(void) {
+    return timestep_clock && *timestep_clock ? real(*timestep_clock,0x18) : 0;
+}
+static float timestep_frames(void) {
+    const float dt=timestep_frame_dt();
+    /* The native 8192 Hz clock alternates 273/274 ticks at nominal 30 FPS. */
+    return dt>0 && dt<273.f/8192 ? dt*30.f : 1;
 }
 
 static int configured_driving_level(void) {
@@ -330,6 +343,7 @@ static RacerAhead catchup_racer_ahead;
 typedef float (ABI *KartSpeed)(void *, void *, int, float, float);
 typedef void (ABI *SpeedModifiers)(void *, float);
 static KartSpeed native_kart_speed;
+static _Thread_local float kart_motion_dt, kart_motion_speed_scale=1;
 static SpeedModifiers native_speed_modifiers;
 static BoostDuration native_jump_impulse;
 static BoostDuration native_trick_impulse;
@@ -637,14 +651,130 @@ static float kart_speed_scale(void *kart, int level, int itemless) {
         return ai_speed_scale(level, itemless, 0, id);
     return ai_speed_scale(level,itemless,now_fn ? now_fn(timer) : 0,id);
 }
+static float kart_base_speed_scale(void *kart,int level,int itemless) {
+    float scale=(level>=0 ? kart_speed_scale(kart,level,itemless) : 1)*(1+catchup_for_kart(kart));
+    if (itemless && level>=2 && !((unsigned char *)kart)[0x214]) scale*=1.10f+.03f*(level-2);
+    return scale;
+}
+
+typedef struct {
+    void *kart, *entity, *clock, *curve;
+    unsigned epoch, frame, interval;
+    int valid, state, quantized;
+    double phase;
+    float start, target, expected, curve_scale, parameters[4];
+} AccelerationStep;
+static _Thread_local AccelerationStep acceleration_steps[16], deceleration_steps[16];
+static _Thread_local unsigned acceleration_next, deceleration_next;
+
+/* Match the native clock's 28 short and two long reference intervals each second. */
+static float acceleration_interval(const AccelerationStep *step) {
+    return step->quantized ? ((step->interval+1)*8192/30-step->interval*8192/30)/8192.f : 1.f/30;
+}
+
+static int kart_curve_timestep(void *kart, void *data, int kind, float speed, float dt, int decelerating, float *out) {
+    AccelerationStep *steps=decelerating ? deceleration_steps : acceleration_steps, *step=NULL;
+    unsigned *next=decelerating ? &deceleration_next : &acceleration_next;
+    for (unsigned i=0;i<16;++i) if (steps[i].kart==kart) { step=&steps[i]; break; }
+    const int reverse=decelerating && speed<0;
+    if (reverse) speed=-speed;
+    const float frames=timestep_frames();
+    void *entity=kart ? ptr(kart,0x18) : NULL;
+    if (!entity || !data || kind<0 || kind>2 ||
+        !(frames<1) || !(dt>0) || !isfinite(dt) || !(kart_motion_dt>0) || !isfinite(kart_motion_dt) ||
+        !(speed>=0) || !isfinite(speed) || !(real(kart,0x1a0)<=0) ||
+        !component || !boost_type || !*boost_type) goto native;
+    if (decelerating) {
+        if (((unsigned char *)kart)[0x34] || ((unsigned char *)kart)[0x36] ||
+            !((unsigned char *)kart)[0x214] || integer(kart,0xe0)!=0) goto native;
+    } else if (kind!=0 || !((unsigned char *)kart)[0x34] || ((unsigned char *)kart)[0x35]) goto native;
+    void *boost=component(entity,*boost_type,0);
+    if (boost && !(real(boost,0x38)<=0)) goto native;
+    void *handle=ptr(kart,0x98), *damage=NULL;
+    if (handle) {
+        if ((unsigned)integer(handle,0)&0x30000000) goto native;
+        damage=ptr(handle,0x28);
+        if (damage && integer(damage,0x40)!=-1) goto native;
+    }
+    const float parameters[]={real(kart,0x190),real(kart,0x19c),real(kart,0x30),real(data,12)};
+    for (unsigned i=0;i<4;++i) if (!isfinite(parameters[i])) goto native;
+    const float top=parameters[0]*parameters[3], curve_scale=dt/timestep_frame_dt();
+    if (!(top>0) || !isfinite(top) || (!decelerating && speed>top) || !(parameters[1]>0) ||
+        !isfinite(curve_scale)) goto native;
+    void *curve=ptr(data,0x18+8*kind);
+    if (!curve) goto native;
+    if (!step) { step=&steps[(*next)++%16]; step->valid=0; }
+    void *clock=*timestep_clock;
+    const unsigned frame=(unsigned)integer(clock,0x10);
+    const unsigned epoch=atomic_load_explicit(&acceleration_epoch,memory_order_relaxed);
+    const int state=decelerating ? kind+4*reverse : integer(kart,0xe0);
+    const float ticks=timestep_frame_dt()*8192;
+    const int quantized=fabsf(real(clock,0x34))<=5e-7f && ticks==floorf(ticks);
+    /* Native motion reprojects velocity; tolerate its float roundoff, not external impulses. */
+    const float tolerance=8*0x1p-23f*fmaxf(1,fabsf(speed));
+    /* shortcut: Restart on input changes; exact mid-interval decisions need native tick scheduling. */
+    if (!step->valid || step->kart!=kart || step->entity!=entity || step->clock!=clock ||
+        step->epoch!=epoch || frame-step->frame!=1 || step->curve!=curve || step->state!=state ||
+        step->quantized!=quantized ||
+        memcmp(step->parameters,parameters,sizeof parameters) || fabsf(step->expected-speed)>tolerance ||
+        fabsf(step->curve_scale-curve_scale)>8*0x1p-23f*fabsf(curve_scale)) {
+        step->kart=kart; step->entity=entity; step->clock=clock; step->curve=curve;
+        step->epoch=epoch; step->state=state; step->phase=0; step->start=speed; step->curve_scale=curve_scale;
+        step->interval=0; step->quantized=quantized;
+        memcpy(step->parameters,parameters,sizeof parameters);
+        step->target=decelerating && speed<=50 ? 0 :
+            native_kart_speed(kart,data,kind,speed,curve_scale*acceleration_interval(step));
+    }
+    step->frame=frame; step->valid=1;
+    step->phase+=frames;
+    float span=acceleration_interval(step)*30;
+    if (step->phase>=span-8*0x1p-23) {
+        step->start=step->target; step->phase-=span;
+        step->interval=(step->interval+1)%30;
+        span=acceleration_interval(step)*30;
+        if (fabs(step->phase)<8*0x1p-23) step->phase=0;
+        step->target=decelerating && step->start<=50 ? 0 :
+            native_kart_speed(kart,data,kind,step->start,curve_scale*acceleration_interval(step));
+    }
+    /* Interpolate native30 endpoints; a partial curve evaluation repeats inverse-curve rounding. */
+    *out=step->expected=step->phase ? (float)(step->start+(step->target-step->start)*(step->phase/span)) : step->start;
+    if (reverse) *out=-*out;
+    return 1;
+native:
+    if (step) step->valid=0;
+    return 0;
+}
+
+/* e4a220 selects natural decay for unboosted overspeed above 1.05 times the speed limit. */
+static float kart_speed_timestep(void *kart, void *data, int kind, float speed, float dt) {
+    float acceleration;
+    if (kart_curve_timestep(kart,data,kind,speed,dt,0,&acceleration)) return acceleration;
+    const float frames=timestep_frames();
+    if (kart && data && (kind==0 || kind==1) && dt>0 && isfinite(dt) &&
+        kart_motion_dt>0 && isfinite(kart_motion_dt) && frames<1 && isfinite(speed) &&
+        real(kart,0x190)>=1 && real(kart,0x1a0)<=0 && component && boost_type && *boost_type) {
+        const float top=real(kart,0x190)*real(data,12);
+        if (top>0 && speed>1.05f*top) {
+            void *entity=ptr(kart,0x18);
+            void *boost=entity ? component(entity,*boost_type,0) : NULL;
+            /* This native branch is a pure decay; retain its 30 FPS inverse-curve rounding. */
+            if (!boost || real(boost,0x38)<=0) {
+                /* Native callers can scale curve time independently of the frame timestep. */
+                const float reference=native_kart_speed(kart,data,kind,speed,dt/frames);
+                if (reference>0 && reference<=speed)
+                    return speed*powf(reference/speed,frames);
+            }
+        }
+    }
+    return native_kart_speed(kart,data,kind,speed,dt);
+}
+
 /* Native e4a220 reads speed-data +c and curve pointers +18/+20/+28.
  * A call-local view changes AI base speed without mutating a shared archetype. */
 static float ABI kart_speed(void *kart, void *data, int kind, float speed, float dt) {
     int level=physics_ai_level(kart);
     const int itemless=runtime_speed_race_active();
-    float scale=(level>=0 ? kart_speed_scale(kart,level,itemless) : 1)*(1+catchup_for_kart(kart));
-    if (itemless && level >= 2 && !((unsigned char *)kart)[0x214])
-        scale *= 1.10f + .03f * (level-2);
+    const float scale=kart_base_speed_scale(kart,level,itemless);
     static int reported_policy=-1;
     const int policy=level+(itemless ? 16 : 0);
     if (level>=0 && reported_policy!=policy) {
@@ -653,10 +783,10 @@ static float ABI kart_speed(void *kart, void *data, int kind, float speed, float
                itemless ? "ghost-traffic" : "native",level,scale,itemless);
     }
     if (scale==1 || !data || !isfinite(real(data,12)) || real(data,12)<=0)
-        return native_kart_speed(kart,data,kind,speed,dt);
+        return kart_speed_timestep(kart,data,kind,speed,dt);
     unsigned char tuned[0x30]; memcpy(tuned,data,sizeof tuned);
     float top=real(data,12)*scale; memcpy(tuned+12,&top,4);
-    return native_kart_speed(kart,tuned,kind,speed,dt);
+    return kart_speed_timestep(kart,tuned,kind,speed,dt);
 }
 /* Keep native vertical impulses on both peers. Extra height changes the
  * flight time assumed by the recording, even at the correct planar speed. */
@@ -728,7 +858,11 @@ static void ABI kart_motion(void *kart, void *data, void *velocity) {
         }
         ai_physics[slot].airborne=air;
     }
+    const float saved_motion_dt=kart_motion_dt, saved_speed_scale=kart_motion_speed_scale;
+    kart_motion_dt=velocity ? real(velocity,0x18) : 0;
+    kart_motion_speed_scale=kart_base_speed_scale(kart,level,runtime_speed_race_active());
     native_kart_motion(kart, data, velocity);
+    kart_motion_dt=saved_motion_dt; kart_motion_speed_scale=saved_speed_scale;
     /* The recorded landing corridor has a speed budget. Catch-up must not
      * carry several times that speed over an edge; only the native owner writes velocity. */
     if (slot>=0) {
@@ -1835,6 +1969,1126 @@ static void jump(unsigned char *at, const void *target) {
     memcpy(at + 6, &target, sizeof target);
 }
 
+typedef struct {
+    float ymm[16][8];
+    uintptr_t r15,r14,r13,r12,rbp,rbx,r11,r10,r9,r8,rdi,rsi,rdx,rcx,rax,flags,resume;
+} TimestepRegisters;
+
+static void ABI rotation_timestep(TimestepRegisters *r) {
+    const float dt=real((const void *)r->rcx,0x20);
+    const float frames=timestep_frames();
+    if (!(dt>0) || !isfinite(dt) || !(frames<1)) return;
+    float *omega=r->ymm[6];
+    const double length=hypot(hypot(omega[0],omega[1]),omega[2]);
+    if (!(length>0) || !isfinite(length)) return;
+    /* Native normalized Euler rotation advances by 2*atan(|omega|*dt/2). */
+    const double scale=tan(frames*atan(length*dt/(2*frames)))/(length*dt*.5);
+    for (unsigned i=0;i<3;++i) omega[i]=(float)(omega[i]*scale);
+}
+
+static size_t register_timestep_bridge(unsigned char *code,
+                                      const unsigned char *displaced, size_t length,
+                                      const void *resume, void (ABI *helper)(TimestepRegisters *)) {
+    /* Save the continuation and every live register; helpers may select a new continuation. */
+    memcpy(code,"\xff\x35\x02\0\0\0\xeb\x08",8);
+    unsigned char *p=code+16;
+    const unsigned char save[]={0x9c,0x50,0x51,0x52,0x56,0x57,
+        0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,0x55,
+        0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0,2,0,0};
+    memcpy(p,save,sizeof save); p+=sizeof save;
+    for (unsigned i=0;i<16;++i) {
+        *p++=0xc5; *p++=i<8 ? 0xfc : 0x7c; *p++=0x11;
+        *p++=(unsigned char)(0x84+8*(i&7)); *p++=0x24;
+        const uint32_t offset=i*32; memcpy(p,&offset,4); p+=4;
+    }
+    const unsigned char call[]={0x48,0x89,0xe7,0x48,0x89,0xe3,
+        0x48,0x83,0xe4,0xf0,0x48,0xb8};
+    memcpy(p,call,sizeof call); p+=sizeof call;
+    memcpy(p,&helper,8); p+=8;
+    memcpy(p,"\xff\xd0\x48\x89\xdc",5); p+=5;
+    for (unsigned i=0;i<16;++i) {
+        *p++=0xc5; *p++=i<8 ? 0xfc : 0x7c; *p++=0x10;
+        *p++=(unsigned char)(0x84+8*(i&7)); *p++=0x24;
+        const uint32_t offset=i*32; memcpy(p,&offset,4); p+=4;
+    }
+    const unsigned char restore[]={0x48,0x81,0xc4,0,2,0,0,
+        0x41,0x5f,0x41,0x5e,0x41,0x5d,0x41,0x5c,0x5d,0x5b,
+        0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5f,0x5e,0x5a,0x59,0x58,0x9d,
+        0x48,0x8d,0x64,0x24,0x08,0xff,0x64,0x24,0xf8};
+    memcpy(p,restore,sizeof restore); p+=sizeof restore;
+    memcpy(code+8,&p,8);
+    memcpy(p,displaced,length); p+=length;
+    jump(p,resume);
+    return (size_t)(p+14-code);
+}
+
+
+/* A full table disables new corrections; native motion remains unchanged. */
+#define FREEFLIGHT_CAPACITY 2048
+struct FreeflightState {
+    uintptr_t a, info, world;
+    float gravity[3], velocity[3], dt, frame_dt;
+    unsigned iterations, seen;
+    unsigned char active, valid, touched;
+};
+static struct FreeflightState freeflight_states[FREEFLIGHT_CAPACITY];
+static atomic_flag freeflight_lock=ATOMIC_FLAG_INIT;
+static atomic_int freeflight_disabled;
+static unsigned char *freeflight_image;
+static void freeflight_enter(void) {
+    while (atomic_flag_test_and_set_explicit(&freeflight_lock,memory_order_acquire)) {}
+}
+static void freeflight_leave(void) {
+    atomic_flag_clear_explicit(&freeflight_lock,memory_order_release);
+}
+static struct FreeflightState *freeflight_find(uintptr_t a,int create) {
+    struct FreeflightState *available=NULL;
+    const size_t first=(a>>5)&(FREEFLIGHT_CAPACITY-1);
+    /* Bound worker contention; crowded buckets retain native integration. */
+    for (size_t n=0;n<16;++n) {
+        struct FreeflightState *s=&freeflight_states[(first+n)&(FREEFLIGHT_CAPACITY-1)];
+        if (s->a==a) return s;
+        if (!s->active && !available) available=s;
+        if (!s->a) break;
+    }
+    if (!create || !available) return NULL;
+    available->a=a;
+    return available;
+}
+static int freeflight_supported(const void *world) {
+    const void *manager=ptr(world,0x150);
+    if (!manager) return 0;
+    for (unsigned i=0;i<8;++i) {
+        const void *solver=ptr(manager,0x568+i*sizeof(void *));
+        if (i>=2) { if (solver) return 0; continue; }
+        if (!solver) return 0;
+        const void *vtable=ptr(solver,0),*solve=vtable ? ptr(vtable,0x30) : NULL;
+        if (i==0 && solve!=freeflight_image+0x81ace0 && solve!=freeflight_image+0x8c3620) return 0;
+        if (i==1 && solve!=freeflight_image+0x859190) return 0;
+    }
+    return 1;
+}
+static void ABI freeflight_capture(TimestepRegisters *r) {
+    /* Native final integration skips the reserved static motion (ID 0). */
+    if (!r->rdi) {
+        freeflight_enter();
+        struct FreeflightState *s=freeflight_find(r->r8,0);
+        if (s) s->active=0;
+        freeflight_leave();
+        return;
+    }
+    const void *world=(void *)r->rsi,*motion=(void *)(r->r15+r->rdi);
+    const uintptr_t info=(uintptr_t)world+0x330;
+    unsigned short property; memcpy(&property,(const char *)motion+0x38,sizeof property);
+    const void *properties=ptr(ptr(world,0x5d0),0x28);
+    const void *p=(const char *)properties+(size_t)property*0x40;
+    const int iterations=integer((void *)info,0xb4);
+    int valid=!atomic_load_explicit(&freeflight_disabled,memory_order_acquire) &&
+        freeflight_supported(world) && iterations>0 && integer((void *)info,0xbc)==1 &&
+        real(p,0x18)==0 && real(p,0x1c)==0 && real(p,0x24)==0;
+    freeflight_enter();
+    struct FreeflightState *s=freeflight_find(r->r8,1);
+    if (s) {
+        s->world=(uintptr_t)world; s->info=info; s->dt=real((void *)info,0x20); s->frame_dt=timestep_frame_dt();
+        s->iterations=(unsigned)iterations; s->seen=1; s->active=1; s->touched=0;
+        for (unsigned i=0;i<3;++i) {
+            s->gravity[i]=r->ymm[0][i]; s->velocity[i]=real(motion,0x40+4*i);
+            valid=valid && isfinite(s->gravity[i]) && isfinite(s->velocity[i]);
+        }
+        s->valid=(unsigned char)valid;
+    }
+    freeflight_leave();
+}
+static void ABI freeflight_force(TimestepRegisters *r) {
+    freeflight_enter();
+    struct FreeflightState *s=freeflight_find(r->rdx,0);
+    if (s && s->active) {
+        ++s->seen;
+        if (s->info!=r->r9 || memcmp(s->gravity,r->ymm[0],sizeof s->gravity)) s->valid=0;
+    }
+    freeflight_leave();
+}
+static void freeflight_touch(uintptr_t a,uintptr_t b) {
+    freeflight_enter();
+    struct FreeflightState *s=freeflight_find(a,0);
+    if (s && s->active) s->touched=1;
+    s=freeflight_find(b,0);
+    if (s && s->active) s->touched=1;
+    freeflight_leave();
+}
+static uintptr_t freeflight_entry(uintptr_t frame,int offset,unsigned side,const void *row,size_t index) {
+    const uintptr_t base=(uintptr_t)ptr((void *)(frame+(intptr_t)offset+(uintptr_t)side*8),0);
+    unsigned id; memcpy(&id,(const char *)row+index,sizeof id);
+    return base+(uintptr_t)id*32;
+}
+static void ABI freeflight_scalar_contact(TimestepRegisters *r) {
+    const unsigned char *row=(void *)r->r13;
+    if (row[0]>13) { atomic_store_explicit(&freeflight_disabled,1,memory_order_release); return; }
+    const unsigned side=row[1]&1;
+    freeflight_touch(freeflight_entry(r->rbp,-0x60,side,row,0x10),
+                     freeflight_entry(r->rbp,-0x60,1-side,row,0x14));
+}
+static void ABI freeflight_contact(TimestepRegisters *r) {
+    const unsigned char *row=(void *)r->r14;
+    const unsigned side=row[0x1b];
+    if (side>1) { atomic_store_explicit(&freeflight_disabled,1,memory_order_release); return; }
+    freeflight_touch(freeflight_entry(r->rbp,-0x98,side,row,0),
+                     freeflight_entry(r->rbp,-0x98,1-side,row,4));
+}
+static void ABI freeflight_constraint(TimestepRegisters *r) {
+    const unsigned char *row=(void *)r->r14;
+    const unsigned side=row[0xe];
+    if (side>1 || row[0xf]<2) { atomic_store_explicit(&freeflight_disabled,1,memory_order_release); return; }
+    freeflight_touch(freeflight_entry(r->rbp,-0x40,side,row,4),
+                     freeflight_entry(r->rbp,-0x40,1-side,row,8));
+}
+static void ABI freeflight_finish(TimestepRegisters *r) {
+    const uintptr_t a=(uintptr_t)ptr((void *)(r->rbp-0x230),0);
+    struct FreeflightState saved={0};
+    freeflight_enter();
+    struct FreeflightState *s=freeflight_find(a,0);
+    if (s && s->active) { saved=*s; s->active=0; }
+    freeflight_leave();
+    if (!saved.active || !saved.valid || saved.touched || saved.info!=r->rcx ||
+        atomic_load_explicit(&freeflight_disabled,memory_order_acquire) ||
+        !freeflight_supported((void *)saved.world) ||
+        saved.seen!=saved.iterations || !(saved.frame_dt>0 && saved.frame_dt<273.f/8192) ||
+        saved.frame_dt!=timestep_frame_dt() || !(saved.dt>0) ||
+        saved.dt!=real((void *)r->rcx,0x20) ||
+        saved.iterations!=(unsigned)integer((void *)r->rcx,0xb4) || integer((void *)r->rcx,0xbc)!=1) return;
+    /* Explicit contact markers establish scope; this rejects additional forces and caps. */
+    for (unsigned i=0;i<3;++i) {
+        const double expected=saved.velocity[i]+(double)saved.iterations*saved.gravity[i];
+        const double tolerance=32*FLT_EPSILON*(fabs(saved.velocity[i])+fabs(expected)+1);
+        const double mean=saved.velocity[i]+.5*(saved.iterations+1.)*saved.gravity[i];
+        const double mean_tolerance=32*FLT_EPSILON*(fabs(saved.velocity[i])+fabs(mean)+1);
+        if (!isfinite(r->ymm[3][i]) || fabs(r->ymm[3][i]-expected)>tolerance ||
+            !isfinite(r->ymm[2][i]) || fabs(r->ymm[2][i]-mean)>mean_tolerance) return;
+    }
+    const double ratio=.5*(1./(saved.frame_dt*30.)-1);
+    float adjusted[3];
+    for (unsigned i=0;i<3;++i) {
+        adjusted[i]=(float)(r->ymm[2][i]+saved.gravity[i]*ratio);
+        if (!isfinite(adjusted[i])) return;
+    }
+    memcpy(r->ymm[2],adjusted,sizeof adjusted);
+}
+
+static const struct FreeflightSite {
+    size_t address, length;
+    unsigned char bytes[20];
+    void (ABI *helper)(TimestepRegisters *);
+} freeflight_sites[]={
+    {0x80eded,14,{0x49,0x8d,0x44,0x3f,0x38,0xc5,0xf8,0x28,0x4d,0xa0,0xc5,0xf0,0x58,0xc0},freeflight_capture},
+    {0x878b3a,16,{0xc5,0xf0,0x58,0xc0,0xc4,0xe3,0x79,0x04,0xca,0x09,0xc4,0xe3,0x71,0x0c,0xc0,0x07},freeflight_force},
+    {0x81ae17,15,{0x49,0x8b,0x5d,0x38,0x8b,0x8d,0xc8,0xfe,0xff,0xff,0xba,0x00,0x10,0x00,0x00},freeflight_scalar_contact},
+    {0x8c37f0,20,{0x4c,0x89,0xb5,0x60,0xff,0xff,0xff,0x41,0x0f,0xb6,0x56,0x1b,0x48,0x8b,0x84,0xd5,0x68,0xff,0xff,0xff},freeflight_contact},
+    {0x854483,17,{0x41,0x0f,0xb6,0x46,0x0e,0x48,0x8b,0x74,0xc5,0xc0,0x48,0x89,0xb5,0xb8,0xfe,0xff,0xff},freeflight_constraint},
+    {0x8790b7,17,{0xc5,0xf8,0x29,0x1a,0xc4,0xc3,0x69,0x0c,0xc4,0x08,0xc4,0x81,0x78,0x29,0x44,0x30,0x60},freeflight_finish},
+};
+/* Native layout and the body accesses dominated by the three markers. */
+static const struct FreeflightLayout {
+    size_t address,length;
+    unsigned char bytes[64];
+} freeflight_layouts[]={
+    {0x81aed8,31,{0x41,0x0f,0xb6,0x45,0x00,0x48,0x83,0xf8,0x0d,0x0f,0x87,0xc9,0x02,0x00,0x00,0x48,0x8d,0x0d,0x7a,0x27,0x00,0x00,0x48,0x63,0x04,0x81,0x48,0x01,0xc8,0xff,0xe0}},
+    {0x81d668,56,{0x8f,0xd8,0xff,0xff,0x62,0xdd,0xff,0xff,0x88,0xdf,0xff,0xff,0x92,0xdf,0xff,0xff,0x9c,0xdf,0xff,0xff,0xa6,0xdf,0xff,0xff,0x48,0xdb,0xff,0xff,0x48,0xdb,0xff,0xff,0xb0,0xdf,0xff,0xff,0xb4,0xe1,0xff,0xff,0x39,0xe3,0xff,0xff,0x43,0xe3,0xff,0xff,0x4d,0xe3,0xff,0xff,0x57,0xe3,0xff,0xff}},
+    {0x81af72,29,{0x41,0x0f,0xb6,0x45,0x01,0x48,0x89,0xc1,0x48,0x83,0xe1,0x01,0x48,0xc1,0xe1,0x03,0x48,0x8d,0x55,0xa0,0x48,0x89,0xd6,0x48,0x09,0xf1,0x4c,0x8b,0x11}},
+    {0x81af8f,36,{0x41,0x8b,0x55,0x10,0x48,0xc1,0xe2,0x05,0xb9,0x01,0x00,0x00,0x00,0xc4,0xe2,0x78,0xf2,0xc1,0x48,0xc1,0xe0,0x03,0x48,0x09,0xf0,0x4c,0x8b,0x38,0x41,0x8b,0x7d,0x14,0x48,0xc1,0xe7,0x05}},
+    {0x81b43e,31,{0x41,0x0f,0xb6,0x45,0x01,0x48,0x83,0xe0,0x01,0x48,0xc1,0xe0,0x03,0x48,0x8d,0x4d,0xa0,0x48,0x09,0xc8,0x48,0x8b,0x00,0x41,0x8b,0x4d,0x10,0x48,0xc1,0xe1,0x05}},
+    {0x81b631,61,{0x41,0x0f,0xb6,0x55,0x01,0x48,0x89,0xd0,0x48,0x83,0xe0,0x01,0x48,0xc1,0xe0,0x03,0x48,0x8d,0x4d,0xa0,0x48,0x89,0xce,0x48,0x09,0xf0,0x4c,0x8b,0x10,0x41,0x8b,0x4d,0x10,0x48,0xc1,0xe1,0x05,0xb8,0x01,0x00,0x00,0x00,0xc4,0xe2,0x68,0xf2,0xd0,0x48,0xc1,0xe2,0x03,0x48,0x09,0xf2,0x4c,0x8b,0x3a,0x41,0x8b,0x75,0x14}},
+    {0x81b82e,31,{0x41,0x0f,0xb6,0x45,0x01,0x48,0x83,0xe0,0x01,0x48,0xc1,0xe0,0x03,0x48,0x8d,0x4d,0xa0,0x48,0x09,0xc8,0x48,0x8b,0x00,0x41,0x8b,0x4d,0x10,0x48,0xc1,0xe1,0x05}},
+    {0x6e7b16,6,{0x89,0x97,0xb4,0x00,0x00,0x00}},
+    {0x6e7b3f,6,{0x89,0x8f,0xbc,0x00,0x00,0x00}},
+    {0x6e7b69,5,{0xc5,0xf8,0x11,0x67,0x20}},
+    {0x85446f,9,{0x45,0x0f,0xb6,0x4e,0x0f,0x49,0xc1,0xe1,0x04}},
+    {0x6af550,16,{0x83,0xfe,0x08,0x7c,0x01,0xcc,0x89,0xf0,0x48,0x89,0x94,0xc7,0x68,0x05,0x00,0x00}},
+    {0x6ce368,7,{0x4d,0x8b,0xa5,0x50,0x01,0x00,0x00}},
+    {0x80ecc0,11,{0x48,0x8b,0x86,0xd0,0x05,0x00,0x00,0x4c,0x8b,0x58,0x28}},
+    {0x80ed1e,17,{0x41,0x0f,0xb7,0x44,0x3f,0x38,0x48,0xc1,0xe0,0x06,0xc4,0xc2,0x79,0x18,0x44,0x03,0x08}},
+    {0x878dde,7,{0xc4,0xe2,0x79,0x18,0x54,0x07,0x24}},
+    {0x878eab,23,{0xc4,0xe2,0x79,0x18,0x44,0x07,0x1c,0xc5,0xf8,0x28,0x59,0x20,0xc5,0xe0,0x59,0xc0,0xc4,0xe2,0x79,0x18,0x6c,0x07,0x18}},
+    {0x8523d0,15,{0x0f,0xb6,0x43,0x18,0x49,0x8b,0xbc,0xc7,0x68,0x05,0x00,0x00,0x48,0x8b,0x07}},
+    {0x852405,3,{0xff,0x50,0x30}},
+    {0x878bf2,18,{0x83,0x7a,0x18,0x00,0x75,0x0c,0xff,0xc9,0x48,0x83,0xc6,0x20,0x48,0x83,0xc2,0x20,0xff,0xc7}},
+    {0x80ee57,7,{0x8b,0x45,0xbc,0x41,0x89,0x41,0x18}},
+    {0x81afc1,12,{0xc4,0x41,0x78,0x28,0x04,0x12,0xc4,0x41,0x78,0x28,0x3c,0x3f}},
+    {0x81b455,19,{0x41,0x8b,0x4d,0x10,0x48,0xc1,0xe1,0x05,0xc5,0xfb,0xf0,0x54,0x08,0x0c,0xc5,0x78,0x28,0x2c,0x08}},
+    {0x81b66a,34,{0x41,0x8b,0x75,0x14,0x48,0xc1,0xe6,0x05,0xc4,0xc1,0x7b,0xf0,0x54,0x0a,0x0c,0xc4,0xc1,0x7b,0xf0,0x5c,0x37,0x0c,0xc4,0x41,0x78,0x28,0x14,0x0a,0xc4,0x41,0x78,0x28,0x0c,0x37}},
+    {0x81b845,19,{0x41,0x8b,0x4d,0x10,0x48,0xc1,0xe1,0x05,0xc5,0xfb,0xf0,0x54,0x08,0x0c,0xc5,0x78,0x28,0x2c,0x08}},
+    {0x8c3804,50,{0x41,0x8b,0x0e,0x48,0xc1,0xe1,0x05,0x48,0x8d,0x3c,0x08,0x48,0x89,0xbd,0x78,0xff,0xff,0xff,0xbe,0x01,0x00,0x00,0x00,0x48,0x29,0xd6,0x48,0x8b,0x94,0xf5,0x68,0xff,0xff,0xff,0x41,0x8b,0x76,0x04,0x48,0xc1,0xe6,0x05,0x4c,0x8d,0x04,0x32,0x4c,0x89,0x45,0x80}},
+    {0x854494,61,{0x41,0x8b,0x56,0x04,0x41,0x8b,0x7e,0x08,0x48,0xc1,0xe2,0x05,0xb9,0x01,0x00,0x00,0x00,0x48,0x29,0xc1,0x4c,0x8b,0x44,0xcd,0xc0,0x48,0xc1,0xe7,0x05,0x48,0x89,0xbd,0xf8,0xfe,0xff,0xff,0x48,0x8b,0x44,0xc5,0xb0,0x48,0x8b,0x4c,0xcd,0xb0,0xc5,0xf8,0x28,0x04,0x16,0xc5,0xf8,0x29,0x85,0x20,0xff,0xff,0xff,0xc5,0xfb}},
+};
+static int freeflight_timestep_contract(const unsigned char *image,size_t size) {
+    for (unsigned i=0;i<sizeof freeflight_sites/sizeof *freeflight_sites;++i) {
+        const struct FreeflightSite *s=&freeflight_sites[i];
+        if (size<s->address+s->length || memcmp(image+s->address,s->bytes,s->length)) return 0;
+    }
+    for (unsigned i=0;i<sizeof freeflight_layouts/sizeof *freeflight_layouts;++i) {
+        const struct FreeflightLayout *s=&freeflight_layouts[i];
+        if (size<s->address+s->length || memcmp(image+s->address,s->bytes,s->length)) return 0;
+    }
+    return 1;
+}
+static void install_freeflight_timestep(unsigned char *image,unsigned char *code) {
+    freeflight_image=image;
+    for (unsigned i=0;i<sizeof freeflight_sites/sizeof *freeflight_sites;++i) {
+        const struct FreeflightSite *s=&freeflight_sites[i];
+        register_timestep_bridge(code+i*512,image+s->address,s->length,image+s->address+s->length,s->helper);
+        jump(image+s->address,code+i*512);
+        memset(image+s->address+14,0x90,s->length-14);
+    }
+}
+
+static void **angular_stack_guard;
+static uintptr_t angular_acceleration_resume;
+
+static _Thread_local struct {
+    void *clock;
+    uint32_t frame, raw, expected;
+    unsigned interval, phase;
+    float scale;
+    int valid;
+} scaled_clock_step;
+
+static void ABI scaled_clock_timestep(TimestepRegisters *r) {
+    void *clock=(void *)r->rbx;
+    if (!timestep_clock || clock!=*timestep_clock) return;
+    const float ticks=real(clock,0x18)*8192, scale=real(clock,0x2c);
+    const float largest=(274.f/8192*scale)*8192;
+    if (fabsf(real(clock,0x34))>5e-7f || !(ticks>=9 && ticks<273) || ticks!=floorf(ticks) ||
+        !(scale>=0) || !(largest<2147483648.f)) {
+        scaled_clock_step.valid=0; return;
+    }
+    const uint32_t frame=(uint32_t)integer(clock,0x10), raw=(uint32_t)integer(clock,0x14);
+    const uint32_t previous=(uint32_t)integer(clock,0x20);
+    if (!scaled_clock_step.valid || scaled_clock_step.clock!=clock || scaled_clock_step.frame+1!=frame ||
+        scaled_clock_step.raw+(uint32_t)ticks!=raw || scaled_clock_step.expected!=previous || scaled_clock_step.scale!=scale) {
+        scaled_clock_step.interval=scaled_clock_step.phase=0;
+    }
+    unsigned remaining=(unsigned)ticks;
+    uint32_t delta=0;
+    while (remaining) {
+        const unsigned index=scaled_clock_step.interval;
+        const unsigned length=(index+1)*8192/30-index*8192/30;
+        const float quantum=((float)length/8192*scale)*8192;
+        const uint64_t budget=(uint32_t)quantum;
+        const unsigned phase=scaled_clock_step.phase;
+        const unsigned take=remaining<length-phase ? remaining : length-phase;
+        delta+=(uint32_t)(((phase+take)*budget)/length-(phase*budget)/length);
+        remaining-=take; scaled_clock_step.phase+=take;
+        if (scaled_clock_step.phase==length) {
+            scaled_clock_step.phase=0; scaled_clock_step.interval=(index+1)%30;
+        }
+    }
+    scaled_clock_step.clock=clock; scaled_clock_step.frame=frame; scaled_clock_step.raw=raw;
+    scaled_clock_step.expected=previous+delta; scaled_clock_step.scale=scale; scaled_clock_step.valid=1;
+    /* Native adds this increment once; never rewrite an already published clock value. */
+    r->rax=delta; r->resume+=4;
+}
+
+static int scaled_clock_contract(const unsigned char *image,size_t size) {
+    const unsigned char code[]={0xc5,0xfa,0x2c,0xc1,0xc5,0xf8,0x2e,0xd0,0x0f,0x92,0x43,0x31,0x01,0x43,0x20};
+    return size>0xa31b0c && !memcmp(image+0xa31afd,code,sizeof code);
+}
+
+static void install_scaled_clock(unsigned char *image,unsigned char *code) {
+    register_timestep_bridge(code,image+0xa31afd,15,image+0xa31b0c,scaled_clock_timestep);
+    jump(image+0xa31afd,code);
+}
+
+/* Native grounded control selection, including the combined gas/brake speed limit. */
+static float ground_speed_curve(void *kart,void *data,int kind,float speed,float dt) {
+    unsigned char tuned[0x30];
+    if(kart_motion_speed_scale!=1) {
+        memcpy(tuned,data,sizeof tuned);float top=real(data,12)*kart_motion_speed_scale;
+        memcpy(tuned+12,&top,4);data=tuned;
+    }
+    return native_kart_speed(kart,data,kind,speed,dt);
+}
+static float ground_speed_target(void *kart,void *archetype,void *surface,float speed,float dt,int *mode) {
+    const unsigned char *k=kart;
+    const int gas=k[0x34]!=0,brake=k[0x35]!=0,control=k[0x36]!=0;
+    const int coast=surface && ((unsigned char *)surface)[0x28];
+    int kind=0,reverse=0,stopped=0;
+    if(speed>50)kind=gas ? (control && brake ? 2 : 0) : (control || brake ? 2 : 1);
+    else if(speed < -50) {
+        reverse=1;kind=control ? (brake || !gas ? 0 : 2) : (brake || gas ? 2 : 1);
+    } else if(!gas || (control && brake)) {reverse=control;stopped=!control;}
+    if(kind==2 && coast)kind=1;
+    *mode=reverse ? 2 : stopped;
+    if(stopped)return 0;
+    void *data=ptr(archetype,reverse ? 0x78 : 0x68);
+    float magnitude=reverse ? -speed : speed,result;
+    if(kind==0 && brake && !coast) {
+        void *both=ptr(archetype,0x98);
+        if(both) {
+            const float threshold=real(both,0xc)*real(data,0xc);
+            result=magnitude>threshold ?
+                fmaxf(threshold,ground_speed_curve(kart,data,2,magnitude,dt*real(both,0x10))) :
+                fminf(threshold,ground_speed_curve(kart,data,0,magnitude,dt*real(both,0x14)));
+        } else result=ground_speed_curve(kart,data,2,ground_speed_curve(kart,data,0,magnitude,dt),dt);
+    } else {
+        if(!reverse && brake && control)dt*=1-(1-real(archetype,0xa0))*fabsf(real(kart,0x30));
+        result=ground_speed_curve(kart,data,kind,magnitude,dt);
+    }
+    return reverse ? -result : result;
+}
+
+typedef struct {
+    AccelerationStep time;
+    void *archetype,*forward,*reverse,*both,*surface;
+    float parameters[18],base_start,base_target,lateral;
+    int controls;
+} GroundSpeedStep;
+static _Thread_local GroundSpeedStep ground_speed_steps[16];
+static _Thread_local unsigned ground_speed_next;
+static _Thread_local int ground_speed_pending;
+static _Thread_local float ground_speed_output,ground_lateral_factor;
+static _Thread_local int ground_lateral_pending;
+static _Thread_local float motion_lateral_cap=1;
+static float ground_speed_blend(void *surface,float start,float target,int mode) {
+    if(!surface)return target;
+    const float retention=real(surface,(mode ? start>target : target>start) ? 0x24 : 0x20);
+    return start*retention+target*(1-retention);
+}
+static void ground_speed_next_target(GroundSpeedStep *s,void *kart) {
+    int mode;
+    s->base_target=ground_speed_target(kart,s->archetype,s->surface,s->time.start,
+                                s->time.curve_scale*acceleration_interval(&s->time),&mode);
+    s->time.target=ground_speed_blend(s->surface,s->time.start,s->base_target+s->parameters[15],mode);
+    if(s->parameters[15]>0) s->time.target=s->time.target<s->parameters[17] ? s->parameters[17] : fminf(s->time.target,s->parameters[16]);
+    /* The base path divides lateral velocity by normalized speed before applying retention. */
+    s->lateral=s->surface ? real(s->surface,0x1c) :
+        real(mode==2 ? s->reverse : s->forward,0x14)/fmaxf(1,fabsf(s->base_target+s->parameters[15])/real(s->forward,0xc));
+}
+static int ground_speed_timestep(TimestepRegisters *r) {
+    ground_speed_pending=ground_lateral_pending=0;
+    void *kart=(void*)r->r14,*archetype=(void*)r->r12,*surface=(void*)r->rsi;
+    void *entity=ptr(kart,0x18),*clock=timestep_clock ? *timestep_clock : NULL;
+    GroundSpeedStep *s=NULL;
+    for(unsigned i=0;i<16;++i)if(ground_speed_steps[i].time.kart==kart){s=&ground_speed_steps[i];break;}
+    const float frames=timestep_frames(),speed=r->ymm[9][0];
+    if(!(frames<1) || !(kart_motion_dt>0) || !isfinite(kart_motion_dt) || !isfinite(speed) ||
+       !((unsigned char*)kart)[0x214] || integer(kart,0xe0)==2 || !(real(kart,0x1a0)<=0) ||
+       !isfinite(r->ymm[8][0]) || r->ymm[8][0]<0 || ptr(kart,0xa0))goto native;
+    const float boost=r->ymm[8][0];
+    void *boost_data=boost>0 ? (void *)r->rbx : NULL;
+    /* Boost transitions need a common input tick; keep their existing correction path. */
+    if(real(kart,0x174)!=boost || (boost>0 && (!boost_data || real(boost_data,0x38)!=boost)))goto native;
+    void *damage_handle=ptr(kart,0x98);
+    if(damage_handle && (((unsigned)integer(damage_handle,0)&0x30000000) ||
+       (ptr(damage_handle,0x28) && integer(ptr(damage_handle,0x28),0x40)!=-1)))goto native;
+    void *forward=ptr(archetype,0x68),*reverse=ptr(archetype,0x78),*both=ptr(archetype,0x98);
+    if(!forward || !reverse || !entity || !clock)goto native;
+    const float parameters[]={real(kart,0x190),real(kart,0x19c),real(kart,0x30),kart_motion_speed_scale,
+        real(forward,0xc),real(reverse,0xc),real(archetype,0xa0),
+        surface?real(surface,0x20):0,surface?real(surface,0x24):0,
+        both?real(both,0xc):0,both?real(both,0x10):0,both?real(both,0x14):0,
+        real(forward,0x14),real(reverse,0x14),surface?real(surface,0x1c):0,
+        boost,boost_data?real(boost_data,0x4c):0,boost_data?real(boost_data,0x50):0};
+    for(unsigned i=0;i<sizeof parameters/sizeof *parameters;++i)if(!isfinite(parameters[i]))goto native;
+    if(!(parameters[0]>0) || !(parameters[1]>0) || !(parameters[4]>0) || !(parameters[5]>0) ||
+       parameters[7]<0 || parameters[7]>1 || parameters[8]<0 || parameters[8]>1 ||
+       parameters[12]<0 || parameters[13]<0 || parameters[14]<0)goto native;
+    const int controls=((unsigned char*)kart)[0x34]+4*((unsigned char*)kart)[0x35]+
+        16*((unsigned char*)kart)[0x36]+64*(surface && ((unsigned char*)surface)[0x28]);
+    const unsigned frame=(unsigned)integer(clock,0x10),epoch=atomic_load_explicit(&acceleration_epoch,memory_order_relaxed);
+    /* A new boost limit clamps immediately; do not turn that event into a gradual response. */
+    if(s && s->time.valid && s->time.entity==entity && s->time.clock==clock && s->time.epoch==epoch &&
+       frame-s->time.frame==1 && (s->parameters[16]!=parameters[16] || s->parameters[17]!=parameters[17]))goto native;
+    const float curve_scale=kart_motion_dt/timestep_frame_dt(),ticks=timestep_frame_dt()*8192;
+    const int quantized=fabsf(real(clock,0x34))<=5e-7f && ticks==floorf(ticks);
+    if(!s){s=&ground_speed_steps[ground_speed_next++%16];s->time.valid=0;}
+    AccelerationStep *t=&s->time;
+    /* shortcut: Reset on changed inputs or external impulses; common tick scheduling is needed across those boundaries. */
+    if(!t->valid || t->kart!=kart || t->entity!=entity || t->clock!=clock || t->epoch!=epoch ||
+       frame-t->frame!=1 || t->state!=integer(kart,0xe0) || t->quantized!=quantized ||
+       s->archetype!=archetype || s->forward!=forward || s->reverse!=reverse || s->both!=both ||
+       s->surface!=surface || s->controls!=controls || memcmp(s->parameters,parameters,sizeof parameters) ||
+       fabsf(t->expected-speed)>8*0x1p-23f*fmaxf(1,fabsf(r->ymm[14][0])+fabsf(r->ymm[15][0])+fabsf(r->ymm[13][0])) ||
+       fabsf(t->curve_scale-curve_scale)>8*0x1p-23f*fabsf(curve_scale)) {
+        t->kart=kart;t->entity=entity;t->clock=clock;t->epoch=epoch;t->state=integer(kart,0xe0);
+        t->quantized=quantized;t->curve_scale=curve_scale;t->phase=0;t->interval=0;t->start=speed;
+        s->archetype=archetype;s->forward=forward;s->reverse=reverse;s->both=both;s->surface=surface;
+        s->controls=controls;memcpy(s->parameters,parameters,sizeof parameters);
+        s->base_start=real(kart,0x170);ground_speed_next_target(s,kart);
+    }
+    t->frame=frame;t->valid=1;
+    float span=acceleration_interval(t)*30;
+    const double remaining=span-t->phase;
+    ground_lateral_factor=powf(s->lateral,(float)(fmin(frames,remaining)/span));
+    t->phase+=frames;
+    if(t->phase>=span-8*0x1p-23) {
+        t->start=t->target;s->base_start=s->base_target;t->phase-=span;t->interval=(t->interval+1)%30;
+        span=acceleration_interval(t)*30;
+        if(fabs(t->phase)<8*0x1p-23)t->phase=0;
+        ground_speed_next_target(s,kart);
+        ground_lateral_factor*=powf(s->lateral,(float)(t->phase/span));
+    }
+    const double fraction=t->phase/span;
+    ground_speed_output=t->expected=t->phase ? (float)(t->start+(t->target-t->start)*fraction) : t->start;
+    r->ymm[6][0]=t->phase ? (float)(s->base_start+(s->base_target-s->base_start)*fraction) : s->base_start;
+    ground_speed_pending=1;
+    return 1;
+native:
+    if(s)s->time.valid=0;
+    return 0;
+}
+static void ABI ground_speed_project(TimestepRegisters *r) {
+    motion_lateral_cap=r->rsi ? 1 : fmaxf(1,r->ymm[3][0]);
+    if(ground_speed_pending) {
+        r->ymm[0][0]=ground_speed_output;
+        /* The reference lateral factor already includes this overspeed divisor. */
+        r->ymm[3][0]=fminf(r->ymm[3][0],1);
+        ground_lateral_pending=1;
+    }
+    ground_speed_pending=0;
+}
+
+/* Correct the selected scalar speed before native motion stores or projects it. */
+static void ABI deceleration_timestep(TimestepRegisters *r) {
+    const unsigned char *surface=(const void *)r->rsi;
+    /* Surface longitudinal blending belongs to the complete motion map, not just its speed curve. */
+    if (surface && (real(surface,0x20)!=0 || real(surface,0x24)!=0)) return;
+    const float speed=r->ymm[9][0];
+    void *kart=(void *)r->r14, *archetype=(void *)r->r12;
+    void *data=ptr(archetype,speed<0 ? 0x78 : 0x68);
+    unsigned char tuned[0x30];
+    if (data && kart_motion_speed_scale!=1) {
+        memcpy(tuned,data,sizeof tuned);
+        const float top=real(data,12)*kart_motion_speed_scale;
+        memcpy(tuned+12,&top,4); data=tuned;
+    }
+    float out;
+    const int kind=((unsigned char *)kart)[0x35] && !(surface && surface[0x28]) ? 2 : 1;
+    if (kart_curve_timestep(kart,data,kind,speed,kart_motion_dt,1,&out))
+        r->ymm[6][0]=out;
+}
+
+static void ABI ground_speed_selected(TimestepRegisters *r) {
+    if (!ground_speed_timestep(r)) deceleration_timestep(r);
+}
+
+static int deceleration_timestep_contract(const unsigned char *image,size_t size) {
+    const unsigned char code[]={0xc4,0xc1,0x7a,0x11,0xb6,0x70,0x01,0,0,
+                               0xc4,0x41,0x7a,0x11,0x86,0x74,0x01,0,0};
+    return size>0xe46a67 && !memcmp(image+0xe46a55,code,sizeof code);
+}
+
+static void install_deceleration_timestep(unsigned char *image,unsigned char *code) {
+    register_timestep_bridge(code,image+0xe46a55,18,image+0xe46a67,ground_speed_selected);
+    jump(image+0xe46a55,code);
+}
+
+static const unsigned char ground_speed_project_code[]={
+    0xc5,0xfa,0x59,0xd1,0xc5,0xfa,0x59,0xce,0xc5,0x7a,0x59,0xe5,0x48,0x85,0xf6};
+/* Native boost load, cap/floor order, normalization and previous-boost subtraction. */
+static const struct {size_t address,length;unsigned char bytes[40];} ground_boost_layout[]={
+    {0xe4678e,5,{0xc5,0x7a,0x10,0x43,0x38}},
+    {0xe46e2d,39,{0xc5,0xfa,0x10,0x7b,0x4c,0xc5,0xfa,0x10,0x53,0x50,0xc5,0xf8,0x2e,0xc7,0x77,0x04,0xc5,0xf8,0x28,0xf8,0xc5,0xf8,0x2e,0xd0,0x77,0x04,0xc5,0xf8,0x28,0xd7,0xc5,0xf8,0x28,0xc2,0xe9,0x7b,0xfc,0xff,0xff}},
+    {0xe46a67,4,{0xc5,0xba,0x58,0xc6}},
+    {0xe46a7b,10,{0x49,0x8b,0x44,0x24,0x68,0xc5,0xf2,0x5e,0x58,0x0c}},
+    {0xe4a2d6,10,{0xc4,0xc1,0x72,0x5c,0x8c,0x24,0x74,0x01,0x00,0x00}},
+};
+static int ground_speed_project_contract(const unsigned char *image,size_t size) {
+    for(unsigned i=0;i<sizeof ground_boost_layout/sizeof *ground_boost_layout;++i) {
+        if(size<ground_boost_layout[i].address+ground_boost_layout[i].length ||
+           memcmp(image+ground_boost_layout[i].address,ground_boost_layout[i].bytes,ground_boost_layout[i].length))return 0;
+    }
+    return size>=0xe46ade && !memcmp(image+0xe46acf,ground_speed_project_code,sizeof ground_speed_project_code);
+}
+static void install_ground_speed_project(unsigned char *image,unsigned char *code) {
+    register_timestep_bridge(code,ground_speed_project_code,sizeof ground_speed_project_code,
+                             image+0xe46ade,ground_speed_project);
+    jump(image+0xe46acf,code); image[0xe46add]=0x90;
+}
+
+static void ABI angular_acceleration_timestep(TimestepRegisters *r) {
+    const double frames=timestep_frames();
+    const double error=r->ymm[3][0], threshold=r->ymm[5][0];
+    if (!(frames>0 && frames<1) || r->ymm[4][0]!=1 ||
+        !(error>threshold && threshold>0) || !isfinite(error)) return;
+    const double surface=r->rax ? 1-real((const void *)r->rax,0x18) : 1;
+    const double reference=real((const void *)(r->rbp-0x74),0)*surface/frames;
+    if (!(reference>0) || !isfinite(reference)) return;
+    double remaining=0;
+    if (reference<threshold) {
+        /* Fractional iterations preserve the native geometric-to-linear transition. */
+        const double logq=log1p(-reference/threshold), linear=threshold/reference;
+        const double n=ceil(log(error/threshold)/-logq);
+        const double time=n+error*exp(n*logq)/reference-frames;
+        if (time>linear) {
+            const double k=ceil(time-linear);
+            remaining=reference*(time-k)*exp(-k*logq);
+        } else remaining=fmax(0,reference*time);
+    }
+    memset(r->ymm[5],0,sizeof r->ymm[5]);
+    r->ymm[5][0]=(float)fmax(0,error-remaining);
+    memset(r->ymm[6],0,sizeof r->ymm[6]);
+    r->r12=(uintptr_t)*angular_stack_guard;
+    r->resume=angular_acceleration_resume;
+}
+
+static int angular_timestep_contract(const unsigned char *image,size_t size) {
+    if (size<0xe4598a || memcmp(image+0xe45951,"\xc5\xe2\x5e\xed\x4c\x8b\x25",7) ||
+        memcmp(image+0xe4595c,"\xc5\xc8\x57\xf6",4) ||
+        memcmp(image+0xe45980,"\xc5\xf8\x2e\xdd\x0f\x87\x8a\x05\0\0",10)) return 0;
+    int32_t displacement; memcpy(&displacement,image+0xe45958,4);
+    const size_t guard=(size_t)(0xe4595c+(int64_t)displacement);
+    return guard<=size-sizeof(void *);
+}
+
+static void install_angular_timestep(unsigned char *image,unsigned char *code) {
+    int32_t displacement; memcpy(&displacement,image+0xe45958,4);
+    angular_stack_guard=(void **)(image+0xe4595c+(int64_t)displacement);
+    angular_acceleration_resume=(uintptr_t)(image+0xe45980);
+    unsigned char displaced[22];
+    memcpy(displaced,image+0xe45951,4);
+    memcpy(displaced+4,"\x49\xbc",2); memcpy(displaced+6,&angular_stack_guard,8);
+    memcpy(displaced+14,"\x4d\x8b\x24\x24",4);
+    memcpy(displaced+18,image+0xe4595c,4);
+    register_timestep_bridge(code,displaced,sizeof displaced,image+0xe45960,angular_acceleration_timestep);
+    jump(image+0xe45951,code); image[0xe4595f]=0x90;
+}
+
+static unsigned char *vfx_timestep_image;
+typedef void (ABI *VfxWorker)(void *,void *);
+static VfxWorker native_vfx_worker;
+static _Thread_local void *vfx_worker_manager;
+static void ABI vfx_worker(void *owner,void *job) {
+    void *previous=vfx_worker_manager;
+    vfx_worker_manager=ptr(owner,0);
+    native_vfx_worker(owner,job);
+    vfx_worker_manager=previous;
+}
+
+/* Only the proven rebuilt-velocity stack; other operators retain native behavior. */
+static int vfx_rebuilt_velocity(void *op,void *context) {
+    static const size_t kinds[]={0x24700e0,0x24707c0,0x2470500,0x24604e8,0x246e560,
+        0x245d1f8,0x246e560,0x24612c0,0x246ad00,0x246bd80,0x246bd80,0x24621e0,
+        0x2462340,0x2462340,0x24661c8};
+    if (!vfx_worker_manager || ptr(context,0x370)!=vfx_worker_manager || !ptr(context,0x3c0)) return 0;
+    void *primitive=ptr(context,0x388), *instance=ptr(context,0x390), *data=ptr(context,0x380);
+    if (!primitive || !instance || !data || (integer(instance,0x10)&0xa) ||
+        ptr(primitive,0x10)!=data || integer(context,8)!=0 || ptr(context,0)!=(unsigned char *)context+0x10) return 0;
+    /* Commit exports only track-zero quaternion/position/velocity into stream[0:40]. */
+    if (integer(data,0x54)!=0xb || integer(data,0x58)!=0x30 || integer(data,0x5c)!=0xb ||
+        integer(data,0x60)!=0xa || integer(data,0x64)!=0) return 0;
+    void *list=ptr(data,0x70);
+    if (!list || integer(list,0xc)!=15) return 0;
+    void **ops=ptr(list,0x20);
+    if (!ops || ops[3]!=op) return 0;
+    for (unsigned i=0;i<15;++i)
+        if (!ops[i] || ptr(ops[i],0)!=vfx_timestep_image+kinds[i] || !(integer(ops[i],0xc)&1)) return 0;
+    if (integer(ops[0],0x10)!=2 || integer(ops[1],0x10)!=5 || integer(ops[1],0x14)!=2 ||
+        integer(ops[2],0x10)!=0 || integer(ops[2],0x14)!=2 || integer(op,0x10)!=0 ||
+        integer(ops[4],0x10)!=8 || integer(ops[6],0x10)!=6) return 0;
+    /* The draw prelude may update its frame state, but not the committed motion. */
+    if (integer(ops[14],0x30)!=0x28 || ptr(ops[14],0x28)) return 0;
+    return real(op,0x14)>=0 && isfinite(real(op,0x14));
+}
+
+static void ABI vfx_drag_timestep(TimestepRegisters *r) {
+    const float frames=timestep_frames();
+    if (!(frames<1)) return;
+    void *context=(void *)r->r15, *op=ptr((const unsigned char *)r->rbp-0xc8,0);
+    const float dt=real(context,0x3dc), reference=dt/frames;
+    if (!(dt>0) || !isfinite(dt) || !isfinite(reference) || !vfx_rebuilt_velocity(op,context)) return;
+    for (unsigned i=0;i<4;++i) r->ymm[2][i]=reference;
+    memset(r->ymm[2]+4,0,4*sizeof(float));
+    r->resume+=9; /* Replace only vbroadcastss; native multiplication and store stay intact. */
+}
+
+static const unsigned char vfx_worker_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+    0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x01,0,0};
+static const unsigned char vfx_drag_code[]={0xc4,0xc2,0x79,0x18,0x97,0xdc,0x03,0,0,
+    0xc5,0xf8,0x59,0xc2,0xc5,0xf8,0x11,0x45,0x90};
+static int vfx_timestep_contract(const unsigned char *image,size_t size) {
+    return size>=0x2470900 && !memcmp(image+0x2b3670,vfx_worker_code,sizeof vfx_worker_code) &&
+        !memcmp(image+0x2c4f98,vfx_drag_code,sizeof vfx_drag_code) &&
+        !memcmp(image+0x2b3ac0,"\x49\x8b\x37\x4c\x89\xf7\x4c\x89\xe9\x49\x89\xd8\x4d\x89\xe1\xe8\x0c\xfa\xff\xff",20) &&
+        !memcmp(image+0x2b2673,"\x48\x8b\x45\x10\xc4\xc1\x7a\x11\x85\xdc\x03\0\0",13) &&
+        !memcmp(image+0x2b2687,"\x4d\x89\xb5\xc0\x03\0\0",7);
+}
+static void install_vfx_timestep(unsigned char *image,unsigned char *code) {
+    vfx_timestep_image=image;
+    memcpy(code+512,vfx_worker_code,sizeof vfx_worker_code);
+    jump(code+512+sizeof vfx_worker_code,image+0x2b3670+sizeof vfx_worker_code);
+    native_vfx_worker=(VfxWorker)(code+512);
+    register_timestep_bridge(code,vfx_drag_code,sizeof vfx_drag_code,image+0x2c4faa,vfx_drag_timestep);
+    jump(image+0x2b3670,vfx_worker); memset(image+0x2b3670+14,0x90,sizeof vfx_worker_code-14);
+    jump(image+0x2c4f98,code); memset(image+0x2c4f98+14,0x90,sizeof vfx_drag_code-14);
+}
+
+static const unsigned char camera_height_code[]={
+    0xc4,0xc1,0x7a,0x10,0x45,0x14,0xc4,0xc1,0x7a,0x10,0xaf,0x00,0x02,0x00,0x00,0xc5,
+    0xfa,0x10,0x9d,0x54,0xff,0xff,0xff,0xc4,0xc1,0x7a,0x10,0xb7,0xfc,0x01,0x00,0x00,
+    0xc5,0xfa,0x10,0x10,0x49,0x8d,0xbf,0xf4,0x01,0x00,0x00,0x49,0x8d,0xb7,0x04,0x02,
+    0x00,0x00,0xc5,0xfa,0x59,0xc0,0xc5,0xfa,0x59,0x05,0xfa,0xed,0x01,0x01,0xc5,0xd2,
+    0x5c,0xe4,0xc5,0xfa,0x59,0xe4,0xc5,0xfa,0x59,0xe4,0xc5,0xfa,0x59,0xc3,0xc5,0xfa,
+    0x58,0x05,0xc6,0xed,0x01,0x01,0xc5,0xda,0x59,0xe3,0xc5,0xca,0x5c,0xe4,0xc5,0xfa,
+    0x59,0xc0,0xc5,0xda,0x5e,0xc0,0xc5,0xfa,0x59,0xe3,0xc5,0xd2,0x58,0xe4,0xc4,0xc1,
+    0x7a,0x11,0xa7,0x00,0x02,0x00,0x00,0xc4,0xc1,0x7a,0x11,0x87,0xfc,0x01,0x00,0x00
+};
+
+static const unsigned char camera_pitch_code[]={
+    0xc5,0xea,0x59,0xc2,0xc5,0xfa,0x59,0x05,0x4d,0xed,0x01,0x01,0xc4,0xc1,0x79,0x6e,
+    0xdc,0xc5,0xfa,0x10,0xa5,0x54,0xff,0xff,0xff,0xc4,0xc1,0x7a,0x10,0x8f,0x10,0x02,
+    0x00,0x00,0xc5,0xd2,0x5c,0xdb,0xc5,0xfa,0x59,0xdb,0xc5,0xfa,0x59,0xdb,0xc5,0xfa,
+    0x59,0xc4,0xc5,0xfa,0x58,0x05,0x03,0xed,0x01,0x01,0xc5,0xe2,0x59,0xdc,0xc5,0xf2,
+    0x5c,0xcb,0xc5,0xfa,0x59,0xc0,0xc5,0xf2,0x5e,0xc0,0xc5,0xfa,0x59,0xcc,0xc5,0xd2,
+    0x58,0xc9,0xc4,0xc1,0x7a,0x11,0x8f,0x0c,0x02,0x00,0x00,0xc4,0xc1,0x7a,0x11,0x87,
+    0x10,0x02,0x00,0x00
+};
+
+static const unsigned char camera_planar_code[]={
+    0xc5,0xfa,0x10,0x27,0xc5,0xfa,0x10,0x6f,0x04,0xc5,0xea,0x59,0xd2,0xc5,0xea,0x59,
+    0x15,0xab,0xda,0x20,0x01,0xc5,0xfa,0x10,0x3d,0xa7,0xda,0x20,0x01,0xc5,0xfa,0x10,
+    0x36,0xc5,0x7a,0x10,0x46,0x04,0xc5,0xda,0x5c,0xc0,0xc5,0xd2,0x5c,0xc9,0xc5,0xea,
+    0x59,0xc0,0xc5,0xea,0x59,0xc9,0xc5,0xea,0x59,0xc0,0xc5,0xea,0x59,0xc9,0xc5,0xea,
+    0x59,0xd3,0xc5,0xea,0x58,0xd7,0xc5,0xfa,0x59,0xc3,0xc5,0xf2,0x59,0xcb,0xc5,0xca,
+    0x5c,0xc0,0xc5,0xba,0x5c,0xc9,0xc5,0xea,0x59,0xd2,0xc5,0xc2,0x5e,0xd2,0xc5,0xea,
+    0x59,0xc0,0xc5,0xea,0x59,0xc9,0xc5,0xfa,0x59,0xd3,0xc5,0xf2,0x59,0xdb,0xc5,0xda,
+    0x58,0xd2,0xc5,0xd2,0x58,0xdb,0xc5,0xfa,0x11,0x17,0xc5,0xfa,0x11,0x5f,0x04,0xc5,
+    0xfa,0x11,0x06,0xc5,0xfa,0x11,0x4e,0x04,0xc3
+};
+
+static uintptr_t camera_height_resume, camera_planar_resume, camera_pitch_resume;
+
+#define CAMERA_SCALAR_CAPACITY 16
+struct CameraScalarState {
+    uintptr_t key;
+    uint32_t frame;
+    float anchor_position, anchor_velocity, previous_target, stiffness, reference_dt;
+    float last_position, last_velocity;
+    double phase, elapsed_dt;
+    int valid;
+};
+static _Thread_local struct CameraScalarState camera_scalar_states[CAMERA_SCALAR_CAPACITY];
+static _Thread_local unsigned camera_scalar_next;
+
+static struct CameraScalarState *camera_scalar_state(uintptr_t key) {
+    for (unsigned i=0;i<CAMERA_SCALAR_CAPACITY;++i)
+        if (camera_scalar_states[i].key==key)
+            return &camera_scalar_states[i];
+    for (unsigned i=0;i<CAMERA_SCALAR_CAPACITY;++i)
+        if (!camera_scalar_states[i].valid) return &camera_scalar_states[i];
+    struct CameraScalarState *state=&camera_scalar_states[camera_scalar_next++%CAMERA_SCALAR_CAPACITY];
+    memset(state,0,sizeof *state);
+    return state;
+}
+
+static void camera_spring_advance(float *position, float *velocity, float target,
+                                  float stiffness, float reference_dt, double phase) {
+    const double g=1/(1+(double)stiffness*reference_dt), decay=pow(g,phase);
+    const double b=reference_dt*phase*g;
+    const double error=(double)*position-target, speed=*velocity, k=stiffness;
+    *position=(float)(target+decay*((1+b*k)*error+b*speed));
+    *velocity=(float)(decay*((1-b*k)*speed-b*k*k*error));
+}
+
+static int camera_spring_step(float *position, float *velocity, float target,
+                              float stiffness, float dt, uintptr_t key) {
+    const float frames=timestep_frames();
+    void *clock=timestep_clock ? *timestep_clock : NULL;
+    if (!(frames>0 && frames<1) || !(dt>0) || !isfinite(dt) || !isfinite(stiffness) ||
+        !isfinite(*position) || !isfinite(*velocity) || !isfinite(target) || !clock) {
+        if (position && velocity) camera_scalar_state(key)->valid=0;
+        return 0;
+    }
+    const float reference_dt=dt/frames;
+    if (!(reference_dt>0) || !isfinite(reference_dt)) {
+        camera_scalar_state(key)->valid=0;
+        return 0;
+    }
+    const uint32_t frame=(uint32_t)integer(clock,0x10);
+    struct CameraScalarState *state=camera_scalar_state(key);
+    const int continuous=state->valid && state->frame+1==frame &&
+        *position==state->last_position && *velocity==state->last_velocity &&
+        state->stiffness==stiffness &&
+        fabsf(state->reference_dt-reference_dt)<=8*FLT_EPSILON*fmaxf(1,fabsf(reference_dt));
+    if (!continuous) {
+        state->key=key;
+        state->anchor_position=*position; state->anchor_velocity=*velocity;
+        state->previous_target=target; state->stiffness=stiffness;
+        state->reference_dt=reference_dt; state->phase=0; state->elapsed_dt=0; state->valid=1;
+    }
+    float next_position=state->anchor_position, next_velocity=state->anchor_velocity;
+    double phase=state->phase+frames;
+    const double phase_tolerance=30.0/8192.0+8*FLT_EPSILON;
+    state->elapsed_dt+=dt;
+    if (fabs(phase-1)<=phase_tolerance) {
+        camera_spring_advance(&next_position,&next_velocity,target,stiffness,(float)state->elapsed_dt,1);
+        state->anchor_position=next_position; state->anchor_velocity=next_velocity;
+        state->elapsed_dt=0; phase=0;
+    } else if (phase>=1) {
+        const double boundary=(1-state->phase)/frames;
+        const float boundary_target=state->previous_target+(target-state->previous_target)*(float)boundary;
+        const float boundary_dt=(float)(state->elapsed_dt-dt*(1-boundary));
+        camera_spring_advance(&next_position,&next_velocity,boundary_target,stiffness,boundary_dt,1);
+        state->anchor_position=next_position; state->anchor_velocity=next_velocity;
+        state->elapsed_dt=(double)dt*(1-boundary); phase-=1;
+    }
+    if (phase>8*FLT_EPSILON)
+        camera_spring_advance(&next_position,&next_velocity,target,stiffness,reference_dt,phase);
+    else phase=0;
+    *position=next_position; *velocity=next_velocity;
+    state->phase=phase; state->frame=frame; state->previous_target=target;
+    state->last_position=next_position; state->last_velocity=next_velocity;
+    return 1;
+}
+
+typedef void (ABI *CameraDirectionSpring)(float *,float *,float,float,float,float,float);
+typedef void (ABI *CameraDirectionWrap)(float *);
+static CameraDirectionSpring native_camera_direction;
+static CameraDirectionWrap camera_direction_wrap;
+static float camera_frame_phase(float frame_dt) {
+    if (!(frame_dt>0) || !isfinite(frame_dt)) return 0;
+    const float ticks=frame_dt*8192.f;
+    if (ticks>=272.9f && ticks<274.1f) return 1.f;
+    return frame_dt*30.f;
+}
+#define CAMERA_DIRECTION_CAPACITY 8
+struct CameraDirectionState {
+    uintptr_t position,velocity;
+    float anchor_position[3],anchor_velocity[3],last_position[3],last_velocity[3];
+    float previous_target[3],previous_error[3],damping,reference_dt;
+    double phase;
+    uint32_t frame;
+    unsigned char valid;
+};
+static _Thread_local struct CameraDirectionState camera_direction_states[CAMERA_DIRECTION_CAPACITY];
+static _Thread_local unsigned camera_direction_next;
+
+static struct CameraDirectionState *camera_direction_state(uintptr_t position,uintptr_t velocity) {
+    for (unsigned i=0;i<CAMERA_DIRECTION_CAPACITY;++i)
+        if (camera_direction_states[i].position==position && camera_direction_states[i].velocity==velocity)
+            return &camera_direction_states[i];
+    for (unsigned i=0;i<CAMERA_DIRECTION_CAPACITY;++i)
+        if (!camera_direction_states[i].valid) return &camera_direction_states[i];
+    struct CameraDirectionState *state=&camera_direction_states[camera_direction_next++%CAMERA_DIRECTION_CAPACITY];
+    memset(state,0,sizeof *state);
+    return state;
+}
+
+static int camera_direction_interpolate(float position[3],float velocity[3],const float target[3],
+                                        float damping,float reference_dt,double phase) {
+    float error[3],equivalent_target[3];
+    for (unsigned i=0;i<3;++i) {
+        const float raw=position[i]-target[i];
+        if (!isfinite(raw) || fabsf(raw)>2.5f || !isfinite(velocity[i])) return 0;
+        error[i]=raw;
+    }
+    camera_direction_wrap(error);
+    const double k=(float)(damping*damping*500.f),dt=reference_dt*phase;
+    const double g=1/(1+k*reference_dt),decay=pow(g,phase),b=dt*g;
+    for (unsigned i=0;i<3;++i) {
+        equivalent_target[i]=position[i]-error[i];
+        const double e=error[i],speed=velocity[i];
+        position[i]=(float)(equivalent_target[i]+decay*((1+b*k)*e+b*speed));
+        velocity[i]=(float)(decay*((1-b*k)*speed-b*k*k*e));
+        if (!isfinite(position[i]) || !isfinite(velocity[i])) return 0;
+    }
+    return 1;
+}
+
+static void ABI camera_direction_timestep(float *position,float *velocity,float tx,float ty,float tz,
+                                          float damping,float dt) {
+    const float frame_dt=timestep_frame_dt(),frames=camera_frame_phase(frame_dt);
+    void *clock=timestep_clock ? *timestep_clock : NULL;
+    if (!(frames>0 && frames<=3) || frames==1 || !(dt>0) ||
+        !isfinite(dt) || !isfinite(damping) || !clock || !position || !velocity) {
+        if (native_camera_direction) native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+        return;
+    }
+    const float target[3]={tx,ty,tz};
+    for (unsigned i=0;i<3;++i)
+        if (!isfinite(position[i]) || !isfinite(velocity[i]) || !isfinite(target[i])) {
+            native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+            return;
+        }
+    const float reference_dt=dt/frames;
+    const uint32_t frame=(uint32_t)integer(clock,0x10);
+    struct CameraDirectionState *state=camera_direction_state((uintptr_t)position,(uintptr_t)velocity);
+    const int continuous=state->valid && state->frame+1==frame &&
+        !memcmp(position,state->last_position,sizeof state->last_position) &&
+        !memcmp(velocity,state->last_velocity,sizeof state->last_velocity) &&
+        fabsf(reference_dt-state->reference_dt)<=8*FLT_EPSILON*fmaxf(1,fabsf(reference_dt));
+    if (!continuous) {
+        state->position=(uintptr_t)position; state->velocity=(uintptr_t)velocity;
+        memcpy(state->anchor_position,position,sizeof state->anchor_position);
+        memcpy(state->anchor_velocity,velocity,sizeof state->anchor_velocity);
+        memcpy(state->previous_target,target,sizeof state->previous_target);
+        state->damping=damping; state->reference_dt=reference_dt; state->phase=0;
+        state->valid=1;
+    }
+    float raw_error[3];
+    for (unsigned i=0;i<3;++i) raw_error[i]=position[i]-target[i];
+    if (continuous) {
+        double dot=0;
+        for (unsigned i=0;i<3;++i) dot+=(double)state->previous_target[i]*target[i];
+        if (dot<0.87758256 || fabsf(damping-state->damping)>8*FLT_EPSILON*fmaxf(1,fabsf(damping))) {
+            state->valid=0;
+            native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+            return;
+        }
+        float wrapped_error[3]; memcpy(wrapped_error,raw_error,sizeof wrapped_error);
+        camera_direction_wrap(wrapped_error);
+        for (unsigned i=0;i<3;++i)
+            if (fabsf(raw_error[i])>2.5f || fabsf(wrapped_error[i]-state->previous_error[i])>0.5f) {
+                state->valid=0;
+                native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+                return;
+            }
+    }
+    float next_position[3],next_velocity[3];
+    memcpy(next_position,state->anchor_position,sizeof next_position);
+    memcpy(next_velocity,state->anchor_velocity,sizeof next_velocity);
+    double phase=state->phase+frames;
+    if (phase>=1) {
+        float boundary_target[3],norm_a=hypotf(hypotf(state->previous_target[0],state->previous_target[1]),state->previous_target[2]);
+        float norm_b=hypotf(hypotf(tx,ty),tz);
+        if (!(norm_a>0) || !(norm_b>0) || !isfinite(norm_a) || !isfinite(norm_b)) {
+            state->valid=0;
+            native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+            return;
+        }
+        float a[3],b[3];
+        for (unsigned i=0;i<3;++i) { a[i]=state->previous_target[i]/norm_a; b[i]=target[i]/norm_b; }
+        double dot=0; for (unsigned i=0;i<3;++i) dot+=(double)a[i]*b[i];
+        if (dot< -0.95) {
+            state->valid=0;
+            native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+            return;
+        }
+        if (dot>1) dot=1;
+        const double angle=acos(dot),sine=sin(angle);
+for (double at=1-state->phase;at<=frames+1e-10;at+=1) {
+const double sample=at/frames;
+if (angle<1e-6 || fabs(sine)<1e-8) {
+for (unsigned i=0;i<3;++i) boundary_target[i]=(float)(a[i]+(b[i]-a[i])*sample);
+} else {
+const double wa=sin((1-sample)*angle)/sine,wb=sin(sample*angle)/sine;
+for (unsigned i=0;i<3;++i) boundary_target[i]=(float)(wa*a[i]+wb*b[i]);
+}
+const float boundary_damping=state->damping+(damping-state->damping)*(float)sample;
+native_camera_direction(next_position,next_velocity,boundary_target[0],boundary_target[1],
+boundary_target[2],boundary_damping,reference_dt);
+phase-=1;
+}
+        memcpy(state->anchor_position,next_position,sizeof next_position);
+        memcpy(state->anchor_velocity,next_velocity,sizeof next_velocity);
+    }
+    if (phase>0 && !camera_direction_interpolate(next_position,next_velocity,target,damping,reference_dt,phase)) {
+        state->valid=0;
+        native_camera_direction(position,velocity,tx,ty,tz,damping,dt);
+        return;
+    }
+    memcpy(position,next_position,sizeof next_position);
+    memcpy(velocity,next_velocity,sizeof next_velocity);
+    state->phase=phase; state->frame=frame; state->damping=damping;
+    memcpy(state->previous_target,target,sizeof state->previous_target);
+    for (unsigned i=0;i<3;++i) state->previous_error[i]=position[i]-target[i];
+    camera_direction_wrap(state->previous_error);
+    memcpy(state->last_position,position,sizeof state->last_position);
+    memcpy(state->last_velocity,velocity,sizeof state->last_velocity);
+    /* Keep native stack-canary validation on every rendered camera update. */
+    native_camera_direction(position,velocity,tx,ty,tz,damping,0);
+}
+
+static void camera_scalar_register(TimestepRegisters *r, unsigned reg, float value) {
+    memset(r->ymm[reg],0,sizeof r->ymm[reg]);
+    r->ymm[reg][0]=value;
+}
+
+static void ABI camera_height_timestep(TimestepRegisters *r) {
+    unsigned char *camera=(unsigned char *)r->r15;
+    const float dt=real((const unsigned char *)r->rbp-0xac,0);
+    const float damping=real((const void *)r->r13,0x14);
+    const float old_position=real(camera,0x200), old_velocity=real(camera,0x1fc);
+    float position=old_position, velocity=old_velocity;
+    if (!camera_spring_step(&position,&velocity,r->ymm[4][0],damping*damping*500.f,dt,(uintptr_t)(camera+0x200))) return;
+    memcpy(camera+0x200,&position,4); memcpy(camera+0x1fc,&velocity,4);
+    r->rdi=r->r15+0x1f4; r->rsi=r->r15+0x204;
+    camera_scalar_register(r,0,velocity);
+    camera_scalar_register(r,2,real((const void *)r->rax,0));
+    camera_scalar_register(r,3,dt);
+    camera_scalar_register(r,4,position);
+    camera_scalar_register(r,5,old_position);
+    camera_scalar_register(r,6,old_velocity);
+    r->resume=camera_height_resume;
+}
+
+static void ABI camera_planar_timestep(TimestepRegisters *r) {
+    float position[2], velocity[2], old_position[2], old_velocity[2];
+    memcpy(position,(const void *)r->rdi,sizeof position);
+    memcpy(velocity,(const void *)r->rsi,sizeof velocity);
+    memcpy(old_position,position,sizeof position); memcpy(old_velocity,velocity,sizeof velocity);
+    const float damping=r->ymm[2][0], dt=r->ymm[3][0];
+    const float targets[]={r->ymm[7][0],r->ymm[1][0]};
+    for (unsigned i=0;i<2;++i)
+        if (!camera_spring_step(&position[i],&velocity[i],targets[i],damping*damping*500.f,dt,r->rdi+i*4)) return;
+    memcpy((void *)r->rdi,position,sizeof position);
+    memcpy((void *)r->rsi,velocity,sizeof velocity);
+    const float registers[]={velocity[0],velocity[1],position[0],position[1],
+                             old_position[0],old_position[1],old_velocity[0],1,old_velocity[1]};
+    for (unsigned i=0;i<9;++i) camera_scalar_register(r,i,registers[i]);
+    uint32_t bits; memcpy(&bits,&position[1],4); r->rax=bits;
+    r->resume=camera_planar_resume;
+}
+
+static void ABI camera_pitch_timestep(TimestepRegisters *r) {
+    unsigned char *camera=(unsigned char *)r->r15;
+    float target; const uint32_t bits=(uint32_t)r->r12; memcpy(&target,&bits,4);
+    const float dt=real((const unsigned char *)r->rbp-0xac,0), k=r->ymm[0][0];
+    const float old_position=real(camera,0x20c);
+    float position=old_position, velocity=real(camera,0x210);
+    if (!camera_spring_step(&position,&velocity,target,k,dt,(uintptr_t)(camera+0x20c))) return;
+    memcpy(camera+0x20c,&position,4); memcpy(camera+0x210,&velocity,4);
+    camera_scalar_register(r,0,velocity);
+    camera_scalar_register(r,1,position);
+    camera_scalar_register(r,3,k*(k*(old_position-target))*dt);
+    camera_scalar_register(r,4,dt);
+    r->resume=camera_pitch_resume;
+}
+
+static int camera_constant(const unsigned char *image, size_t size, size_t displacement, float value) {
+    int32_t relative; memcpy(&relative,image+displacement,4);
+    const int64_t target=(int64_t)displacement+4+relative;
+    return target>=0 && (uint64_t)target<=size-4 && !memcmp(image+target,&value,4);
+}
+
+static int camera_spring_contract(const unsigned char *image, size_t size, size_t address,
+                                  const unsigned char *expected, size_t length,
+                                  size_t first, size_t second) {
+    return !memcmp(image+address,expected,first) &&
+        !memcmp(image+address+first+4,expected+first+4,second-first-4) &&
+        !memcmp(image+address+second+4,expected+second+4,length-second-4) &&
+        camera_constant(image,size,address+first,500.f) &&
+        camera_constant(image,size,address+second,1.f);
+}
+
+static int camera_direction_contract(const unsigned char *image,size_t size) {
+    const unsigned char prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x28,0x4c,0x8b,0x3d};
+    if (size<0xa997c0+20 || memcmp(image+0xa997c0,prefix,sizeof prefix)) return 0;
+    int32_t displacement; memcpy(&displacement,image+0xa997c0+16,4);
+    const int64_t guard=(int64_t)0xa997c0+20+displacement;
+    return guard>=0 && (uint64_t)guard<=size-sizeof(void *);
+}
+
+static int camera_timestep_contract(const unsigned char *image, size_t size) {
+    if (size<0x1cb0000) return 0;
+    return camera_spring_contract(image,size,0xc89b54,camera_height_code,sizeof camera_height_code,58,82) &&
+        camera_spring_contract(image,size,0xc89c33,camera_pitch_code,sizeof camera_pitch_code,8,54) &&
+        camera_spring_contract(image,size,0xa99670,camera_planar_code,sizeof camera_planar_code,17,25) &&
+        camera_direction_contract(image,size) &&
+        !memcmp(image+0xc89bd4,"\xc5\xf8\x28\xc7\xe8\x93\xfa\xe0\xff\x41\x8b\x87\xf8\x01\0\0",16) &&
+        !memcmp(image+0xc89be4,"\x41\x8b\x8f\0\x02\0\0\x41\x8b\x9f\xf4\x01\0\0",14) &&
+        !memcmp(image+0xc89c97,"\xc5\xf2\x59\x05",4) && camera_constant(image,size,0xc89c9b,.01745329238474369f) &&
+        !memcmp(image+0xc89c9f,"\xc5\xfa\x59\x05",4) && camera_constant(image,size,0xc89ca3,-.5f) &&
+        !memcmp(image+0xc89ca7,"\xc5\xfa\x11\x85\x54\xff\xff\xff",8);
+}
+
+static void install_camera_timestep(unsigned char *image, unsigned char *code) {
+    camera_height_resume=(uintptr_t)(image+0xc89bd4);
+    camera_planar_resume=(uintptr_t)(image+0xc89be4);
+    camera_pitch_resume=(uintptr_t)(image+0xc89c97);
+    /* The original call moves to an absolute call literal; no RIP-relative operands move. */
+    unsigned char planar[27]; memcpy(planar,image+0xc89bd4,4);
+    memcpy(planar+4,"\xff\x15\x02\0\0\0\xeb\x08",8);
+    const void *native=image+0xa99670; memcpy(planar+12,&native,8);
+    memcpy(planar+20,image+0xc89bdd,7);
+    register_timestep_bridge(code,image+0xc89b54,15,image+0xc89b63,camera_height_timestep);
+    register_timestep_bridge(code+512,planar,sizeof planar,image+0xc89be4,camera_planar_timestep);
+    register_timestep_bridge(code+1024,image+0xc89c44,17,image+0xc89c55,camera_pitch_timestep);
+    jump(image+0xc89b54,code); image[0xc89b62]=0x90;
+    jump(image+0xc89bd4,code+512); memset(image+0xc89be2,0x90,2);
+    jump(image+0xc89c44,code+1024); memset(image+0xc89c52,0x90,3);
+    unsigned char *trampoline=code+1536;
+    memcpy(trampoline,image+0xa997c0,13);
+    memcpy(trampoline+13,"\x49\xbb",2);
+    int32_t displacement; memcpy(&displacement,image+0xa997c0+16,4);
+    const uintptr_t guard=(uintptr_t)(image+0xa997c0+20+displacement);
+    memcpy(trampoline+15,&guard,sizeof guard);
+    memcpy(trampoline+23,"\x4d\x8b\x3b",3);
+    jump(trampoline+26,image+0xa997d4);
+    native_camera_direction=(CameraDirectionSpring)trampoline;
+    camera_direction_wrap=(CameraDirectionWrap)(image+0xa98310);
+    jump(image+0xa997c0,camera_direction_timestep);
+}
+
+static float ABI lateral_retention(float retention, float dt) {
+    const float cap=motion_lateral_cap;motion_lateral_cap=1;
+    if(ground_lateral_pending) {ground_lateral_pending=0;return ground_lateral_factor;}
+    const float frames=timestep_frames();
+    if (!(dt>0) || !isfinite(dt) || !(frames<1)) return retention;
+    if (cap>1 && isfinite(cap) && retention>=0 && isfinite(retention))
+        return cap*powf(retention/cap,frames);
+    return retention>0 && retention<1 ? powf(retention,frames) : retention;
+}
+
+static float ABI wheel_blend(float weight, float dt) {
+    const float steps=timestep_frames();
+    if (!(dt>0) || !isfinite(dt) || !(steps<1) || !(weight>0 && weight<1))
+        return weight;
+    const float reference=weight/steps;
+    if (reference>=1) return 1;
+    return -expm1f(log1pf(-reference)*steps);
+}
+
+static void timestep_bridge(unsigned char *code, const void *resume,
+                            const unsigned char displaced[15], unsigned reg,
+                            signed char dt_offset, float (ABI *helper)(float,float)) {
+    /* Preserve live native registers while correcting one scalar coefficient. */
+    const unsigned char save[] = {0x9c,0x50,0x51,0x52,0x56,0x57,
+        0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x48,0x81,0xec,0,1,0,0};
+    unsigned char *p=code;
+    memcpy(p,save,sizeof save); p+=sizeof save;
+    for (unsigned i=0;i<16;++i) {
+        if (i>=8) *p++=0x44;
+        *p++=0x0f; *p++=0x11; *p++=(unsigned char)(0x84+8*(i&7)); *p++=0x24;
+        uint32_t offset=i*16; memcpy(p,&offset,4); p+=4;
+    }
+    const unsigned char args[] = {0xf3,0x0f,0x10,0x84,0x24,0,0,0,0,
+        0xf3,0x0f,0x10,0x4d,0xcc,0x48,0xb8};
+    memcpy(p,args,sizeof args);
+    p[13]=(unsigned char)dt_offset;
+    uint32_t offset=reg*16; memcpy(p+5,&offset,4); p+=sizeof args;
+    memcpy(p,&helper,8); p+=8;
+    *p++=0xff; *p++=0xd0;
+    const unsigned char result[] = {0xf3,0x0f,0x11,0x84,0x24};
+    memcpy(p,result,sizeof result); p+=sizeof result;
+    memcpy(p,&offset,4); p+=4;
+    for (unsigned i=0;i<16;++i) {
+        if (i>=8) *p++=0x44;
+        *p++=0x0f; *p++=0x10; *p++=(unsigned char)(0x84+8*(i&7)); *p++=0x24;
+        offset=i*16; memcpy(p,&offset,4); p+=4;
+    }
+    const unsigned char restore[] = {0x48,0x81,0xc4,0,1,0,0,
+        0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5f,0x5e,0x5a,0x59,0x58,0x9d};
+    memcpy(p,restore,sizeof restore); p+=sizeof restore;
+    memcpy(p,displaced,15); p+=15;
+    jump(p,resume);
+}
+
+static void ABI contact_timestep(TimestepRegisters *r) {
+    const float dt=real((const unsigned char *)r->rbp-0x34,0), frame=timestep_frame_dt();
+    /* shortcut: scaled-world position limits stay native until their contact response is proved. */
+    if (!(timestep_frames()<1) || dt!=frame) return;
+    r->ymm[0][0]/=dt;
+    memset(r->ymm[0]+4,0,4*sizeof(float));
+    r->resume+=8; /* Skip only the native multiply; retain its store and comparison. */
+}
+
+static void contact_timestep_bridge(unsigned char *code, const void *resume) {
+    const unsigned char displaced[]={0xc5,0xfa,0x59,0x05,0x18,0,0,0,
+        0xc5,0xfa,0x11,0x45,0x84,0xc5,0xf8,0x2e,0x45,0xb8};
+    const size_t length=register_timestep_bridge(code,displaced,sizeof displaced,resume,contact_timestep);
+    const float thirty=30;
+    memcpy(code+length,&thirty,4);
+}
+
 static int writable(void *address, size_t length) {
 #ifdef _WIN32
     DWORD old;
@@ -1848,7 +3102,10 @@ static int writable(void *address, size_t length) {
 }
 
 int runtime_race_options_start(unsigned char *image, size_t size) {
-    if (size < 0x2af2608) return 0;
+    if (size < 0x2af2608 || !camera_timestep_contract(image,size) ||
+        !vfx_timestep_contract(image,size) || !angular_timestep_contract(image,size) ||
+        !deceleration_timestep_contract(image,size) || !scaled_clock_contract(image,size) ||
+        !ground_speed_project_contract(image,size) || !freeflight_timestep_contract(image,size)) return 0;
     const uintptr_t team_native = (uintptr_t)ptr(image, 0x2778150);
     /* Online may already wrap this slot; detect the region from the native code. */
     const unsigned char signature[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
@@ -1903,16 +3160,78 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     const unsigned char motion_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x01,0,0};
     if (memcmp(image+0xe33d80,hop_prefix,sizeof hop_prefix) || memcmp(image+0xe49d90,hop_prefix,sizeof hop_prefix) ||
         memcmp(image+0xe46250,motion_prefix,sizeof motion_prefix)) return 0;
+    const unsigned char contact_step[] = {0xc5,0xfa,0x59,0x05,0x0c,0x26,0xe6,0,
+        0xc5,0xfa,0x11,0x45,0x84,0xc5,0xf8,0x2e,0x45,0xb8};
+    int32_t contact_displacement;
+    memcpy(&contact_displacement,image+0xe47d20,4);
+    const int64_t contact_constant=0xe47d24+(int64_t)contact_displacement;
+    if (memcmp(image+0xe47d1c,contact_step,4) ||
+        memcmp(image+0xe47d24,contact_step+8,sizeof contact_step-8) ||
+        memcmp(image+0xe47d2e,"\x48\x8d\x45\x84",4) ||
+        memcmp(image+0xe46278,"\x48\x89\x95\x58\xff\xff\xff",7) ||
+        memcmp(image+0xe252c9,"\x45\x8b\x6f\x18",4) ||
+        contact_constant<0 || (uint64_t)contact_constant>size-4 ||
+        memcmp(image+contact_constant,"\0\0\xf0\x41",4)) return 0;
+    const unsigned char lateral_base[] = {0xc5,0xfa,0x10,0x7d,0xc0,
+        0xc5,0xfa,0x10,0x5d,0xc4,0xc5,0xfa,0x10,0x45,0xc8};
+    const unsigned char lateral_surface[] = {0xc5,0xfa,0x10,0x6d,0xc0,
+        0xc5,0xfa,0x10,0x75,0xc4,0xc5,0x7a,0x10,0x4d,0xc8};
+    if (memcmp(image+0xe46b2a,lateral_base,sizeof lateral_base) ||
+        memcmp(image+0xe47237,lateral_surface,sizeof lateral_surface)) return 0;
+    const unsigned char wheel_step[] = {0xc5,0xfa,0x59,0xc2,0xc5,0xf2,0x58,0xc0,
+        0xc4,0xc1,0x7a,0x11,0x44,0x24,0x58};
+    if (memcmp(image+0xe2f821,wheel_step,sizeof wheel_step) ||
+        memcmp(image+0xe2f6a8,"\xc5\xfa\x11\x45\xac",5)) return 0;
+    const unsigned char rotation_step[]={0xc5,0xf8,0x28,0x8d,0xf0,0xfd,0xff,0xff,
+        0xc5,0xf0,0x59,0x49,0x20,0xc5,0xc8,0x59,0xc9};
+    if (memcmp(image+0x8790eb,rotation_step,sizeof rotation_step)) return 0;
+    enum { CAMERA_BRIDGE = 2912, CONTACT_BRIDGE = 10656, COLD_SIZE = 11168 };
+    _Static_assert(CONTACT_BRIDGE >= CAMERA_BRIDGE + 2048, "contact bridge overlaps camera bridge");
+    _Static_assert(COLD_SIZE >= CONTACT_BRIDGE + 512, "contact bridge exceeds allocation");
 #ifdef _WIN32
-    unsigned char *cold = VirtualAlloc(NULL, 784, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    unsigned char *cold = VirtualAlloc(NULL, COLD_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #else
-    unsigned char *cold = mmap(NULL, 784, PROT_READ | PROT_WRITE | PROT_EXEC,
+    unsigned char *cold = mmap(NULL, COLD_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cold == MAP_FAILED) cold = NULL;
 #endif
     if (!cold || !writable(image+0xe2f1d0,sizeof keep_boost_prefix) || !writable(image+0xe75250-shift,sizeof boost_update_prefix) || !writable(image+0xe8ad70-shift,sizeof exhaust_prefix) || !writable(image+0xe33d80,15) || !writable(image+0xe49d90,15) || !writable(image+0xe46250,20) || !writable(image+0xe452c0,17) || !writable(image+0xe4a220,17) || !writable(image + 0xdcd930, 20) || !writable(image + 0xc0a3b0, 14) || !writable(image + 0xdcdd30, 20) || !writable(image + 0xdd0210, 20) || !writable(image + 0xc59b10, 14) || !writable(image + 0x2770de0, sizeof(void *)) ||
         !writable(image + 0xf4c840 - shift, 14) || !writable(image + 0xe0f9b0, 14) ||
         !writable(image + 0xdcfc10, 14) || !writable(image + 0xdcb630, 17) || !writable(image + 0xdcfb10, 14) || !writable(image + 0xe0efa0, 14)) return 0;
+    if (!writable(image+0xe47d1c,sizeof contact_step) ||
+        !writable(image+0xe46b2a,15) || !writable(image+0xe47237,15) ||
+        !writable(image+0xe2f821,15) || !writable(image+0x8790eb,sizeof rotation_step) ||
+        !writable(image+0xe46acf,15) || !writable(image+0xe45951,15) || !writable(image+0xe46a55,18) || !writable(image+0xa31afd,15)) return 0;
+    if (!writable(image+0xc89b54,15) || !writable(image+0xc89bd4,16) ||
+        !writable(image+0xc89c44,17) || !writable(image+0xa997c0,14)) return 0;
+    if (!writable(image+0x2b3670,sizeof vfx_worker_code) || !writable(image+0x2c4f98,sizeof vfx_drag_code)) return 0;
+    for (unsigned i=0;i<sizeof freeflight_sites/sizeof *freeflight_sites;++i)
+        if (!writable(image+freeflight_sites[i].address,freeflight_sites[i].length)) return 0;
+    timestep_clock=(void **)(image+0x2ab4100);
+    install_vfx_timestep(image,cold+4960);
+    install_angular_timestep(image,cold+5536);
+    install_deceleration_timestep(image,cold+6048);
+    install_scaled_clock(image,cold+6560);
+    install_ground_speed_project(image,cold+7072);
+    install_freeflight_timestep(image,cold+7584);
+    puts("Native steering: nonlinear angular acceleration follows the 30 FPS reference");
+    /* Gameplay validation found visible shake and stutter; retain the native camera path. */
+    if (0) install_camera_timestep(image,cold+CAMERA_BRIDGE);
+    register_timestep_bridge(cold+2400,rotation_step,sizeof rotation_step,image+0x8790fc,rotation_timestep);
+    jump(image+0x8790eb,cold+2400);
+    memset(image+0x8790eb+14,0x90,sizeof rotation_step-14);
+    puts("Native rotation integration: angular response matches 30 FPS above 30 FPS");
+    timestep_bridge(cold+864,image+0xe46b39,lateral_base,11,-0x34,lateral_retention);
+    timestep_bridge(cold+1376,image+0xe47246,lateral_surface,3,-0x34,lateral_retention);
+    if (0) timestep_bridge(cold+1888,image+0xe2f830,wheel_step,2,-0x54,wheel_blend);
+    jump(image+0xe46b2a,cold+864); image[0xe46b38]=0x90;
+    jump(image+0xe47237,cold+1376); image[0xe47245]=0x90;
+    /* Gameplay validation found visible animation stutter; retain the native wheel blend. */
+    puts("Native kart lateral retention: base and surface damping follow simulation dt above 30 FPS");
+    contact_timestep_bridge(cold+CONTACT_BRIDGE,image+0xe47d2e);
+    jump(image+0xe47d1c,cold+CONTACT_BRIDGE);
+    memset(image+0xe47d1c+14,0x90,sizeof contact_step-14);
+    puts("Native kart contact: position-limit correction follows simulation dt above 30 FPS");
     cold[0] = 0x55; /* Replaced native cold-path push rbp; rest stays in place. */
     jump(cold + 1, image + 0xc59b1e);
     cold_ai_data = (DataGetter)cold;
@@ -2003,7 +3322,9 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     jump(cold+544+sizeof hop_prefix,image+0xe49d90+sizeof hop_prefix);
     native_jump_impulse=(BoostDuration)(cold+544);
     memcpy(cold+576,motion_prefix,sizeof motion_prefix);
-    jump(cold+576+sizeof motion_prefix,image+0xe46250+sizeof motion_prefix);
+    /* rbp-a8 is reused by native code. Keep dt in the Euler vector's unused fourth float. */
+    memcpy(cold+576+sizeof motion_prefix,"\x8b\x42\x18\x89\x45\xcc",6);
+    jump(cold+576+sizeof motion_prefix+6,image+0xe46250+sizeof motion_prefix);
     native_kart_motion=(KartMotion)(cold+576);
     memcpy(cold+624,hop_prefix,sizeof hop_prefix);
     jump(cold+624+sizeof hop_prefix,image+0xe33d80+sizeof hop_prefix);

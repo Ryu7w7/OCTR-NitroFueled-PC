@@ -301,6 +301,7 @@ static void lead_item(void *component, int kind) {
     Tracked *t = track(component, entity, kind, now);
     if (!t) return;
     float *at = &RR_AT(entity, 0x20, float);
+    const double dt = now - t->last_seen;
     t->updates++;
     t->last_seen = now;
     if (!(t->written && same(at, t->lead)) && !(t->has_base && same(at, t->base))) {
@@ -316,7 +317,9 @@ static void lead_item(void *component, int kind) {
     float v[3];
     double stale = 0.0;
     if (!velocity(t, now, v, &stale)) return;
-    t->speed = t->speed > 0.0f ? t->speed + (norm(v) - t->speed) * 0.2f : norm(v);
+    /* Preserve the 30 FPS response when item updates arrive more often. */
+    const float blend = dt >= 0.0 && dt < 1.0 / 30.0 ? (float)(1.0 - pow(0.8, dt * 30.0)) : 0.2f;
+    t->speed = t->speed > 0.0f ? t->speed + (norm(v) - t->speed) * blend : norm(v);
     if (now - t->rtt_at > 0.5) t->rtt = round_trip(t->owner), t->rtt_at = now;
     const float measured = calibrated(t->owner);
     float lead = cfg.fixed_ms >= 0 ? cfg.fixed_ms / 1000.0f
