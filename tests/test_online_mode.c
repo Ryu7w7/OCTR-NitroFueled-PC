@@ -666,7 +666,11 @@ static void ABI place_racers_mock(unsigned char *manager) {
         unsigned char *handle = *(void **)(items[i] + 0x10);
         unsigned char *player = handle ? *(void **)(handle + 0x28) : NULL;
         int id = *(int *)(player ? player + 0xc8 : items[i] + 0x164);
-        assert(*(int *)(items[i] + 0x60) == (expected_grid == 2 ? (id == 7 ? 1 : id == 0 ? 8 : id + 1) : expected_grid ? id + 1 : 0));
+        int position = expected_grid >= 2 ?
+            (id == 7 ? 1 : id == 0 ? 8 : id + 1) : expected_grid ? id + 1 : 0;
+        if (expected_grid >= 3 && player && *(uint64_t *)(player + 0xa8) == 100) position = 8;
+        if (expected_grid == 4 && position > 4) --position;
+        assert(*(int *)(items[i] + 0x60) == position);
     }
     ++grid_calls;
 }
@@ -1028,6 +1032,13 @@ static void test_region(size_t shift) {
     roster_disp = 0x1c39170 + (int32_t)shift;
     memcpy(image + (0xe9b9fc - shift), &roster_disp, 4);
     image[0xe9ba09 - shift] = 0xc3;
+    unsigned char *net_kart = image + 0x200000;
+    memcpy(net_kart, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
+    memset(net_kart + 17, 0x90, 7);
+    memcpy(net_kart + 0x18, "\x49\x89\xf6\x49\x89\xfc\x48\x89\xf0\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d\xc3", 25);
+    image[0xa67db1] = 0xe8;
+    const int32_t net_kart_call = (int32_t)(net_kart - (image + 0xa67db6));
+    memcpy(image + 0xa67db2, &net_kart_call, 4);
     unsigned char racers_manager[0x50] = {0}, racers_list[40] = {0};
     unsigned char racers[8][0x180] = {{0}}, players[8][0x100] = {{0}}, handles[8][48] = {{0}};
     void *racer_items[8];
@@ -1193,6 +1204,13 @@ static void test_region(size_t shift) {
     assert(hof_open_options[0x21] == 0);
     open_asset(&hof_opened, hof_open_manager, (void *)2, hof_open_options, 4, (void *)5, 0.25f);
     assert(hof_opened == (void *)6 && asset_opens == assets_before + 2);
+    void *(ABI *spawn_net_kart_hook)(unsigned char *, unsigned char *) = (void *)net_kart;
+    unsigned char net_infos[0x30] = {0}, net_hero[0x18] = {0};
+    put_pointer(net_hero, 0x10, racers[0]);
+    put_pointer(net_infos, 0x20, net_hero);
+    assert(!spawn_net_kart_hook(NULL, net_infos));
+    assert(!spawn_net_kart_hook(racers_manager, NULL));
+    assert(spawn_net_kart_hook(racers_manager, net_infos) == net_infos);
     /* A racer from a mod this game lacks shows as Crash; the game's own and this player's mod
      * racers stay; no list (an older launcher) changes nothing. */
     int (ABI *team_gate)(void) = (void *)(image + 0x2000);
@@ -2044,11 +2062,21 @@ static void test_region(size_t shift) {
     assert(*(int *)(racers[0] + 0xb8) == 27);
     /* Preserve human and AI grid identities across recreated racers. */
     cup_index = 1;
+    void *remaining_racers[7];
+    int remaining = 0;
+    for (int k = 0; k < 8; ++k)
+        if (racer_items[k] != racers[3]) remaining_racers[remaining++] = racer_items[k];
+    put_pointer(racers_list, 0x20, remaining_racers);
+    *(int *)(racers_list + 12) = 7;
     for (int k = 0; k < 8; ++k) *(int *)(racers[k] + 0x60) = 8-k;
     load_map(maps[cup_index], 8);
     for (int k = 0; k < 8; ++k) *(int *)(racers[k] + 0x60) = 0;
-    expected_grid = 2;
+    *(int *)(players[0] + 0xc8) = 42; /* Network slot can change between CUP tracks. */
+    expected_grid = 4;
     place_racers(racers_manager);
+    *(int *)(players[0] + 0xc8) = 0;
+    put_pointer(racers_list, 0x20, racer_items);
+    *(int *)(racers_list + 12) = 8;
     put_pointer(racers[6], 0x10, handles[6]);
     put_pointer(racers[7], 0x10, handles[7]);
     *(int *)(mixed_results + 0x20) = 7;
