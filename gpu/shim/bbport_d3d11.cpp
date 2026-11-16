@@ -269,6 +269,12 @@ void Present(std::uint64_t address, std::uint32_t snapshot) {
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
     context->RSSetViewports(1, &viewport);
     BbOverlay::RenderD3d11(width, height);
+    if (shaders) {  // Shift+F12's glitch trap: the picture as it is presented, overlay included
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> back;
+        if (resource && SUCCEEDED(resource.As(&back))) GfxTrapFinal(back.Get());
+    }
     GfxForgetState();
     lock.unlock();
     const auto present_start = std::chrono::steady_clock::now();

@@ -3073,6 +3073,30 @@ u32 GfxSnapshot(u64 addr) {
     return slot + 1;
 }
 
+void GfxTrapFinal(ID3D11Texture2D* back_buffer) {
+    if (!g_glitch_trap || !back_buffer || !g_dev) return;
+    static ComPtr<ID3D11Texture2D> copy;
+    static ComPtr<ID3D11ShaderResourceView> view;
+    D3D11_TEXTURE2D_DESC want;
+    back_buffer->GetDesc(&want);
+    D3D11_TEXTURE2D_DESC have{};
+    if (copy) copy->GetDesc(&have);
+    if (!copy || have.Width != want.Width || have.Height != want.Height || have.Format != want.Format) {
+        copy.Reset(), view.Reset();
+        D3D11_TEXTURE2D_DESC d = want;
+        d.Usage = D3D11_USAGE_DEFAULT, d.BindFlags = D3D11_BIND_SHADER_RESOURCE, d.CPUAccessFlags = 0, d.MiscFlags = 0;
+        d.MipLevels = d.ArraySize = 1, d.SampleDesc.Count = 1, d.SampleDesc.Quality = 0;
+        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &copy)) ||
+            FAILED(g_dev->CreateShaderResourceView(copy.Get(), nullptr, &view))) {
+            copy.Reset(), view.Reset();
+            return;
+        }
+        LOG("gfx: glitch trap watches the final picture (%ux%u, format %d)", want.Width, want.Height, (int)want.Format);
+    }
+    g_ctx->CopyResource(copy.Get(), back_buffer);
+    RecordFrame(view.Get());
+}
+
 void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
     if (!Init()) return;
     g_swap_rtv = target;
@@ -3229,7 +3253,7 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
         g_ctx->PSSetShaderResources(0, 1, &picture);
         g_ctx->PSSetSamplers(0, 1, g_samp_linear.GetAddressOf());
         g_ctx->Draw(3, 0);
-        RecordFrame(picture);
+        if (!g_glitch_trap) RecordFrame(picture);  // the trap watches the final picture (GfxTrapFinal)
     }
     // CTR_SCREENSHOT=<n>: every n-th frame; =<first>+<count>: that many frames in a row (flicker)
     static u64 shot_frame = 0, shot_count = 0;
