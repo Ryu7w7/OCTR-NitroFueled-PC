@@ -1004,6 +1004,7 @@ typedef void *(ABI *SpawnNetKart)(unsigned char *manager, unsigned char *infos);
 static SpawnNetKart original_spawn_net_kart;
 
 static void *ABI spawn_net_kart(unsigned char *manager, unsigned char *infos) {
+    if (!manager || !infos) return NULL;
     unsigned char *hero = infos ? pointer_at(infos, 0x20) : NULL;
     if (manager && infos && (!hero || !pointer_at(hero, 0x10))) {
         int slot = -1, count = 0;
@@ -1044,6 +1045,12 @@ static struct CupTotal racer_identity(unsigned char *racer) {
     memcpy(&result.points, racer + 0xb8, 4);
     memcpy(&result.finish_position, racer + 0x60, 4);
     return result;
+}
+
+static int same_cup_racer(const struct CupTotal *a, const struct CupTotal *b) {
+    if (a->human != b->human) return 0;
+    if (!a->human) return a->id == b->id;
+    return a->online_id && b->online_id ? a->online_id == b->online_id : a->id == b->id;
 }
 
 /* Native a299c1 maps an AI spawn slot through the network roster before
@@ -1670,7 +1677,7 @@ static void ABI place_cup_racers(unsigned char *self) {
     if (private_cup_race_active && current_cup_index() > 0) {
         unsigned char *manager = racer_manager ? *racer_manager : NULL;
         unsigned char *list = manager ? pointer_at(manager, 0x10) : NULL;
-        int count = 0, restored = 0;
+        int count = 0, matched = 0, previous[8] = {0};
         if (list) memcpy(&count, list + 12, 4);
         void **items = list ? pointer_at(list, 0x20) : NULL;
         for (int i = 0; items && i < count && i < 8; ++i) {
@@ -1679,18 +1686,28 @@ static void ABI place_cup_racers(unsigned char *self) {
             const struct CupTotal key = racer_identity(racer);
             for (int j = 0; j < cup_total_count; ++j) {
                 const struct CupTotal *saved = cup_totals + j;
-                if (key.human != saved->human || key.id != saved->id ||
-                    key.online_id != saved->online_id) continue;
-                /* Native later-track placement reads last finish, not total points. */
-                if (saved->finish_position > 0 && saved->finish_position <= count) {
-                    memcpy(racer + 0x60, &saved->finish_position, 4);
-                    ++restored;
-                }
+                if (!same_cup_racer(&key, saved)) continue;
+                previous[i] = saved->finish_position;
+                ++matched;
                 restore_cup_total(racer);
                 break;
             }
         }
-        printf("Native private CUP: restored previous finish grid %d/%d before placement\n", restored, count);
+        unsigned occupied = 0;
+        for (int i = 0; matched == count && i < count; ++i) {
+            if (previous[i] < 1 || previous[i] > 8 || (occupied & (1u << previous[i]))) {
+                matched = 0;
+                break;
+            }
+            occupied |= 1u << previous[i];
+        }
+        /* Native later-track placement reads last finish. Compact gaps left by disconnects. */
+        for (int i = 0; matched == count && i < count; ++i) {
+            int position = 1;
+            for (int j = 0; j < count; ++j) position += previous[j] < previous[i];
+            memcpy((unsigned char *)items[i] + 0x60, &position, 4);
+        }
+        printf("Native private CUP: restored previous finish grid %d/%d before placement\n", matched, count);
     }
     original_place_racers(self);
     snapshot_private_grid();
@@ -1709,8 +1726,7 @@ static void restore_finish_position(unsigned char *racer) {
     const struct CupTotal key = racer_identity(racer);
     for (int i = 0; i < finish_order_count; ++i) {
         const struct CupTotal *saved = finish_order + i;
-        if (key.human != saved->human || key.id != saved->id ||
-            key.online_id != saved->online_id) continue;
+        if (!same_cup_racer(&key, saved)) continue;
         const int position = i + 1;
         memcpy(racer + 0x58, &position, 4);
         memcpy(racer + 0x60, &position, 4);
@@ -1724,7 +1740,7 @@ static void restore_cup_total(unsigned char *racer) {
     struct CupTotal key = racer_identity(racer);
     for (int i = 0; i < cup_total_count; ++i) {
         struct CupTotal *saved = cup_totals + i;
-        if (key.human == saved->human && key.id == saved->id && key.online_id == saved->online_id) {
+        if (same_cup_racer(&key, saved)) {
             memcpy(racer + 0xb8, &saved->points, 4);
             return;
         }
@@ -1775,8 +1791,7 @@ static void ABI racer_finished(unsigned char *racer, int finished) {
     const struct CupTotal key = racer_identity(racer);
     for (int i = 0; i < cup_result_count; ++i) {
         const struct CupTotal *result = &cup_results[i].key;
-        if (key.human != result->human || key.id != result->id ||
-            key.online_id != result->online_id) continue;
+        if (!same_cup_racer(&key, result)) continue;
         /* A late finish callback must not overwrite the host's final award. */
         memcpy(racer + 0x64, &cup_results[i].position, 4);
         memcpy(racer + 0xb4, &cup_results[i].award, 4);
@@ -1846,8 +1861,7 @@ static int apply_cup_results(unsigned char *event) {
         int previous = 0;
         for (int j = 0; j < cup_total_count; ++j) {
             const struct CupTotal *saved = cup_totals + j;
-            if (keys[i].human == saved->human && keys[i].id == saved->id &&
-                keys[i].online_id == saved->online_id) {
+            if (same_cup_racer(&keys[i], saved)) {
                 previous = saved->points;
                 break;
             }
