@@ -1,8 +1,8 @@
-/* Native wall classification, Time Trial track rules and eligible Itemless boost retention. */
+/* Native wall classification, Itemless collision rules and starting positions. */
 #define _GNU_SOURCE
 #include "runtime.h"
-#include <stdio.h>
 #include <math.h>
+#include <stdio.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -13,16 +13,34 @@
 typedef void (ABI *Contact)(void *, void *, void *);
 typedef void (ABI *StopBoost)(void *);
 typedef void *(ABI *FindRacer)(void *, void *);
-typedef void *(ABI *FindComponent)(void *, void *, int);
 static Contact native_contact;
 static StopBoost native_stop;
 static FindRacer find_racer;
-static FindComponent find_component;
-static void **kart_controller_type;
 static void **racers;
 static _Thread_local void *contact_owner;
 typedef unsigned char (ABI *LayerFilter)(void *, const char *, int);
 static LayerFilter native_layer_filter;
+typedef void (ABI *PlaceRacer)(void *, void *, void *);
+typedef void (ABI *ResolveHandle)(void **);
+static PlaceRacer native_place_racer;
+static ResolveHandle resolve_start_handle;
+typedef void (ABI *Lifecycle)(void *);
+typedef void *(ABI *Component)(void *, void *, int);
+typedef void *(ABI *BodySignal)(void *, int, int);
+typedef void (ABI *Subscribe)(void *, void *);
+typedef void (ABI *BodyFlags)(void *, int, unsigned, unsigned);
+static Lifecycle native_initialize, native_uninitialize;
+static Component get_component;
+static BodySignal body_signal;
+static Subscribe subscribe_contact, unsubscribe_contact, disable_contact;
+static BodyFlags enable_body_flags;
+static void **kart_controller_type;
+static void **physics_type;
+
+int runtime_itemless_collisions_disabled(void) {
+    return runtime_speed_race_active() &&
+        (!runtime_online_mode_in_private() || !runtime_online_mode_itemless_collision());
+}
 
 /* Only asset/spawn decisions see Time Trial; the multiplayer race mode stays intact. A replay of a race
  * without crates (Time Trial, Itemless) loads the track as that race did. */
@@ -43,7 +61,7 @@ static void *ptr(const void *p, size_t off) {
 static float ABI wall_axis(void *response, const float *normal) {
     const float original=fabsf(normal[2]);
     void *entity=ptr(response,0x18);
-    void *kart=entity ? find_component(entity,*kart_controller_type,0) : NULL;
+    void *kart=entity ? get_component(entity,*kart_controller_type,0) : NULL;
     if (!kart || !((unsigned char *)kart)[0x214] || !((unsigned char *)kart)[0x215])
         return original;
     float ground[3],dot=0,length2=0;
@@ -58,9 +76,108 @@ static float ABI wall_axis(void *response, const float *normal) {
     return original;
 }
 
+static void *start_waypoint(void **slot) {
+    for (int depth = 0; depth < 16 && *slot; ++depth) {
+        unsigned flags;
+        memcpy(&flags, *slot, 4);
+        if (flags & 0x10000000) resolve_start_handle(slot);
+        if (!*slot) return NULL;
+        memcpy(&flags, *slot, 4);
+        void *object = ptr(*slot, 0x28);
+        if (!(flags & 0x20000000) || !object) return object;
+        slot = (void **)((unsigned char *)object + 0x10);
+    }
+    return NULL;
+}
+
+static void ABI place_racer(void *self, void *racer, void *waypoint) {
+    unsigned char aligned[0x28];
+    void *data = self ? ptr(self, 0x10) : NULL;
+    void *list = data ? ptr(data, 0x10) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, (unsigned char *)list + 12, 4);
+    void **slots = list ? ptr(list, 0x20) : NULL;
+    if (runtime_itemless_collisions_disabled() && waypoint && slots && count == 8) {
+        void *points[8];
+        int index = -1;
+        for (int i = 0; i < 8; ++i) {
+            points[i] = start_waypoint(slots + i);
+            if (points[i] == waypoint) index = i;
+        }
+        if (index >= 0 && points[0] && points[3]) {
+            float first[3], last[3], position[3];
+            memcpy(first, (unsigned char *)points[0] + 0x10, sizeof first);
+            memcpy(last, (unsigned char *)points[3] + 0x10, sizeof last);
+            int valid = 1;
+            for (int i = 0; i < 3; ++i) {
+                position[i] = first[i] + (last[i] - first[i]) * ((float)index / 7.0f);
+                if (!isfinite(position[i])) valid = 0;
+            }
+            if (valid) {
+                /* All 40 tracks use two rows of four; keep the authored front-row width. */
+                memcpy(aligned, waypoint, sizeof aligned);
+                memcpy(aligned + 0x10, position, sizeof position);
+                memcpy(aligned + 0x1c, (unsigned char *)points[0] + 0x1c, 12);
+                waypoint = aligned;
+            }
+        }
+    }
+    native_place_racer(self, racer, waypoint); /* Native ground raycast and network ownership. */
+}
+
 static int is_racer(void *entity) {
     void *racer = entity && *racers ? find_racer(*racers, entity) : NULL;
     return racer != NULL;
+}
+
+static void ABI filter_contact(void *self, void *context, void *collision) {
+    if (!runtime_itemless_collisions_disabled() || !context || !collision) return;
+    void *world = ptr(context, 0);
+    void *bodies = world ? ptr(world, 0x20) : NULL;
+    void *cache = ptr(collision, 0x20);
+    if (!bodies || !cache) return;
+    int own, first, second;
+    unsigned capacity;
+    memcpy(&own, (unsigned char *)self + 0x58, 4);
+    memcpy(&first, (unsigned char *)collision + 8, 4);
+    memcpy(&second, (unsigned char *)collision + 12, 4);
+    memcpy(&capacity, (unsigned char *)world + 0x2c, 4);
+    int other_index = first == own ? second : second == own ? first : -1;
+    if (other_index < 0 || (unsigned)other_index >= (capacity & 0x3fffffff)) return;
+    unsigned char *body = (unsigned char *)bodies + (size_t)other_index * 0x90;
+    if (!(body[0x42] & 4)) return;
+    void *other = (void *)((uintptr_t)ptr(body, 0x88) & ~(uintptr_t)3);
+    void *owner = ptr(self, 0x18);
+    if (owner != other && is_racer(owner) && is_racer(other))
+        disable_contact(cache, world);
+}
+
+static void filter_subscription(void *self, int add) {
+    void *physics = get_component(ptr(self, 0x18), *physics_type, 0);
+    void *world = physics ? ptr(physics, 0x48) : NULL;
+    int body;
+    memcpy(&body, (unsigned char *)self + 0x58, 4);
+    if (!world || body < 0 || body == 0x7fffffff) return;
+    if (add) enable_body_flags(world, body, 0x40, 0);
+    void *signal = body_signal(world, 2, body);
+    unsubscribe_contact(signal, self);
+    if (add) {
+        subscribe_contact(signal, self);
+        void *node = (void *)((uintptr_t)ptr(signal, 0) & ~(uintptr_t)3);
+        Contact callback = filter_contact;
+        memcpy((unsigned char *)node + 0x18, &callback, sizeof callback);
+    }
+}
+
+static void ABI initialize(void *self) {
+    native_initialize(self);
+    /* Event 2 owns the collision cache; event 3 exposes contact data instead. */
+    if (runtime_itemless_collisions_disabled()) filter_subscription(self, 1);
+}
+
+static void ABI uninitialize(void *self) {
+    filter_subscription(self, 0);
+    native_uninitialize(self);
 }
 
 static void ABI contact(void *self, void *context, void *collision) {
@@ -80,7 +197,13 @@ static void ABI contact(void *self, void *context, void *collision) {
                 if (body[0x42] & 4) {
                     void *other = (void *)((uintptr_t)ptr(body, 0x88) & ~(uintptr_t)3);
                     void *owner = ptr(self, 0x18);
-                    if (owner != other && is_racer(owner) && is_racer(other)) contact_owner = owner;
+                    if (owner != other && is_racer(owner) && is_racer(other)) {
+                        if (runtime_itemless_collisions_disabled()) {
+                            contact_owner = previous;
+                            return;
+                        }
+                        contact_owner = owner;
+                    }
                 }
             }
         }
@@ -162,17 +285,28 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
         0x41,0x89,0xd6,0x48,0x89,0xfb,0x48,0x85,0xf6};
     /* Small loader images do not contain CTR's native collision hooks. */
     if (size < 0x2ad4b78) return 1;
+    const unsigned char place_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x58};
     size_t shift = memcmp(image + 0xe916b0, collision_code, sizeof collision_code) ? 0x10 : 0;
     unsigned char *c = image + 0xe916b0 - shift, *s = image + 0xe92e90 - shift;
     unsigned char *layer = image + 0xfe44c0 - shift;
     unsigned char *crate = image + 0xeebaa6 - shift;
+    unsigned char *place = image + 0xf31b80 - shift;
     unsigned char crate_code[] = {0x48,0x8b,0x0d,0x9b,0x23,0xbe,0x01,
         0x49,0x8b,0x44,0x24,0x10,0x8b,0x89,0x4c,0x0d,0x00,0x00};
     crate_code[3] += (unsigned char)shift;
     if (memcmp(c, collision_code, sizeof collision_code) ||
         memcmp(s, stop_code, sizeof stop_code) ||
         memcmp(layer, layer_code, sizeof layer_code) ||
-        memcmp(crate, crate_code, sizeof crate_code)) return 0;
+        memcmp(place, place_code, sizeof place_code) ||
+        memcmp(crate, crate_code, sizeof crate_code) ||
+        ptr(image, 0x2589af8) != image + 0xe90fc0 - shift ||
+        ptr(image, 0x2589b00) != image + 0xe91340 - shift ||
+        memcmp(image + 0xba3320, "\xf6\x47\x17\x10\x74\x1c\x8b\x47\x18\x0f\xb6\x4f\x16", 13) ||
+        memcmp(image + 0x6d48c0, "\x55\x48\x89\xe5\x48\x8b\xbf\x48\x06\x00\x00", 11) ||
+        memcmp(image + 0x6e4eb0, "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x48\x83\xec\x18", 13) ||
+        memcmp(image + 0x7634e0, "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x49\x89\xff", 14) ||
+        memcmp(image + 0xe92c10 - shift, "\x55\x48\x89\xe5\x41\x56\x53\x49\x89\xf6\x48\x89\xfb", 13)) return 0;
     unsigned char *wall=image+0xe91d86-shift;
     const unsigned char wall_code[]={0xc5,0xf8,0x2e,0xd1,0x0f,0x86,0x38,0xfb,0xff,0xff,
         0x48,0x8b,0x9d,0x10,0xff,0xff,0xff};
@@ -192,7 +326,8 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
     if (stub == MAP_FAILED) stub = NULL;
 #endif
     if (!stub || !writable(c, 14) || !writable(s, 14) ||
-        !writable(layer, 14) || !writable(crate, 14) || !writable(wall,sizeof wall_code)) return 0;
+        !writable(layer, 14) || !writable(crate, 14) || !writable(place, 14) ||
+        !writable(image + 0x2589af8, 16) || !writable(wall, sizeof wall_code)) return 0;
     memcpy(stub, collision_code, sizeof collision_code);
     jump(stub + sizeof collision_code, c + sizeof collision_code);
     memcpy(stub + 64, stop_code, sizeof stop_code);
@@ -201,23 +336,39 @@ int runtime_itemless_start(unsigned char *image, size_t size) {
     jump(stub + 128 + sizeof layer_code, layer + sizeof layer_code);
     native_layer_filter = (LayerFilter)(stub + 128);
     crate_mode_stub(stub + 192, image + 0x2acde48, crate + sizeof crate_code);
-    find_component=(FindComponent)(image+0x3dbf90);
-    kart_controller_type=(void **)(image+0x2ac4580);
-    wall_axis_stub(stub+320,image+0xe918c8-shift,wall+sizeof wall_code);
+    kart_controller_type = (void **)(image + 0x2ac4580);
+    wall_axis_stub(stub + 320, image + 0xe918c8 - shift, wall + sizeof wall_code);
     native_contact = (Contact)stub;
     native_stop = (StopBoost)(stub + 64);
     find_racer = (FindRacer)(image + 0xfd4230 - shift);
     racers = (void **)(image + 0x2ad4b70);
+    memcpy(stub + 464, place_code, sizeof place_code);
+    jump(stub + 464 + sizeof place_code, place + sizeof place_code);
+    native_place_racer = (PlaceRacer)(stub + 464);
+    resolve_start_handle = (ResolveHandle)(image + 0x149fca0 - shift);
+    native_initialize = (Lifecycle)ptr(image, 0x2589af8);
+    native_uninitialize = (Lifecycle)ptr(image, 0x2589b00);
+    get_component = (Component)(image + 0x3dbf90);
+    physics_type = (void **)(image + 0x2acfc10);
+    body_signal = (BodySignal)(image + 0x6d48c0);
+    enable_body_flags = (BodyFlags)(image + 0x6e4eb0);
+    subscribe_contact = (Subscribe)(image + 0xe92c10 - shift);
+    unsubscribe_contact = (Subscribe)(image + 0x7634e0);
+    disable_contact = (Subscribe)(image + 0xba3320);
+    Lifecycle init = initialize, uninit = uninitialize;
+    memcpy(image + 0x2589af8, &init, sizeof init);
+    memcpy(image + 0x2589b00, &uninit, sizeof uninit);
     jump(c, (void *)contact);
     jump(s, (void *)stop_boost);
     jump(layer, (void *)layer_filter);
     jump(crate, stub + 192);
-    jump(wall,stub+320);
-    memset(wall+14,0x90,sizeof wall_code-14);
+    jump(wall, stub + 320);
+    memset(wall + 14, 0x90, sizeof wall_code - 14);
+    jump(place, (void *)place_racer);
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
-    puts("Native ITEMLESS: Time Trial track layers and crate spawning; preserve boost on racer contact");
+    puts("Native ITEMLESS: Time Trial track layers; synchronized racer collisions and aligned starts");
     puts("Native wall contact: bank continuation is classified relative to stable ground");
     return 1;
 }

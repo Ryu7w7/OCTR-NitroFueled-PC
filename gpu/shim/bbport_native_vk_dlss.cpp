@@ -258,8 +258,7 @@ bool Upscale(const Frame& f) {
     }
 
     static const char* preset_env = std::getenv("BB_DLSS_PRESET");
-    const u32 preset = preset_env ? u32(std::atoi(preset_env))
-                       : BbSettings::Get().dlss_model == 1 ? 5u : 0u;
+    const u32 preset = preset_env ? u32(std::atoi(preset_env)) : BbSettings::DlssModelPreset();
     const DlssNgx::FeatureDesc desc{w,      h,     ow,    oh, DlssNgx::QualityForScale(float(ow) / float(w)),
                                     false, preset, f.hdr};
     bool reset = f.reset;

@@ -22,7 +22,7 @@ class RestartTests(unittest.TestCase):
         settings = {'renderer': 'native', 'temporal': 'fsr3'}
         env = {'USER_OVERRIDE': 'kept'}
         scope = dict(env=env, renderer_changes={}, ini_value=lambda _, key: settings.get(key),
-                     config=None, title_id='CUSA13795', app_version='01.21', data=Path('/data'),
+                     config=None, title_id='CUSA13795', app_version='01.21', data=Path('/data'), game=Path('/game'),
                      native_shaders=native_shaders, say=lambda _: None, out=Path('/out'))
         exec(compile(ast.Module(body=[renderer], type_ignores=[]), 'run', 'exec'), scope)
         with mock.patch.object(native_shaders, 'ready', return_value=True):

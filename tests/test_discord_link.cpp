@@ -113,6 +113,44 @@ int main() {
     for (SOCKET s : held) closesocket(s);
     std::puts("ok: next free port; busy when all are taken");
 
+    // 5. Steam: its sign-in page, back to /steam with the signed openid.* fields kept as they came.
+    const auto steam_state = [](const std::string& url) {
+        const std::string back = Param(url, "openid.return_to");  // http%3A%2F%2F127.0.0.1%3A53134%2Fsteam%3Fstate%3D...
+        const size_t at = back.find("state%3D");
+        return at == std::string::npos ? std::string() : back.substr(at + 8);
+    };
+    const auto steam_port = [](const std::string& url) {
+        const std::string back = Param(url, "openid.return_to");
+        const size_t at = back.find("127.0.0.1%3A");
+        return at == std::string::npos ? 0 : std::atoi(back.c_str() + at + 12);
+    };
+    const std::string signed_fields = "openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.mode=id_res"
+                                      "&openid.claimed_id=https%3A%2F%2Fsteamcommunity.com%2Fopenid%2Fid%2F76561197960287930";
+    std::string back_query;
+    r = DiscordLink::SteamSignIn(20, true, [&](const std::string& url) {
+        assert(url.rfind("https://steamcommunity.com/openid/login?", 0) == 0);
+        assert(Param(url, "openid.mode") == "checkid_setup");
+        assert(Param(url, "openid.realm") == "http%3A%2F%2F127.0.0.1%3A53134");
+        const std::string state = steam_state(url);
+        const int port = steam_port(url);
+        assert(state.size() == 32 && port == DiscordLink::kPorts[0]);
+        back_query = "state=" + state + "&" + signed_fields;
+        browser = std::thread([state, port, signed_fields] {
+            assert(Get(port, "/steam?state=0123&" + signed_fields).find("400") != std::string::npos);
+            assert(Get(port, "/steam?state=" + state + "&" + signed_fields).find("200") != std::string::npos);
+        });
+    });
+    browser.join();
+    assert(r.ok && r.code == back_query && r.redirect_uri.rfind("http://127.0.0.1:53134/steam?state=", 0) == 0);
+    r = DiscordLink::SteamSignIn(20, false, [&](const std::string& url) {
+        const std::string state = steam_state(url);
+        const int port = steam_port(url);
+        browser = std::thread([state, port] { Get(port, "/steam?state=" + state + "&openid.mode=cancel"); });
+    });
+    browser.join();
+    assert(!r.ok && r.error == "denied");
+    std::puts("ok: Steam sign-in, a request that is not ours, cancellation");
+
     assert(DiscordLink::FormEncode("a b&c=d/é") == "a%20b%26c%3Dd%2F%C3%A9");
     WSACleanup();
     std::puts("PASS");

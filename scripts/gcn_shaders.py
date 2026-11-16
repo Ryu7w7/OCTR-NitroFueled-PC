@@ -115,7 +115,9 @@ def archives(game):
 
 
 def stamp(paths):
-    return {'format': FORMAT, 'archives': [[p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in paths]}
+    import hashlib
+    return {'format': FORMAT, 'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'archives': [[str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns] for p in paths]}
 
 
 def build(game, out):

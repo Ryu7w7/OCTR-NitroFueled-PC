@@ -20,10 +20,11 @@ def engine_features(executable,digest):
 
 def preflight(profile,config,selection,extra_dirs=(),title_id='CUSA13795',app_version='01.21',game=None):
     from prepare import parse_self
-    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments,optional_game_patch
+    from patches import all_external_patches,external_selection,read_settings,render_patches,compile_external,eboot_segments,optional_game_patch,tacho_pack_patches
     elf,*_=parse_self(((Path(game) if game is not None else profile/'game')/'eboot.bin').read_bytes())
     settings=read_settings(Path(config))  # run.py passes bbport.ini's path as text without a widescreen layout
-    selected=external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)+render_patches(settings)
+    selected=(external_selection(all_external_patches([profile/'patches',*extra_dirs],app_version,title_id),selection,settings)
+              +tacho_pack_patches(settings,app_version,title_id)+render_patches(settings))
     claims=[]
     for key,path,meta in selected:
         # Built-in render patches have no XML path.
@@ -55,7 +56,11 @@ def prune_sessions(sessions, keep=KEEP_SESSIONS):
     sessions = Path(sessions)
     if not sessions.is_dir():
         return []
-    found = sorted((p for p in sessions.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
+    from cache_cleanup import discard_tree, linked
+    found = sorted((p for p in sessions.iterdir() if p.is_dir() and not linked(p)),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for session in found:
+        discard_tree(session/'cache-before-reset')
     deleted = []
     for session in found[keep:]:
         try:
@@ -137,11 +142,14 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         for message in adopt_mod_profile(state,progress):log('OCTR mod saves: '+message)
         environment['BB_PROGRESS_DIR']=str(progress)
         cache=state/'extensions/vanilla-cache'/plan['engine']
-        if cache.exists():copy_tree(cache,user/'cache')
+        if cache.exists():
+            from cache_cleanup import prune
+            prune(cache,'CUSA13795/profile.bin',r'[0-9a-f]{64}',log)
+            copy_tree(cache,user/'cache')
         elif (progress/'cache').exists():copy_tree(progress/'cache',user/'cache')  # the player's shaders so far
         if environment.get('BB_CLEAR_SHADER_CACHE')=='1' and (user/'cache').exists():
-            # Preserve a requested reset for inspection; never clear another profile.
-            (user/'cache').rename(session/'cache-before-reset')
+            from cache_cleanup import discard_tree
+            discard_tree(user/'cache',log)
         ini=session/'bbport.ini';ini.write_text(''.join(k+'='+v+'\n' for k,v in plan['settings'].items()),encoding='utf-8')
         snapshot=session/'patches.json';save_json(snapshot,original)
         writes=preflight(plan['profile'],ini,snapshot,title_id=title_id,app_version=app_version,game=plan['game'])

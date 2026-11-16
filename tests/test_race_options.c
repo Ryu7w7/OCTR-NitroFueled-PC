@@ -2,6 +2,568 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+static unsigned char timestep_boost[0x70];
+static float timestep_native_dt;
+static int timestep_native_calls;
+static void timestep_set_frame(float dt) {
+    static unsigned char clock[0x38];
+    static void *object=clock;
+    memcpy(clock+0x18,&dt,4);
+    timestep_clock=&object;
+}
+static void *ABI timestep_component(void *entity, void *type, int flags) {
+    (void)entity; (void)type; (void)flags;
+    return timestep_boost;
+}
+static float ABI timestep_speed(void *kart, void *data, int kind, float speed, float dt) {
+    (void)kart; (void)data; (void)kind;
+    timestep_native_dt=dt;
+    timestep_native_calls++;
+    return speed*.995f;
+}
+static void test_overspeed_timestep(void) {
+    void **saved_clock=timestep_clock;
+    const __typeof__(native_kart_speed) saved_speed=native_kart_speed;
+    const __typeof__(component) saved_component=component;
+    void **saved_type=boost_type;
+    unsigned char kart[0x300]={0}, data[0x30]={0};
+    void *meta=(void *)1, *entity=kart;
+    float multiplier=1, top=1000, penalty=0;
+    memcpy(kart+0x18,&entity,sizeof entity);
+    memcpy(kart+0x190,&multiplier,4);
+    memcpy(data+12,&top,4);
+    component=timestep_component; boost_type=&meta; native_kart_speed=timestep_speed;
+    const int rates[]={30,60,72,90,120,144,240};
+    const float reference=3000*powf(.995f,30);
+    for (int kind=0;kind<2;kind++) for (unsigned r=0;r<sizeof rates/sizeof *rates;r++) {
+        float speed=3000;
+        kart_motion_dt=1.f/rates[r];
+        timestep_set_frame(kart_motion_dt);
+        for (int i=0;i<rates[r];i++) speed=kart_speed_timestep(kart,data,kind,speed,1.f/rates[r]);
+        assert(fabsf(speed-reference)<.08f);
+        assert(fabsf(timestep_native_dt-1.f/30)<1e-8f);
+    }
+    float speed=3000;
+    for (int i=0;i<120;i++) {
+        kart_motion_dt=i%2 ? 1.f/80 : 1.f/240;
+        timestep_set_frame(kart_motion_dt);
+        speed=kart_speed_timestep(kart,data,0,speed,kart_motion_dt);
+    }
+    assert(fabsf(speed-reference)<.08f);
+    const float slow_or_invalid[]={1.f/20,1.f/30,273.f/8192,274.f/8192,0,-1,NAN,INFINITY};
+    for (unsigned i=0;i<sizeof slow_or_invalid/sizeof *slow_or_invalid;i++) {
+        timestep_native_calls=0;
+        kart_motion_dt=slow_or_invalid[i];
+        timestep_set_frame(kart_motion_dt);
+        assert(kart_speed_timestep(kart,data,0,3000,slow_or_invalid[i])==3000*.995f);
+        assert(timestep_native_calls==1);
+        assert(kart_speed_timestep(kart,data,0,3000,1.f/240)==3000*.995f);
+    }
+    kart_motion_dt=1.f/30;
+    timestep_set_frame(kart_motion_dt);
+    assert(kart_speed_timestep(kart,data,0,3000,1.f/240)==3000*.995f);
+    assert(timestep_native_dt==1.f/240);
+    kart_motion_dt=.5f/30;
+    assert(kart_speed_timestep(kart,data,0,3000,kart_motion_dt)==3000*.995f);
+    assert(timestep_native_dt==kart_motion_dt); /* Native 30 FPS slow motion stays exact. */
+    kart_motion_dt=1.f/240;
+    timestep_set_frame(kart_motion_dt);
+    kart_speed_timestep(kart,data,0,3000,.5f/240);
+    assert(fabsf(timestep_native_dt-.5f/30)<1e-8f);
+    /* The correction must not reach normal acceleration, natural deceleration, boost or slow surfaces. */
+    for (int scenario=0;scenario<6;scenario++) {
+        const float boost=scenario==2 ? 1 : 0;
+        multiplier=scenario==3 ? .7f : 1;
+        penalty=scenario==4 ? .1f : 0;
+        memcpy(timestep_boost+0x38,&boost,4);
+        memcpy(kart+0x190,&multiplier,4);
+        memcpy(kart+0x1a0,&penalty,4);
+        component=scenario==5 ? NULL : timestep_component;
+        timestep_native_calls=0;
+        const float input=scenario==0 ? top : 3000;
+        assert(kart_speed_timestep(kart,data,scenario==1 ? 2 : 0,input,1.f/240)==input*.995f);
+        assert(timestep_native_calls==1 && timestep_native_dt==1.f/240);
+    }
+    memset(timestep_boost,0,sizeof timestep_boost);
+    kart_motion_dt=0;
+    native_kart_speed=saved_speed; component=saved_component; boost_type=saved_type;
+    timestep_clock=saved_clock;
+}
+
+static float ABI acceleration_speed(void *kart, void *data, int kind, float speed, float dt) {
+    (void)kart; (void)kind;
+    return floorf(speed*64)/64+(real(data,12)-speed)*dt*3;
+}
+static float acceleration_first(void *kart,void *data,float speed,float dt) {
+    const float frames=timestep_frames();
+    return (float)(speed+(native_kart_speed(kart,data,0,speed,dt/frames)-speed)*(double)frames);
+}
+static void test_acceleration_timestep(void) {
+    void **saved_clock=timestep_clock, **saved_type=boost_type;
+    const KartSpeed saved_speed=native_kart_speed;
+    const __typeof__(component) saved_component=component;
+    unsigned char karts[17][0x300]={{0}},data[0x30]={0},curves[2][0x68]={{0}};
+    unsigned char clock[0x40]={0},damage_handle[0x30]={0},damage[0x48]={0};
+    void *object=clock, *type=(void *)1;
+    const float one=1,top=2000;
+    memcpy(data+12,&top,4); put_ptr(data,0x18,curves[0]);
+    for(unsigned i=0;i<17;++i) {
+        put_ptr(karts[i],0x18,karts[i]); karts[i][0x34]=1;
+        memcpy(karts[i]+0x190,&one,4); memcpy(karts[i]+0x19c,&one,4);
+    }
+    timestep_clock=&object; boost_type=&type; component=timestep_component;
+    memset(timestep_boost,0,sizeof timestep_boost); native_kart_speed=acceleration_speed;
+    const unsigned rates[]={30,60,72,90,120,144,240,0};
+    const float scales[]={.125f,.5f,1,2};
+    for(unsigned r=0;r<8;++r)for(unsigned s=0;s<4;++s) {
+        float reference[61]={0};
+        for(unsigned i=1;i<=60;++i)reference[i]=acceleration_speed(karts[0],data,0,reference[i-1],scales[s]/30);
+        memset(acceleration_steps,0,sizeof acceleration_steps); acceleration_next=0;
+        double elapsed=0; float speed=0;
+        for(unsigned frame=0;frame<(rates[r] ? 2*rates[r] : 180);++frame) {
+            const float dt=rates[r] ? 1.f/rates[r] : (const float[]){1.f/240,1.f/80,1.f/60}[frame%3];
+            memcpy(clock+0x18,&dt,4); put_int(clock,0x10,(int)frame);
+            kart_motion_dt=dt*scales[s]; elapsed+=dt*30.f;
+            speed=kart_speed_timestep(karts[0],data,0,speed,kart_motion_dt);
+            const unsigned tick=(unsigned)fmin(59,floor(elapsed));
+            const float expected=(float)(reference[tick]+(reference[tick+1]-reference[tick])*(elapsed-tick));
+            assert(fabsf(speed-expected)<.003);
+        }
+    }
+    /* Every external discontinuity starts from the supplied speed, never a stale endpoint. */
+    for(unsigned change=0;change<13;++change) {
+        memset(acceleration_steps,0,sizeof acceleration_steps); acceleration_next=0;
+        put_ptr(data,0x18,curves[0]); put_ptr(karts[0],0x18,karts[0]);
+        memcpy(karts[0]+0x190,&one,4); memcpy(karts[0]+0x19c,&one,4);
+        put_int(karts[0],0xe0,0); const float dt=1.f/120;
+        memcpy(clock+0x18,&dt,4); kart_motion_dt=dt; put_int(clock,0x10,100);
+        float speed=kart_speed_timestep(karts[0],data,0,300,dt);
+        put_int(clock,0x10,101);
+        const float different=.5f;
+        if(change==0) speed-=80;
+        if(change==1) put_int(clock,0x10,103);
+        if(change==2) put_int(clock,0x10,100);
+        if(change==3) atomic_fetch_add(&acceleration_epoch,1);
+        if(change==4) put_ptr(karts[0],0x18,karts[1]);
+        if(change==5) put_ptr(data,0x18,curves[1]);
+        if(change==6) memcpy(karts[0]+0x190,&different,4);
+        if(change==7) memcpy(karts[0]+0x19c,&different,4);
+        if(change==8) put_int(karts[0],0xe0,3);
+        if(change==9) kart_motion_dt=dt*.5f;
+        if(change==10) { karts[0][0x34]=0; kart_speed_timestep(karts[0],data,0,speed,dt); karts[0][0x34]=1; }
+        if(change==11) { karts[0][0x35]=1; kart_speed_timestep(karts[0],data,0,speed,dt); karts[0][0x35]=0; }
+        if(change==12) kart_speed_timestep(karts[0],data,2,speed,dt);
+        const float expected=acceleration_first(karts[0],data,speed,kart_motion_dt);
+        assert(kart_speed_timestep(karts[0],data,0,speed,kart_motion_dt)==expected);
+    }
+    memcpy(karts[0]+0x190,&one,4); memcpy(karts[0]+0x19c,&one,4);
+    put_ptr(karts[0],0x18,karts[0]); put_ptr(data,0x18,curves[0]);
+    /* Isolate simultaneous karts; safe replacement after cache capacity is exhausted. */
+    memset(acceleration_steps,0,sizeof acceleration_steps); acceleration_next=0;
+    float speeds[17]; const float dt=1.f/120; kart_motion_dt=dt;
+    for(unsigned i=0;i<17;++i)speeds[i]=100+i*10;
+    for(unsigned frame=0;frame<4;++frame) {
+        put_int(clock,0x10,200+(int)frame);
+        for(unsigned i=0;i<16;++i)speeds[i]=kart_speed_timestep(karts[i],data,0,speeds[i],dt);
+    }
+    for(unsigned i=0;i<16;++i) assert(fabsf(speeds[i]-acceleration_speed(karts[i],data,0,100+i*10,1.f/30))<.0001);
+    const float expected=acceleration_first(karts[16],data,speeds[16],dt);
+    assert(kart_speed_timestep(karts[16],data,0,speeds[16],dt)==expected);
+    /* Damage overrides and boosted/native-only branches must remain untouched. */
+    for(unsigned excluded=0;excluded<11;++excluded) {
+        put_ptr(karts[0],0x98,NULL); put_ptr(data,0x18,curves[0]);
+        const float zero=0,active=1; int kind=0;
+        memcpy(karts[0]+0x1a0,&zero,4); memcpy(timestep_boost+0x38,&zero,4);
+        karts[0][0x34]=1; karts[0][0x35]=0; kart_motion_dt=dt;
+        float frame_dt=dt;
+        if(excluded==0) karts[0][0x34]=0;
+        if(excluded==1) karts[0][0x35]=1;
+        if(excluded==2) kind=1;
+        if(excluded==3) kind=2;
+        if(excluded==4) memcpy(timestep_boost+0x38,&active,4);
+        if(excluded==5) memcpy(karts[0]+0x1a0,&active,4);
+        if(excluded==6) kart_motion_dt=0;
+        if(excluded==7 || excluded==8) {
+            put_ptr(karts[0],0x98,damage_handle); put_ptr(damage_handle,0x28,damage);
+            put_int(damage_handle,0,excluded==8 ? 0x10000000 : 0); put_int(damage,0x40,0);
+        }
+        if(excluded==9) frame_dt=273.f/8192;
+        if(excluded==10) frame_dt=274.f/8192;
+        memcpy(clock+0x18,&frame_dt,4);
+        assert(kart_speed_timestep(karts[0],data,kind,300,dt)==acceleration_speed(karts[0],data,kind,300,dt));
+    }
+    memset(acceleration_steps,0,sizeof acceleration_steps); memset(timestep_boost,0,sizeof timestep_boost);
+    kart_motion_dt=0; timestep_clock=saved_clock; boost_type=saved_type;
+    native_kart_speed=saved_speed; component=saved_component;
+}
+
+static float ABI deceleration_speed(void *kart,void *data,int kind,float speed,float dt) {
+    (void)kart; (void)data;
+    return fmaxf(0,speed-(kind==2 ? 900 : 300)*dt);
+}
+static void test_deceleration_timestep(void) {
+    void **saved_clock=timestep_clock, **saved_type=boost_type;
+    const KartSpeed saved_speed=native_kart_speed;
+    const __typeof__(component) saved_component=component;
+    unsigned char kart[0x300]={0},archetype[0xb0]={0},data[0x30]={0},curve[0x68]={0};
+    const float one=1,top=2000;
+    memcpy(kart+0x190,&one,4); memcpy(kart+0x19c,&one,4); memcpy(data+12,&top,4);
+    put_ptr(data,0x20,curve); put_ptr(data,0x28,curve); put_ptr(kart,0x18,kart);
+    put_ptr(archetype,0x68,data); put_ptr(archetype,0x78,data);
+    void *type=(void *)1; boost_type=&type; component=timestep_component;
+    native_kart_speed=deceleration_speed; kart[0x214]=1;
+    memset(timestep_boost,0,sizeof timestep_boost);
+    TimestepRegisters r={0}; r.r14=(uintptr_t)kart; r.r12=(uintptr_t)archetype;
+    for(unsigned brake=0;brake<2;++brake)for(unsigned reverse=0;reverse<2;++reverse) {
+        memset(deceleration_steps,0,sizeof deceleration_steps); deceleration_next=0;
+        kart[0x35]=brake; const float sign=reverse ? -1 : 1;
+        float speed=sign*55, reference=55;
+        for(unsigned tick=0;tick<6;++tick) {
+            reference=reference<=50 ? 0 : deceleration_speed(kart,data,brake ? 2 : 1,reference,1.f/30);
+            for(unsigned sub=0;sub<4;++sub) {
+                timestep_set_frame(1.f/120); put_int(*timestep_clock,0x10,(int)(tick*4+sub));
+                kart_motion_dt=1.f/120; r.ymm[9][0]=speed; r.ymm[6][0]=-123;
+                TimestepRegisters saved=r;
+                deceleration_timestep(&r); speed=r.ymm[6][0];
+                r.ymm[6][0]=saved.ymm[6][0]; assert(!memcmp(&r,&saved,sizeof r));
+            }
+            assert(fabsf(speed-sign*reference)<.0001);
+        }
+    }
+    /* Invalid scope must preserve the native-selected output, including upper vector lanes. */
+    for(unsigned excluded=0;excluded<7;++excluded) {
+        kart[0x34]=kart[0x36]=0; kart[0x214]=1; put_int(kart,0xe0,0);
+        const float zero=0; memcpy(timestep_boost+0x38,&zero,4);
+        kart_motion_dt=1.f/120; timestep_set_frame(kart_motion_dt);
+        if(excluded==0) kart[0x34]=1;
+        if(excluded==1) kart[0x36]=1;
+        if(excluded==2) kart[0x214]=0;
+        if(excluded==3) put_int(kart,0xe0,2);
+        if(excluded==4) memcpy(timestep_boost+0x38,&one,4);
+        if(excluded==5) kart_motion_dt=0;
+        if(excluded==6) timestep_set_frame(273.f/8192);
+        r.ymm[6][0]=123; r.ymm[9][0]=1600;
+        TimestepRegisters saved=r; deceleration_timestep(&r); assert(!memcmp(&r,&saved,sizeof r));
+    }
+    memset(deceleration_steps,0,sizeof deceleration_steps); memset(timestep_boost,0,sizeof timestep_boost);
+    kart_motion_dt=0; timestep_clock=saved_clock; boost_type=saved_type;
+    native_kart_speed=saved_speed; component=saved_component;
+}
+
+static void test_ground_speed_timestep(void) {
+    void **saved_clock=timestep_clock;
+    const KartSpeed saved_speed=native_kart_speed;
+    unsigned char kart[0x300]={0},entity[0x80]={0},archetype[0xb0]={0},data[0x30]={0};
+    unsigned char surface[0x30]={0},damage_handle[0x30]={0},damage[0x44]={0};
+    const float one=1,top=2000,retention=.5f;
+    memcpy(kart+0x190,&one,4);memcpy(kart+0x19c,&one,4);memcpy(data+12,&top,4);
+    memcpy(surface+0x20,&retention,4);memcpy(surface+0x24,&retention,4);
+    put_ptr(kart,0x18,entity);put_ptr(archetype,0x68,data);put_ptr(archetype,0x78,data);
+    native_kart_speed=deceleration_speed;kart[0x214]=1;
+    TimestepRegisters r={0};r.r14=(uintptr_t)kart;r.r12=(uintptr_t)archetype;r.rsi=(uintptr_t)surface;
+    timestep_set_frame(1.f/120);kart_motion_dt=1.f/120;
+    for(unsigned i=0;i<16;++i)for(unsigned j=0;j<8;++j)r.ymm[i][j]=100.f+i*8+j;
+    r.ymm[8][0]=0;r.ymm[9][0]=1000;
+    TimestepRegisters saved=r;
+    assert(ground_speed_timestep(&r));
+    assert(ground_speed_pending && fabsf(ground_speed_output-998.75f)<.0001);
+    r.ymm[6][0]=saved.ymm[6][0];assert(!memcmp(&r,&saved,sizeof r));
+    ground_speed_project(&r);assert(r.ymm[0][0]==998.75f && !ground_speed_pending);
+    assert(r.ymm[3][0]==1 && ground_lateral_pending);
+    r.ymm[0][0]=saved.ymm[0][0];r.ymm[3][0]=saved.ymm[3][0];assert(!memcmp(&r,&saved,sizeof r));
+    /* An external impulse restarts the reference interval immediately. */
+    put_int(*timestep_clock,0x10,1);r.ymm[9][0]=500;
+    assert(ground_speed_timestep(&r));assert(fabsf(ground_speed_output-498.75f)<.0001);
+    /* Near-zero projection of a large sideways velocity must not reset the interval. */
+    put_int(*timestep_clock,0x10,2);r.ymm[9][0]=0;r.ymm[14][0]=r.ymm[15][0]=500;
+    assert(ground_speed_timestep(&r));assert(ground_speed_output==0);
+    put_int(*timestep_clock,0x10,3);r.ymm[9][0]=1e-5f;
+    assert(ground_speed_timestep(&r));assert(ground_speed_output==0);
+    for(unsigned excluded=0;excluded<9;++excluded) {
+        timestep_set_frame(1.f/120);kart_motion_dt=1.f/120;kart[0x214]=1;
+        put_int(kart,0xe0,0);put_ptr(kart,0xa0,NULL);put_ptr(kart,0x98,NULL);
+        r.ymm[8][0]=0;r.ymm[9][0]=500;
+        if(excluded==0)kart[0x214]=0;
+        if(excluded==1)put_int(kart,0xe0,2);
+        if(excluded==2)r.ymm[8][0]=100;
+        if(excluded==3)put_ptr(kart,0xa0,damage);
+        if(excluded==4)kart_motion_dt=0;
+        if(excluded==5)timestep_set_frame(273.f/8192);
+        if(excluded==6)r.ymm[9][0]=NAN;
+        if(excluded>=7) {
+            put_ptr(kart,0x98,damage_handle);put_ptr(damage_handle,0x28,damage);
+            put_int(damage_handle,0,excluded==7 ? 0x10000000 : 0);
+        }
+        saved=r;assert(!ground_speed_timestep(&r));assert(!ground_speed_pending);
+        assert(!memcmp(&r,&saved,sizeof r));ground_speed_project(&r);assert(!memcmp(&r,&saved,sizeof r));
+    }
+    memset(ground_speed_steps,0,sizeof ground_speed_steps);ground_speed_next=0;
+    ground_lateral_pending=0;motion_lateral_cap=2;timestep_set_frame(1.f/120);
+    assert(fabsf(lateral_retention(.8f,1.f/120)-2*powf(.4f,.25f))<1e-6f);
+    assert(motion_lateral_cap==1);
+    motion_lateral_cap=2;timestep_set_frame(273.f/8192);
+    assert(lateral_retention(.8f,273.f/8192)==.8f && motion_lateral_cap==1);
+    unsigned char boost[0x80]={0};const float amount=1000,ceiling=3000,floor=1200;
+    put_ptr(kart,0xa0,NULL);put_ptr(kart,0x98,NULL);kart[0x214]=1;
+    for(unsigned test=0;test<10;++test) {
+        memset(ground_speed_steps,0,sizeof ground_speed_steps);ground_speed_next=0;
+        timestep_set_frame(1.f/240);kart_motion_dt=1.f/240;
+        memcpy(kart+0x174,&amount,4);memcpy(boost+0x38,&amount,4);
+        memcpy(boost+0x4c,&ceiling,4);memcpy(boost+0x50,&floor,4);
+        r.rbx=(uintptr_t)boost;r.ymm[8][0]=amount;r.ymm[9][0]=1600;
+        const float zero=0,nan=NAN,infinity=INFINITY;
+        if(test==1)memcpy(kart+0x174,&zero,4);
+        if(test==2){r.ymm[8][0]=0;memcpy(boost+0x38,&zero,4);}
+        if(test==3)r.ymm[8][0]=999;
+        if(test==4)memcpy(kart+0x174,&nan,4);
+        if(test==5)r.rbx=0;
+        if(test==6)memcpy(boost+0x38,&floor,4);
+        if(test==7)memcpy(boost+0x4c,&nan,4);
+        if(test==8)memcpy(boost+0x50,&infinity,4);
+        if(test==9)r.ymm[8][0]=-1;
+        saved=r;const int accepted=ground_speed_timestep(&r);
+        if(!test) {
+            assert(accepted && ground_speed_pending);
+            put_int(*timestep_clock,0x10,integer(*timestep_clock,0x10)+1);
+            memcpy(boost+0x4c,&amount,4);saved=r;
+            assert(!ground_speed_timestep(&r) && !ground_speed_pending && !memcmp(&r,&saved,sizeof r));
+        } else assert(!accepted && !ground_speed_pending && !memcmp(&r,&saved,sizeof r));
+    }
+    memset(ground_speed_steps,0,sizeof ground_speed_steps);ground_speed_next=0;
+    kart_motion_dt=0;timestep_clock=saved_clock;native_kart_speed=saved_speed;
+}
+
+extern float ABI contact_probe(void *code, void *message, float gap, float velocity);
+__asm__(".text\n"
+        ".globl contact_probe\n"
+        "contact_probe:\n"
+        "push %rbp\n"
+        "mov %rsp,%rbp\n"
+        "push %r12\n"
+        "sub $0xb8,%rsp\n"
+        "mov 0x18(%rsi),%eax\n"
+        "mov %eax,-0x34(%rbp)\n"
+        "movq $0,-0xa8(%rbp)\n" /* Native code reuses the original message slot. */
+        "vmovss %xmm1,-0x48(%rbp)\n"
+        "lea -0x48(%rbp),%r12\n"
+        "call *%rdi\n"
+        "mov -8(%rbp),%r12\n"
+        "leave\n"
+        "ret\n");
+
+extern float ABI lateral_probe(void *code, float retention, float dt);
+__asm__(".text\n"
+        ".globl lateral_probe\n"
+        "lateral_probe:\n"
+        "push %rbp\n"
+        "mov %rsp,%rbp\n"
+        "sub $0x58,%rsp\n" /* Match native jump-site alignment after the probe call. */
+        "vmovss %xmm1,-0x34(%rbp)\n"
+        "vmovss %xmm0,-0x40(%rbp)\n"
+        "vmovss %xmm0,-0x3c(%rbp)\n"
+        "vmovss %xmm0,-0x38(%rbp)\n"
+        "mov %rdi,-0x48(%rbp)\n"
+        "vmovaps %xmm1,%xmm2\n"
+        "vmovaps %xmm0,%xmm11\n"
+        "vmovaps %xmm0,%xmm3\n"
+        "call *%rdi\n"
+        "cmp -0x48(%rbp),%rdi\n"
+        "jne 1f\n"
+        "vmovd %xmm2,%eax\n"
+        "cmp -0x34(%rbp),%eax\n"
+        "jne 1f\n"
+        "leave\n"
+        "ret\n"
+        "1: ud2\n");
+
+static void test_lateral_timestep(void) {
+    void **saved_clock=timestep_clock;
+    unsigned char *code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,
+                             MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(code!=MAP_FAILED);
+    const unsigned char displaced[2][15] = {
+        {0xc5,0xfa,0x10,0x7d,0xc0,0xc5,0xfa,0x10,0x5d,0xc4,0xc5,0xfa,0x10,0x45,0xc8},
+        {0xc5,0xfa,0x10,0x6d,0xc0,0xc5,0xfa,0x10,0x75,0xc4,0xc5,0x7a,0x10,0x4d,0xc8}
+    };
+    const unsigned char resume[2][6] = {
+        {0xc5,0x78,0x29,0xd8,0xc3,0x90}, /* vmovaps xmm0,xmm11 */
+        {0xc5,0xf8,0x28,0xc3,0xc3,0x90}  /* vmovaps xmm0,xmm3 */
+    };
+    const int rates[]={30,60,72,90,120,144,240};
+    const float scales[]={.125f,.5f,1,2};
+    /* The native per-frame coefficient loses much more lateral speed at 240 FPS. */
+    assert(1000.f*(powf(.99f,30)-powf(.99f,240))>600.f);
+    for (unsigned path=0;path<2;++path) {
+        memcpy(code+512,resume[path],6);
+        timestep_bridge(code,code+512,displaced[path],path ? 3 : 11,-0x34,lateral_retention);
+        const float coefficients[]={0,.25f,.8f,.99f,1};
+        for (unsigned c=0;c<sizeof coefficients/sizeof coefficients[0];++c) {
+            const float retention=coefficients[c];
+            const float reference=1000.f*powf(retention,30);
+            for (unsigned s=0;s<sizeof scales/sizeof scales[0];++s)
+            for (unsigned r=0;r<sizeof rates/sizeof rates[0];++r) {
+                timestep_set_frame(1.f/rates[r]);
+                const float corrected=lateral_probe(code,retention,scales[s]/rates[r]);
+                if (rates[r]==30) assert(corrected==retention);
+                float speed=1000;
+                for (int step=0;step<rates[r];++step) speed*=corrected;
+                assert(fabsf(speed-reference)<.01f);
+            }
+        }
+        const float invalid_or_slow[]={0,-.01f,1.f/20,273.f/8192,274.f/8192,INFINITY,-INFINITY,NAN};
+        for (unsigned i=0;i<sizeof invalid_or_slow/sizeof invalid_or_slow[0];++i) {
+            timestep_set_frame(invalid_or_slow[i]);
+            assert(lateral_probe(code,.8f,invalid_or_slow[i])==.8f);
+            assert(lateral_probe(code,.8f,1.f/240)==.8f);
+        }
+        timestep_set_frame(1.f/240);
+        const float invalid[]={0,-.01f,INFINITY,-INFINITY,NAN};
+        for (unsigned i=0;i<sizeof invalid/sizeof invalid[0];++i)
+            assert(lateral_probe(code,.8f,invalid[i])==.8f);
+        assert(lateral_probe(code,-.5f,1.f/240)==-.5f);
+        assert(lateral_probe(code,1.1f,1.f/240)==1.1f);
+        assert(isnan(lateral_probe(code,NAN,1.f/240)));
+    }
+    assert(munmap(code,4096)==0);
+    timestep_clock=saved_clock;
+}
+
+extern float ABI wheel_probe(void *code, void *state, float target, float weight, float dt);
+__asm__(".text\n"
+        ".globl wheel_probe\n"
+        "wheel_probe:\n"
+        "push %rbp\n"
+        "mov %rsp,%rbp\n"
+        "push %r12\n"
+        "sub $0x60,%rsp\n"
+        "vmovss %xmm2,-0x54(%rbp)\n"
+        "mov %rsi,%r12\n"
+        "vmovaps %xmm1,%xmm2\n"
+        "vmovss 0x58(%r12),%xmm1\n"
+        "vsubss %xmm1,%xmm0,%xmm0\n"
+        "call *%rdi\n"
+        "mov -8(%rbp),%r12\n"
+        "leave\n"
+        "ret\n");
+
+static void test_wheel_timestep(void) {
+    void **saved_clock=timestep_clock;
+    unsigned char *code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,
+                             MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(code!=MAP_FAILED);
+    const unsigned char native[]={0xc5,0xfa,0x59,0xc2,0xc5,0xf2,0x58,0xc0,
+        0xc4,0xc1,0x7a,0x11,0x44,0x24,0x58};
+    code[512]=0xc3;
+    memcpy(code+1024,native,sizeof native); code[1024+sizeof native]=0xc3;
+    timestep_bridge(code,code+512,native,2,-0x54,wheel_blend);
+    const int rates[]={30,60,72,90,120,144,240};
+    const float responses[]={.00001f,1,6,29,30,60};
+    const float scales[]={.125f,.5f,1,2};
+    for (unsigned c=0;c<sizeof responses/sizeof responses[0];++c) {
+        for (unsigned s=0;s<sizeof scales/sizeof scales[0];++s)
+        for (unsigned r=0;r<sizeof rates/sizeof rates[0];++r) {
+            timestep_set_frame(1.f/rates[r]);
+            unsigned char reference[0x60]={0}, state[0x60]={0};
+            for (unsigned phase=0;phase<3;++phase) {
+                const float target=phase==1 ? -1 : 1;
+                for (int step=0;step<15;++step)
+                    wheel_probe(code+1024,reference,target,fminf(responses[c]*scales[s]/30,1),scales[s]/30);
+                for (int step=0;step<rates[r]/2;++step)
+                    wheel_probe(code,state,target,fminf(responses[c]*scales[s]/rates[r],1),scales[s]/rates[r]);
+                assert(fabsf(real(reference,0x58)-real(state,0x58))<.00002f);
+                if (rates[r]==30) assert(real(reference,0x58)==real(state,0x58));
+            }
+        }
+    }
+    unsigned char slow[0x60]={0}, fast[0x60]={0};
+    for (int step=0;step<3;++step) wheel_probe(code+1024,slow,1,6.f/30,1.f/30);
+    for (int step=0;step<24;++step) wheel_probe(code+1024,fast,1,6.f/240,1.f/240);
+    assert(fabsf(real(slow,0x58)-real(fast,0x58))>.03f); /* Native regression. */
+    memset(fast,0,sizeof fast);
+    for (int step=0;step<3;++step) {
+        timestep_set_frame(1.f/120);
+        wheel_probe(code,fast,1,6.f/120,1.f/120);
+        timestep_set_frame(1.f/40);
+        wheel_probe(code,fast,1,6.f/40,1.f/40);
+    }
+    assert(fabsf(real(slow,0x58)-real(fast,0x58))<.000001f);
+    const float invalid_or_slow[]={0,-.01f,1.f/20,273.f/8192,274.f/8192,INFINITY,-INFINITY,NAN};
+    for (unsigned i=0;i<sizeof invalid_or_slow/sizeof invalid_or_slow[0];++i) {
+        timestep_set_frame(invalid_or_slow[i]);
+        memset(slow,0,sizeof slow); memset(fast,0,sizeof fast);
+        assert(wheel_probe(code,slow,1,.2f,invalid_or_slow[i])==
+               wheel_probe(code+1024,fast,1,.2f,invalid_or_slow[i]));
+        memset(slow,0,sizeof slow); memset(fast,0,sizeof fast);
+        assert(wheel_probe(code,slow,1,.2f,1.f/240)==wheel_probe(code+1024,fast,1,.2f,1.f/240));
+    }
+    timestep_set_frame(1.f/240);
+    const float invalid[]={0,-.01f,INFINITY,-INFINITY,NAN};
+    for (unsigned i=0;i<sizeof invalid/sizeof invalid[0];++i) {
+        memset(slow,0,sizeof slow); memset(fast,0,sizeof fast);
+        assert(wheel_probe(code,slow,1,.2f,invalid[i])==wheel_probe(code+1024,fast,1,.2f,invalid[i]));
+    }
+    assert(munmap(code,4096)==0);
+    timestep_clock=saved_clock;
+}
+
+static void test_contact_timestep(void) {
+    void **saved_clock=timestep_clock;
+    unsigned char message[0x20] = {0};
+    unsigned char *code = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(code != MAP_FAILED);
+    /* Native continuation selects max(corrective velocity, current velocity) using its flags. */
+    const unsigned char continuation[] = {0x48,0x8d,0x45,0x84,0x49,0x0f,0x46,0xc4,
+        0xc5,0xfa,0x10,0,0xc3};
+    memcpy(code+512,continuation,sizeof continuation);
+    contact_timestep_bridge(code, code+512);
+    unsigned char *original=code+1024;
+    const unsigned char native[] = {0xc5,0xfa,0x59,0x05,0x78,0,0,0,
+        0xc5,0xfa,0x11,0x45,0x84,0xc5,0xf8,0x2e,0x45,0xb8};
+    assert((unsigned char *)ptr(code,8)+sizeof native+14+4<code+512);
+    assert(!memcmp(code+512,continuation,sizeof continuation));
+    memcpy(original,native,sizeof native);
+    jump(original+sizeof native,code+512);
+    const float thirty=30;
+    memcpy(original+128,&thirty,4);
+    const int rates[] = {30,60,72,90,120,144,240};
+    for (unsigned i=0;i<sizeof rates/sizeof rates[0];++i) {
+        const float dt=1.f/rates[i];
+        timestep_set_frame(dt);
+        memcpy(message+0x18,&dt,4);
+        const float velocity=contact_probe(code,message,-4.f,-5000.f);
+        /* Downward motion reaches the height bound in one step without crossing it. */
+        assert(fabsf(velocity*dt+4.f)<.00001f);
+        if (rates[i]==30)
+            assert(velocity==contact_probe(original,message,-4.f,-5000.f));
+        /* Do not restrict falling when the kart cannot reach the floor during this step. */
+        assert(fabsf(contact_probe(code,message,-4.f,-200.f)-fmaxf(-4.f/dt,-200.f))<.0001f);
+        assert(contact_probe(original,message,-4.f,-200.f)==-120.f);
+        assert(contact_probe(code,message,-4.f,200.f)==200.f); /* Rising hops stay native. */
+        assert(contact_probe(code,message,0.f,-200.f)==0.f); /* Do not cross the floor. */
+        const float scales[]={.125f,.5f,2};
+        for (unsigned s=0;s<sizeof scales/sizeof scales[0];++s) {
+            const float scaled=dt*scales[s];
+            memcpy(message+0x18,&scaled,4);
+            assert(contact_probe(code,message,-4.f,-5000.f)==contact_probe(original,message,-4.f,-5000.f));
+            assert(contact_probe(code,message,-4.f,200.f)==contact_probe(original,message,-4.f,200.f));
+            assert(contact_probe(code,message,0.f,-200.f)==contact_probe(original,message,0.f,-200.f));
+        }
+    }
+    const float invalid_or_slow[] = {0,-0.f,-.01f,1.f/20,273.f/8192,274.f/8192,INFINITY,-INFINITY,NAN};
+    for (unsigned i=0;i<sizeof invalid_or_slow/sizeof invalid_or_slow[0];++i) {
+        timestep_set_frame(invalid_or_slow[i]);
+        memcpy(message+0x18,invalid_or_slow+i,4);
+        assert(contact_probe(code,message,-4.f,-5000.f)==-120.f);
+        const float dt=1.f/240;
+        memcpy(message+0x18,&dt,4);
+        assert(contact_probe(code,message,-4.f,-5000.f)==-120.f);
+    }
+    assert(munmap(code,4096)==0);
+    timestep_clock=saved_clock;
+}
+
 void runtime_room_mode_host_name(char out[24]) { strcpy(out,"host"); }
 static int catchup_guest;
 int runtime_room_mode_following(void) { return catchup_guest; }
@@ -56,12 +618,14 @@ static void ABI modifiers_native_mock(void *kart, float dt) {
     put_int(kart,0x194,9999);
 }
 static float expected_motion_scale = 1;
+static unsigned char motion_message[0x20];
 static float ABI trick_native_mock(void *kart) {
     return ((unsigned char *)kart)[0xe8] ? 200 : 150;
 }
 static float ABI hop_native_mock(void *kart) { assert(kart); return 100; }
 static void ABI motion_native_mock(void *kart, void *data, void *velocity) {
-    assert(kart && data == (void *)1 && velocity == (void *)2);
+    assert(kart && data == (void *)1 && velocity == motion_message);
+    assert(kart_motion_dt==real(motion_message,0x18));
     const size_t offsets[] = {0x38, 0x4c, 0x50};
     for (int i=0;i<3;++i)
         assert(fabsf(real(boost_component,offsets[i])-(100+i*100)*expected_motion_scale)<.001f);
@@ -136,6 +700,8 @@ static void test_ai_physics(void) {
     assert(real(kart,0x198)==damage); /* Damage and native timers remain outside the surface policy. */
     speed_modifiers(human,.016f); assert(fabsf(real(human,0x190)-.6f)<.001f);
     native_jump_impulse=hop_native_mock; native_trick_impulse=trick_native_mock; native_kart_motion=motion_native_mock;
+    const float frame_dt=1.f/30;
+    memcpy(motion_message+0x18,&frame_dt,4);
     void *boost_meta=(void *)1; boost_type=&boost_meta; component=find_component;
     const size_t boost_offsets[]={0x38,0x4c,0x50};
     for(int i=0;i<3;++i) { float v=100+i*100; memcpy(boost_component+boost_offsets[i],&v,4); }
@@ -155,7 +721,8 @@ static void test_ai_physics(void) {
             put_ptr(racer,0x10,player_handle);
             assert(jump_impulse(kart)==100 && kart_speed(kart,speed_data,0,75,.016f)==100);
             assert(trick_jump_impulse(kart)==200 && kart[0xe8]==1);
-            expected_motion_scale=1; kart_motion(kart,(void *)1,(void *)2);
+            expected_motion_scale=1; kart_motion(kart,(void *)1,motion_message);
+            assert(kart_motion_dt==0);
             put_ptr(racer,0x10,NULL);
             /* Keep the old registration while live ownership becomes uncertain. */
             for (int invalid=0;invalid<6;++invalid) {
@@ -171,7 +738,7 @@ static void test_ai_physics(void) {
                     assert(trick_jump_impulse(kart)==150 && kart[0xe8]==0);
                     assert(kart_speed(kart,speed_data,0,75,.016f)==100);
                     assert(catchup_for_kart(kart)==0);
-                    expected_motion_scale=1; kart_motion(kart,(void *)1,(void *)2);
+                    expected_motion_scale=1; kart_motion(kart,(void *)1,motion_message);
                     speed_modifiers(kart,.016f); assert(fabsf(real(kart,0x190)-.6f)<.001f);
                 }
                 peer_decision=0; racer_manager=&racers_root;
@@ -180,10 +747,10 @@ static void test_ai_physics(void) {
             }
             expected_motion_scale=itemless ? 1.12f+.03f*(level-2) : 1;
             for(int repeat=0;repeat<3;++repeat) {
-                kart_motion(kart,(void *)1,(void *)2);
+                kart_motion(kart,(void *)1,motion_message);
                 for(int i=0;i<3;++i) assert(real(boost_component,boost_offsets[i])==100+i*100);
             }
-            expected_motion_scale=1; kart_motion(human,(void *)1,(void *)2);
+            expected_motion_scale=1; kart_motion(human,(void *)1,motion_message);
             kart[0x214]=1;
             float ground=kart_speed(kart,speed_data,0,75,.016f);
             kart[0x214]=0;
@@ -1687,7 +2254,12 @@ static void test_targeting(void) {
     client=difficulty_manager=manager=racer_manager=ai_data=settings=NULL;
 }
 static void ABI original(unsigned char *self, unsigned char *event, void *owner) {
-    (void)self; (void)owner; ++calls;
+    (void)owner; ++calls;
+    const char *name = ptr(self, 0x148);
+    if (name && !strcmp(name, "COLLISION")) {
+        assert(integer(*settings, 0x28) == 3);
+        return;
+    }
     put_int(*settings, 0x28, integer(event, 0x18) + 1);
 }
 static uint32_t item_clock;
@@ -1769,6 +2341,13 @@ int main(void) {
     unsigned char *invalid_image = calloc(1, 0x2af2608);
     assert(invalid_image && !runtime_race_options_start(invalid_image, 0x2af2608));
     free(invalid_image);
+    test_overspeed_timestep();
+    test_acceleration_timestep();
+    test_deceleration_timestep();
+    test_ground_speed_timestep();
+    test_wheel_timestep();
+    test_lateral_timestep();
+    test_contact_timestep();
     put_int(default_race, 0xd40, 1); put_int(default_race, 0xd4c, 1);
     unsigned char race[0xd50] = {0}, config[0x30] = {0}, self[0x1d0] = {0};
     unsigned char labels_list[40] = {0}, flags_list[40] = {0}, event[32] = {0};
@@ -1803,6 +2382,11 @@ int main(void) {
     team_event(self, event, NULL);
     assert(integer(config, 0x28) == 3 && integer(labels_list, 12) == 4 && drops == 1);
     assert(calls == 5);
+    private_room = 1;
+    put_ptr(self, 0x148, (void *)"COLLISION");
+    team_event(self, event, NULL);
+    assert(calls == 6 && integer(config, 0x28) == 3 && drops == 1);
+    put_ptr(self, 0x148, NULL);
     manager = &default_race_ptr;
     test_ai();
     manager = &default_race_ptr;

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pack Tacho 1.2.8 by Tacho, built into the port with his permission (scripts/tacho_pack/README.txt). -->
+<!-- Lista de lideres de 8 puestos (CGuiBehaviorRaceLeadersItem, FUN_009dd2e0). Address = VA + 0x400000.
+     1) Nombre: el JNZ de _playerTagText (VA 0x009dd46d) pasa por una cueva; sin datos de jugador (IA) o con
+        HUD original oculta el texto (bit 0x400) y salta la rama, que si no leeria [0+0x68].
+     2) Wumpas: la rama de _timeText (VA 0x009dd84f) formatea "x%d" con CRacer._currentWumpaFruitCount (+0x9c).
+     3) Refresco: el update por frame del Item (VA 0x009dedd0) llama a FUN_009dd2e0 cada 6 frames (Item+0xcc).
+     4) Item: corredor -> kart -> CVehiclePowerUpControllerComponent -> _storedPowerUp -> tipo; muestra su icono.
+     5) Menu: el toggle con _variable = 11 lee/escribe COctaneGlobalOptionsData._showObjective (+0x29):
+        1 = HUD nuevo, 0 = sin nombre, wumpas ni item y solo puestos 1-4 (fila con escala 0). -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata isEnabled="true" Title="Crash Team Racing Nitro-Fueled"
+              Name="Race Leaders: 8 puestos, nombre, wumpas, item y opciones de menu"
+              Author="Tacho"
+              PatchVer="0.9"
+              AppVer="01.21"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x02722400" Value="0fb605f9c58c0085c07403ffc8c3488b0533ba7a004885c0741a488b80b00d00004885c0740e488b40784885c074050fb64029c3b801000000c3"
+                  ExpectedSHA256="66b4a8b2a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba4"/>
+            <Line Type="bytes" Address="0x02722640" Value="488b05e9277b004885c074048b4028c331c0c3"
+                  ExpectedSHA256="d6fd62f5ce537d90ea3ea45841b17f34d727bcbc4128748cba14fb87c0ffd9d1"/>
+            <Line Type="bytes" Address="0x00ddeb54" Value="90e931f7ffff"
+                  Signature="83 bb b0 00 00 00 00 0f 84 31 f7 ff ff 49 8b 5e 20" SignatureOffset="0x7"
+                  ExpectedSHA256="b61704c8ee3803522dfc9e8403c0befd4cb7eb934574168f96140ffa4a43c057"/>
+            <Line Type="bytes" Address="0x02722000" Value="e8fb03000085c074114d85ed740c81670cfffbffffe9b7b76bfe814f0c00040000e94db46bfe"
+                  ExpectedSHA256="762b023699a0e48aa95763f0cf7c0467f1d6e9880308c78ebbc1c423de7072d3"/>
+            <Line Type="bytes" Address="0x00ddd46d" Value="0f858d4b9401"
+                  Signature="49 8b 7e 20 48 85 ff 0f 85 5e 03 00 00 49 83 7e 28 00 0f 85" SignatureOffset="0x7"
+                  ExpectedSHA256="1f821e05060b3912c532196d60674cb820ad0599fee376043073af299dc49196"/>
+            <Line Type="bytes" Address="0x02722040" Value="48b9000000001000000048894da048c745b000000000488d45b8488945a8c645b800c645c8fd488b45808b909c000000488d3510000000488d7da031c0e83e6b20ffe917ba6bfe78256400"
+                  ExpectedSHA256="367467f43d580c3c07040a78c7890ae4262dad4778878f9a49d5f652c81689a5"/>
+            <Line Type="bytes" Address="0x00ddd84f" Value="e9ec479401"
+                  Signature="48 8b 45 80 80 b8 8c 00 00 00 00 0f 85 4e 01 00 00 e8" SignatureOffset="0x0"
+                  ExpectedSHA256="5baf6baf58600e83ce3b4890af3afcd4a9cbc0c7fc419ac6e68b1d1103e3600f"/>
+            <Line Type="bytes" Address="0x027220c0" Value="fe8bcc0000007f1dc683cc00000006488b73284885f6740d4889dfe800b26bfee85f07000080bb81000000000f8501cd6bfee9e2cc6bfe"
+                  ExpectedSHA256="02779466cdec163811d078815c633f21901413081449002f24aa3e80f0b88ef7"/>
+            <Line Type="bytes" Address="0x02722800" Value="488b074885c074398b08f7c100000010750df7c1000000207519488b4028c357e87bd417ff5f488b074885c07413488b4028c34883ec08e884311dff4883c408c331c0c3415441554156e8b1fbffff8883cf00000041beffffffff4531ed488dbb88000000e896ffffff41be650000004885c00f8409020000448ba89c0000008b4858488b53504885d2743a488b52404885d27431488b52404885d27428be0000803f80bbcf00000000750783f9047e0231f689b28400000089b288000000814a0c0010000080b8b0000000000f85b800000041beffffffff4989c4e85ffdffff83f8020f8c98010000498d7c2410e80cffffff4885c00f8485010000448ba8e40000004585ed0f88750100008b4070f7d82d0101000083f8100f83620100004189c4488b0546227b004885c00f844f010000488b40104885c00f84420100008b480c488b502085c90f8433010000488b3a4885ff742c80bfb00000000074235152488d7f10e895feffff5a594885c074114439a8e400000075084589e6e9ff0000004883c208ffc9ebbc488d7820e86cfeffff41be660000004885c00f84df0000004889c7488b35e3b37b0031d2e8dc950bfe41be670000004885c00f84bf000000488d7830e834feffff41beffffffff4885c00f84500000004989c44889c7488b00ff90f800000083f80d7505418b44245483f802750d4183fd097e29b80f000000eb2283f803750d4183fd097f17b80d000000eb1083f808750b4183fd097f05b80e0000004189c6e810fcffff83f8020f8c49000000488dbb88000000e8bbfdffff4885c00f8434000000488d7810e8a9fdffff4885c00f842200000083b8e4000000000f8c15000000b9fffeffff4429f14585f67905b9ffffffff89487080bbcf00000000750641befeffffff4c8b63284d85e40f8467000000418b44240c0d0014000080bbcf00000000740525fffbffff418944240c498b5424404531ed4d8b6424504d85e474384939d47433418b44240c0d001400004183fd10750b80bbcf00000000740ceb054539f5750525fffbffff418944240c41ffc54183fd117cbe415e415d415cc3"
+                  ExpectedSHA256="679879a045a4fc0469906f91b6410cc32496e53b24d8e743d4b954826b25a6d1"/>
+            <Line Type="bytes" Address="0x00ddedd0" Value="e9eb32940190909090"
+                  Signature="48 89 fb 49 8b 07 48 89 45 d8 80 bb 81 00 00 00 00 75 1a" SignatureOffset="0xa"
+                  ExpectedSHA256="6e1475f03bd95e79b3ff34b8e9f0e271a2ae07b86211b31cfaa020fe033fb326"/>
+            <Line Type="bytes" Address="0x02722440" Value="83f90b750d80782900410f95c6e928bef4fe83f90c750d80782800410f95c6e916bef4fe4531f6e90ebef4fe"
+                  ExpectedSHA256="85759b3811ff7dc47b03792ac85317be51431a3f9e01dcafce317ed736a391b0"/>
+            <Line Type="bytes" Address="0x0166e2b8" Value="e983410b01"
+                  Signature="83 f9 05 75 10 80 78 21 00 eb 04 80 78 2a 00 41 0f 95 c6 eb c2 45 31 f6 eb bd" SignatureOffset="0x15"
+                  ExpectedSHA256="b7e4fd5ee91a3834deb6b6b2ccd70af922a70e6119917e4e87e9c6a700d9c20d"/>
+            <Line Type="bytes" Address="0x02722480" Value="83f9050f84c4bef4fe83f90b750944887029e98bbef4fe83f90c0f8582bef4fe44887028e979bef4fe"
+                  ExpectedSHA256="9e1736c43d19118e6ce4302118af337109491ecc52757dfb949bad6a7940b0c2"/>
+            <Line Type="bytes" Address="0x0166e348" Value="e933410b01"
+                  Signature="83 f9 06 48 8b 40 78 0f 84 64 01 00 00 83 f9 05 75 d5 44 88 70 21" SignatureOffset="0xd"
+                  ExpectedSHA256="db1c037dc7f46ba9991e2e73644999083ae0a34bb0c03da84aa591b7ca9346d6"/>
+        </PatchList>
+    </Metadata>
+</Patch>

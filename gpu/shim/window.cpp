@@ -11,9 +11,12 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_d3d11.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 #include "bbport_graphics_tab.h"
+
+extern "C" void runtime_party_experiment_request(int kind); // src/runtime_party_experiment.c
 
 namespace Frontend {
 
@@ -132,7 +135,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    // Direct3D 11 needs no Vulkan at all (gnmdriver.cpp RegisterLib): a Vulkan window there
+    // stopped PCs without a Vulkan driver, the ones that engine is for (2026-11-15).
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, !BbD3d11::On());
     // On scaled Wayland desktops, window coordinates are logical units. Request a native
     // pixel drawable so the compositor does not enlarge a low-resolution Vulkan surface.
     // The swapchain uses SDL_GetWindowSizeInPixels, including after pixel-size changes.
@@ -405,6 +410,14 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         if (BbOverlay::HandleEvent(event)) {
+            continue;
+        }
+        // Host handoff research (src/runtime_party_experiment.c): Ctrl+F9 leave and host,
+        // Ctrl+Shift+F9 close and host, Ctrl+F10 join the other player's room.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_F9 || event.key.key == SDLK_F10) && (event.key.mod & SDL_KMOD_CTRL)) {
+            const int kind = event.key.key == SDLK_F10 ? 3 : (event.key.mod & SDL_KMOD_SHIFT) ? 2 : 1;
+            runtime_party_experiment_request(kind); // only with BB_HOST_EXPERIMENT=1
             continue;
         }
         // Alt + Enter toggles fullscreen

@@ -4,10 +4,13 @@
 #include "../src/runtime_itemless.c"
 void runtime_race_options_stop_boost(void *b, void (ABI *stop)(void *)) { stop(b); }
 static int active, responses, removals, nested;
+static int private_mode, collision_enabled;
 static unsigned char owner[32], other[32], ai[32], ai2[32], obstacle[32], human_racer[32], ai_racer[32];
 static unsigned char boost[32], wall_context[40], collision_data[16];
 static int boost_alive;
 int runtime_speed_race_active(void) { return active; }
+int runtime_online_mode_in_private(void) { return private_mode; }
+int runtime_online_mode_itemless_collision(void) { return collision_enabled; }
 int runtime_replay_no_crates(void) { return 0; }
 static void put(void *p, size_t off, void *v) { memcpy((char *)p+off, &v, sizeof v); }
 static void *ABI lookup(void *manager, void *entity) {
@@ -31,6 +34,51 @@ static unsigned char ABI filter(void *rule, const char *name, int mode) {
     return (unsigned char)mode;
 }
 
+static unsigned char placed[0x28];
+static void *placed_pointer;
+static void ABI record_placement(void *self, void *racer, void *waypoint) {
+    assert(self && racer == owner);
+    placed_pointer = waypoint;
+    memcpy(placed, waypoint, sizeof placed);
+}
+
+static void test_start_grid(void) {
+    unsigned char self[0x20] = {0}, data[0x20] = {0}, list[0x28] = {0};
+    unsigned char points[8][0x28] = {{0}}, handles[8][0x30] = {{0}};
+    void *slots[8];
+    put(self, 0x10, data); put(data, 0x10, list); put(list, 0x20, slots);
+    const int count = 8;
+    memcpy(list + 12, &count, 4);
+    for (int i = 0; i < 8; ++i) {
+        const float pose[] = {-100.0f + 200.0f*(i%4), 1000.0f + 20.0f*(i%4) - 400.0f*(i/4),
+                              10.0f + 5.0f*(i%4), 0, 0, 1.5f + i*0.01f};
+        memcpy(points[i] + 0x10, pose, sizeof pose);
+        put(handles[i], 0x28, points[i]); slots[i] = handles[i];
+    }
+    unsigned char saved[sizeof points];
+    memcpy(saved, points, sizeof points);
+    native_place_racer = record_placement;
+    for (active = 0; active <= 1; ++active)
+        for (private_mode = 0; private_mode <= 1; ++private_mode)
+            for (collision_enabled = 0; collision_enabled <= 1; ++collision_enabled)
+                for (int i = 0; i < 8; ++i) {
+                    place_racer(self, owner, points[i]);
+                    if (active && (!private_mode || !collision_enabled)) {
+                        float pose[6]; memcpy(pose, placed + 0x10, sizeof pose);
+                        assert(fabsf(pose[0] - (-100.0f + 600.0f*i/7.0f)) < 0.001f);
+                        assert(fabsf(pose[1] - (1000.0f + 60.0f*i/7.0f)) < 0.001f);
+                        assert(fabsf(pose[2] - (10.0f + 15.0f*i/7.0f)) < 0.001f);
+                        assert(pose[3] == 0 && pose[4] == 0 && pose[5] == 1.5f);
+                    } else assert(placed_pointer == points[i] && !memcmp(placed, points[i], sizeof placed));
+                    assert(!memcmp(points, saved, sizeof points));
+                }
+    active = 1; private_mode = collision_enabled = 0;
+    slots[3] = NULL;
+    place_racer(self, owner, points[7]);
+    assert(placed_pointer == points[7]); /* Incomplete modded grid stays native. */
+    active = 0;
+}
+
 static unsigned char ground_kart[0x240];
 static int missing_ground;
 static void *ABI ground_component(void *entity, void *type, int unused) {
@@ -42,7 +90,7 @@ static void test_banked_wall(void) {
     unsigned char response[32]={0};
     void *type=other;
     put(response,0x18,owner);
-    find_component=ground_component; kart_controller_type=&type;
+    get_component=ground_component; kart_controller_type=&type;
     unsigned char *code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,
                               MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(code!=MAP_FAILED);
@@ -122,13 +170,119 @@ static void test_track_rules(void) {
     munmap(code, 4096);
     active = 0;
 }
+
+static unsigned char filter_world[0x320], filter_physics[0x50], filter_node[0x28];
+static void *filter_signal, *filter_owner;
+static int subscriptions, initializations, uninitializations, flag_updates, signal_queries;
+static void ABI init_contact(void *self) { assert(self == filter_owner); ++initializations; }
+static void ABI uninit_contact(void *self) {
+    assert(self == filter_owner && !subscriptions);
+    ++uninitializations;
+}
+static void *ABI physics_component(void *entity, void *type, int unused) {
+    assert(entity == owner && type == filter_physics && !unused);
+    return filter_physics;
+}
+static void *ABI get_signal(void *world, int kind, int body) {
+    assert(world == filter_world && kind == 2 && body == 0);
+    ++signal_queries;
+    return &filter_signal;
+}
+static void ABI add_signal(void *signal, void *self) {
+    assert(signal == &filter_signal && self == filter_owner && !subscriptions);
+    filter_signal = filter_node;
+    ++subscriptions;
+}
+static void ABI remove_signal(void *signal, void *self) {
+    assert(signal == &filter_signal && self == filter_owner);
+    subscriptions = 0; filter_signal = NULL;
+}
+static void ABI set_flags(void *world, int body, unsigned set, unsigned clear) {
+    assert(world == filter_world && body == 0 && set == 0x40 && !clear);
+    ++flag_updates;
+}
+
+static void test_collision_filter(void) {
+    unsigned char self[0x60] = {0}, context[0x28] = {0}, event[0x28] = {0};
+    unsigned char bodies[0x120] = {0}, cache[0x60] = {0};
+    void *manager = self, *type = filter_physics;
+    racers = &manager; find_racer = lookup;
+    put(self, 0x18, owner); put(context, 0, filter_world);
+    put(filter_world, 0x20, bodies); put(filter_physics, 0x48, filter_world);
+    const unsigned capacity = 2; memcpy(filter_world + 0x2c, &capacity, 4);
+    const int other_index = 1; memcpy(event + 12, &other_index, 4);
+    put(event, 0x20, cache); bodies[0x90+0x42] = 4;
+    filter_owner = self; physics_type = &type;
+    native_initialize = init_contact; native_uninitialize = uninit_contact;
+    get_component = physics_component; body_signal = get_signal;
+    subscribe_contact = add_signal; unsubscribe_contact = remove_signal;
+    enable_body_flags = set_flags;
+    for (private_mode = 0; private_mode <= 1; ++private_mode)
+        for (collision_enabled = 0; collision_enabled <= 1; ++collision_enabled) {
+            active = 0;
+            initialize(self);
+            assert(!subscriptions && !flag_updates && !signal_queries);
+        }
+    active = private_mode = collision_enabled = 1;
+    initialize(self);
+    assert(!subscriptions && !flag_updates && !signal_queries);
+    private_mode = collision_enabled = 0;
+    initializations = 0;
+    initialize(self);
+    assert(subscriptions == 1 && ptr(filter_node, 0x18) == (void *)filter_contact);
+    initialize(self); /* A repeated activation must not retain duplicate callbacks. */
+    assert(initializations == 2 && subscriptions == 1);
+    assert(flag_updates == 2 && signal_queries == 2);
+
+    /* Execute native ba3320: disables the manifold and its cached contact flags. */
+    const unsigned char cancel_code[] = {
+        0xf6,0x47,0x17,0x10,0x74,0x1c,0x8b,0x47,0x18,0x0f,0xb6,0x4f,0x16,
+        0xc1,0xe8,0x0e,0x48,0xc1,0xe1,0x04,0x83,0xe0,0x3c,0x48,0x01,0xc8,
+        0x48,0x01,0xf8,0x74,0x03,0x80,0x08,0x03,0x80,0x4f,0x25,0x02,
+        0x0f,0xb7,0x47,0x30,0x48,0x03,0x47,0x28,0x74,0x0e,
+        0x8b,0xbe,0x10,0x03,0x00,0x00,0x48,0x89,0xc6,0xe9,0xa2,0x6c,0xcd,0xff,0xc3};
+    void *code = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(code != MAP_FAILED); memcpy(code, cancel_code, sizeof cancel_code);
+    disable_contact = (Subscribe)code;
+    void *entities[] = {other, ai, ai2, obstacle, owner};
+    for (active = 0; active <= 1; ++active)
+        for (private_mode = 0; private_mode <= 1; ++private_mode)
+            for (collision_enabled = 0; collision_enabled <= 1; ++collision_enabled)
+                for (int i = 0; i < 5; ++i) {
+                    put(bodies, 0x90+0x88, entities[i]);
+                    memset(cache, 0, sizeof cache); cache[0x17] = 0x10; cache[0x16] = 4;
+                    filter_contact(self, context, event);
+                    int disabled = active && (!private_mode || !collision_enabled) && i < 3;
+                    assert(cache[0x25] == (disabled ? 2 : 0));
+                    assert(cache[0x40] == (disabled ? 3 : 0));
+                }
+    active = 1; private_mode = collision_enabled = 0;
+    put(self, 0x18, ai); put(bodies, 0x90+0x88, owner);
+    cache[0x25] = 0; filter_contact(self, context, event); assert(cache[0x25] == 2);
+    put(bodies, 0x90+0x88, ai2);
+    cache[0x25] = 0; filter_contact(self, context, event); assert(cache[0x25] == 2);
+    const int invalid = 2; memcpy(event + 12, &invalid, 4);
+    cache[0x25] = 0; filter_contact(self, context, event); assert(!cache[0x25]);
+    memcpy(event + 12, &other_index, 4); bodies[0x90+0x42] = 0;
+    filter_contact(self, context, event); assert(!cache[0x25]);
+    bodies[0x90+0x42] = 4; put(event, 0x20, NULL);
+    filter_contact(self, context, event); assert(!cache[0x25]);
+    put(self, 0x18, owner);
+    active = 0; /* Cleanup must work even after the room/mode flag has reset. */
+    uninitialize(self); assert(uninitializations == 1 && !subscriptions && !filter_signal);
+    munmap(code, 4096);
+}
 int main(void) {
     assert(runtime_itemless_start(NULL, 0));
     unsigned char *invalid_image = calloc(1, 0x2ad4b78);
     assert(invalid_image && !runtime_itemless_start(invalid_image, 0x2ad4b78));
     free(invalid_image);
     test_banked_wall();
+    test_start_grid();
     test_track_rules();
+    test_collision_filter();
+    private_mode = collision_enabled = 1;
     unsigned char self[32] = {0}, context[40] = {0}, world[40] = {0}, bodies[0x120] = {0};
     void *manager = self;
     racers = &manager; find_racer = lookup; native_contact = respond; native_stop = remove_boost;
@@ -170,5 +324,10 @@ int main(void) {
     assert(responses == 9); /* Every collision still reaches native response. */
     stop_boost(boost);
     assert(removals == 5); /* No protection leaks into later contacts. */
+    private_mode = collision_enabled = 0;
+    const int previous_responses = responses;
+    boost_alive = 1;
+    contact(self, context, collision_data);
+    assert(responses == previous_responses && removals == 5 && boost_alive && !contact_owner);
     puts("Itemless contact tests passed");
 }

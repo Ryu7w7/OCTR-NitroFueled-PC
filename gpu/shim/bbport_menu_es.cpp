@@ -43,7 +43,7 @@ const char* Spanish(const char* english) {
     {"Auto keeps the internal resolution above. The others render at NVIDIA's share of the DLSS output: Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%, DLAA 100%. Applies after the restart.", "Automático mantiene la resolución interna de arriba. Las demás dibujan a la proporción de NVIDIA de la salida DLSS: Calidad 67 %, Equilibrado 58 %, Rendimiento 50 %, Ultra rendimiento 33 %, DLAA 100 %. Tras reiniciar."},
     {"DLSS output", "Salida DLSS"},
     {"DLSS model", "Modelo DLSS"},
-    {"Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. CNN: the older model (preset E), lighter; NVIDIA marks it deprecated. Applies at once.", "Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. CNN: el anterior, más ligero. Se aplica al momento."},
+    {"Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. Transformer K: preset K in every mode, lighter than the default presets of Performance (M) and Ultra Performance (L). CNN: the older model (preset E), lighter; NVIDIA marks it deprecated. Applies at once.", "Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. Transformer K: el preset K en todos los modos, más ligero que los de Rendimiento (M) y Ultra rendimiento (L). CNN: el anterior, más ligero. Se aplica al momento."},
     {"FSR 3 sharpness", "Nitidez FSR 3"},
     {"From patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), applied to the executable at start.", "De patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch); se aplican al arrancar."},
     {"Changes apply after restarting the game", "Los cambios se aplican al reiniciar el juego"},
@@ -87,6 +87,7 @@ const char* Spanish(const char* english) {
     {"Balanced", "Equilibrado"},
     {"Ultra Performance", "Ultra rendimiento"},
     {"Transformer (recommended)", "Transformer (recomendado)"},
+    {"Transformer K (lighter)", "Transformer K (más ligero)"},
     {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)"},
     {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)"},
     {"60 FPS unlock (illusion)", "60 FPS (illusion)"},
@@ -332,6 +333,18 @@ const char* Spanish(const char* english) {
     {"Bugs, questions or a ban appeal: our Discord", "Errores, dudas o apelar un baneo: nuestro Discord"},
     {"Open", "Abrir"},
     {"Copy link", "Copiar enlace"},
+    // Tacho: menu con columna, Amigos en sub-pestanas, Imagen + Juego + Rendimiento juntos
+    {"Requests", "Solicitudes"},
+    {"Invite everyone online", "Invitar a todos los que están en línea"},
+    {"Sends an invitation to your room to every friend who is online.",
+     "Manda una invitación a tu sala a todos tus amigos en línea."},
+    {"No friends yet: search for a nickname in Add.", "Aún no tienes amigos: busca un apodo en Agregar."},
+    {"Accept all", "Aceptar todas"},
+    {"Decline all", "Rechazar todas"},
+    {"No friend requests.", "No tienes solicitudes de amistad."},
+    {"Picture and performance", "Imagen y rendimiento"},
+    {"Quit game###quit_game", "Salir del juego###quit_game"},           // el boton busca la clave con su ###id
+    {"Exit game###confirm_quit", "Salir del juego###confirm_quit"},
     };
     const auto it = table.find(english);
     return it == table.end() ? english : it->second;

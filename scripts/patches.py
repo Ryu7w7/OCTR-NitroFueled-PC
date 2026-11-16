@@ -43,6 +43,11 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
                  'patch_unlock_all':'CrashTeamRacingUnlockAll.xml/Unlock Everything',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
+# Pack Tacho's executable patches (scripts/tacho_pack.py): part of the port, always applied (no
+# launcher toggle), from their own folder, which the launchers' patch lists do not read.
+TACHO_PACK_FILES=('RaceLeaders_hud.xml','HudOriginal.xml','ItemsMejorados.xml','NtropyPosicion.xml',
+                  'SinItemsPortales.xml','BarraReservas.xml')
+TACHO_PACK_DIR=Path(__file__).resolve().parent/'tacho_pack'/'patches'
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
                'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
@@ -513,16 +518,37 @@ def external_selection(found, config, ini=None):
     if any(selection_key(key) == blur and meta.get('AppVer') == '01.21' for key, _, meta in found):
         enabled.discard(blur)
         disabled.add(blur)
+    # Pack Tacho's patches come from tacho_pack_patches() only: a copy elsewhere (the old Pack Tacho
+    # mod still installed) would apply them twice.
+    found=[patch for patch in found if not tacho_pack_patch(patch[0])]
     return [(key,path,meta) for key,path,meta in found
             if selection_key(key) in enabled
             or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
+def tacho_pack_patch(key):
+    """One of Pack Tacho's executable patches (scripts/tacho_pack.py), by its file name."""
+    return key.partition('/')[0] in TACHO_PACK_FILES
+
+
+def tacho_pack_patches(ini=None, app_version=APP_VERSION, title_id=TITLE_ID):
+    """Pack Tacho's patches, always selected: no setting turns them off, so every player has
+    the same rules. Raises tacho_pack.Modified when a file of the pack was changed. ini is unused."""
+    from tacho_pack import verify
+    verify()
+    found=[patch for patch in external_patches(TACHO_PACK_DIR,app_version,title_id) if tacho_pack_patch(patch[0])]
+    # Made for the USA game (CUSA13795) 1.21 only: another edition or update has none of them.
+    if (title_id,app_version)==('CUSA13795','01.21') and len(found)!=len(TACHO_PACK_FILES):
+        raise ValueError('Pack Tacho: patches missing from scripts/tacho_pack/patches; install the port again')
+    return found
+
+
 def optional_game_patch(key):
     """One of the bundled community game patches (GAME_PATCH_KEYS: 60 FPS, motion blur, ...),
-    under any edition's file name. Nothing a mod ships depends on them, so one whose code is not
-    found in this executable (another build of the update) is skipped even in a mod session."""
-    return selection_key(key) in GAME_PATCH_KEYS.values()
+    under any edition's file name, or of Pack Tacho (made for the USA 1.21 executable only).
+    Nothing a mod ships depends on them, so one whose code is not found in this executable
+    (another build of the update) is skipped even in a mod session."""
+    return selection_key(key) in GAME_PATCH_KEYS.values() or tacho_pack_patch(key)
 
 
 def compile_external(selected, segments, elf=None, strict=False, require_verification=False,
@@ -649,7 +675,13 @@ def main():
     found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     applied=[]
-    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
+    try:
+        pack=tacho_pack_patches(settings,a.app_version,a.title_id)
+    except ValueError as error:  # tacho_pack.Modified among them: never start without the pack
+        print(f'Pack Tacho: {error}',file=sys.stderr)
+        sys.exit(3)
+    writes=compile_external(external_selection(found,a.patches_config,settings)
+                            +pack+render_patches(settings)
                             +theme_patches(settings)+end_race_patches(),
                             segments,elf,strict=a.strict_overlap,applied=applied)
     write_blob(a.out,writes)

@@ -7,6 +7,37 @@ from prepare import parse_self
 
 @unittest.skipUnless(os.environ.get("BB_TEST_GAME"), "requires native USA/EU dump")
 class NativeItemless(unittest.TestCase):
+    def test_pre_solver_collision_filter_contracts(self):
+        import struct
+        game = Path(os.environ["BB_TEST_GAME"])
+        elf, _, segments, *_ = parse_self((game / "eboot.bin").read_bytes())
+        shift = 0x10 if "CUSA14876" in str(game) else 0
+        def read(address, size):
+            p = next(p for p in segments if p["type"] in (1, 0x61000010) and
+                     p["vaddr"] <= address < p["vaddr"] + p["filesz"])
+            off = p["offset"] + address - p["vaddr"]
+            return elf[off:off + size]
+        self.assertEqual(struct.unpack("<QQ", read(0x2589af8, 16)),
+                         (0xe90fc0 - shift, 0xe91340 - shift))
+        for address, code in [
+            (0x6d48c0, "55 48 89 e5 48 8b bf 48 06 00 00"),
+            (0x6e4eb0, "55 48 89 e5 41 57 41 56 53 48 83 ec 18"),
+            (0x7634e0, "55 48 89 e5 41 57 41 56 41 54 53 49 89 ff"),
+            (0xe92c10 - shift, "55 48 89 e5 41 56 53 49 89 f6 48 89 fb"),
+            (0xe92c70 - shift, "c5 fa 7f 40 18"),
+            (0xf09bc9 - shift, "be 02 00 00 00"),
+            (0xf09e5e - shift, "48 8b 7b 20 49 8b 36"),
+            (0xba3320, "f6 47 17 10 74 1c 8b 47 18 0f b6 4f 16 c1 e8 0e "
+                         "48 c1 e1 04 83 e0 3c 48 01 c8 48 01 f8 74 03 80 08 03 "
+                         "80 4f 25 02 0f b7 47 30 48 03 47 28 74 0e "
+                         "8b be 10 03 00 00 48 89 c6 e9 a2 6c cd ff c3"),
+        ]:
+            expected = bytes.fromhex(code)
+            self.assertEqual(read(address, len(expected)), expected, hex(address))
+        call = 0xf09e65 - shift
+        self.assertEqual(read(call, 1), b"\xe8")
+        self.assertEqual(call + 5 + struct.unpack("<i", read(call + 1, 4))[0], 0xba3320)
+
     def test_native_hook_contracts(self):
         game = Path(os.environ["BB_TEST_GAME"])
         elf, _, segments, *_ = parse_self((game / "eboot.bin").read_bytes())
@@ -27,6 +58,12 @@ class NativeItemless(unittest.TestCase):
             (0xeeba80,"55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 50"),
             (0xeebab8,"83 78 18 00 8d 51 ff 75 2f"),
             (0xeebad0,"80 78 20 00 75 2e"), # spawnRegardlessOfGamemode override
+            (0xf31b80,"55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 58"),
+            (0xf31bdd,"8b 43 18"), # waypoint position.z
+            (0xf31bf8,"48 8b 43 10"), # waypoint position.xy
+            (0xf31c00,"8b 43 24"), # waypoint Euler.z
+            (0xf31c0a,"48 8b 43 1c"), # waypoint Euler.xy
+            (0xf31f26,"49 8b 07 48 8d 75 c0 48 8d 55 b0 4c 89 ff ff 90 20 02 00 00"),
         ]:
             expected = bytes.fromhex(code)
             self.assertEqual(read(address - shift, len(expected)), expected, hex(address))

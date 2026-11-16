@@ -822,12 +822,11 @@ vk::ImageView CtrFsr3::Upscale(VideoCore::ImageId source_id, vk::Format view_for
     if (BbSettings::Get().temporal == BbSettings::TemporalDlss && !dlss_failed) {
         auto* dlss = DlssNgx::Get();
         if (dlss && dlss->IsAvailable()) {
-            // The model: NVIDIA's transformer presets (the DLL's defaults, K/L/M by mode) or the
-            // CNN one (preset E, deprecated by NVIDIA but still in DLSS 310). BB_DLSS_PRESET
-            // picks any preset number.
+            // The model: NVIDIA's transformer presets (the DLL's defaults, K/L/M by mode), K in
+            // every mode, or the CNN one (preset E, deprecated by NVIDIA but still in DLSS 310).
+            // BB_DLSS_PRESET picks any preset number.
             static const char* preset_env = std::getenv("BB_DLSS_PRESET");
-            const u32 preset = preset_env ? u32(std::atoi(preset_env))
-                               : BbSettings::Get().dlss_model == 1 ? 5u : 0u;
+            const u32 preset = preset_env ? u32(std::atoi(preset_env)) : BbSettings::DlssModelPreset();
             const DlssNgx::FeatureDesc desc{w, h, out.width, out.height,
                                             DlssNgx::QualityForScale(float(out.width) / float(w)),
                                             false, preset, false};

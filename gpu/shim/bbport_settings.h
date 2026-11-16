@@ -95,8 +95,11 @@ inline constexpr const char* DlssQualityNames[] = {"auto", "dlaa", "quality", "b
 inline constexpr int DlssQualityCount = 6;
 /// bbport.ini dlss_output: the picture DLSS outputs with a quality mode (1080p or 4K).
 inline constexpr int DlssOutputHeights[] = {1080, 2160};
-/// bbport.ini dlss_model: transformer (NVIDIA's default presets K/L/M) or cnn (preset E).
-inline constexpr const char* DlssModelNames[] = {"transformer", "cnn"};
+/// bbport.ini dlss_model: transformer (the DLL's default preset per mode: K for DLAA, Quality and
+/// Balanced, M for Performance, L for Ultra Performance), cnn (preset E) or transformer_k (preset K
+/// in every mode, lighter than M and L). The index is the saved value's: new names go at the end.
+inline constexpr const char* DlssModelNames[] = {"transformer", "cnn", "transformer_k"};
+inline constexpr int DlssModelCount = 3;
 
 struct Values {
     std::array<std::array<char, 64>, ControllerPorts> ports{}; ///< guarded by PortsMutex()
@@ -267,6 +270,13 @@ void SetUltrawide(bool on);
 
 Values& Get();
 std::mutex& PortsMutex();
+/// The NVSDK_NGX_DLSS_Hint_Render_Preset of dlss_model (nvsdk_ngx_defs.h): 0 the DLL's default
+/// for the mode, 5 E (CNN), 11 K. BB_DLSS_PRESET, where the renderers read it, goes first.
+inline unsigned DlssModelPreset() {
+    static constexpr unsigned presets[DlssModelCount] = {0u, 5u, 11u};
+    const int model = Get().dlss_model;
+    return presets[model >= 0 && model < DlssModelCount ? model : 0];
+}
 /// Localized overlay text; the Language selector itself stays in English.
 const char* MenuText(const char* english, const char* russian);
 /// v0.4: the Spanish of an English menu text (bbport_menu_es.cpp); the English one if missing.
