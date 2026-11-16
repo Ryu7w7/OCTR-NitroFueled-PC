@@ -109,4 +109,7 @@ uint8_t *rr_pack_frame(uint8_t *out, const struct rr_frame *f, const struct rr_f
 int rr_unpack_frame(struct rr_frame *f, const struct rr_frame *p1, const struct rr_frame *p2,
                     const uint8_t **in, const uint8_t *end, int version);
 
+/* The level loaded now (its zone's name), 0 none (runtime_replay.c). */
+const char *rr_current_level(void);
+
 #endif

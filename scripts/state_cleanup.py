@@ -67,8 +67,12 @@ def sessions(overlays, current, log=print):
     overlays = Path(overlays)
     if not overlays.is_dir():
         return 0
-    ready = [p for p in overlays.iterdir() if p.is_dir() and (p / 'ready.json').is_file() and p.name != Path(current).name]
+    from cache_cleanup import linked  # never into a link or junction
+    if linked(overlays):
+        return 0
+    ready = [p for p in overlays.iterdir() if p.is_dir() and not linked(p) and (p / 'ready.json').is_file()
+             and p.name != Path(current).name]
     ready.sort(key=lambda p: (p / 'ready.json').stat().st_mtime, reverse=True)
     stale = ready[KEEP_SESSIONS - 1:]
-    stale += [p for p in overlays.iterdir() if p.is_dir() and p.name.startswith('building-')]
+    stale += [p for p in overlays.iterdir() if p.is_dir() and not linked(p) and p.name.startswith('building-')]
     return remove(stale, 'Prepared sessions', log) if stale else 0

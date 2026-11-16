@@ -51,6 +51,7 @@ import button_prompts  # noqa: E402
 import season_art  # noqa: E402
 import signed_in_name  # noqa: E402
 import ctr_tv_logo  # noqa: E402
+import tacho_pack  # noqa: E402
 import track_names  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
@@ -1228,6 +1229,17 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"CTR TV logo: {error}; the game's own")
+        # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): its HUD, leaders list and main
+        # menu files by archive patch, and the Graphics tab's main menu made from the pack's.
+        # It has no off switch; a changed pack stops the launch (every player has the same rules).
+        try:
+            tacho_patches, tacho_env = startup_call('tacho_pack.prepare', tacho_pack.prepare, game, out, config, env, base_patches)
+            base_patches.update(tacho_patches)
+            env.update(tacho_env)
+        except tacho_pack.Modified as error:
+            fail(f'Pack Tacho: {error}')
+        except (OSError, ValueError, KeyError) as error:
+            say(f"Pack Tacho: {error}; the game's own files")
         # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE
         # (src/runtime_presence.c), and the tracks' own names go beside it (scripts/track_names.py).
         presence = Path(env.setdefault('BB_PRESENCE_FILE', str((out / 'presence' / 'presence.txt').resolve())))
@@ -1275,6 +1287,7 @@ def launch(args, restarted=False):
             except (OSError, ValueError, KeyError, TypeError) as error:
                 say(f"Item rules: {error}; the game's own odds")
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
+            env.pop('BB_NSANE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,
             # src/runtime_race_options.c); without them it keeps the native route guidance.
@@ -1305,6 +1318,7 @@ def launch(args, restarted=False):
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
+                        env['BB_NSANE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_mode.nsane_view(out / 'speed-mode')))
                         say(f'ITEMLESS: HUD prepared; native Time Trial track rules cover {track_count} tracks')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
@@ -1360,7 +1374,7 @@ def launch(args, restarted=False):
                     f'{app_version}, so the game starts with Vulkan (shadPS4)')
             else:
                 shaders = native_shaders.shader_dir(data, title_id, app_version)
-                if not native_shaders.ready(shaders):
+                if not native_shaders.ready(shaders, game):
                     say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
                     # "@progress" lines: the launchers show a window with a progress bar meanwhile
                     last = [-1]
@@ -1371,7 +1385,7 @@ def launch(args, restarted=False):
                             emit(f'@progress native-shaders {percent} {stage}\n')
                     built = native_shaders.build(PORT, game, shaders, say, progress=progress)
                     emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
-                if native_shaders.ready(shaders):
+                if native_shaders.ready(shaders, game):
                     env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
                     say('Graphics engine: native Vulkan (experimental)')
                 else:

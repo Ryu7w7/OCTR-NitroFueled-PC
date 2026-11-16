@@ -133,8 +133,14 @@ server address can be changed there too, to play on your own RyuNET server.
 
 **Connection problems:** the game connects players directly to each other (UDP port 3074), as
 on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) cannot reach some
-other players. If a match keeps failing with the same people, enabling UPnP on your router or
-forwarding UDP 3074 to your PC helps.
+other players. Online startup skips automatic UPnP discovery so an unresponsive router cannot
+hold up the connection. NAT discovery, hole punching, and the port's tunnel remain active.
+Set `BB_UPNP_PORT` to an external UDP port (1024–9999) before launching if you want the game's
+UPnP router mapping instead. Manual port forwarding remains available too.
+
+Press Online once while the network starts; the request continues when the network is ready.
+Moving focus or pressing Back cancels that request. “Connected to servers” appears only after
+server login and native network startup both finish.
 
 **No donations:** this is a non-commercial fan project. It does not accept donations and sells
 nothing; online play is free and the same for everyone. You need your own copy of the game.
@@ -152,7 +158,9 @@ nothing; online play is free and the same for everyone. You need your own copy o
     you see trails.
 - With DLSS: *DLSS quality* (Auto follows the internal resolution; DLAA, Quality, Balanced,
   Performance and Ultra Performance render at NVIDIA's share of the *DLSS output*, 1080p or 4K,
-  after a restart) and *DLSS model* (Transformer, recommended, or the lighter CNN).
+  after a restart) and *DLSS model*: Transformer (recommended; NVIDIA's default preset per mode, K
+  for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance), Transformer K
+  (preset K in every mode, lighter than M and L) or the lighter CNN (preset E).
 
 **Game language** (launcher: Settings > Console): the languages this build (CUSA13795, the
 Americas) has: English, Latin American Spanish, French and Brazilian Portuguese. Spain's Spanish is

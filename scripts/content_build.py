@@ -103,12 +103,12 @@ RACE_DOMAIN = 'packages/generated/UI/domains/JuiceDomain_Race_pkg.igz'
 
 
 def online_cups(game, blob):
-    """The Online menus' package with the private rooms' CUP menu files in it, as
-    scripts/online_mode.py gives update2.pak's copy: this archive's copy is the one the game
-    loads, and without them that menu is empty."""
+    """The Online menus' package as scripts/online_mode.py gives update2.pak's copy (the private
+    rooms' CUP menu files, the ranked and Hall of Fame assets): this archive's copy is the one the
+    game loads, and without them those menus are empty."""
     import online_mode
     found = newest(game, [START_SCREEN, RACE_DOMAIN])
-    return online_mode.cup_package(game, blob, found[START_SCREEN][1], None, found[RACE_DOMAIN][1])
+    return online_mode.online_menus_package(game, blob, found[START_SCREEN][1], None, found[RACE_DOMAIN][1])
 
 
 def build(game, store, staging, packages, operations, settings, log=print, own_page=True, online=False):

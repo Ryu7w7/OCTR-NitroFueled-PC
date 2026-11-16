@@ -21,7 +21,7 @@
 #include <string.h>
 #include <time.h>
 
-extern void (*runtime_online_mode_chosen)(int speed, int private_room); /* runtime_online_mode.c */
+extern void (*runtime_online_mode_chosen)(int mode, int private_room); /* runtime_online_mode.c */
 extern void runtime_speed_mode_set(int enabled);                          /* runtime_file.c */
 
 static const char session_prefix[] = "cusa13795-session-";
@@ -46,7 +46,7 @@ static void start(void *(*run)(void *), void *arg) {
 
 static pthread_mutex_t publish_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned publish_generation;
-static int publish_running, publish_speed;
+static int publish_running, publish_speed; /* the room mode: 0 normal, 1 speed (Itemless), 2 nsane */
 static int publish_ok;
 
 static void *publish(void *arg) {
@@ -61,11 +61,12 @@ static void *publish(void *arg) {
         if (me && nickname_ok(me)) {
             runtime_public_itemless_announce();
             char target[128], body[128];
-            snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me, speed ? "speed" : "normal");
+            snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me,
+                     speed == 1 ? "speed" : speed == 2 ? "nsane" : "normal");
             const int status = runtime_ryunet_request("POST", target, body, sizeof body);
             accepted = status == 200 && !strcmp(body, "status ok\n");
             printf("Native Online mode: this private room is %s for the players who join (RyuNET %d)\n",
-                   speed ? "ITEMLESS" : "NORMAL", status);
+                   speed == 1 ? "ITEMLESS" : speed == 2 ? "N.SANE" : "NORMAL", status);
             fflush(stdout);
         }
         pthread_mutex_lock(&publish_lock);
@@ -95,11 +96,11 @@ static void publish_mode(int speed) {
 }
 
 /* Installed before main: the selector tells this file when the player picks a mode. */
-static void chosen(int speed, int private_room) {
+static void chosen(int mode, int private_room) {
     runtime_room_mode_left(); /* our own choice now, not another host's room */
     /* Outside a private room it is Normal: the players of our party (the private room's guests,
      * taken along to a public search) follow it too. */
-    publish_mode(private_room && speed);
+    publish_mode(private_room ? mode : 0);
 }
 __attribute__((constructor)) static void install(void) { runtime_online_mode_chosen = chosen; }
 
@@ -108,7 +109,8 @@ __attribute__((constructor)) static void install(void) { runtime_online_mode_cho
  * replaces an old choice left on the server. */
 void runtime_room_mode_hosting(void) {
     runtime_room_mode_left();
-    publish_mode(runtime_online_mode_private_speed() && runtime_online_mode_in_private());
+    publish_mode(!runtime_online_mode_in_private() ? 0 : runtime_online_mode_private_speed() ? 1 :
+                 runtime_online_mode_private_nsane() ? 2 : 0);
 }
 
 /* The joining player follows the host's room while in it: the host can pick Normal or Speed again
@@ -137,12 +139,17 @@ int runtime_room_mode_ready(void) {
     return ready;
 }
 
+/* This player's room mode as RyuNET names it: 0 normal, 1 speed (Itemless), 2 nsane. */
+static int current_mode(void) {
+    return runtime_speed_mode_enabled() ? 1 : runtime_nsane_mode_enabled() ? 2 : 0;
+}
+
 static int read_mode(const char *host) {
     char target[128], body[128] = "", word[16], extra;
     snprintf(target, sizeof target, "/ryunet/room-mode?host=%s&format=text", host);
     const int status = runtime_ryunet_request("GET", target, body, sizeof body);
     if (status != 200 || sscanf(body, "mode %15s %c", word, &extra) != 1) return -1;
-    return !strcmp(word, "speed") ? 1 : !strcmp(word, "normal") ? 0 : -1;
+    return !strcmp(word, "speed") ? 1 : !strcmp(word, "nsane") ? 2 : !strcmp(word, "normal") ? 0 : -1;
 }
 
 typedef struct { char host[24]; unsigned generation, publication, epoch; int guest; } VerifyMode;
@@ -171,7 +178,7 @@ int runtime_room_mode_begin_race(void) {
         pthread_mutex_lock(&publish_lock);
         int valid=verification.generation==follow_generation && verify_speed>=0 &&
             (verification.guest || (verification.publication==publish_generation && publish_ok &&
-                                    verify_speed==runtime_speed_mode_enabled()));
+                                    verify_speed==current_mode()));
         pthread_mutex_unlock(&publish_lock);
         if (valid) {
             race_frozen=1;
@@ -195,6 +202,13 @@ int runtime_room_mode_begin_race(void) {
     return result;
 }
 
+int runtime_room_mode_race_frozen(void) {
+    pthread_mutex_lock(&follow_lock);
+    int frozen = race_frozen;
+    pthread_mutex_unlock(&follow_lock);
+    return frozen;
+}
+
 void runtime_room_mode_end_race(void) {
     pthread_mutex_lock(&follow_lock);
     race_frozen = 0; verify_done=0; ++verify_epoch;
@@ -212,7 +226,7 @@ static int following(const Follow *f) {
 
 static void follow_update(const Follow *f, int speed) {
     pthread_mutex_lock(&follow_lock);
-    if (speed >= 0 && following(f) && !race_frozen && speed != runtime_speed_mode_enabled())
+    if (speed >= 0 && following(f) && !race_frozen && speed != current_mode())
         runtime_online_mode_adopt(speed);
     pthread_mutex_unlock(&follow_lock);
 }
@@ -249,6 +263,7 @@ void runtime_room_mode_joined(const char *session_id) {
     memcpy(followed_host, f->host, sizeof followed_host);
     race_frozen = 0;
     pthread_mutex_unlock(&follow_lock);
+    runtime_online_mode_request_leave(1);
     start(follow, f);
 }
 
@@ -256,12 +271,13 @@ void runtime_room_mode_joined(const char *session_id) {
 void runtime_room_mode_left(void) {
     pthread_mutex_lock(&follow_lock);
     followed_host[0] = 0;
-    race_frozen = 0;
+    race_frozen = 0; verify_done = 0;
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
+    runtime_nsane_mode_set(runtime_online_mode_private_nsane());
     pthread_mutex_unlock(&follow_lock);
     runtime_race_options_leave_room();
-    runtime_online_mode_leave_cup();
+    runtime_online_mode_request_leave(0);
 }
 
 void runtime_room_mode_host_name(char out[24]) {

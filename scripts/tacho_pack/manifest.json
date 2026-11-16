@@ -1,0 +1,100 @@
+{
+ "format": 1,
+ "name": "Pack Tacho",
+ "version": "1.2.8",
+ "author": "Tacho",
+ "description": "Paquete: Lista 8 puestos compacta + nombre + wumpas + item (Hud Power Charged) 0.53.0 (con No = HUD original) + Items mejorados 1.5.1 + Reloj de N. Tropy por posicion 0.3.0 + Sin items en los portales 0.19.0 + Barra de reservas 1.0.1. Minimapa un poco mas arriba (no tapa el velocimetro). Sin el logo Power Charged del menu principal (el menu es el del juego).",
+ "operations": [
+  {
+   "kind": "archive_asset",
+   "archive": "update.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 36,
+   "original_sha256": "18c3401278639ef239e0109fe8c5be6180e967d70c05bd93cd5bf4074a8c9906",
+   "patched_sha256": "13ba0c73edf93b2c4e865e5e4df6405986fbd9bfa0440aa55731b2c23923ad92",
+   "payload": "payloads/13ba0c73edf93b2c.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 6,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flareday.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 7,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flarenight.pak",
+   "asset": "ui/Octane_race_Leaders.igz",
+   "index": 7,
+   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+   "payload": "payloads/bc2e431dcd2ff509.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "update2.pak",
+   "asset": "ui/Octane_Racer_HUD.igz",
+   "index": 10067,
+   "original_sha256": "0018619b6ccf5b40015bd1b4caa24516028d487ce05b27a6ecc1b9c57b71be2f",
+   "patched_sha256": "716be7d86455c297b4dceff51e6a5e8db9c9d462bcd8b3a898285f727c4fc5a2",
+   "payload": "payloads/716be7d86455c297.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 283,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flareday.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 287,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  },
+  {
+   "kind": "archive_asset",
+   "archive": "juicedomain_race_flarenight.pak",
+   "asset": "ui/Octane_Minimap.igz",
+   "index": 288,
+   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+   "payload": "payloads/617bebb344d18b24.igz"
+  }
+ ],
+ "menu_operations": [
+  {
+   "kind": "archive_asset",
+   "archive": "update2.pak",
+   "asset": "ui/Octane_Options_Menu_Page.igz",
+   "index": 1582,
+   "original_sha256": "a3f73faeb9311f80c24436bfd604204125b4e429653e3927bfc5adc98cdbf4b0",
+   "patched_sha256": "db9174f804219cf3e609cc47ec3deb756358279c56fb9f97d348b40a66422a93",
+   "payload": "payloads/db9174f804219cf3.igz"
+  }
+ ],
+ "patches": [
+  "RaceLeaders_hud.xml",
+  "HudOriginal.xml",
+  "ItemsMejorados.xml",
+  "NtropyPosicion.xml",
+  "SinItemsPortales.xml",
+  "BarraReservas.xml"
+ ]
+}

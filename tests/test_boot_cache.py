@@ -202,7 +202,7 @@ class BootCacheTests(unittest.TestCase):
                 stream.write(b'new dump wrapper')
             target = self.ensure()
         managed = [p for p in target.parent.iterdir() if boot_cache.KEY.fullmatch(p.name)]
-        self.assertEqual(len(managed), 2)
+        self.assertEqual(len(managed), 1)
         self.assertTrue(eu.is_dir())
         self.assertEqual((unmanaged / 'keep.txt').read_text(), 'user file')
 

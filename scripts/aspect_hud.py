@@ -15,6 +15,7 @@ import math
 import struct
 import zlib
 from pathlib import Path
+from cache_cleanup import prune
 
 import archive_patch
 from archive_reader import Archive
@@ -179,6 +180,7 @@ def prepare(game, out, base):
             raise ValueError('Unexpected HUD cache entry')
         made = {guest: target / name for guest, name in cached['patches'].items()}
         if cached['source'] == stamp and made and all(path.is_file() for path in made.values()):
+            prune(target, 'stamp.json', r'[0-9a-f]{16}')
             return made
     except (OSError, KeyError, TypeError, ValueError):
         pass
@@ -212,4 +214,5 @@ def prepare(game, out, base):
         archive_patch.write_entries_patch(made[guest], sources[name], guest, entries, base.get(guest))
     (target / 'stamp.json').write_text(json.dumps(
         {'source': stamp, 'patches': {guest: path.name for guest, path in made.items()}}, sort_keys=True))
+    prune(target, 'stamp.json', r'[0-9a-f]{16}')
     return made

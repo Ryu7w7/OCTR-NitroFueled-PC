@@ -229,7 +229,10 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
         'content':[[m['id'],m['version'],content_package.manifest_digest(m)] for m,_ in content]+([content_package.selection(content_root)['page'],online] if content else []),
-        'content_code':{n:sha(Path(__file__).with_name(n)) for n in ('content_build.py','content_package.py','track_registry.py','igz_merge.py','graphics_tab.py')} if content else None,
+        'content_code':{n:sha(Path(__file__).with_name(n)) for n in ('content_build.py','content_package.py','track_registry.py','igz_merge.py','graphics_tab.py','online_mode.py')} if content else None,
+        'generators':{name:sha(Path(__file__).with_name(name)) for name in (
+            'mod_content.py','mod_components.py','mod_format.py','mod_overlays.py',
+            'nitro_components.py','nitro_format.py','mod_file_paths.py')},
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')},
         'coexist':[frozen_before,{n:sha(Path(__file__).with_name(n)) for n in ('builtin_coexist.py','igz_rebase.py','igz_merge.py')}] if builtins else None}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]

@@ -436,11 +436,13 @@ class WholeUpdate3Tests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'BB_TEST_GAME: a USA 1.21 game folder')
     def test_online_menus_keep_the_private_cup_menu(self):
         # update3.pak's Online menus package is the one the game loads: with Online on it keeps
-        # the private rooms' CUP menu files online_mode.py adds to update2.pak's (else that menu is empty)
+        # the files online_mode.py adds to update2.pak's: the private rooms' CUP menu and the ranked
+        # menus' assets (else those menus are empty)
         import online_mode
         from igz_file import Igz
         game = os.environ['BB_TEST_GAME']
         blob = cb.newest(game, [cb.ONLINE_MENUS])[cb.ONLINE_MENUS][1]
         rows = [path for _, path in online_mode.package_rows(Igz(cb.online_cups(game, blob)))[1]]
         self.assertIn('ui/octane_cupselect.igz', rows)
+        self.assertIn(online_mode.RANKED_BACKGROUND_TEXTURE.lower(), rows)  # and the ranked menus' assets
         self.assertNotIn('ui/octane_cupselect.igz', [p for _, p in online_mode.package_rows(Igz(blob))[1]])

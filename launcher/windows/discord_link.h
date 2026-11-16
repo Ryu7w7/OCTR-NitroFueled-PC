@@ -27,6 +27,12 @@ struct Result {
 Result Authorize(const std::string& client_id, int timeout_seconds, bool spanish,
                  const std::function<void(const std::string& url)>& open_url = {});
 
+/// "Sign in through Steam" (OpenID 2.0) the same way: Steam's sign-in page in the browser, back to
+/// http://127.0.0.1:<port>/steam. On success, code holds the raw query of that return address
+/// (Steam's signed openid.* fields) for the server to verify with Steam
+/// (ryunet-demonware-ctr/server/steam_link.go); the launcher never sees the password.
+Result SteamSignIn(int timeout_seconds, bool spanish, const std::function<void(const std::string& url)>& open_url = {});
+
 /// application/x-www-form-urlencoded value.
 std::string FormEncode(const std::string& value);
 

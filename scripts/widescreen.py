@@ -32,6 +32,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from cache_cleanup import prune
 from struct import error as struct_error
 
 import archive_patch
@@ -146,6 +147,7 @@ def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', 
     made = {f'/app0/archives/{name}': target / f'{name}.bbpatch' for name in groups}
     try:
         if json.loads((target / 'stamp.json').read_text()) == stamp and all(p.is_file() for p in made.values()):
+            prune(target, 'stamp.json', r'[0-9a-f]{16}', say)
             return made
     except (OSError, ValueError):
         pass
@@ -180,6 +182,7 @@ def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', 
         guest = f'/app0/archives/{name}'
         archive_patch.write_entries_patch(made[guest], archives / name, guest, entries, base.get(guest))
     (target / 'stamp.json').write_text(json.dumps(stamp))
+    prune(target, 'stamp.json', r'[0-9a-f]{16}', say)
     return made
 
 
@@ -240,6 +243,7 @@ def graphics_overlay(game, out, env, folder, operations):
             os.replace(temp, target)
         finally:
             temp.unlink(missing_ok=True)
+    prune(target.parent, 'update3.pak', r'[0-9a-f]{16}', say)
     return {'BB_GRAPHICS_TAB_ARCHIVE': str(target.resolve())}
 
 

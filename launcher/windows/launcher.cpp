@@ -998,6 +998,9 @@ struct NickCheck {
         long long ban_until = 0;      // unix time; 0: permanent
         bool key_switched = false;    // it was another installation's on this PC: its key is used now
         bool account_required = false;  // the server plays only accounts (RYUNET_REQUIRE_ACCOUNT)
+        bool steam_link = false;        // the server can link Steam accounts
+        std::string steam;              // the linked Steam account's name (only for our own nickname)
+        long long account_deadline = 0; // unix time: new nicknames need an account, unlinked ones play until then
     };
     std::mutex mutex;
     std::map<std::string, Result> results;  // "server|nick" -> answer
@@ -1577,6 +1580,10 @@ NickCheck::Result AskNickStatus(const std::string& server, const std::string& ni
     r.linked = JsonBool(body, "linked");
     r.link_available = JsonBool(body, "discord_link");
     r.account_required = JsonBool(body, "account_required");
+    r.steam_link = JsonBool(body, "steam_link");
+    r.steam = JsonText(body, "steam");
+    if (const auto at = body.find("\"account_deadline\":"); at != std::string::npos)
+        r.account_deadline = std::strtoll(body.c_str() + at + 19, nullptr, 10);
     r.discord = JsonField(body, "discord");
     r.banned = JsonText(body, "banned");
     r.ban_kind = JsonField(body, "ban_kind");
@@ -1629,6 +1636,25 @@ bool DiscordLinkAvailable() {
         g_nick_check.in_flight.clear();
     }).detach();
     return false;
+}
+
+/// Whether the server can link Steam accounts (the same background answer as Discord's).
+bool SteamLinkAvailable() {
+    DiscordLinkAvailable();  // asks the server once when nothing is known yet
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    std::scoped_lock lock{g_nick_check.mutex};
+    const auto it = g_nick_check.results.find(server + "|*");
+    return it != g_nick_check.results.end() && it->second.steam_link;
+}
+
+/// "16/12/2026": the day accounts become required (account_deadline, UTC).
+std::string DeadlineDate(long long unix_time) {
+    const time_t t = time_t(unix_time);
+    tm day{};
+    gmtime_s(&day, &t);
+    char text[16];
+    std::snprintf(text, sizeof text, "%02d/%02d/%04d", day.tm_mday, day.tm_mon + 1, day.tm_year + 1900);
+    return text;
 }
 
 /// The last answer about the current nickname (status "" when unknown), without asking.
@@ -2034,6 +2060,7 @@ void StartGame() {
         if (!map.empty()) AddLog("Online through Epic Online Services: this network does not reach the server directly");
     }
     SetEnv(L"BB_GAME_DIR", PathText(a.game_dir));
+    SetEnv(L"BB_ART_DIR", PathText(a.root / L"art"));  // Tacho: letra y fondo del menu del juego (bbport_overlay.cpp)
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
@@ -3884,12 +3911,16 @@ void SettingsTab() {
             if (GameChoiceCombo(T("Salida de DLSS", "DLSS output"), "dlss_output", kOutput, "1080", 16.0f)) SaveGameIni();
         }
         static constexpr Choice kModel[] = {{"Transformer (recomendado)", "Transformer (recommended)", "transformer"},
+                                            {"Transformer K (más ligero)", "Transformer K (lighter)", "transformer_k"},
                                             {"CNN", "CNN", "cnn"}};
         if (GameChoiceCombo(T("Modelo de DLSS", "DLSS model"), "dlss_model", kModel, "transformer", 16.0f)) SaveGameIni();
-        HelpMarker(T("Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. CNN: el "
-                     "modelo anterior (preset E), más ligero; NVIDIA lo marca como obsoleto.",
-                     "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. CNN: the "
-                     "older model (preset E), lighter; NVIDIA marks it deprecated."));
+        HelpMarker(T("Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. "
+                     "Transformer K: el preset K en todos los modos, más ligero que los presets por defecto de "
+                     "Rendimiento (M) y Ultra rendimiento (L). CNN: el modelo anterior (preset E), más ligero; NVIDIA "
+                     "lo marca como obsoleto.",
+                     "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. "
+                     "Transformer K: preset K in every mode, lighter than the default presets of Performance (M) and "
+                     "Ultra Performance (L). CNN: the older model (preset E), lighter; NVIDIA marks it deprecated."));
     }
     if (temporal == "fsr3" || temporal == "fsr4") {
         float sharp = float(std::atof(a.game.Get("fsr3_sharpness", "0.30").c_str()));
@@ -4086,15 +4117,95 @@ struct DiscordLinkState {
 DiscordLinkState g_discord_link;
 
 /// Link the current nickname, unlink it, or recover the Discord account's own nickname (for a
-/// reinstalled launcher that does not know it any more).
-enum class DiscordLinkMode { Link, Unlink, Recover };
+/// reinstalled launcher that does not know it any more). Enter (Steam): one click to play: the
+/// Steam account's own nickname, or a new one made from the Steam name.
+enum class DiscordLinkMode { Link, Unlink, Recover, Enter };
 
-void StartDiscordLink(DiscordLinkMode mode) {
+fs::path FindSteamPath();
+
+/// The Steam client is running (it keeps its process ID here while it runs).
+bool SteamRunning() {
+    DWORD pid = 0, size = sizeof pid;
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", L"pid", RRF_RT_REG_DWORD, nullptr,
+                     &pid, &size) != ERROR_SUCCESS || !pid)
+        return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess(process, &code) && code == STILL_ACTIVE;
+    CloseHandle(process);
+    return alive;
+}
+
+/// The public name (PersonaName) of the Steam account last signed in on this PC, from Steam's own
+/// config\loginusers.vdf; "" when unknown. Only that public name is read, never the login name.
+std::string SteamPersonaName() {
+    const fs::path steam = FindSteamPath();
+    if (steam.empty()) return {};
+    std::ifstream in(steam / "config" / "loginusers.vdf", std::ios::binary);
+    if (!in) return {};
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // "<steamid>" { ... "PersonaName" "x" ... "MostRecent" "1" ... "timestamp" "n" }: the most
+    // recent account, or the one signed in last.
+    std::string best;
+    long long best_time = -1;
+    bool best_recent = false;
+    size_t at = 0;
+    const auto value = [&](size_t from, size_t to, const char* key) {
+        const std::string quoted = std::string("\"") + key + "\"";
+        const size_t k = text.find(quoted, from);
+        if (k == std::string::npos || k > to) return std::string();
+        const size_t open = text.find('"', k + quoted.size());
+        const size_t close = open == std::string::npos ? open : text.find('"', open + 1);
+        if (close == std::string::npos || close > to) return std::string();
+        return text.substr(open + 1, close - open - 1);
+    };
+    while ((at = text.find('{', at + 1)) != std::string::npos) {
+        const size_t end = text.find('}', at);
+        if (end == std::string::npos) break;
+        const std::string name = value(at, end, "PersonaName");
+        if (!name.empty()) {
+            const bool recent = value(at, end, "MostRecent") == "1";
+            const long long when = std::atoll(value(at, end, "timestamp").c_str());
+            if ((recent && !best_recent) || (recent == best_recent && when > best_time)) {
+                best = name;
+                best_time = when;
+                best_recent = recent;
+            }
+        }
+        at = end;
+    }
+    return best;
+}
+
+/// A nickname the server takes (3 to 16 of A-Z a-z 0-9 _ -) made from a Steam name: other
+/// characters become "_" (accented letters are dropped), runs of "_" are one.
+std::string NickFromSteamName(const std::string& name) {
+    std::string nick;
+    for (const unsigned char c : name) {
+        if (std::isalnum(c) && c < 0x80) nick += char(c);
+        else if (c == '-' || c == '_') nick += char(c);
+        else if (c < 0x80 && !nick.empty() && nick.back() != '_') nick += '_';
+    }
+    while (!nick.empty() && nick.back() == '_') nick.pop_back();
+    while (!nick.empty() && nick.front() == '_') nick.erase(nick.begin());
+    if (nick.size() > 16) nick.resize(16);
+    while (nick.size() < 3) nick += "CTR";
+    if (nick.size() > 16) nick.resize(16);
+    return nick;
+}
+
+void StartDiscordLink(DiscordLinkMode mode, bool steam = false) {
     const bool unlink = mode == DiscordLinkMode::Unlink;
     App& a = g_app;
     const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
     const std::string nick = mode == DiscordLinkMode::Recover ? std::string() : CurrentNick();
     const std::string app_id = DiscordAppId();
+    // Enter with Steam: the nickname in the field if it is a usable one, else one made from the
+    // Steam name of this PC (only its public name), checked free on the server before signing in.
+    const bool enter = mode == DiscordLinkMode::Enter;
+    const std::string typed = enter && !NickProblem(nick) ? nick : std::string();
+    const std::string persona = enter ? SteamPersonaName() : std::string();
     {
         std::scoped_lock lock{g_discord_link.mutex};
         if (g_discord_link.busy) return;
@@ -4103,77 +4214,123 @@ void StartDiscordLink(DiscordLinkMode mode) {
         g_discord_link.message.clear();
         g_discord_link.other_nick.clear();
     }
-    std::thread([server, nick, app_id, unlink] {
+    std::thread([server, nick = std::string(nick), app_id, unlink, steam, enter, typed, persona]() mutable {
         std::string message, other, recovered;
         bool error = true;
+        const std::string who = steam ? "Steam" : "Discord";
+        if (enter) {
+            std::vector<std::string> candidates;
+            if (!typed.empty()) candidates.push_back(typed);
+            if (!persona.empty()) {
+                const std::string base = NickFromSteamName(persona);
+                candidates.push_back(base);
+                for (int i = 2; i <= 9; ++i) {
+                    const std::string suffix = "_" + std::to_string(i);
+                    candidates.push_back(base.substr(0, 16 - suffix.size()) + suffix);
+                }
+            }
+            nick.clear();  // none free: the account's own nickname only (recovery)
+            for (const std::string& candidate : candidates) {
+                const std::string status = AskNickStatus(server, candidate).status;
+                if (status == "free" || status == "yours") {
+                    nick = candidate;
+                    break;
+                }
+            }
+        }
         const auto form = [](const char* key, const std::string& value) {
             return std::string(key) + "=" + DiscordLink::FormEncode(value);
         };
         if (unlink) {
-            const std::string body = HttpRequest(server, L"POST", L"/ryunet/discord/unlink", form("nick", nick), 10000);
+            const std::string body = HttpRequest(server, L"POST", steam ? L"/ryunet/steam/unlink" : L"/ryunet/discord/unlink",
+                                                 form("nick", nick), 10000);
             if (JsonBool(body, "unlinked")) {
                 error = false;
-                message = T("Apodo desvinculado de Discord.", "Nickname unlinked from Discord.");
+                message = Format(T("Apodo desvinculado de %s.", "Nickname unlinked from %s."), who);
             } else {
                 message = T("No se pudo desvincular.", "Could not unlink.");
             }
         } else {
-            const DiscordLink::Result auth = DiscordLink::Authorize(app_id, 180, g_spanish);
+            // Steam's sign-in in the Steam client's own browser when it runs: already signed in there,
+            // one click. Otherwise the default browser, on steamcommunity.com as well.
+            const auto open_steam = [](const std::string& url) {
+                const std::wstring target = SteamRunning() ? L"steam://openurl/" + Widen(url) : Widen(url);
+                ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            };
+            const DiscordLink::Result auth = steam ? DiscordLink::SteamSignIn(180, g_spanish, open_steam)
+                                                   : DiscordLink::Authorize(app_id, 180, g_spanish);
             if (!auth.ok) {
-                message = auth.error == "denied"  ? T("Cancelaste la autorización en Discord.", "You cancelled the authorization in Discord.")
+                message = auth.error == "denied"  ? Format(T("Cancelaste la autorización en %s.", "You cancelled the authorization in %s."), who)
                           : auth.error == "busy"  ? T("Los puertos 53134 a 53136 están ocupados: cierra otros launchers abiertos.",
                                                       "Ports 53134 to 53136 are in use: close other open launchers.")
-                          : auth.error == "timeout" ? T("La autorización de Discord no llegó a tiempo (3 minutos).",
-                                                        "Discord's authorization did not arrive in time (3 minutes).")
-                                                    : T("No se pudo autorizar con Discord.", "Could not authorize with Discord.");
+                          : auth.error == "timeout" ? Format(T("La autorización de %s no llegó a tiempo (3 minutos).",
+                                                               "%s's authorization did not arrive in time (3 minutes)."), who)
+                                                    : Format(T("No se pudo autorizar con %s.", "Could not authorize with %s."), who);
             } else {
                 const std::string body =
-                    HttpRequest(server, L"POST", L"/ryunet/discord/link",
-                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000,
-                                true);
-                const std::string status = JsonField(body, "status"), account = JsonField(body, "discord");
-                if (status == "linked") {
+                    steam ? HttpRequest(server, L"POST", L"/ryunet/steam/link", form("nick", nick) + "&" + auth.code, 25000, true)
+                          : HttpRequest(server, L"POST", L"/ryunet/discord/link",
+                                        form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri),
+                                        25000, true);
+                const std::string status = JsonField(body, "status");
+                std::string account = steam ? JsonText(body, "steam") : JsonField(body, "discord");
+                // "Discord (alice)", "Steam (Ryu)", or just the platform when it gives no name.
+                account = account.empty() ? who : who + " (" + account + ")";
+                if (enter && (status == "linked" || status == "recovered" || status == "other_nick")) {
+                    // One click to play: the field gets the account's nickname (this installation
+                    // already got its key from the server).
                     error = false;
-                    message = Format(T("Listo: %s queda vinculado a tu cuenta de Discord %s. Si reinstalas o cambias de PC, "
-                                       "pulsa Recuperar con Discord.",
-                                       "Done: %s is linked to your Discord account %s. If you reinstall or change PC, "
-                                       "press Recover with Discord."),
+                    recovered = status == "other_nick" ? JsonField(body, "nick") : (nick.empty() ? JsonField(body, "nick") : nick);
+                    message = Format(T("Listo: juegas como %s con tu cuenta de %s.", "Done: you play as %s with your %s account."),
+                                     recovered, account);
+                } else if (status == "linked") {
+                    error = false;
+                    message = Format(T("Listo: %s queda vinculado a tu cuenta de %s. Si reinstalas o cambias de PC, "
+                                       "pulsa Recuperar con la misma cuenta.",
+                                       "Done: %s is linked to your %s account. If you reinstall or change PC, "
+                                       "press Recover with the same account."),
                                      nick, account);
                 } else if (status == "recovered") {
                     error = false;
                     recovered = nick.empty() ? JsonField(body, "nick") : nick;
-                    message = Format(T("Recuperado: %s vuelve a ser tuyo en esta instalación (Discord: %s).",
-                                       "Recovered: %s is yours again on this installation (Discord: %s)."),
+                    message = Format(T("Recuperado: %s vuelve a ser tuyo en esta instalación (%s).",
+                                       "Recovered: %s is yours again on this installation (%s)."),
                                      recovered, account);
                 } else if (status == "own_nick") {
                     error = false;
                     recovered = JsonField(body, "nick");
-                    message = Format(T("Esta instalación ya tenía el apodo %s, sin vincular a Discord. Ya está puesto: pulsa "
-                                       "Vincular con Discord para poder recuperarlo en cualquier PC.",
-                                       "This installation already had the nickname %s, not linked to Discord. It is filled "
-                                       "in: press Link with Discord to recover it on any PC."),
-                                     recovered);
+                    message = Format(T("Esta instalación ya tenía el apodo %s, sin vincular. Ya está puesto: pulsa "
+                                       "Vincular con %s para poder recuperarlo en cualquier PC.",
+                                       "This installation already had the nickname %s, not linked. It is filled "
+                                       "in: press Link with %s to recover it on any PC."),
+                                     recovered, who);
                 } else if (status == "no_nick") {
-                    message = Format(T("Tu cuenta de Discord %s no tiene ningún apodo vinculado en este servidor: escribe "
-                                       "uno y pulsa Vincular con Discord.",
-                                       "Your Discord account %s has no nickname linked on this server: type one and "
-                                       "press Link with Discord."),
+                    message = Format(T("Tu cuenta de %s no tiene ningún apodo vinculado en este servidor: escribe "
+                                       "uno y pulsa Vincular.",
+                                       "Your %s account has no nickname linked on this server: type one and "
+                                       "press Link."),
                                      account);
                 } else if (status == "other_nick") {
                     other = JsonField(body, "nick");
-                    message = Format(T("Tu cuenta de Discord ya tiene el apodo %s: cada cuenta tiene uno.",
-                                       "Your Discord account already has the nickname %s: one per account."),
-                                     other);
+                    message = Format(T("Tu cuenta de %s ya tiene el apodo %s: cada cuenta tiene uno.",
+                                       "Your %s account already has the nickname %s: one per account."),
+                                     who, other);
                 } else if (status == "taken") {
-                    message = T("Ese apodo es de otra persona o de otra cuenta de Discord.",
-                                "That nickname belongs to someone else or to another Discord account.");
+                    message = Format(T("Ese apodo es de otra persona o de otra cuenta de %s.",
+                                       "That nickname belongs to someone else or to another %s account."),
+                                     who);
+                } else if (status == "banned") {
+                    message = Format(T("Esa cuenta de %s pertenece a un jugador baneado.",
+                                       "That %s account belongs to a banned player."),
+                                     who);
                 } else if (status == "invalid" || status == "reserved") {
                     message = T("El servidor no aceptó la solicitud.", "The server did not accept the request.");
                 } else if (body.empty()) {
                     message = T("No se pudo contactar con el servidor.", "Could not reach the server.");
                 } else {
-                    message = T("El servidor no pudo confirmar la cuenta con Discord. Prueba otra vez.",
-                                "The server could not confirm the account with Discord. Try again.");
+                    message = Format(T("El servidor no pudo confirmar la cuenta con %s. Prueba otra vez.",
+                                       "The server could not confirm the account with %s. Try again."),
+                                     who);
                 }
             }
         }
@@ -4203,8 +4360,8 @@ void DiscordLinkStatusLines() {
         other = g_discord_link.other_nick;
     }
     if (busy) {
-        ImGui::TextColored(kGrey, "%s", T("Autoriza tu cuenta en la pestaña de Discord que se abrió en el navegador...",
-                                          "Authorize your account in the Discord tab that opened in the browser..."));
+        ImGui::TextColored(kGrey, "%s", T("Autoriza tu cuenta en la pestaña que se abrió en el navegador (Discord o Steam)...",
+                                          "Authorize your account in the tab that opened in the browser (Discord or Steam)..."));
         return;
     }
     if (message.empty()) return;
@@ -4224,20 +4381,24 @@ void DiscordLinkStatusLines() {
 
 /// With no usable nickname yet (a reinstall, another PC): recover the one linked to Discord.
 void DiscordRecoverOffer() {
-    if (!DiscordLinkAvailable()) return;
+    const bool discord = DiscordLinkAvailable(), steam = SteamLinkAvailable();
+    if (!discord && !steam) return;
     bool busy;
     {
         std::scoped_lock lock{g_discord_link.mutex};
         busy = g_discord_link.busy;
     }
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button(T("Recuperar mi apodo con Discord", "Recover my nickname with Discord")))
+    if (discord && ImGui::Button(T("Recuperar mi apodo con Discord", "Recover my nickname with Discord")))
         StartDiscordLink(DiscordLinkMode::Recover);
+    if (discord && steam) ImGui::SameLine();
+    if (steam && ImGui::Button(T("Entrar con Steam", "Log in with Steam")))
+        StartDiscordLink(DiscordLinkMode::Enter, true);
     ImGui::EndDisabled();
-    HelpMarker(T("¿Reinstalaste el juego o cambiaste de PC y tu apodo estaba vinculado a Discord? Autoriza la misma "
-                 "cuenta de Discord y el launcher pondrá tu apodo, aunque no lo recuerdes.",
-                 "Did you reinstall the game or change PC, and your nickname was linked to Discord? Authorize the "
-                 "same Discord account and the launcher fills in your nickname, even if you do not remember it."));
+    HelpMarker(T("¿Reinstalaste el juego o cambiaste de PC y tu apodo estaba vinculado a Discord o Steam? Inicia "
+                 "sesión con la misma cuenta y el launcher pondrá tu apodo, aunque no lo recuerdes.",
+                 "Did you reinstall the game or change PC, and your nickname was linked to Discord or Steam? Sign "
+                 "in with the same account and the launcher fills in your nickname, even if you do not remember it."));
     DiscordLinkStatusLines();
 }
 
@@ -4256,7 +4417,31 @@ void ApplyRecoveredNick() {
     SaveGameIni();
 }
 
-/// Under the nickname: its Discord account, and Link / Recover / Unlink.
+/// One linked account and its Unlink (a second press confirms).
+void LinkedAccountLine(bool steam, const std::string& name) {
+    const std::string who = steam ? "Steam" : "Discord";
+    ImGui::TextColored(kGreen, "%s", Format(T("Cuenta de %s: %s", "%s account: %s"), who, name.empty() ? who : name).c_str());
+    ImGui::SameLine();
+    static ULONGLONG unlink_armed[2] = {0, 0};
+    ULONGLONG& armed_at = unlink_armed[steam ? 1 : 0];
+    const bool armed = armed_at && GetTickCount64() - armed_at < 5000;
+    ImGui::PushID(steam ? "unlink_steam" : "unlink_discord");
+    if (ImGui::SmallButton(armed ? T("Pulsa otra vez para desvincular", "Press again to unlink") : T("Desvincular", "Unlink"))) {
+        if (armed) {
+            armed_at = 0;
+            StartDiscordLink(DiscordLinkMode::Unlink, steam);
+        } else {
+            armed_at = GetTickCount64();
+        }
+    }
+    ImGui::PopID();
+    if (!armed && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", Format(T("Deja de estar vinculado a %s: ya no recuperarás el apodo con esa cuenta si reinstalas.",
+                                         "Unlinks it from %s: you can no longer recover the nickname with that account if you reinstall."),
+                                       who).c_str());
+}
+
+/// Under the nickname: its Discord and Steam accounts, and Link / Recover / Unlink.
 void DiscordAccountSection() {
     if (NickProblem(CurrentNick())) {
         DiscordRecoverOffer();
@@ -4270,47 +4455,63 @@ void DiscordAccountSection() {
         busy = g_discord_link.busy;
         message = g_discord_link.message;
     }
-    if (!info.link_available && message.empty()) return;  // unknown yet, or this server cannot link
+    const bool discord = info.link_available, steam = info.steam_link;
+    if (!discord && !steam && message.empty()) return;  // unknown yet, or this server cannot link
     ImGui::BeginDisabled(busy);
+    const bool has_discord = !info.discord.empty(), has_steam = !info.steam.empty();
     if (info.status == "yours" && info.linked) {
-        ImGui::TextColored(kGreen, "%s", Format(T("Cuenta de Discord: %s", "Discord account: %s"), info.discord).c_str());
-        ImGui::SameLine();
-        // Unlinking frees the nickname field and stops Discord recovery: a second press confirms.
-        static ULONGLONG unlink_armed = 0;
-        const bool armed = unlink_armed && GetTickCount64() - unlink_armed < 5000;
-        if (ImGui::SmallButton(armed ? T("Pulsa otra vez para desvincular", "Press again to unlink") : T("Desvincular", "Unlink"))) {
-            if (armed) {
-                unlink_armed = 0;
-                StartDiscordLink(DiscordLinkMode::Unlink);
-            } else {
-                unlink_armed = GetTickCount64();
-            }
-        }
-        if (!armed && ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", T("Deja de estar vinculado: podrás cambiar el apodo, pero ya no lo recuperarás con Discord "
-                                      "si reinstalas.",
-                                      "Unlinks it: you can change the nickname, but can no longer recover it with Discord "
-                                      "if you reinstall."));
+        if (has_discord) LinkedAccountLine(false, info.discord);
+        if (has_steam) LinkedAccountLine(true, info.steam);
+        // The other platform too, so either one recovers the nickname.
+        if (discord && !has_discord && ImGui::SmallButton(T("Vincular también con Discord", "Also link with Discord")))
+            StartDiscordLink(DiscordLinkMode::Link);
+        if (steam && !has_steam && ImGui::SmallButton(T("Vincular también con Steam", "Also link with Steam")))
+            StartDiscordLink(DiscordLinkMode::Link, true);
     } else if (info.status == "yours" || info.status == "free") {
-        if (ImGui::Button(T("Vincular con Discord", "Link with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
+        // Accounts required or coming (RYUNET_ACCOUNT_DEADLINE): say what this nickname needs.
+        ImGui::PushTextWrapPos(0.0f);
+        if (info.status == "free" && (info.account_required || info.account_deadline))
+            ImGui::TextColored(kYellow, "%s", T("Para crear un apodo nuevo, vincúlalo con tu cuenta de Discord o de Steam.",
+                                                "To make a new nickname, link it with your Discord or Steam account."));
+        else if (info.status == "yours" && info.account_required)
+            ImGui::TextColored(kYellow, "%s", T("Para seguir jugando online, vincula este apodo con Discord o Steam.",
+                                                "To keep playing online, link this nickname with Discord or Steam."));
+        else if (info.status == "yours" && info.account_deadline)
+            ImGui::TextColored(kYellow, "%s",
+                               Format(T("Desde el %s solo se podrá jugar online con apodos vinculados a Discord o Steam. "
+                                        "Vincula el tuyo antes para no perder el acceso.",
+                                        "From %s only nicknames linked to Discord or Steam can play online. Link "
+                                        "yours before then to keep your access."),
+                                      DeadlineDate(info.account_deadline)).c_str());
+        ImGui::PopTextWrapPos();
+        if (discord && ImGui::Button(T("Vincular con Discord", "Link with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
+        if (discord && steam) ImGui::SameLine();
+        if (steam && ImGui::Button(T("Vincular con Steam", "Link with Steam"))) StartDiscordLink(DiscordLinkMode::Link, true);
+        HelpMarker(T("Tu apodo queda ligado a tu cuenta de Discord o de Steam: si reinstalas el juego o juegas en otro PC, "
+                     "lo recuperas iniciando sesión otra vez. Se abre la página oficial en el navegador; el launcher solo "
+                     "recibe el número de tu cuenta, nunca tu contraseña ni tus mensajes.",
+                     "Your nickname is tied to your Discord or Steam account: if you reinstall the game or play on "
+                     "another PC, you recover it by signing in again. The official page opens in the browser; the "
+                     "launcher only receives your account number, never your password or messages."));
         if (info.status == "free") {
             // A reinstall shows a free nickname the player just typed; theirs may be linked.
-            ImGui::SameLine();
-            if (ImGui::SmallButton(T("¿Ya tenías un apodo vinculado? Recupéralo", "Had a linked nickname already? Recover it")))
-                StartDiscordLink(DiscordLinkMode::Recover);
+            if (ImGui::SmallButton(T("¿Ya tenías un apodo vinculado? Recupéralo", "Had a linked nickname already? Recover it"))) {
+                if (discord) StartDiscordLink(DiscordLinkMode::Recover);
+                else StartDiscordLink(DiscordLinkMode::Recover, true);
+            }
+            if (discord && steam) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(T("Recuperar con Steam", "Recover with Steam"))) StartDiscordLink(DiscordLinkMode::Recover, true);
+            }
         }
-        HelpMarker(T("Tu apodo queda ligado a tu cuenta de Discord: si reinstalas el juego o juegas en otro PC, lo "
-                     "recuperas autorizando Discord otra vez. Se abre Discord en el navegador para que lo autorices; "
-                     "el launcher solo recibe tu identificador de Discord, nunca tu contraseña.",
-                     "Your nickname is tied to your Discord account: if you reinstall the game or play on another PC, "
-                     "you recover it by authorizing Discord again. Discord opens in the browser for you to authorize; "
-                     "the launcher only receives your Discord ID, never your password."));
     } else if (info.status == "taken" && info.linked) {
-        if (ImGui::Button(T("Recuperar con Discord", "Recover with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
-        HelpMarker(T("Si este apodo es tuyo, autoriza la misma cuenta de Discord con la que lo vinculaste y "
-                     "podrás usarlo en esta instalación.",
-                     "If this nickname is yours, authorize the same Discord account you linked it with and you can "
-                     "use it on this installation."));
+        if (discord && ImGui::Button(T("Recuperar con Discord", "Recover with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
+        if (discord && steam) ImGui::SameLine();
+        if (steam && ImGui::Button(T("Recuperar con Steam", "Recover with Steam"))) StartDiscordLink(DiscordLinkMode::Link, true);
+        HelpMarker(T("Si este apodo es tuyo, inicia sesión con la misma cuenta de Discord o Steam con la que lo "
+                     "vinculaste y podrás usarlo en esta instalación.",
+                     "If this nickname is yours, sign in with the same Discord or Steam account you linked it with "
+                     "and you can use it on this installation."));
     } else if (info.status == "taken") {
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(kGrey, "%s",
@@ -4714,6 +4915,16 @@ void AccountSection() {
                      "monedas, amigos, logros y partidas guardadas te siguen a cualquier PC.",
                      "Opens the server's site: you log in with Discord (or create your account) and authorize this PC. "
                      "Your nickname, coins, friends, trophies and saves follow you to any PC."));
+        if (SteamLinkAvailable()) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(discord_busy);
+            if (ImGui::Button(T("Entrar con Steam", "Log in with Steam"))) StartDiscordLink(DiscordLinkMode::Enter, true);
+            ImGui::EndDisabled();
+            HelpMarker(T("Un clic: se abre el inicio de sesión oficial de Steam (dentro de Steam si lo tienes abierto) y "
+                         "juegas con tu apodo; si aún no tienes uno, se crea con tu nombre de Steam.",
+                         "One click: Steam's official sign-in opens (inside Steam when it is running) and you play with "
+                         "your nickname; if you have none yet, one is made from your Steam name."));
+        }
         if (DiscordLinkAvailable()) {
             ImGui::SameLine();
             ImGui::BeginDisabled(discord_busy);
@@ -4723,6 +4934,17 @@ void AccountSection() {
                          "sin escribir nada (también tras reinstalar o en otro PC).",
                          "If your account is already linked to Discord: authorize it in the browser and this PC plays "
                          "with it, nothing to type (also after reinstalling or on another PC)."));
+        }
+        if (SteamLinkAvailable()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(kGrey, "%s",
+                               T("Seguro: es la página oficial de Steam. Nunca vemos tu contraseña, tu correo ni tus juegos; "
+                                 "solo tu número público de Steam (el de tu perfil) y tu nombre visible. No podemos entrar "
+                                 "en tu cuenta ni hacer nada con ella.",
+                                 "Safe: it is Steam's official page. We never see your password, email or games; only your "
+                                 "public Steam number (the one on your profile) and your display name. We cannot get into "
+                                 "your account or do anything with it."));
+            ImGui::PopTextWrapPos();
         }
         DiscordLinkStatusLines();
 
@@ -4859,11 +5081,12 @@ void OnlineTab() {
         AccountSection();
         // Without an account: a nickname typed here, which Link with Discord turns into one (the
         // way in when the site does not open on this network).
-        const bool required = NickInfo().account_required;
+        const NickCheck::Result policy = NickInfo();
+        const bool required = policy.account_required || policy.account_deadline;
         if (SignedIn()) {
             if (a.game.Flag("online", true)) DiscordAccountSection();
-        } else if (ImGui::TreeNode(required ? T("Crear la cuenta desde aquí: elige un apodo y vincúlalo con Discord",
-                                                "Create the account from here: pick a nickname and link it with Discord")
+        } else if (ImGui::TreeNode(required ? T("Crear la cuenta desde aquí: elige un apodo y vincúlalo con Discord o Steam",
+                                                "Create the account from here: pick a nickname and link it with Discord or Steam")
                                             : T("Jugar sin cuenta: escribir el apodo a mano",
                                                 "Play without an account: type the nickname by hand"))) {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
@@ -4939,8 +5162,7 @@ void OnlineTab() {
     }
     ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
     CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
-    // Record validation now; ranked play with ranks and MMR, tied to the server, later.
-    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)", "Crash Team Rank: validate your records (ranked play with MMR coming)"));
+    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords", "Crash Team Rank: validate your records"));
     ImGui::SameLine();
     if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
 
@@ -9692,10 +9914,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), 0.0f, &merge);
         }
     };
-    if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
-    else io.Fonts->AddFontDefault();
-    merge_fallbacks(false);
-    const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
+    // Tacho: letra del CTR (art/ctr-text.ttf, CCGeekSpeak) para todo el texto, con Segoe UI y las CJK de Windows
+    // para lo que no trae (acentos raros, cirilico, japones...). Sin el archivo: Segoe UI como antes.
+    const fs::path text_font = g_app.root / L"art" / L"ctr-text.ttf";
+    if (fs::is_regular_file(text_font, ec)) {
+        io.Fonts->AddFontFromFileTTF(PathText(text_font).c_str());
+        merge_fallbacks(true);
+    } else {
+        if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
+        else io.Fonts->AddFontDefault();
+        merge_fallbacks(false);
+    }
+    // Titulos y boton Jugar: art/ctr-title.ttf (CCZoinks, la del logo del CTR); si no esta, ctr-menu.ttf.
+    fs::path ctr_font = g_app.root / L"art" / L"ctr-title.ttf";
+    if (!fs::is_regular_file(ctr_font, ec)) ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
     if (fs::is_regular_file(ctr_font, ec)) {
         g_ctr_font = io.Fonts->AddFontFromFileTTF(PathText(ctr_font).c_str(), style.FontSizeBase);
         merge_fallbacks(true);  // Cyrillic and CJK labels in the CTR font's places

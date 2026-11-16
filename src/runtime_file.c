@@ -81,6 +81,7 @@ typedef struct ArchivePatch {
     int count, slot, fd, in_order;
     PatchRange *ranges;
     const struct ArchivePatch *private_view;
+    const struct ArchivePatch *nsane_view;
 } ArchivePatch;
 extern int runtime_private_room_active(void); /* runtime_services.c */
 typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; const ArchivePatch *patch; } File;
@@ -386,6 +387,8 @@ static ArchivePatch archive_patches[MAX_ARCHIVE_PATCHES];
 static int archive_patch_count;
 static ArchivePatch private_archive_patches[MAX_ARCHIVE_PATCHES];
 static int private_archive_patch_count;
+static ArchivePatch nsane_archive_patches[MAX_ARCHIVE_PATCHES];
+static int nsane_archive_patch_count;
 static pthread_once_t archive_patches_once=PTHREAD_ONCE_INIT;
 
 static uint64_t le64(const uint8_t *p) { uint64_t v=0; for (int i=7;i>=0;--i) v=v<<8|p[i]; return v; }
@@ -477,8 +480,17 @@ static void load_archive_patches(void) {
     load_archive_patch_list("BB_ARCHIVE_PATCHES",archive_patches,&archive_patch_count,0);
     load_archive_patch_list("BB_PRIVATE_ARCHIVE_PATCHES",private_archive_patches,
                             &private_archive_patch_count,MAX_ARCHIVE_PATCHES);
+    load_archive_patch_list("BB_NSANE_ARCHIVE_PATCHES",nsane_archive_patches,
+                            &nsane_archive_patch_count,2*MAX_ARCHIVE_PATCHES);
     for (int i=0;i<archive_patch_count;++i) {
         ArchivePatch *normal=&archive_patches[i];
+        for (int j=0;j<nsane_archive_patch_count;++j) {
+            const ArchivePatch *nsane=&nsane_archive_patches[j];
+            if (strcasecmp(normal->guest,nsane->guest) || normal->size!=nsane->size) continue;
+            if (normal->virtual_size==nsane->virtual_size) normal->nsane_view=nsane;
+            else printf("Runtime: N.Sane archive size differs for %s: its crates are off\n",normal->guest);
+            break;
+        }
         for (int j=0;j<private_archive_patch_count;++j) {
             const ArchivePatch *speed=&private_archive_patches[j];
             if (strcasecmp(normal->guest,speed->guest) || normal->size!=speed->size) continue;
@@ -521,7 +533,27 @@ int runtime_speed_race_active(void) {
              (runtime_private_room_active() && private_race_session())));
 }
 
+/* N.Sane Mode (runtime_nsane.c): chosen for the private room, like Itemless.
+ * its HUD slot is in every view, hidden until runtime_nsane.c shows it. Its extra crates are a view of their
+ * own (scripts/nsane_crates.py, BB_NSANE_ARCHIVE_PATCHES). */
+static int nsane_mode_enabled;
+
+void runtime_nsane_mode_set(int enabled) {
+    __atomic_store_n(&nsane_mode_enabled, !!enabled, __ATOMIC_RELEASE);
+}
+
+int runtime_nsane_mode_enabled(void) {
+    return __atomic_load_n(&nsane_mode_enabled, __ATOMIC_ACQUIRE);
+}
+
+int runtime_nsane_race_active(void) {
+    return runtime_nsane_mode_enabled() && !runtime_public_itemless_active() &&
+           (runtime_private_match_active() ||
+            (runtime_private_room_active() && private_race_session()));
+}
+
 static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
+    if (normal && normal->nsane_view && runtime_nsane_race_active()) return normal->nsane_view;
     if (!normal || !normal->private_view) return normal;
     const int selected = runtime_speed_mode_enabled();
     const int room = runtime_private_room_active();
