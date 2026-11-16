@@ -954,8 +954,13 @@ static void native_return_focus(void *node, int ancestors) {
         void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
         for (int i = 0; items && i < count; ++i) {
             const char *name = vsc_graph_name(items[i]);
-            if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root") ||
-                                      !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root"))) {
+            /* A public search's lobby. Not the private room's: focus comes back to it when a dialog
+             * inside closes, with the room's players already in, who then counted as a party that
+             * came in together (2026-11-16: leaving a private room took them all along). The
+             * private room is armed on entering it (the online menu's Private Match button, or
+             * the mode screen's way into the lobby). */
+            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) return;
+            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {
                 arm_party_return();
                 return;
             }
@@ -1080,6 +1085,11 @@ static void ABI placeable_event(void *self, void *event) {
                     if (confirm) { ranked_selected = 0; arm_party_return(); }
                     if (gain) runtime_online_mode_selector_left();
                 }
+                /* Back into the private room from the mode screen (after leaving it): the party is
+                 * the one this player has now, before anyone joins the room. */
+                if (confirm && private_room && name &&
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton"))
+                    arm_party_return();
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     if (!ranked_entry_allowed()) return;

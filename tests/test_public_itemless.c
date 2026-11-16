@@ -512,7 +512,8 @@ static void test_native_return_focus(void) {
     root_meta[2]="Scripts.Graph.Octane_Lobby_Matchmaking_Root";
     native_return_focus(root,0);assert(!menu_party_returned);
     root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
-    menu_party_returned=1;native_return_focus(root,0);assert(!menu_party_returned);
+    /* Focus back in the private room (a dialog closed, its players in): not an entry. */
+    menu_party_returned=1;native_return_focus(root,0);assert(menu_party_returned);
     root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
     native_return_focus(root,0);assert(menu_party_returned && !search_mark);
     root_meta[2]="Scripts.Graph.Octane_Lobby_WaitingRoom_Root";
@@ -578,6 +579,13 @@ static void test_ranked_season_gate(void) {
     assert(forwarded == before && handles == 0);
     ranked_selected = 0;
     selected = 0;
+    /* Into the private room from the mode screen: the party is counted there, before anyone joins. */
+    event[3] = (void *)8;
+    private_room = 1;
+    menu_party_returned = 1; party_at_entry = 5;
+    placeable_event(button, event);
+    assert(!menu_party_returned && party_at_entry == ranked_party_size());
+    private_room = 0;
 }
 
 static void test_hall_of_fame_button_event(void) {
