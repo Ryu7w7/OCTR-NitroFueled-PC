@@ -2832,6 +2832,25 @@ void RecordFrame(ID3D11ShaderResourceView* picture) {
         return GetEnvironmentVariableA("CTR_RECORD_AT", v, sizeof(v)) ? strtoull(v, nullptr, 10) : 0ull;
     }();
     static bool record_fired = false;
+    // F12 with the game in front: the next 120 frames at 960x540 (CTR_RECORD_FRAMES/_SIZE change it)
+    static bool f12_held = false;
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        const bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F12) & 0x8000);
+        if (down && !f12_held && left <= 0) {
+            char v[32] = {};
+            int frames = 120;
+            if (GetEnvironmentVariableA("CTR_RECORD_FRAMES", v, sizeof(v))) frames = atoi(v);
+            if (!scaled) {
+                kRecordW = 960, kRecordH = 540;
+                if (GetEnvironmentVariableA("CTR_RECORD_SIZE", v, sizeof(v))) sscanf(v, "%ux%u", &kRecordW, &kRecordH);
+            }
+            LOG("gfx: F12 pressed");
+            g_record_request = frames;
+        }
+        f12_held = down;
+    }
     if (record_at && g_frame >= record_at && !record_fired) {
         record_fired = true;
         char v[32] = {};
