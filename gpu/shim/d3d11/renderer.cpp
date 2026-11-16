@@ -2982,7 +2982,13 @@ u32 GfxSnapshot(u64 addr) {
     }
     if (!g_dev || !addr) return 0;
     auto it = g_surfaces.find(addr);
-    if (it == g_surfaces.end() || !it->second.tex || !it->second.srv) return 0;
+    if (it == g_surfaces.end() || !it->second.tex || !it->second.srv) {
+        static u64 missed = 0;
+        if (missed++ % 600 == 0)
+            LOG("gfx: flip of %llx, a buffer this renderer has no picture of (%llu so far)", (unsigned long long)addr,
+                (unsigned long long)missed);
+        return 0;
+    }
     D3D11_TEXTURE2D_DESC want;
     it->second.tex->GetDesc(&want);
     const u32 slot = g_next_snapshot++ % kSnapshots;
@@ -3112,11 +3118,31 @@ void GfxPresent(u64 addr, ID3D11RenderTargetView* target, u32 snapshot) {
         g_capture = true;
         LOG("cap: capturing frame %llu", (unsigned long long)g_frame);
     }
-    auto it = g_surfaces.find(addr);
-    // the copy made at the flip, while it still holds this buffer (not taken over by a later flip)
-    ID3D11ShaderResourceView* picture = it != g_surfaces.end() ? it->second.srv.Get() : nullptr;
-    if (snapshot >= 1 && snapshot <= kSnapshots && g_snapshots[snapshot - 1].addr == addr && g_snapshots[snapshot - 1].srv)
+    // The copy made at the flip, while it still holds this buffer (not taken over by a later flip).
+    // Without one (the swap thread presents more often than the game flips, so a ring slot was
+    // reused, or the game flipped a buffer this renderer never drew), the last picture shown is
+    // shown again: the live buffer may be half redrawn with a later frame and no picture is a
+    // black screen, both seen as flicker (issues #247, #251). BB_D3D11_LIVE_FALLBACK=1: as before.
+    static const bool live_fallback = GetEnvironmentVariableA("BB_D3D11_LIVE_FALLBACK", nullptr, 0) > 0;
+    static ComPtr<ID3D11ShaderResourceView> last_shown;
+    static u64 shown_copy = 0, shown_again = 0, shown_live = 0, shown_none = 0;
+    ID3D11ShaderResourceView* picture = nullptr;
+    if (snapshot >= 1 && snapshot <= kSnapshots && g_snapshots[snapshot - 1].addr == addr && g_snapshots[snapshot - 1].srv) {
         picture = g_snapshots[snapshot - 1].srv.Get();
+        last_shown = picture;
+        shown_copy++;
+    } else if (last_shown && !live_fallback) {
+        picture = last_shown.Get();
+        shown_again++;
+    } else {
+        auto it = g_surfaces.find(addr);
+        picture = it != g_surfaces.end() ? it->second.srv.Get() : nullptr;
+        (picture ? shown_live : shown_none)++;
+    }
+    if ((shown_copy + shown_again + shown_live + shown_none) % 600 == 0)
+        LOG("gfx: presented %llu flipped copies, %llu repeats of the last one, %llu live buffers, %llu without a picture",
+            (unsigned long long)shown_copy, (unsigned long long)shown_again, (unsigned long long)shown_live,
+            (unsigned long long)shown_none);
     float black[4] = {0, 0, 0, 1};
     g_ctx->OMSetRenderTargets(1, g_swap_rtv.GetAddressOf(), nullptr);
     g_ctx->ClearRenderTargetView(g_swap_rtv.Get(), black);
