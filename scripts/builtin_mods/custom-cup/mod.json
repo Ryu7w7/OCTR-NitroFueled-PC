@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "id": "custom-cup",
   "name": "Custom Cup",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "author": "Kyouko8",
-  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Reiniciar between a cup's races and after its last one (every cup: the game's, Ultimate Customizer's added ones and a custom cup): the cup starts again from its first race with the points at 0, its tracks as they were chosen. Continuar, Reiniciar, Salir.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
+  "description": "Built into the launcher, from Custom Cup by Kyouko8.\nPlay a cup of 4 to 16 tracks of your choice (\"Copa Personalizada\").\n- R1 (\"Copa Personalizada\") on the cup menu opens the track menu to choose the tracks; on the single race track menu it turns the choosing on.\n- While choosing, Cross adds the focused track: its label says \"Pista n de N\" and the chosen tracks' pictures show at the top left, with a white frame. Circle (\"Quitar pista\") takes the last one out; with none chosen it goes back as always. Square still moves to a random track, so a random cup is Square + Cross each time. The last track opens the cup's race settings (laps, difficulty), then its races with the cup standings (\"Circuito n / N\"), as an Arcade cup.\n- Circle goes back to the menu where you started the cup.\n- Offline only: in online games and private rooms (their cup and track menus) the buttons are not there.\n- Works with Ultimate Customizer (its lap counts apply to this cup too) and Customisation Loadouts. Winning it marks no cup's stars.\n- A track can be chosen more than once: the cup still plays its races in order.\n- Reiniciar between a cup's races and after its last one (every cup: the game's, Ultimate Customizer's added ones and a custom cup): the cup starts again from its first race with the points at 0, its tracks as they were chosen. Continuar, Reiniciar, Salir.\n- Miniaturas en ajustes de carrera (option, on by default): the race settings of a custom cup (laps, difficulty) show its tracks' pictures, with their white frames, and its first track as the picture. The game's cups (and Ultimate Customizer's added ones) keep their own picture there.\n- Copas Extendidas (option, on by default): while choosing, L1 / R1 (\"Cantidad\") take the number of tracks down / up by 2, from 4 to 16 (never under the tracks already chosen: take them out with Circle first). On the single race track menu, Circle with no track chosen ends the choosing (\"Cancelar copa\"). The thumbnails are a grid of 4 x 4. Off: cups of 4 tracks, R1 turns the choosing on and off.",
   "requiresCapabilities": [
     "archive-assets",
     "xml-patches",
@@ -231,13 +231,13 @@
     },
     {
       "file": "patches/copas-extendidas.xml",
-      "sha256": "3a88d6f1f5f27d44b10d5d5c4a967693ff347d2fc6a646b979ec0fa9587fbb06",
+      "sha256": "e218763a49c56bba77add7ad33f548dd8fc9357c089f84cd9e07e28535e7b63b",
       "bytes": 903
     },
     {
       "file": "patches/custom-cup.xml",
-      "sha256": "0d476b478087cb6b21c9020a4e9442de411271618c6b09a296a5fa9fddf81561",
-      "bytes": 16769
+      "sha256": "3eebe7305d4083119d9755fb20b3889bc08cf983c834680805eca6833dcc1088",
+      "bytes": 16849
     },
     {
       "file": "payloads/ajustes-carrera-materiales.delta.json",

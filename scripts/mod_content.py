@@ -215,7 +215,8 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     # archive the launcher builds (scripts/content_build.py).
     import content_package
     content_root=Path(environment.get('BB_CONTENT_DIR',Path(mod_root).parent/content_package.FOLDER))
-    content=content_package.selected(content_root,environment.get('BB_ONLINE',effective.get('online','0'))=='1',log)
+    online=environment.get('BB_ONLINE',effective.get('online','0'))=='1'
+    content=content_package.selected(content_root,online,log)
     if content:
         whole3=[name for name in names for target in added.get(name,[]) if target.casefold()=='archives/update3.pak']
         if whole3:raise ValueError(whole_update3_message(whole3,update3))
@@ -227,7 +228,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
-        'content':[[m['id'],m['version'],content_package.manifest_digest(m)] for m,_ in content]+([content_package.selection(content_root)['page']] if content else []),
+        'content':[[m['id'],m['version'],content_package.manifest_digest(m)] for m,_ in content]+([content_package.selection(content_root)['page'],online] if content else []),
         'content_code':{n:sha(Path(__file__).with_name(n)) for n in ('content_build.py','content_package.py','track_registry.py','igz_merge.py','graphics_tab.py')} if content else None,
         'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')},
         'coexist':[frozen_before,{n:sha(Path(__file__).with_name(n)) for n in ('builtin_coexist.py','igz_rebase.py','igz_merge.py')}] if builtins else None}
@@ -294,7 +295,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                 if under(staging/'files','archives/update3.pak').exists():raise ValueError('Racer mods and external content both need update3.pak')
                 import content_build
                 own=content_build.build(game,content_package.state(content_root),staging,content,operations,effective,log,
-                    own_page=content_package.selection(content_root)['page']=='own')
+                    own_page=content_package.selection(content_root)['page']=='own',online=online)
                 save_json(staging/'content.json',{'archives':[[t.as_posix(),str(s)] for t,s in own]})
             records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind'] in ('archive_asset','localized_strings')]
             save_json(staging/'archive-plan.json',records)

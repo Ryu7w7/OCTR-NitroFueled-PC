@@ -97,10 +97,25 @@ def graphics_files(game, operations, staging, log):
         dest.unlink()
 
 
-def build(game, store, staging, packages, operations, settings, log=print, own_page=True):
+ONLINE_MENUS = 'packages/generated/UI/domains/JuiceDomain_OnlineMenus_pkg.igz'
+START_SCREEN = 'packages/generated/UI/domains/JuiceDomain_StartScreen_pkg.igz'
+RACE_DOMAIN = 'packages/generated/UI/domains/JuiceDomain_Race_pkg.igz'
+
+
+def online_cups(game, blob):
+    """The Online menus' package with the private rooms' CUP menu files in it, as
+    scripts/online_mode.py gives update2.pak's copy: this archive's copy is the one the game
+    loads, and without them that menu is empty."""
+    import online_mode
+    found = newest(game, [START_SCREEN, RACE_DOMAIN])
+    return online_mode.cup_package(game, blob, found[START_SCREEN][1], None, found[RACE_DOMAIN][1])
+
+
+def build(game, store, staging, packages, operations, settings, log=print, own_page=True, online=False):
     """archives/update3.pak written under staging/files for the enabled packages
     ([(manifest, folder)], by id). Returns [(target, source)] of the packages' own archives,
-    for the file redirection, or [] when there is nothing to add."""
+    for the file redirection, or [] when there is nothing to add. online: Online is on (its
+    private rooms' CUP menu, online_cups)."""
     if not packages:
         return []
     try:
@@ -111,6 +126,9 @@ def build(game, store, staging, packages, operations, settings, log=print, own_p
         raise ValueError(f'{error}. {installed}' if installed else str(error)) from None
     titles = [tr.LANGUAGE_FILE.format(lang) for lang in tr.LANGUAGES]
     base = effective(game, tr.FILES, operations, optional=titles)
+    if online:
+        menus = next(p for p in base if p.casefold() == ONLINE_MENUS.casefold())
+        base[menus] = online_cups(game, base[menus])
     tracks = [cp.track(m) for m, _ in packages if m['type'] == 'track']
     changed = tr.register(base, tracks, log, own_page=own_page)
     entries = dict(changed)

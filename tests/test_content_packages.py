@@ -2,6 +2,7 @@
 content_build.py (the update archive with the tracks registered), on a game made of the synthetic
 files of test_track_registry.py."""
 import hashlib
+import os
 import json
 import shutil
 import tempfile
@@ -431,3 +432,15 @@ class WholeUpdate3Tests(unittest.TestCase):
         self.assertIn('nbc ships a whole update3.pak: turn it off, or convert it to external content', message)
         self.assertIn('tag ships a whole update3.pak, which cannot be used with external content', message)
         self.assertNotIn('convert', message.split('; ')[1])
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'BB_TEST_GAME: a USA 1.21 game folder')
+    def test_online_menus_keep_the_private_cup_menu(self):
+        # update3.pak's Online menus package is the one the game loads: with Online on it keeps
+        # the private rooms' CUP menu files online_mode.py adds to update2.pak's (else that menu is empty)
+        import online_mode
+        from igz_file import Igz
+        game = os.environ['BB_TEST_GAME']
+        blob = cb.newest(game, [cb.ONLINE_MENUS])[cb.ONLINE_MENUS][1]
+        rows = [path for _, path in online_mode.package_rows(Igz(cb.online_cups(game, blob)))[1]]
+        self.assertIn('ui/octane_cupselect.igz', rows)
+        self.assertNotIn('ui/octane_cupselect.igz', [p for _, p in online_mode.package_rows(Igz(blob))[1]])
