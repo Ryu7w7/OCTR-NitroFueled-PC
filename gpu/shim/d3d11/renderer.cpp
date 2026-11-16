@@ -2778,7 +2778,8 @@ std::vector<std::pair<std::string, std::vector<u8>>> g_record_queue;
 // CTR_GLITCH_TRAP=1, which keeps only the frames that turn suddenly dark (and the one before each),
 // logged as "glitch trap" - a long recorded drive without such lines has no single-frame glitches
 u32 kRecordW = 1280, kRecordH = 720;
-const bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
+// Shift+F12 turns it on in play (RecordFrame): a long recording that keeps only those frames.
+bool g_glitch_trap = GetEnvironmentVariableA("CTR_GLITCH_TRAP", nullptr, 0) > 0;
 
 void RecordWriter() {
     for (;;) {
@@ -2842,7 +2843,8 @@ void RecordFrame(ID3D11ShaderResourceView* picture) {
         return GetEnvironmentVariableA("CTR_RECORD_AT", v, sizeof(v)) ? strtoull(v, nullptr, 10) : 0ull;
     }();
     static bool record_fired = false;
-    // F12 with the game in front: the next 120 frames at 960x540 (CTR_RECORD_FRAMES/_SIZE change it)
+    // F12 with the game in front: the next 120 frames at 960x540 (CTR_RECORD_FRAMES/_SIZE change it).
+    // Shift+F12: the glitch trap, recording for hours and keeping only frames that turn dark.
     static bool f12_held = false;
     {
         DWORD pid = 0;
@@ -2852,6 +2854,11 @@ void RecordFrame(ID3D11ShaderResourceView* picture) {
             char v[32] = {};
             int frames = 120;
             if (GetEnvironmentVariableA("CTR_RECORD_FRAMES", v, sizeof(v))) frames = atoi(v);
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+                g_glitch_trap = true;
+                frames = 1000000;
+                LOG("gfx: glitch trap on: frames that turn dark are saved");
+            }
             if (!scaled) {
                 kRecordW = 960, kRecordH = 540;
                 if (GetEnvironmentVariableA("CTR_RECORD_SIZE", v, sizeof(v))) sscanf(v, "%ux%u", &kRecordW, &kRecordH);
