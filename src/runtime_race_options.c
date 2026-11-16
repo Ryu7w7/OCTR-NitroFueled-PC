@@ -3086,9 +3086,11 @@ static void ABI contact_timestep(TimestepRegisters *r) {
     r->resume+=8; /* Skip only the native multiply; retain its store and comparison. */
 }
 
+/* Only the multiply is displaced: the bridge resumes at its store (0xe47d24). The comparison at
+ * 0xe47d29 must stay in place, since 0xe47b87 jumps straight to it (with the old 18-byte patch,
+ * which covered it, that jump landed inside the patch's jump and crashed the race). */
 static void contact_timestep_bridge(unsigned char *code, const void *resume) {
-    const unsigned char displaced[]={0xc5,0xfa,0x59,0x05,0x18,0,0,0,
-        0xc5,0xfa,0x11,0x45,0x84,0xc5,0xf8,0x2e,0x45,0xb8};
+    const unsigned char displaced[]={0xc5,0xfa,0x59,0x05,0x0e,0,0,0}; /* vmulss xmm0,[rip+14]: the 30 below */
     const size_t length=register_timestep_bridge(code,displaced,sizeof displaced,resume,contact_timestep);
     const float thirty=30;
     memcpy(code+length,&thirty,4);
@@ -3173,6 +3175,8 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     if (memcmp(image+0xe47d1c,contact_step,4) ||
         memcmp(image+0xe47d24,contact_step+8,sizeof contact_step-8) ||
         memcmp(image+0xe47d2e,"\x48\x8d\x45\x84",4) ||
+        /* the two instructions before the multiply, which the patch now starts at */
+        memcmp(image+0xe47d10,"\xc5\xfa\x10\x8d\x40\xff\xff\xff\xc5\xf2\x5c\xc0",12) ||
         memcmp(image+0xe46278,"\x48\x89\x95\x58\xff\xff\xff",7) ||
         memcmp(image+0xe252c9,"\x45\x8b\x6f\x18",4) ||
         contact_constant<0 || (uint64_t)contact_constant>size-4 ||
@@ -3190,9 +3194,10 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     const unsigned char rotation_step[]={0xc5,0xf8,0x28,0x8d,0xf0,0xfd,0xff,0xff,
         0xc5,0xf0,0x59,0x49,0x20,0xc5,0xc8,0x59,0xc9};
     if (memcmp(image+0x8790eb,rotation_step,sizeof rotation_step)) return 0;
-    enum { CAMERA_BRIDGE = 2912, CONTACT_BRIDGE = 10656, COLD_SIZE = 11168 };
+    enum { CAMERA_BRIDGE = 2912, CONTACT_BRIDGE = 10656, CONTACT_ENTRY = 11168, COLD_SIZE = 11232 };
     _Static_assert(CONTACT_BRIDGE >= CAMERA_BRIDGE + 2048, "contact bridge overlaps camera bridge");
-    _Static_assert(COLD_SIZE >= CONTACT_BRIDGE + 512, "contact bridge exceeds allocation");
+    _Static_assert(CONTACT_ENTRY >= CONTACT_BRIDGE + 512, "contact bridge exceeds allocation");
+    _Static_assert(COLD_SIZE >= CONTACT_ENTRY + 64, "contact entry exceeds allocation");
 #ifdef _WIN32
     unsigned char *cold = VirtualAlloc(NULL, COLD_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #else
@@ -3203,7 +3208,7 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     if (!cold || !writable(image+0xe2f1d0,sizeof keep_boost_prefix) || !writable(image+0xe75250-shift,sizeof boost_update_prefix) || !writable(image+0xe8ad70-shift,sizeof exhaust_prefix) || !writable(image+0xe33d80,15) || !writable(image+0xe49d90,15) || !writable(image+0xe46250,20) || !writable(image+0xe452c0,17) || !writable(image+0xe4a220,17) || !writable(image + 0xdcd930, 20) || !writable(image + 0xc0a3b0, 14) || !writable(image + 0xdcdd30, 20) || !writable(image + 0xdd0210, 20) || !writable(image + 0xc59b10, 14) || !writable(image + 0x2770de0, sizeof(void *)) ||
         !writable(image + 0xf4c840 - shift, 14) || !writable(image + 0xe0f9b0, 14) ||
         !writable(image + 0xdcfc10, 14) || !writable(image + 0xdcb630, 17) || !writable(image + 0xdcfb10, 14) || !writable(image + 0xe0efa0, 14)) return 0;
-    if (!writable(image+0xe47d1c,sizeof contact_step) ||
+    if (!writable(image+0xe47d10,20) ||
         !writable(image+0xe46b2a,15) || !writable(image+0xe47237,15) ||
         !writable(image+0xe2f821,15) || !writable(image+0x8790eb,sizeof rotation_step) ||
         !writable(image+0xe46acf,15) || !writable(image+0xe45951,15) || !writable(image+0xe46a55,18) || !writable(image+0xa31afd,15)) return 0;
@@ -3233,9 +3238,13 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     jump(image+0xe47237,cold+1376); image[0xe47245]=0x90;
     /* Gameplay validation found visible animation stutter; retain the native wheel blend. */
     puts("Native kart lateral retention: base and surface damping follow simulation dt above 30 FPS");
-    contact_timestep_bridge(cold+CONTACT_BRIDGE,image+0xe47d2e);
-    jump(image+0xe47d1c,cold+CONTACT_BRIDGE);
-    memset(image+0xe47d1c+14,0x90,sizeof contact_step-14);
+    /* 0xe47d10..0xe47d23 (load, subtract, multiply) go to the entry, which runs the first two and
+     * enters the bridge before the multiply; the store at 0xe47d24 and 0xe47d29's comparison stay. */
+    contact_timestep_bridge(cold+CONTACT_BRIDGE,image+0xe47d24);
+    memcpy(cold+CONTACT_ENTRY,image+0xe47d10,12);
+    jump(cold+CONTACT_ENTRY+12,cold+CONTACT_BRIDGE);
+    jump(image+0xe47d10,cold+CONTACT_ENTRY);
+    memset(image+0xe47d10+14,0x90,20-14);
     puts("Native kart contact: position-limit correction follows simulation dt above 30 FPS");
     cold[0] = 0x55; /* Replaced native cold-path push rbp; rest stays in place. */
     jump(cold + 1, image + 0xc59b1e);
