@@ -416,8 +416,7 @@ bool WindowSDL::PollEvents() {
         if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
             (event.key.key == SDLK_F9 || event.key.key == SDLK_F10) && (event.key.mod & SDL_KMOD_CTRL)) {
             const int kind = event.key.key == SDLK_F10 ? 3 : (event.key.mod & SDL_KMOD_SHIFT) ? 2 : 1;
-            runtime_party_experiment_request(kind);
-            std::printf("Host experiment: key %d pressed\n", kind);
+            runtime_party_experiment_request(kind); // only with BB_HOST_EXPERIMENT=1
             continue;
         }
         // Alt + Enter toggles fullscreen

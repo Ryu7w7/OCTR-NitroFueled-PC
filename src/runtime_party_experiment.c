@@ -17,6 +17,7 @@
  *   Ctrl+F10       join the other player's room (the old host following the new one): the
  *                  Friends tab's Join (runtime_invite_join).
  * For 30 s after each, every change of the party is written to the log with the roster's names.
+ * Off unless BB_HOST_EXPERIMENT=1: the keys do nothing in players' builds.
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "runtime.h"
 #include "runtime_np_online.h"
@@ -47,6 +48,8 @@ static uint64_t now_ms(void) {
 static void *at(const void *p, size_t offset) { return p ? *(void *const *)((const char *)p + offset) : NULL; }
 
 int runtime_party_experiment_start(unsigned char *base, size_t size) {
+    const char *on = getenv("BB_HOST_EXPERIMENT");
+    if (!on || strcmp(on, "1")) return 1; /* off: nothing installed, the keys are ignored */
     static const unsigned char create[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54};
     if (size < 0x2acf708 || memcmp(base + 0xa56fb0, create, sizeof create) || base[0x409700] != 0x55)
         return 0;
@@ -59,6 +62,8 @@ int runtime_party_experiment_start(unsigned char *base, size_t size) {
 }
 
 void runtime_party_experiment_request(int kind) {
+    if (!image) return;
+    fprintf(stderr, "Host experiment: key %d pressed\n", kind);
     __atomic_store_n(&request, kind, __ATOMIC_RELEASE);
 }
 
