@@ -585,7 +585,8 @@ static void test_ranked_season_gate(void) {
     menu_party_returned = 1; party_at_entry = 5;
     placeable_event(button, event);
     assert(!menu_party_returned && party_at_entry == ranked_party_size() && entry_private);
-    private_room = 0; entry_private = 0;
+    assert(private_lobby_entered);
+    private_room = 0; entry_private = 0; private_lobby_entered = 0;
 }
 
 static void test_hall_of_fame_button_event(void) {
@@ -887,6 +888,8 @@ static void test_cancelled_and_duplicate_lobby_entries(void) {
 
 static int party_returns;
 static void ABI return_party_mock(void *party) { assert(party); ++party_returns; }
+static int quits;
+static void ABI quit_party_mock(void *party) { assert(party); ++quits; }
 static void test_native_party_menu_return(void) {
     unsigned char party[0x80]={0},session[0x20]={0},connection[0x120]={0};
     void *party_value=party,*network_value=test_network;
@@ -962,6 +965,19 @@ static void test_native_party_menu_return(void) {
         /* The next search is not a private room any more. */
         arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;
+        /* Back on the mode screen from a private lobby as its host with a player in the party:
+         * the party is disbanded once; not without the lobby, a player or as a guest. */
+        unsigned char member[0x30]={0},roster[0x28]={0};
+        void *members[]={member};
+        *(int *)(roster+12)=1;*(void ***)(roster+0x20)=members;*(void **)(party+0x30)=roster;
+        void (ABI *saved_quit)(void *)=native_party_quit_trace;
+        native_party_quit_trace=quit_party_mock;quits=0;
+        private_lobby_entered=0;leave_private_party();assert(quits==0);
+        private_lobby_entered=1;leave_private_party();assert(quits==1 && !private_lobby_entered);
+        leave_private_party();assert(quits==1);
+        *(int *)(connection+0x118)=2;private_lobby_entered=1;leave_private_party();assert(quits==1);
+        *(int *)(connection+0x118)=1;*(int *)(roster+12)=0;private_lobby_entered=1;leave_private_party();assert(quits==1);
+        *(void **)(party+0x30)=NULL;native_party_quit_trace=saved_quit;
     }
     runtime_public_itemless_reset();
     party_guest=saved_guest;party_manager=saved_party;network_manager=saved_network;

@@ -78,12 +78,19 @@ static int party_at_entry = 1;
 /* That session is a private room: leaving it never brings anyone along, not even a party that
  * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
 static int entry_private;
+/* This player went into a private room's lobby (the mode screen's way in). Back on the mode
+ * screen as its host, the room's players are still its party (the game keeps a private room's
+ * players grouped with its host): the party is disbanded there (leave_private_party). */
+static int private_lobby_entered;
+static void (ABI *native_party_quit_trace)(void *);
 static int ranked_party_size(void);
+static void leave_private_party(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
 static void arm_party_return(void) {
     if (__atomic_exchange_n(&menu_party_returned,0,__ATOMIC_SEQ_CST)) {
         __atomic_store_n(&party_at_entry,ranked_party_size(),__ATOMIC_SEQ_CST);
         __atomic_store_n(&entry_private,0,__ATOMIC_SEQ_CST);
+        __atomic_store_n(&private_lobby_entered,0,__ATOMIC_SEQ_CST);
     }
 }
 static void arm_private_room(void) {
@@ -307,6 +314,23 @@ static int ranked_party_size(void) {
     for (int i=0;i<count;++i)
         if (items[i] && !*((unsigned char *)items[i]+0x2c)) ++total;
     return total;
+}
+
+/* Back on the mode screen from a private room's lobby, as the host with players still in its
+ * party: the game's own Leave Party (0xa9ffd0, as when leaving the online menus) tells them the
+ * party is over (message 0x2c) and takes them out of it (0xaa02d0). Once per room. */
+static void leave_private_party(void) {
+    if (!__atomic_exchange_n(&private_lobby_entered,0,__ATOMIC_SEQ_CST)) return;
+    unsigned char *party=party_manager ? *party_manager : NULL;
+    unsigned char *session=party ? *(void **)(party+0x18) : NULL;
+    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
+    int role=0;
+    if (connection) memcpy(&role,connection+0x118,sizeof role);
+    const int members=ranked_party_size();
+    if (role!=1 || members<2 || !native_party_quit_trace) return;
+    printf("Online party: left a private room as its host: its party of %d is disbanded\n",members);
+    fflush(stdout);
+    native_party_quit_trace(party);
 }
 
 int runtime_online_party_active(void) {
@@ -977,6 +1001,7 @@ static void native_return_focus(void *node, int ancestors) {
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
+                leave_private_party();
                 runtime_public_itemless_menu_return();
                 return;
             }
@@ -1099,8 +1124,10 @@ static void ABI placeable_event(void *self, void *event) {
                 /* Back into the private room from the mode screen (after leaving it): the party is
                  * the one this player has now, before anyone joins the room. */
                 if (confirm && private_room && name &&
-                    !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton"))
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     arm_private_room();
+                    __atomic_store_n(&private_lobby_entered,1,__ATOMIC_SEQ_CST);
+                }
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     if (!ranked_entry_allowed()) return;
@@ -1352,7 +1379,6 @@ static void ABI kicked(void *self, uint64_t room) {
 
 static unsigned char *party_trace_image;
 static void (ABI *native_party_reset_trace)(void *);
-static void (ABI *native_party_quit_trace)(void *);
 static unsigned char (ABI *native_party_return_trace)(void *,void *,void *);
 static void party_trace(const char *action, void *self, void *caller) {
     unsigned char *party=self;
