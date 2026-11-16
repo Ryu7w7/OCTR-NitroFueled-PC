@@ -288,11 +288,12 @@ def ranked_lobby_icons(blob):
                 struct.pack_into('<2f', g.data, icon + 0x60, x + 2.0, y + 2.0)
                 struct.pack_into('<4f', g.data, icon + 0xc0, 0.0, 0.0, 0.0, 1.0)
             if (mode, tier) == HOST_CROWN:
-                # The crown just left of the name ([MemberName] starts at x 10; icons are placed by
-                # their centre), so it reads as the host's mark; the right end keeps the rank icons.
-                x, y = -12.0 + (2.0 if kind == 'SHADOW' else 0.0), 14.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                # The crown first in the row, before the rank icon (centred at 62, 32 wide) and the
+                # name (from 82): icons are placed by their centre, and the row clips what leaves it
+                # (at x -12 only a sliver showed).
+                x, y = 26.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
                 struct.pack_into('<2f', g.data, icon + 0x60, x, y)
-                struct.pack_into('<2f', g.data, icon + 0x90, 40.0, 40.0)
+                struct.pack_into('<2f', g.data, icon + 0x90, 36.0, 36.0)
             new.append(icon)
     # Keep the native style slots addressable by their behavior, but never render them.
     for source, kind in objects.items():
