@@ -937,11 +937,21 @@ ID3D11DepthStencilState* GetDepthState(u32 ctl, u32 refmask, u32 ops) {
 
 constexpr int kDimsCube = 4;  // a slot the shader declares TextureCube
 
+// This frame read a render target nothing was drawn to yet: a new D3D11 texture is black, where
+// the PS4's memory would still hold the target's last picture. Seen as a one-frame black flash
+// when a race loads (issues #247, #251); GfxSnapshot shows the last picture again instead.
+bool g_sampled_empty = false;
+u64 g_sampled_empty_target = 0;
+
 ID3D11ShaderResourceView* GetTexture(const u32* tsharp, int dims) {
     if (!tsharp) return dims == kDimsCube ? nullptr : dims == 3 ? g_placeholder.srv_array.Get() : g_placeholder.srv.Get();
     TSharp t = DecodeTSharp(tsharp);
     auto it = g_surfaces.find(t.base);
     if (it != g_surfaces.end() && it->second.srv) {
+        if (!it->second.rendered && !it->second.dsv) {
+            g_sampled_empty = true;
+            g_sampled_empty_target = t.base;
+        }
         if (Current(it->second)) {
             if (dims == kDimsCube) return nullptr;  // no cube targets
             return dims == 3 ? it->second.srv_array.Get() : it->second.srv.Get();
@@ -3007,6 +3017,24 @@ u32 GfxSnapshot(u64 addr) {
             LOG("gfx: flip of %llx, a buffer this renderer has no picture of (%llu so far)", (unsigned long long)addr,
                 (unsigned long long)missed);
         return 0;
+    }
+    // A frame that read an empty render target (g_sampled_empty) is not shown: the last picture is
+    // shown again (GfxPresent). At most 3 frames in a row, so a target that stays empty (some path
+    // this renderer does not draw) cannot freeze the screen. BB_D3D11_SHOW_EMPTY=1: shown anyway.
+    {
+        static const bool show_empty = GetEnvironmentVariableA("BB_D3D11_SHOW_EMPTY", nullptr, 0) > 0;
+        static int held_in_a_row = 0;
+        static u64 held = 0;
+        const bool empty = std::exchange(g_sampled_empty, false);
+        if (empty && !show_empty && held_in_a_row < 3) {
+            held_in_a_row++;
+            if (held++ < 32 || held % 600 == 0)
+                LOG("gfx: frame %llu read target %llx before anything was drawn to it: the last picture "
+                    "shown again (%llu so far)",
+                    (unsigned long long)g_frame, (unsigned long long)g_sampled_empty_target, (unsigned long long)held);
+            return 0;
+        }
+        if (!empty) held_in_a_row = 0;
     }
     D3D11_TEXTURE2D_DESC want;
     it->second.tex->GetDesc(&want);
