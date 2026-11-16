@@ -5,6 +5,7 @@ static char friends_csv[NP_FRIENDS_CSV_CAPACITY];
 static char current_host[24];
 static int frozen_race, left_room, connected_party;
 int runtime_online_party_active(void) { return connected_party; }
+int runtime_party_hosting(void) { return 0; }
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
 void runtime_room_mode_left(void) { ++left_room; }
 void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", current_host); }

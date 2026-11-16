@@ -15,7 +15,7 @@
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 
-extern "C" void runtime_party_experiment_request(int direct); // src/runtime_party_experiment.c
+extern "C" void runtime_party_experiment_request(int kind); // src/runtime_party_experiment.c
 
 namespace Frontend {
 
@@ -411,11 +411,13 @@ bool WindowSDL::PollEvents() {
         if (BbOverlay::HandleEvent(event)) {
             continue;
         }
-        // Host handoff research (src/runtime_party_experiment.c): Ctrl+F9, Ctrl+Shift+F9 direct.
-        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.key == SDLK_F9 &&
-            (event.key.mod & SDL_KMOD_CTRL)) {
-            runtime_party_experiment_request((event.key.mod & SDL_KMOD_SHIFT) != 0);
-            std::printf("Host experiment: Ctrl+%sF9 pressed\n", (event.key.mod & SDL_KMOD_SHIFT) ? "Shift+" : "");
+        // Host handoff research (src/runtime_party_experiment.c): Ctrl+F9 leave and host,
+        // Ctrl+Shift+F9 close and host, Ctrl+F10 join the other player's room.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_F9 || event.key.key == SDLK_F10) && (event.key.mod & SDL_KMOD_CTRL)) {
+            const int kind = event.key.key == SDLK_F10 ? 3 : (event.key.mod & SDL_KMOD_SHIFT) ? 2 : 1;
+            runtime_party_experiment_request(kind);
+            std::printf("Host experiment: key %d pressed\n", kind);
             continue;
         }
         // Alt + Enter toggles fullscreen

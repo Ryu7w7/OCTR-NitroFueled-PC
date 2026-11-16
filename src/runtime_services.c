@@ -1292,6 +1292,20 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
     }
     /* DELETE /v1/sessions -> delete session (method 3 is DELETE) */
     if (req->method == 3 && strstr(req->path, "/v1/sessions")) {
+        /* Leaving another player's session after this player made its own party (it took over
+         * as host: runtime_party_experiment.c): its own session stays. */
+        const char *me = runtime_np_get_online_name();
+        const char *path_sid = strstr(req->path, "/v1/sessions/");
+        if (me && *me && path_sid && runtime_party_hosting()) {
+            char mine[128];
+            const int n = snprintf(mine, sizeof(mine), "cusa13795-session-%s", me);
+            path_sid += strlen("/v1/sessions/");
+            const int own = !strncmp(path_sid, mine, (size_t)n) && (path_sid[n] == '/' || !path_sid[n]);
+            if (!own) {
+                runtime_net_trace("webapi: left %s; this player hosts its own party: its session stays", req->path);
+                return strdup("{}");
+            }
+        }
         remove_active_session();
         return strdup("{}");
     }

@@ -1,30 +1,41 @@
-/* Host handoff research, experiment 1 (staff builds): can a guest of a private room become the
- * host of a new party of its own while the room's lobby stays on screen?
+/* Host handoff research (staff builds): can the host of a private room change while the room's
+ * lobby stays on screen?
  *
  * The game has no way to hand a party over: a host is whoever created the party. 0xa56fb0
  * (CPartyManager, [0x2acf700]) starts a new party session when this player is not its host; when
- * the server confirms it, 0xa57350 makes it the party's session (+0x18), rebuilds the roster
- * (+0x30) from the local players, posts CGuiEventLobbyBecomeHost to the menus and registers the
- * host's messages (0x28, 0x29 leaving, 0x2a, 0x2f). 0xa56f70 calls it only while the network is
- * up and nothing else is in progress.
+ * the server confirms it, 0xa57350 makes it the party's session (+0x18), adds the local players to
+ * the roster (+0x30, without emptying it), posts CGuiEventLobbyBecomeHost to the menus and
+ * registers the host's messages (0x28, 0x29 leaving, 0x2a, 0x2f).
  *
- * In a lobby, Ctrl+F9 calls 0xa56f70 and Ctrl+Shift+F9 calls 0xa56fb0 directly; then for 30 s
- * every change of the party (state, role, roster, sessions, peers) is written to the log, with the
- * roster's names, to see what the game and its lobby do.
+ * Experiment 1 (2026-11-16): a guest calling it in the lobby became host with the lobby kept (START
+ * GAME showed), but the old party was dropped while still connected (a corrupt free followed), the
+ * roster kept the old members plus a second copy of the local player, and the old host was left
+ * alone. Experiment 2, in a lobby:
+ *   Ctrl+F9        leave the old party the game's way first (0xa9ffd0: tells its host, message
+ *                  0x29, and resets the party), empty the roster, then make the new party;
+ *   Ctrl+Shift+F9  only close the old party's connection (0x409700) before the same;
+ *   Ctrl+F10       join the other player's room (the old host following the new one): the
+ *                  Friends tab's Join (runtime_invite_join).
+ * For 30 s after each, every change of the party is written to the log with the roster's names.
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "runtime.h"
+#include "runtime_np_online.h"
 
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+void runtime_invite_join(const char *host); /* runtime_services.c */
+
 static unsigned char *image;
 static void **party_manager;
-static void (ABI *party_create_checked)(void *);           /* 0xa56f70 */
-static uint64_t (ABI *party_create)(void *);               /* 0xa56fb0 */
-static int request;                                         /* 1 checked, 2 direct */
+static uint64_t (ABI *party_create)(void *);            /* 0xa56fb0 */
+static void (ABI *party_leave)(void *);                 /* 0xa9ffd0 (traced in runtime_public_itemless.c) */
+static void (ABI *connection_close)(void *, int);       /* 0x409700 */
+static int request;
 static uint64_t watch_until, next_look;
 
 static uint64_t now_ms(void) {
@@ -37,20 +48,29 @@ static void *at(const void *p, size_t offset) { return p ? *(void *const *)((con
 
 int runtime_party_experiment_start(unsigned char *base, size_t size) {
     static const unsigned char create[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54};
-    static const unsigned char checked[] = {0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0x48, 0x8b, 0x05};
-    if (size < 0x2acf708 || memcmp(base + 0xa56fb0, create, sizeof create) ||
-        memcmp(base + 0xa56f70, checked, sizeof checked))
+    if (size < 0x2acf708 || memcmp(base + 0xa56fb0, create, sizeof create) || base[0x409700] != 0x55)
         return 0;
     image = base;
     party_manager = (void **)(base + 0x2acf700);
     party_create = (uint64_t (ABI *)(void *))(base + 0xa56fb0);
-    party_create_checked = (void (ABI *)(void *))(base + 0xa56f70);
+    party_leave = (void (ABI *)(void *))(base + 0xa9ffd0);
+    connection_close = (void (ABI *)(void *, int))(base + 0x409700);
     return 1;
 }
 
-void runtime_party_experiment_request(int direct) {
-    __atomic_store_n(&request, direct ? 2 : 1, __ATOMIC_RELEASE);
+void runtime_party_experiment_request(int kind) {
+    __atomic_store_n(&request, kind, __ATOMIC_RELEASE);
 }
+
+static int party_role(void) {
+    unsigned char *party = party_manager ? *party_manager : NULL;
+    unsigned char *connection = at(at(party, 0x18), 0x10);
+    int role = 0;
+    if (connection) memcpy(&role, connection + 0x118, sizeof role);
+    return role;
+}
+
+int runtime_party_hosting(void) { return image && party_role() == 1; }
 
 struct Look {
     void *pending, *session, *connection;
@@ -89,6 +109,33 @@ static void print_look(const char *when, const struct Look *l) {
             when, l->state, l->role, l->peers, l->roster, l->names, l->pending, l->session, l->connection);
 }
 
+/* The other player of a two-instance test: BB_HOST_EXPERIMENT_JOIN, or Ryu7w7 <-> Ryu7w7_test. */
+static const char *other_player(void) {
+    const char *set = getenv("BB_HOST_EXPERIMENT_JOIN");
+    if (set && *set) return set;
+    const char *me = runtime_np_get_online_name();
+    return me && !strcmp(me, "Ryu7w7") ? "Ryu7w7_test" : "Ryu7w7";
+}
+
+static void become_host(unsigned char *party, int kind) {
+    if (party_role() == 1) {
+        fprintf(stderr, "Host experiment: already a party host; nothing to do\n");
+        return;
+    }
+    if (kind == 1) {
+        fprintf(stderr, "Host experiment: leaving the old party (0xa9ffd0)\n");
+        party_leave(party);
+    } else {
+        void *connection = at(at(party, 0x18), 0x10);
+        fprintf(stderr, "Host experiment: closing the old party's connection %p (0x409700)\n", connection);
+        if (connection) connection_close(connection, 1);
+    }
+    void *roster = at(party, 0x30);
+    if (roster) *(int *)((char *)roster + 12) = 0; /* 0xa57350 appends; its entries are left alive */
+    const uint64_t result = party_create(party);
+    fprintf(stderr, "Host experiment: 0xa56fb0 returned %" PRIu64 " (1: a party session was already being made)\n", result);
+}
+
 /* The game's thread, every frame of an online lobby (runtime_online_mode.c lobby_update). */
 void runtime_party_experiment_tick(void) {
     if (!image) return;
@@ -97,15 +144,16 @@ void runtime_party_experiment_tick(void) {
     const uint64_t now = now_ms();
     if (asked) {
         look(&last);
-        print_look(asked == 2 ? "before 0xa56fb0 (direct)" : "before 0xa56f70 (checked)", &last);
+        print_look(asked == 3 ? "before joining" : "before becoming host", &last);
         unsigned char *party = party_manager ? *party_manager : NULL;
         if (!party) {
             fprintf(stderr, "Host experiment: no party manager\n");
-        } else if (asked == 2) {
-            const uint64_t result = party_create(party);
-            fprintf(stderr, "Host experiment: 0xa56fb0 returned %" PRIu64 " (1: a party session was already being made)\n", result);
+        } else if (asked == 3) {
+            const char *host = other_player();
+            fprintf(stderr, "Host experiment: joining %s's room (runtime_invite_join)\n", host);
+            runtime_invite_join(host);
         } else {
-            party_create_checked(party);
+            become_host(party, asked);
         }
         struct Look after;
         look(&after);
