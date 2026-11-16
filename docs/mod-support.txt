@@ -146,15 +146,17 @@ from the player's own game files, so no game file is in the repository.
                   first track's picture (2.0.3).
                   Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
                   (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
-                  Reiniciar (2.1.3, every cup): the end race menu between a cup's races and
-                  after its last one shows Continuar, Reiniciar, Salir. Its cup group's Restart
+                  Reiniciar (2.1.3, every cup): the end race menu between a cup's races shows
+                  Siguiente carrera, Reiniciar, Salir. Its cup group's Restart
                   ("Reintentar", now "Reiniciar" in its texts) was hidden in a cup, and its
                   script only retried the race: its unreached branch calling
                   CLoadMapNodes::restartCup_VSC (race 0 of the cup's own zone list; the kart
                   records' reset clears the cup points at a cup's first race) now runs in a
-                  cup. The root script shows the button, links the three and gives the last
-                  race a chain of its own (copies of the game's nodes); the Adventure keeps
-                  its Continue only.
+                  cup. The root script shows the button and links the three; its chain for
+                  the last race (copies of the game's nodes) does not show there, and after
+                  the last race the menu stays the game's. The Adventure keeps its Continue
+                  only. Online and in private rooms Custom Cup's buttons are off (2.1.4: the
+                  game's network check, or CPartyManager +0x6c, the private session).
   extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
                   game's own track pictures): "Prepare" on Ultimate Customizer draws them
                   from the player's game files (scripts/cup_art.py, about a minute; numpy,
