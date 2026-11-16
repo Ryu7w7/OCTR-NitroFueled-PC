@@ -3905,12 +3905,16 @@ void SettingsTab() {
             if (GameChoiceCombo(T("Salida de DLSS", "DLSS output"), "dlss_output", kOutput, "1080", 16.0f)) SaveGameIni();
         }
         static constexpr Choice kModel[] = {{"Transformer (recomendado)", "Transformer (recommended)", "transformer"},
+                                            {"Transformer K (más ligero)", "Transformer K (lighter)", "transformer_k"},
                                             {"CNN", "CNN", "cnn"}};
         if (GameChoiceCombo(T("Modelo de DLSS", "DLSS model"), "dlss_model", kModel, "transformer", 16.0f)) SaveGameIni();
-        HelpMarker(T("Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. CNN: el "
-                     "modelo anterior (preset E), más ligero; NVIDIA lo marca como obsoleto.",
-                     "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. CNN: the "
-                     "older model (preset E), lighter; NVIDIA marks it deprecated."));
+        HelpMarker(T("Transformer: el modelo actual de NVIDIA (DLSS 4), más nítido y estable, algo más pesado. "
+                     "Transformer K: el preset K en todos los modos, más ligero que los presets por defecto de "
+                     "Rendimiento (M) y Ultra rendimiento (L). CNN: el modelo anterior (preset E), más ligero; NVIDIA "
+                     "lo marca como obsoleto.",
+                     "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. "
+                     "Transformer K: preset K in every mode, lighter than the default presets of Performance (M) and "
+                     "Ultra Performance (L). CNN: the older model (preset E), lighter; NVIDIA marks it deprecated."));
     }
     if (temporal == "fsr3" || temporal == "fsr4") {
         float sharp = float(std::atof(a.game.Get("fsr3_sharpness", "0.30").c_str()));

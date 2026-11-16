@@ -2015,20 +2015,37 @@ void Menu() {
                 ImGui::EndCombo();
             }
         }
-        static constexpr const char* models[] = {"Transformer (recommended)", "CNN"};
-        const int model = s.dlss_model ? 1 : 0;
-        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS model", "Модель DLSS"), BbSettings::Label(models[model]))) {
-            for (int m = 0; m < 2; ++m) {
-                if (ImGui::Selectable(BbSettings::Label(models[m]), m == model)) {
-                    Store(s.dlss_model, m, m != model);
+        // Shown as transformer, transformer K, CNN (the indices of DlssModelNames: 0, 2, 1). A
+        // change makes the renderers create a new DLSS feature (its preset is part of it).
+        struct Model {
+            int value;
+            const char* label;
+        };
+        static constexpr Model models[] = {
+            {0, "Transformer (recommended)"},
+            {2, "Transformer K (lighter)"},
+            {1, "CNN"},
+        };
+        const int model = std::clamp(s.dlss_model.load(), 0, BbSettings::DlssModelCount - 1);
+        const char* preview = models[0].label;
+        for (const auto& m : models) {
+            if (m.value == model) preview = m.label;
+        }
+        if (ImGui::BeginCombo(BbSettings::MenuText("DLSS model", "Модель DLSS"), BbSettings::Label(preview))) {
+            for (const auto& m : models) {
+                if (ImGui::Selectable(BbSettings::Label(m.label), m.value == model)) {
+                    Store(s.dlss_model, m.value, m.value != model);
                 }
             }
             ImGui::EndCombo();
         }
         Hint(BbSettings::MenuText(
             "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. "
+            "Transformer K: preset K in every mode, lighter than the default presets of Performance (M) "
+            "and Ultra Performance (L). "
             "CNN: the older model (preset E), lighter; NVIDIA marks it deprecated. Applies at once.",
-            "Transformer: текущая модель NVIDIA. CNN: старая, легче. Применяется сразу."));
+            "Transformer: текущая модель NVIDIA. Transformer K: пресет K во всех режимах, легче в "
+            "Performance и Ultra Performance. CNN: старая, легче. Применяется сразу."));
     }
     if (s.temporal == BbSettings::TemporalFsr3 || s.temporal == BbSettings::TemporalFsr4) {
         Slider(BbSettings::MenuText("FSR sharpness", "Резкость FSR"), s.fsr3_sharpness, 0.0f, 1.0f);

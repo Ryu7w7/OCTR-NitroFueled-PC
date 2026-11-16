@@ -44,7 +44,9 @@ monitor, el mando, el idioma del juego y la imagen:
   - Con DLSS: Calidad de DLSS (Automatica = la resolucion interna; DLAA,
     Calidad, Equilibrado, Rendimiento, Ultra rendimiento dibujan a la
     proporcion de NVIDIA de la salida 1080p o 4K; tras reiniciar) y Modelo
-    de DLSS (Transformer recomendado, o CNN mas ligero).
+    de DLSS (Transformer recomendado; Transformer K, el preset K en todos
+    los modos, mas ligero en Rendimiento y Ultra rendimiento; o CNN mas
+    ligero).
   - Idioma del juego (Ajustes > Consola): ingles, espanol latinoamericano,
     frances y portugues de Brasil (los que trae esta version del juego).
 En Parches, los
