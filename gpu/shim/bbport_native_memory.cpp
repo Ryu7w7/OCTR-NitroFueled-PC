@@ -3,6 +3,7 @@
 #include "bbport_native_memory.h"
 #include "bbport_d3d11.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -24,10 +25,14 @@ void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
 
 namespace BbMem {
 namespace {
-std::shared_mutex ranges_mutex;
-boost::icl::interval_set<VAddr> mapped;
-std::unique_ptr<VideoCore::PageManager> pages;
-bool installed = false;
+// Never destroyed: when the game quits, its threads keep running while the process's static
+// objects are destroyed, and one watching pages then read a freed manager (v0.8.8, Direct3D 11:
+// PageManager::UpdatePageWatchers on the igCommandStreamQueue thread). They live as long as the process.
+std::shared_mutex& ranges_mutex = *new std::shared_mutex;
+boost::icl::interval_set<VAddr>& mapped = *new boost::icl::interval_set<VAddr>;
+VideoCore::PageManager* pages = nullptr;
+// Set once pages exists; other threads read it (acquire) before using pages.
+std::atomic<bool> installed{false};
 
 bool MappedNow(VAddr addr, u64 size) {
     if (size == 0 || addr > ~VAddr(0) - size) {
@@ -68,8 +73,8 @@ bool NativeOnly() {
 void Install() {
     static std::once_flag once;
     std::call_once(once, [] {
-        pages = std::make_unique<VideoCore::PageManager>(&owner);
-        installed = true;
+        pages = new VideoCore::PageManager(&owner);
+        installed.store(true, std::memory_order_release);
         // the runtime replays the mappings made so far
         runtime_memory_set_gpu_hooks(
             [](uintptr_t address, uint64_t size) {
@@ -96,17 +101,17 @@ void Install() {
 }
 
 void NoteWrite(std::uint64_t addr, std::uint64_t size) {
-    if (installed) {
+    if (installed.load(std::memory_order_acquire)) {
         Written(addr, size);
     }
 }
 
 bool Ready() {
-    return installed || Core::Memory::Instance()->GetRasterizer() != nullptr;
+    return installed.load(std::memory_order_acquire) || Core::Memory::Instance()->GetRasterizer() != nullptr;
 }
 
 bool IsMapped(std::uint64_t addr, std::uint64_t size) {
-    if (installed) {
+    if (installed.load(std::memory_order_acquire)) {
         return MappedNow(addr, size);
     }
     auto* r = Core::Memory::Instance()->GetRasterizer();
@@ -114,7 +119,7 @@ bool IsMapped(std::uint64_t addr, std::uint64_t size) {
 }
 
 void Watch(std::uint64_t addr, std::uint64_t size, bool watch) {
-    if (installed) {
+    if (installed.load(std::memory_order_acquire)) {
         if (watch) {
             pages->UpdatePageWatchers<true>(addr, size);
         } else {

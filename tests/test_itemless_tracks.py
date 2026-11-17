@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from archive_reader import Archive
 from igz_file import Igz
+import nsane_crates
 import speed_mode
 
 
@@ -18,11 +19,22 @@ class ItemlessTracks(unittest.TestCase):
         written = []
         write = speed_mode.write_entries_patch
 
+        # N.Sane's extra crates (scripts/nsane_crates.py) are in update2.pak's views too: the
+        # original files padded to the crate view's size, so the three views keep one layout.
+        update2 = Archive(game / 'archives/update2.pak')
+        try:
+            crates = {update2.files[i]['path'] for i in nsane_crates.update2_entries(game)}
+        finally:
+            update2.data.close()
+            update2._file.close()
+
         def hud_only(target, pak, guest, entries, base):
             archive = Archive(pak)
             try:
                 paths = {archive.files[i]['path'] for i in entries}
-                self.assertEqual(paths, {speed_mode.WUMPA_HUD, speed_mode.ITEM_HUD})
+                hud = {speed_mode.WUMPA_HUD, speed_mode.ITEM_HUD}
+                self.assertTrue(hud <= paths, paths)
+                self.assertEqual(paths - hud - (crates if Path(pak).name == 'update2.pak' else set()), set())
                 written.append(guest)
             finally:
                 archive.data.close()
@@ -35,7 +47,8 @@ class ItemlessTracks(unittest.TestCase):
             self.assertEqual(count, 40)
             self.assertEqual(len(normal), len(speed_mode.HUD_ARCHIVES))
             self.assertEqual(len(itemless), len(normal))
-            self.assertEqual(len(written), 2 * len(normal))
+            # normal and Itemless views of each HUD archive, plus N.Sane's view of update2.pak
+            self.assertEqual(len(written), 2 * len(normal) + (1 if crates else 0))
             self.assertTrue(all(Path(p).name in speed_mode.HUD_ARCHIVES for p in written))
 
     def test_native_time_trial_layer_policy(self):

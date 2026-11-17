@@ -192,6 +192,7 @@ int runtime_itemless_start(unsigned char *image, size_t size);
 int runtime_itemless_collisions_disabled(void);
 /* N.Sane Mode (runtime_nsane.c, runtime_file.c): a second stored item in private N.Sane races. */
 int runtime_nsane_start(unsigned char *image, size_t size);
+int runtime_hero_guard_start(unsigned char *image, size_t size);
 int runtime_nsane_available(void);
 void runtime_nsane_map_loading(const char *map);
 void runtime_nsane_tick(void);                   /* the game's thread, every frame: the second slot's roulette */

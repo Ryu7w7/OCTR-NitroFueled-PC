@@ -55,6 +55,9 @@ _WORD_KIND = re.compile(r'0|n[0-9a-f]{1,5}|img\+[0-9a-f]{1,8}|b[+-][0-9a-f]{1,5}
 _FAULT_CALLERS = re.compile(r'^  guest code addresses on the stack \(callers, newest first\):')
 _CALLER = re.compile(r' 0x([0-9a-f]{1,8})@rsp')
 _FAULT_THREAD = re.compile(r'^  guest thread: (.+)$')
+# The game's own out-of-memory stop (0xa95710): "OOM [pool]{id,name}->bytes", then a write to 0x13.
+# Which pool ran out and the request's size: what to enlarge (production's top crash, v0.8.8).
+_OOM = re.compile(r'OOM \[(-?\d+)\]\{(-?\d+),([A-Za-z0-9_ .:/-]{0,40})\}->(\d+)')
 # vk_breadcrumbs.cpp: a lost GPU device's report
 _DEVICE_LOST = re.compile(r'^GPU breadcrumbs at device lost \(([^)]*)\)')
 _DEVICE_FAULT = re.compile(r'^GPU fault info: (.+?) \(\d+ addresses, \d+ vendor records\)')
@@ -163,6 +166,7 @@ class Collector:
         self.fault = None  # the crash's signature (fault_of), the first one only
         self.corrupt_free = False  # probe.c kept the game going past a corrupt free
         self.heap = None  # the first corrupt block's word kinds and callers (heap_summary)
+        self.oom = None  # the game's out-of-memory stop: its pool and the request's size
         self.fault_detail = 0  # lines left to read the stored crash's callers and thread from
         self.started = time.time()
 
@@ -223,6 +227,10 @@ class Collector:
                 self.corrupt_free = True
                 self.fault = self.fault or {'kind': 'corrupt free', 'where': 'guest offset ' + m[1]}
                 continue
+            m = _OOM.search(line) if self.oom is None and 'OOM [' in line else None
+            if m:
+                self.oom = {'pool': int(m[1]), 'id': int(m[2]), 'name': m[3], 'bytes': int(m[4])}
+                continue
             m = _CORRUPT_WORDS.match(line)
             if m:
                 if self.heap is None:
@@ -270,7 +278,8 @@ class Collector:
             'overall': everything.summary() if everything.frames else None,
             'tracks': tracks,
             'ended_in': self.level,
-            **({'fault': dict(self.fault, **({'heap': self.heap} if self.heap else {}))} if self.fault else {}),
+            **({'fault': dict(self.fault, **({'heap': self.heap} if self.heap else {}),
+                              **({'oom': self.oom} if self.oom else {}))} if self.fault else {}),
         }
 
 
