@@ -44,7 +44,7 @@ static void put_ptr(void *p, size_t offset, void *value) {
 
 static void ABI team_event(unsigned char *self, unsigned char *event, void *owner) {
     const char *name = ptr(self, 0x148);
-    if (name && !strcmp(name, "COLLISION")) {
+    if (runtime_text_is(name, "COLLISION")) {
         team_event_original(self, event, owner);
         return;
     }

@@ -1082,12 +1082,13 @@ static void status_text(char *out, size_t size) {
     snprintf(first, sizeof first, "%s", P.drivers[P.watch]);
     if (r->name[0]) snprintf(first + strlen(first), sizeof first - strlen(first), " (%s)", r->name);
     if ((s->flags & RS_FINISHED) && r->finished)
-        snprintf(first + strlen(first), sizeof first - strlen(first), "   FINISHED %d%s", r->finished,
-                 r->finished == 1 ? "ST" : r->finished == 2 ? "ND" : r->finished == 3 ? "RD" : "TH");
+        snprintf(first + strlen(first), sizeof first - strlen(first), runtime_text("   FINISHED %d%s"), r->finished,
+                 runtime_text(r->finished == 1 ? "ST" : r->finished == 2 ? "ND" : r->finished == 3 ? "RD" : "TH"));
     const char *state = ended() ? "REPLAY ENDED" : P.paused ? "REPLAY PAUSED" : P.live && P.buffering ? "LIVE (WAITING)"
                       : P.live && !P.live_ended ? "LIVE" : "";
-    char speed[16] = "";
-    if (!state[0] && SPEED_TEXT[P.speed][0]) snprintf(speed, sizeof speed, "REPLAY %s", SPEED_TEXT[P.speed]);
+    state = runtime_text(state);
+    char speed[40] = "";
+    if (!state[0] && SPEED_TEXT[P.speed][0]) snprintf(speed, sizeof speed, runtime_text("REPLAY %s"), SPEED_TEXT[P.speed]);
     snprintf(out, size, "%s\n%d KM/H\n%s", first, P.shown_speed, state[0] ? state : speed);
 }
 
@@ -1265,7 +1266,7 @@ static void hud(void) {
     char number[16];
     snprintf(number, sizeof number, "%d", s->rank);
     show_text(P.place, s->rank ? number : "");
-    show_text(P.place_suffix, s->rank == 1 ? "ST" : s->rank == 2 ? "ND" : s->rank == 3 ? "RD" : s->rank ? "TH" : "");
+    show_text(P.place_suffix, runtime_text(s->rank == 1 ? "ST" : s->rank == 2 ? "ND" : s->rank == 3 ? "RD" : s->rank ? "TH" : ""));
     snprintf(number, sizeof number, "%d", s->wumpa);
     show_text(P.wumpa, number);
     snprintf(number, sizeof number, "%d", laps);

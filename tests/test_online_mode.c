@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include "../src/runtime_text.c"
 
 extern unsigned char *ranked_mode_select_root(unsigned char *owner);
 extern void ranked_mode_select_layout(unsigned char *root, int ranked);

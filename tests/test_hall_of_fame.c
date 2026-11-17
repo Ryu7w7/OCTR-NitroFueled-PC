@@ -1,4 +1,5 @@
 #include "../src/runtime_hall_of_fame.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 static const char *response = "{\"current_season\":3,\"seasons\":[{\"id\":3},{\"id\":1},{\"id\":2}],\"players\":[{\"name\":\"Leader\",\"rank\":1,\"tier\":\"Gold Mask\",\"mmr\":3500}],\"player\":{\"name\":\"Local\",\"rank\":101,\"tier\":\"Gold Mask\",\"mmr\":1200}}";
 static int requests, http = 200, change_during_fetch, old_server;

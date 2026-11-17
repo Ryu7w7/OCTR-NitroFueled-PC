@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pack Tacho 1.2.8 by Tacho, built into the port with his permission (scripts/tacho_pack/README.txt). -->
+<!-- Sin items en los portales (Spyro Circuit y Autopista Espacial). Address = VA + 0x400000.
+     Gancho al inicio de FUN_00f0b760 (CVehiclePowerUpControllerComponent: "se puede usar el item?"):
+     corredor = FUN_00fd4230([0x02ad4b70], controlador+0x18); largo del tramo = CRacer+0x48 / CRacer+0x44.
+     Pistas t503, t255: si el camino actual (_pathLength) acaba en portal y faltan menos de {b't503': 5000.0, b't255': 5500.0} unidades, o si el tramo empieza tras un portal y lleva menos de {b't503': 1000.0, b't255': 2500.0},
+     devuelve false: no se puede usar ni soltar item (tambien para la IA). -->
+<!-- European game (CUSA14876 1.21): ported from scripts/tacho_pack/patches by tools/port_patch_eu.py
+     (the same code; calls and sites at the EU addresses). -->
+<Patch>
+    <TitleID>
+        <ID>CUSA14876</ID>
+    </TitleID>
+    <Metadata isEnabled="true" Title="Crash Team Racing Nitro-Fueled" Name="Sin items en los portales" Author="Tacho" PatchVer="0.1" AppVer="01.21" AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x02724000" Value="57e83a0000005f84c0750b554889e55350e94077befe31c0c3" ExpectedSHA256="61126de1b795b976f3ac878f48e88fa77a87d7308ba57c7642b9e1068403a496" />
+            <Line Type="bytes" Address="0x02724040" Value="5341544883ec38488d0dd701000048894c242848c74424080000000048c74424180000000048c7442420000000004989fc488b3d68557b004885ff0f847d010000e8baf086fe4885c00f846f010000488b40304885c00f8462010000488b40104885c00f84550100008b400783c820488d0d6f0100003d743530330f8417000000488d0dad0100003d743235350f8405000000e92601000048894c2428498b7424184885f60f84fa000000488b3d7e0a7b004885ff0f84ea000000e82001cbfe4885c00f84dc0000004889442408488b48784885c90f84ca0000008b11f7c2000000107418488d7878e862bb17ff488b442408488b4878488b4928eb1af7c200000020740e488d7878e862181dff4889c1eb04488b49284885c90f848500000048894c2418f30f106130488b442408f30f1040440f2f05a60000000f86930000000f28d40f28c8f30f59cc0f28daf30f5cd9488b5c24280f2f5b0c731e8b0b4883c3100f2f13720b0f2f53047705e94f0000004883c308ffc975e8488b5c24280f2f4b08731f8b038b4b04488d5cc3100f2f1372080f2f53047702eb254883c308ffc975eb0f3148c1e2204809d048c1e814412b44247c3d7e040000721631c0eb170f3148c1e2204809d048c1e814418944247cb8010000004883c438415c5bc317b7d138050000000300000000007a4400409c4500e845460028474600d4aa460074ab4680078847802f884700410047009100470042df4600e2df4600e003470030044700410047009100470006ad4600a6ad46050000000400000000401c4500e0ab4500a5454700f54547004b4547009b454700329147005a914700dda2470005a34780b9a34780e1a347009a8a46003a8b4680b9a34780e1a34700dda2470005a34700b07b4500588045" ExpectedSHA256="f391ac709e96133b0cb6cc1a52574ae063aa9d8450a860b775b3d7f8a2a4edc7" />
+            <Line Type="bytes" Address="0x0130b750" Value="e9ab88410190" Signature="55 48 89 e5 53 50 48 89 fb 48 8b 7b 48 48 8b 07 ff 90 b0 00 00 00 84 c0 74 2f 48 8b 7b 18" SignatureOffset="0x0" ExpectedSHA256="7fe74ab05c432d09ce1fd09b42d58fc9981fdd7a8a4b49ea542a916772e77133" />
+        </PatchList>
+    </Metadata>
+</Patch>

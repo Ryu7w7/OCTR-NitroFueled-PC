@@ -7,6 +7,7 @@
 extern "C" {
 int runtime_graphics_tab_ready = 0;
 void runtime_restart() {}
+extern "C" const char* runtime_text(const char* english) { return english; }
 }
 namespace BbOverlay {
 void QuitGame() {}

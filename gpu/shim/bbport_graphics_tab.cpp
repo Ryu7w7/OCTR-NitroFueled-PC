@@ -32,6 +32,7 @@
 #endif
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c): run.py starts the game again
+extern "C" const char* runtime_text(const char* english); // the game's language (src/runtime_text.c)
 // runtime_file.c: the relabelled menus (update3.pak, scripts/graphics_tab.py) reach the game
 // only when every hook below is in: a tab or a Quit Game button without its hook would open a
 // menu or a map that does not exist.
@@ -302,7 +303,7 @@ void SetText(u64 placeable, const char* text) {
     if (!placeable) {
         return;
     }
-    SetStringField(placeable + 0x30, text);
+    SetStringField(placeable + 0x30, runtime_text(text)); // the port's texts in the game's language
     *reinterpret_cast<u32*>(placeable + 0xc) |= 0x1000;
 }
 

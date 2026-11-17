@@ -804,7 +804,7 @@ class OnlineModeTests(unittest.TestCase):
                         mode_index = next(i for i, e in enumerate(entries)
                                           if e[0].lower() == online_mode.MODE_SELECT_ENTRY)
                         mode = Igz(online_mode.current_entry(pak, entries, mode_index, result))
-                        self.assertEqual(mode.u32(0x1880 + 12), 3)
+                        self.assertEqual(mode.u32(0x1880 + 12), 4)  # NORMAL, ITEMLESS, BATTLE, N.SANE MODE
                         mode_archive = Archive(out / 'online/octane_lobby_modeselect.pak')
                         try:
                             mode_paths = {mode_archive.logical(i).lower()

@@ -1,4 +1,5 @@
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>

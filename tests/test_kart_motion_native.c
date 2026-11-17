@@ -1,6 +1,7 @@
 /* CPU-only complete linear-motion caller; no world, contacts or graphics API. */
 #define _GNU_SOURCE
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 #include <elf.h>
 

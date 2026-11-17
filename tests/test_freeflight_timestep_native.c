@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 
 static unsigned char freeflight_clock[0x38];
 static void *freeflight_clock_pointer=freeflight_clock;

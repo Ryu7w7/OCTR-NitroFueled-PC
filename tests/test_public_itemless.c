@@ -1,5 +1,6 @@
 #define SACREDFIRE_RELEASE "v9.9.9"
 #include "../src/runtime_public_itemless.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 #include <unistd.h>
 static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room;

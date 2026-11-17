@@ -2150,15 +2150,12 @@ void Menu() {
     }
     {
         // Always readable, whatever the menu's language.
-        static const char* languages[] = {"English", "Русский", "Español"};
-        int language = s.menu_language == BbSettings::MenuLanguage::Russian   ? 1
-                       : s.menu_language == BbSettings::MenuLanguage::Spanish ? 2
-                                                                              : 0;
+        static const char* languages[] = {"English", "Русский", "Español", "Français", "Português", "Deutsch",
+                                          "Italiano"};
+        int language = int(s.menu_language.load());
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-        if (ImGui::Combo("Language / Idioma", &language, languages, 3)) {
-            s.menu_language = language == 1   ? BbSettings::MenuLanguage::Russian
-                              : language == 2 ? BbSettings::MenuLanguage::Spanish
-                                              : BbSettings::MenuLanguage::English;
+        if (ImGui::Combo("Language / Idioma", &language, languages, int(std::size(languages)))) {
+            s.menu_language = BbSettings::MenuLanguage(std::clamp(language, 0, int(std::size(languages)) - 1));
             BbSettings::Save();
         }
     }
@@ -2933,7 +2930,16 @@ void NoticeBox(const Notice& n, float age) {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - icon - pad * 2.0f - 14.0f * s);
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.85f);
     std::string header = n.title;
-    if (kind >= 1 && kind <= 4) header += std::string("  ·  ") + (spanish ? grade_es[kind] : grade_en[kind]);
+    if (kind >= 1 && kind <= 4) {
+        // Trophy grades in the menu's language (Logro: an OCTR trophy, named in Spanish)
+        static const char* const grade_more[4][5] = {{"", "Bronze", "Argent", "Or", "Platine"},
+                                                     {"", "Bronze", "Prata", "Ouro", "Platina"},
+                                                     {"", "Bronze", "Silber", "Gold", "Platin"},
+                                                     {"", "Bronzo", "Argento", "Oro", "Platino"}};
+        const int more = int(BbSettings::Get().menu_language.load()) - int(BbSettings::MenuLanguage::French);
+        header += std::string("  ·  ") + (spanish ? grade_es[kind] : more >= 0 && more < 4 ? grade_more[more][kind]
+                                                                                           : grade_en[kind]);
+    }
     ImGui::TextColored(color, "%s", header.c_str());
     ImGui::PopFont();
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.3f);

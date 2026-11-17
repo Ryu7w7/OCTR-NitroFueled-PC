@@ -4,6 +4,7 @@
  * /tmp/test-loopback out/eboot.elf
  */
 #include "../src/runtime_online_mode.c"
+#include "../src/runtime_text.c"
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 #include <errno.h>

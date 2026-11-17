@@ -301,7 +301,7 @@ int runtime_public_match_active(void) {
 static void notice(const char *message) {
     fprintf(stderr, "Public ITEMLESS: %s\n", message);
     /* Use the Online/offline error helper: one OK button and native modal input. */
-    if (native_notice) native_notice(message, NULL);
+    if (native_notice) native_notice(runtime_text(message), NULL);
 }
 
 static int ranked_party_size(void) {
@@ -346,8 +346,8 @@ static int ranked_entry_allowed(void) {
     if (!*ranked_device()) { notice("Cannot verify this device for Ranked. Check access to the OS device identifier."); return 0; }
     const int players=ranked_party_size();
     if (players>4) {
-        char message[192];
-        snprintf(message,sizeof message,"Your party has %d players. Ranked supports at most 4, regardless of device. Reduce the party or choose Public Matchmaking (up to 8).",players);
+        char message[320];
+        snprintf(message,sizeof message,runtime_text("Your party has %d players. Ranked supports at most 4, regardless of device. Reduce the party or choose Public Matchmaking (up to 8)."),players);
         notice(message);return 0;
     }
     return 1;

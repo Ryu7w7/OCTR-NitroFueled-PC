@@ -11,6 +11,8 @@ from pathlib import Path
 
 import archive_patch
 import hall_of_fame
+import octr_texts
+from octr_texts import text as tr
 from ranked_results import score_card, manual_navigation
 from ranked_name_badges import add_badges
 from matchmaking_timer import add_timer, timeout_return, preserve_menu_party
@@ -695,10 +697,10 @@ def add_collision_setting(g):
     group, row, behavior = map(relocated, (0x1750, 0x3910, 0x3a60))
     for target, name in ((group + 0x28, 'OCTR_COLLISION_LAYOUT'),
                          (row + 0x28, 'OCTR_COLLISION_ROW'),
-                         (behavior + 0x148, 'COLLISION')):
+                         (behavior + 0x148, tr('COLLISION'))):
         g.set_u64(target, g.string_index(name))
         g.add_site('RSTT', target)
-    set_options(g, relocated(0x4930), relocated(0x4958), ('OFF', 'ON'))
+    set_options(g, relocated(0x4930), relocated(0x4958), (tr('OFF'), tr('ON')))
     # Runtime collapses this extra layout group outside private Itemless.
     g.set_u64(group + 0xf0, 0)
     g.sites['ROFS'].remove(group + 0xf0)
@@ -1004,9 +1006,9 @@ def add_race_type(g):
                 if tag == 'ROFS':
                     g.set_u64(target, relocated(g.u64(site)))
     row, behavior = relocated(0x1000), relocated(0x1678)
-    g.set_u64(behavior + 0x148, g.string_index('RACE TYPE'))
+    g.set_u64(behavior + 0x148, g.string_index(tr('RACE TYPE')))
     g.add_site('RSTT', behavior + 0x148)
-    set_options(g, relocated(0x1880), relocated(0x18a8), ('SINGLE', 'CUP'))
+    set_options(g, relocated(0x1880), relocated(0x18a8), (tr('SINGLE'), tr('CUP')))
     mode_y = struct.unpack_from('<f', g.data, 0x1064)[0]
     lobby_y = struct.unpack_from('<f', g.data, 0xb74)[0]
     # Both native rows share an unshifted parent: preserve their existing pitch.
@@ -1035,7 +1037,8 @@ def rebuild(blob):
     add_race_type(g)
     # The native selector consumes the same option/availability lists as other selectors.
     # N.SANE MODE (index 3, private rooms only: src/runtime_nsane.c); BATTLE keeps index 2.
-    set_options(g, 0x1880, 0x18a8, ('NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE'))
+    # In the game's language (scripts/octr_texts.py); the runtime knows them in both.
+    set_options(g, 0x1880, 0x18a8, tuple(map(tr, ('NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE'))))
     return g.build()
 
 
@@ -1450,6 +1453,7 @@ def prepare(game, out, elf, bases):
     digest = hashlib.sha256(stamp_of(game, bases).encode())
     digest.update(str(out.resolve()).encode())
     digest.update(Path(elf).read_bytes())
+    digest.update(('language:' + octr_texts.current_column()).encode())
     here = Path(__file__).resolve().parent
     for source in sorted([*here.glob('*.py'), *(here / 'assets').rglob('*')]):
         if source.is_file():
@@ -1771,10 +1775,26 @@ def _prepare(game, out, elf, bases):
         label = Igz(iga.read_entry(f, *label_entries[label_index][1:]))
     if label.strings.count('Racing Type') != 1:
         raise ValueError('native Online mode label is not recognized')
-    label.strings[label.strings.index('Racing Type')] = 'GAME MODE'
+    racing_type = label.strings.index('Racing Type')
+    label.strings[racing_type] = 'GAME MODE'
     guest = '/app0/archives/update.pak'
     target = out / 'online-mode-label.bbpatch'
     replacements = {label_index: label.build()}
+    # The other languages' tables of the same screen: the same layout, the row's name translated.
+    with label_pak.open('rb') as f:
+        for i, e in enumerate(label_entries):
+            name = e[0].lower()
+            prefix = LABEL_ENTRY[:-len('en.lng')]
+            if i == label_index or not name.startswith(prefix) or not name.endswith('.lng'):
+                continue
+            column = octr_texts.column_of_suffix(name[len(prefix):-len('.lng')])
+            other = Igz(iga.read_entry(f, *e[1:]))
+            if (len(other.strings) != len(label.strings) or
+                    other.strings[racing_type - 1] != label.strings[racing_type - 1]):
+                print(f'Online: {name.rsplit("/", 1)[-1]} left native (another layout)')
+                continue
+            other.strings[racing_type] = tr('GAME MODE', column) if column else 'GAME MODE'
+            replacements[i] = other.build()
     update_material_index = next(i for i, e in enumerate(label_entries)
                                  if e[0].lower() == LOBBY_MATERIALS_ENTRY.lower())
     replacements[update_material_index] = clone_lobby_materials(

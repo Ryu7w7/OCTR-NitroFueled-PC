@@ -1,6 +1,7 @@
 /* cc -D_GNU_SOURCE -std=c11 -O2 -ffunction-sections -fdata-sections -Isrc
  * tests/test_replay_timestep.c -Wl,--gc-sections -lm -pthread -o /tmp/test-replay */
 #include "../src/runtime_replay_play.c"
+#include "../src/runtime_text.c"
 void runtime_nsane_tick(void) {}
 void runtime_reserves_bar_tick(void) {}
 #include <assert.h>

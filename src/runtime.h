@@ -262,6 +262,13 @@ int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
 /* 1 when the game's fonts have the loudspeaker character (BB_VOICE_GLYPH=1, scripts/button_prompts.py): the
  * nickname over a talking racer's kart then ends with it. */
 int runtime_voice_glyph(void);
+/* The port's own texts in the game's language (src/runtime_text.c, scripts/octr_texts.py): the
+ * translation of an English text, or the text itself when it has none. runtime_text_is: a shown
+ * text is that English text or its translation. */
+const char *runtime_text(const char *english);
+int runtime_text_is(const char *shown, const char *english);
+int runtime_text_column(void);
+void runtime_text_set_language(int id);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */

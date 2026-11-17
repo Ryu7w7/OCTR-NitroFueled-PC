@@ -435,8 +435,10 @@ static void ABI peer_customization(void *self, unsigned char *message) {
     original_peer_customization(self, message);
 }
 
+/* The port's texts go through here: they show in the game's language (src/runtime_text.c). */
 static void set_text(unsigned char *placeable, const char *text) {
     if (!placeable || !text) return;
+    text = runtime_text(text);
     const char *old = pointer_at(placeable, 0x30);
     if (old && !strcmp(old, text)) return;
     set_string(placeable + 0x30, text);
@@ -582,7 +584,7 @@ static void ABI navigation_input(unsigned char *self, void *event, void *owner) 
     if (accepted && startup_behavior && (action != 8 || handle_object(&startup_owner) != owner))
         startup_cancel_input();
     if (accepted && self[0x125] && action == 8 && startup_state() < 0) {
-        native_notice("Failed to initialize network, try again later", NULL);
+        native_notice(runtime_text("Failed to initialize network, try again later"), NULL);
         return;
     }
     if (accepted && self[0x125] && action == 8 && startup_state() >= 0 && startup_state() < 2) {
@@ -624,7 +626,7 @@ static void startup_update(void) {
     if (state == 0 || state == 1) {
         if (monotonic_ms() - startup_requested_ms < 45000) return;
         startup_cancel_input();
-        native_notice("Connection timed out. Please try Online again.", NULL);
+        native_notice(runtime_text("Connection timed out. Please try Online again."), NULL);
         return;
     }
     unsigned char input[sizeof startup_input];
@@ -906,7 +908,7 @@ static void ABI load_private_map(const char *map, int reason) {
         if (runtime_room_mode_following() && private_settings_rejected) {
             pending_private_map[0] = 0;
             return_to_lobby();
-            native_notice("Cannot synchronize the host's cup. Return to the lobby and retry.", NULL);
+            native_notice(runtime_text("Cannot synchronize the host's cup. Return to the lobby and retry."), NULL);
             return;
         }
         int verified=runtime_room_mode_begin_race();
@@ -922,7 +924,7 @@ static void ABI load_private_map(const char *map, int reason) {
         if (!verified) {
         puts("Native private race: mode verification failed; cancelling before track loading");
         return_to_lobby();
-        native_notice("Cannot synchronize the host's race mode. Return to the lobby and retry.", NULL);
+        native_notice(runtime_text("Cannot synchronize the host's race mode. Return to the lobby and retry."), NULL);
         return;
     }
     }
@@ -1901,14 +1903,15 @@ static void team_result_rows(unsigned char *row, int depth) {
             y = -19.0f;
             /* Keep the native text material's gradient, without team tint. */
         } else if (!strcmp(own_name, "OCTR_TEAM_POINTS")) {
-            snprintf(title, sizeof title, "%d POINTS%s", best >= 0 ? team_totals[best] : 0, team_tiebreak ? " (H2H)" : "");
+            snprintf(title, sizeof title, runtime_text("%d POINTS%s"), best >= 0 ? team_totals[best] : 0,
+                     team_tiebreak ? runtime_text(" (H2H)") : "");
             y = 9.0f;
             const float scale[] = {0.08081815f, 0.11369143f, 1.0f};
             memcpy(row + 0x84, scale, sizeof scale);
             hide_placeable(row, 0);
         } else {
             if (best < 0) snprintf(title, sizeof title, "NO FINISHERS");
-            else snprintf(title, sizeof title, "%s TEAM WINS", team_names[best]);
+            else snprintf(title, sizeof title, "%s TEAM WINS", team_names[best]); /* a key: set_text translates */
             y = -4.0f;
             const float white[] = {1, 1, 1, 1};
             memcpy(row + 0xc0, white, sizeof white);
@@ -2543,6 +2546,7 @@ static void update_rank_card(unsigned char *row, int shown, int mode, int tier,
     } else if (tag && !strncmp(tag, "OCTR_RANK_NAME", 14)) {
         hide_placeable(row, !shown);
         if (shown) {
+            rank_name = runtime_text(rank_name);
             set_text(row, rank_name);
             const size_t length = strlen(rank_name);
             const float scale = 1.35f * (length > 18 ? 18.0f / (float)length : 1.0f);
@@ -2691,7 +2695,7 @@ static void update_score_card(unsigned char *row, const struct runtime_ranked_re
             memcpy(row + 0xc0, color, sizeof color);
             text = label;
         } else if (!strcmp(tag, "OCTR_RESULT_MMR")) {
-            if (ready && result->ranked) snprintf(label, sizeof label, "TOTAL %d MMR", result->mmr);
+            if (ready && result->ranked) snprintf(label, sizeof label, runtime_text("TOTAL %d MMR"), result->mmr);
             else if (ready) snprintf(label, sizeof label, "PLACEMENT RACES");
             else label[0] = 0;
             text = label;
@@ -2822,8 +2826,8 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
             if (ranked) {
                 char text[64];
                 if (range<0) snprintf(text,sizeof text,"ALL RANKS");
-                else if (range>400) snprintf(text,sizeof text,"WIDENED: %d MMR",range);
-                else if (range>0) snprintf(text,sizeof text,"RANGE: %d MMR",range);
+                else if (range>400) snprintf(text,sizeof text,runtime_text("WIDENED: %d MMR"),range);
+                else if (range>0) snprintf(text,sizeof text,runtime_text("RANGE: %d MMR"),range);
                 else snprintf(text,sizeof text,"CHECKING RANGE");
                 set_text(node,text);
             }
@@ -2992,7 +2996,7 @@ static void ABI cup_item_event(unsigned char *self, void *event, void *owner) {
 
 static int race_type_selector(const unsigned char *self) {
     const char *name = pointer_at(self, 0x148);
-    return name && !strcmp(name, "RACE TYPE");
+    return runtime_text_is(name, "RACE TYPE");
 }
 
 static int battle_selected(void) {
@@ -3033,7 +3037,7 @@ static unsigned char *row_behavior(unsigned char *row) {
 
 static int collision_selector(const unsigned char *self) {
     const char *name = pointer_at(self, 0x148);
-    return name && !strcmp(name, "COLLISION");
+    return runtime_text_is(name, "COLLISION");
 }
 
 static void collision_selector_visibility(unsigned char *self, unsigned char *owner) {
@@ -3274,10 +3278,11 @@ static int reject_private_team_start(void) {
         int players = 0;
         if (list) memcpy(&players, list + 0x0c, 4);
         if (players < teams || players > 8 || players % teams) {
-            char message[192];
-            snprintf(message, sizeof message,
-                     "%d TEAMS WITH NO AI NEED %s PLAYERS.\nCURRENT PLAYERS: %d\nADJUST PLAYER COUNT OR ENABLE AI.",
-                     teams, teams == 2 ? "2, 4, 6 OR 8" : "4 OR 8", players);
+            char message[320];
+            snprintf(message, sizeof message, runtime_text(teams == 2
+                     ? "2 TEAMS WITH NO AI NEED 2, 4, 6 OR 8 PLAYERS.\nCURRENT PLAYERS: %d\nADJUST PLAYER COUNT OR ENABLE AI."
+                     : "4 TEAMS WITH NO AI NEED 4 OR 8 PLAYERS.\nCURRENT PLAYERS: %d\nADJUST PLAYER COUNT OR ENABLE AI."),
+                     players);
             native_notice(message, NULL);
             printf("Native private TEAM: Start blocked, No AI players=%d/8 teams=%d\n", players, teams);
             return 1;
@@ -3312,7 +3317,7 @@ static void ABI resume_private_start(void *object) {
 static void ABI private_start_gate(void *object) {
     unsigned char *self=object;
     if (!self[0x42] && is_private() && !battle_selected() && !runtime_room_mode_ready()) {
-        native_notice("Room settings are still synchronizing. Please retry Play.", NULL);
+        native_notice(runtime_text("Room settings are still synchronizing. Please retry Play."), NULL);
         return;
     }
     if (!self[0x42]) {
@@ -3339,7 +3344,7 @@ static int mode_selector(const unsigned char *self, int count) {
     if (count != 3 && count != 4) return 0;
     unsigned char *options = pointer_at(self, 0x1a8);
     const char **labels = options ? pointer_at(options, 0x20) : NULL;
-    return labels && labels[1] && !strcmp(labels[1], "ITEMLESS");
+    return labels && runtime_text_is(labels[1], "ITEMLESS");
 }
 
 static void ABI select_mode(void *sender, int index) {
@@ -4088,7 +4093,7 @@ void runtime_online_mode_hof_legend(void *project) {
     const int button = 1;
     memcpy(remove + 0x18, &button, 4);
     dispatch(project, remove);
-    char *label = intern_string(*string_pool, "REFRESH");
+    char *label = intern_string(*string_pool, runtime_text("REFRESH"));
     add_legend(project, button, &label, 1);
     if (label) drop_string(*string_pool, label - 16);
     const int list_button = 3;
@@ -4117,7 +4122,7 @@ static void refresh_team_legend(unsigned char *self) {
         memcpy(remove + 0x18, &button, 4);
         dispatch(project, remove);
     }
-    char *label = intern_string(*string_pool, ready ? "UNREADY" : "READY");
+    char *label = intern_string(*string_pool, runtime_text(ready ? "UNREADY" : "READY"));
     add_legend(project, ready ? 2 : 1, &label, 1);
     if (label) drop_string(*string_pool, label - 16);
 }

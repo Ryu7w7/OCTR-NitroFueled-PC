@@ -18,7 +18,8 @@ class AspectSettingsTests(unittest.TestCase):
                             '-I' + str(ROOT), '-I' + str(ROOT / 'gpu/shim'),
                             str(ROOT / 'tests/test_aspect_settings.cpp'),
                             str(ROOT / 'gpu/shim/bbport_settings.cpp'),
-                            str(ROOT / 'gpu/shim/bbport_menu_es.cpp'), '-o', str(exe)],
+                            str(ROOT / 'gpu/shim/bbport_menu_es.cpp'),
+                            str(ROOT / 'gpu/shim/bbport_menu_more.cpp'), '-o', str(exe)],
                            check=True, capture_output=True, text=True)
             result = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
             self.assertIn('PASS: aspect ratios', result.stdout)
