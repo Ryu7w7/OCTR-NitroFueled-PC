@@ -2743,7 +2743,7 @@ uint32_t runtime_replay_live_count(void) { return P.live ? frames_now() : 0; }
  * game's thread a few times a second during a race; the overlay only reads the copy. ---- */
 static pthread_mutex_t marker_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct RuntimeVoiceMarker marker_copy[8];
-static int marker_count, marker_frames, marker_logged;
+static int marker_count, marker_frames, marker_logged, marker_log_frames;
 static void *marker_project, *marker_manager;
 
 void runtime_voice_markers_tick(int racing) {
@@ -2781,7 +2781,9 @@ void runtime_voice_markers_tick(int racing) {
             m->x = RR_AT(placeable, 0x60, float) + RR_AT(tag, 0x60, float);
             m->y = RR_AT(placeable, 0x64, float) + RR_AT(tag, 0x64, float);
             m->shown = !(RR_AT(placeable, 0xc, uint32_t) & 0x400) && !(RR_AT(tag, 0xc, uint32_t) & 0x400);
-            if (marker_logged < 6) {
+            /* a few positions per race, a couple of seconds apart (placement checks) */
+            if (marker_logged < 8 && i == 0 && marker_frames - marker_log_frames >= 180) {
+                marker_log_frames = marker_frames;
                 marker_logged++;
                 printf("Voice markers: %s at %.0f,%.0f (marker %.0f,%.0f + tag %.0f,%.0f)%s\n", m->name, m->x, m->y,
                        RR_AT(placeable, 0x60, float), RR_AT(placeable, 0x64, float), RR_AT(tag, 0x60, float),

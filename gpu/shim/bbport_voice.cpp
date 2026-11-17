@@ -332,6 +332,10 @@ void Run() {
             joined = ok || (joined && room == "match");
             next_join = now + (joined ? 15000 : 10000);
         }
+        if (!SDL_WasInit(SDL_INIT_AUDIO)) { // the game starts its audio a little later
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
         if (!enabled && !test) {
             if (mic) SDL_DestroyAudioStream(mic), mic = nullptr;
             if (self) SDL_DestroyAudioStream(self), self = nullptr;

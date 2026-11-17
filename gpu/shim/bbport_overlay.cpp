@@ -1077,7 +1077,8 @@ void SpeakerIcon(ImDrawList* dl, ImVec2 at, float size, ImU32 color) {
 }
 
 /// A loudspeaker over the nickname the game shows above each talking racer's kart (its HUD kart
-/// markers, in the game's 1920x1080 UI units, mapped into the 16:9 picture in the window).
+/// markers, in the game's 1920x1080 UI units from the screen's centre, y down; mapped into the
+/// 16:9 picture in the window).
 void VoiceOverKarts(const std::vector<std::string>& speaking) {
     RuntimeVoiceMarker markers[8];
     const int n = runtime_voice_markers(markers, 8);
@@ -1093,7 +1094,7 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
         bool talking = false;
         for (const std::string& nick : speaking) talking |= !SDL_strcasecmp(nick.c_str(), markers[i].name);
         if (!talking) continue;
-        const float x = ox + markers[i].x / 1920.0f * vw, y = oy + markers[i].y / 1080.0f * vh;
+        const float x = ox + (960.0f + markers[i].x) / 1920.0f * vw, y = oy + (540.0f + markers[i].y) / 1080.0f * vh;
         const ImVec2 at(x - size * 0.5f, y - size * 1.9f);
         dl->AddCircleFilled(ImVec2(at.x + size * 0.5f, at.y + size * 0.5f), size * 0.68f, IM_COL32(10, 20, 40, 170));
         SpeakerIcon(dl, ImVec2(at.x + size * 0.1f, at.y + size * 0.1f), size * 0.8f, IM_COL32(110, 230, 140, 255));
