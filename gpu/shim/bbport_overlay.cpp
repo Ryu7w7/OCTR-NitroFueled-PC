@@ -75,7 +75,7 @@ extern "C" const unsigned char bb_font_ttf_end[];
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
 extern "C" const char* runtime_np_get_online_name(void); // the player's nickname (src/runtime_np_online.c)
 extern "C" {
-struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; }; // src/runtime.h
+struct RuntimeVoiceMarker { char name[24]; float x, y, scale; int shown; }; // src/runtime.h
 int runtime_voice_markers(struct RuntimeVoiceMarker* out, int max);  // src/runtime_replay_play.c
 }
 
@@ -1087,7 +1087,7 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
     const float w = viewport->Size.x, h = viewport->Size.y;
     const float vw = std::min(w, h * 16.0f / 9.0f), vh = vw * 9.0f / 16.0f;
     const float ox = viewport->Pos.x + (w - vw) * 0.5f, oy = viewport->Pos.y + (h - vh) * 0.5f;
-    const float size = 26.0f * vh / 1080.0f; // about the nickname's height
+    const float base = vh / 1080.0f;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     for (int i = 0; i < n; ++i) {
         if (!markers[i].shown) continue;
@@ -1095,36 +1095,17 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
         for (const std::string& nick : speaking) talking |= !SDL_strcasecmp(nick.c_str(), markers[i].name);
         if (!talking) continue;
         const float x = ox + (960.0f + markers[i].x) / 1920.0f * vw, y = oy + (540.0f + markers[i].y) / 1080.0f * vh;
-        // right of the nickname, centred on it (the game's tag is centred on x; its letters are
-        // about 18 UI units wide each at that size): white, with a thin dark edge, as the name
-        const float half_name = float(std::strlen(markers[i].name)) * 9.0f * vh / 1080.0f;
-        const ImVec2 at(x + half_name + size * 0.3f, y - size * 0.5f);
+        // right of the nickname, scaled as the game scales the marker with the distance (k), so it
+        // stays by the name from near and far: the marker's point is where its text ends, a little
+        // below the letters' middle (measured on screen); white, with a thin dark edge, as the name
+        const float k = base * std::clamp(markers[i].scale, 0.2f, 3.0f);
+        const float size = 34.0f * k; // a little more than the nickname's letters
+        const ImVec2 at(x + 6.0f * k, y - 22.0f * k - size * 0.5f);
         const float edge = std::max(1.0f, size * 0.07f);
         for (const ImVec2 d : {ImVec2(-edge, 0), ImVec2(edge, 0), ImVec2(0, -edge), ImVec2(0, edge)})
             SpeakerIcon(dl, ImVec2(at.x + d.x, at.y + d.y), size, IM_COL32(20, 20, 30, 200));
         SpeakerIcon(dl, at, size, IM_COL32(255, 255, 255, 255));
     }
-}
-
-/// Who is talking now (voice chat), on the left of the screen: a loudspeaker and the name.
-void VoiceBadge(const std::vector<std::string>& speaking) {
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float pad = 12.0f * base_scale;
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad, viewport->WorkPos.y + viewport->WorkSize.y * 0.3f),
-                            ImGuiCond_Always, ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.45f);
-    ImGui::Begin("##voice", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-    const float line = ImGui::GetTextLineHeight();
-    for (const std::string& nick : speaking) {
-        const ImVec2 at = ImGui::GetCursorScreenPos();
-        SpeakerIcon(ImGui::GetWindowDrawList(), at, line, IM_COL32(110, 230, 140, 255));
-        ImGui::Dummy(ImVec2(line * 1.1f, line));
-        ImGui::SameLine();
-        ImGui::TextUnformatted(nick.c_str());
-    }
-    ImGui::End();
 }
 
 /// The Voice tab: voice chat on or off, push to talk or open microphone, the microphone, its
@@ -3398,13 +3379,9 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
         SpectatorBadge(viewers);
     }
     if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
-        // in a race, only the loudspeakers over the karts; elsewhere (the lobby) the list on the left
-        RuntimeVoiceMarker any[1];
-        if (runtime_voice_markers(any, 1) > 0) {
-            if (!menu_open) VoiceOverKarts(speaking);
-        } else {
-            VoiceBadge(speaking);
-        }
+        // in a race, a loudspeaker by the nickname over the kart; in the room list the game's row
+        // shows its own (runtime_voice_speaking), so nothing else on screen
+        if (!menu_open) VoiceOverKarts(speaking);
     }
     if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {

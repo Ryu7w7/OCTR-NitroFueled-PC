@@ -248,7 +248,7 @@ struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; };
 int runtime_voice_karts(struct RuntimeVoiceKart *out, int max);
 /* Where the game shows each racer's nickname over its kart (HUD kart markers, in the game's
  * 1920x1080 UI units), copied a few times a second during a race (runtime_replay_play.c). */
-struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; };
+struct RuntimeVoiceMarker { char name[24]; float x, y, scale; int shown; };
 void runtime_voice_markers_tick(int racing);
 /* 1 while that player is heard (or this player talks): gpu/shim/bbport_voice.cpp. */
 int runtime_voice_speaking(const char *nick);

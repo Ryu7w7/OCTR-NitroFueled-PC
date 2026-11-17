@@ -2778,16 +2778,27 @@ void runtime_voice_markers_tick(int racing) {
             if (!name || !*name) continue;
             struct RuntimeVoiceMarker *m = &now[n++];
             snprintf(m->name, sizeof m->name, "%s", name);
-            m->x = RR_AT(placeable, 0x60, float) + RR_AT(tag, 0x60, float);
-            m->y = RR_AT(placeable, 0x64, float) + RR_AT(tag, 0x64, float);
-            m->shown = !(RR_AT(placeable, 0xc, uint32_t) & 0x400) && !(RR_AT(tag, 0xc, uint32_t) & 0x400);
+            /* the tag sits at its offset in the marker, both scaled by the marker's scale (the game
+             * makes far markers smaller) */
+            float sx = RR_AT(placeable, 0x84, float), sy = RR_AT(placeable, 0x88, float);
+            if (!(sx > 0.01f && sx < 10.0f)) sx = 1.0f;
+            if (!(sy > 0.01f && sy < 10.0f)) sy = 1.0f;
+            float tag_scale = RR_AT(tag, 0x88, float);
+            if (!(tag_scale > 0.01f && tag_scale < 10.0f)) tag_scale = 1.0f;
+            m->x = RR_AT(placeable, 0x60, float) + RR_AT(tag, 0x60, float) * sx;
+            m->y = RR_AT(placeable, 0x64, float) + RR_AT(tag, 0x64, float) * sy;
+            m->scale = sy * tag_scale;
+            /* drawn: neither hidden nor faded out (a kart behind the camera keeps a marker at the
+             * screen's edge with its name faded) */
+            m->shown = !(RR_AT(placeable, 0xc, uint32_t) & 0x400) && !(RR_AT(tag, 0xc, uint32_t) & 0x400) &&
+                       RR_AT(placeable, 0xe0, float) > 0.05f && RR_AT(tag, 0xe0, float) > 0.05f;
             /* a few positions per race, a couple of seconds apart (placement checks) */
             if (marker_logged < 8 && i == 0 && marker_frames - marker_log_frames >= 180) {
                 marker_log_frames = marker_frames;
                 marker_logged++;
-                printf("Voice markers: %s at %.0f,%.0f (marker %.0f,%.0f + tag %.0f,%.0f)%s\n", m->name, m->x, m->y,
-                       RR_AT(placeable, 0x60, float), RR_AT(placeable, 0x64, float), RR_AT(tag, 0x60, float),
-                       RR_AT(tag, 0x64, float), m->shown ? "" : " hidden");
+                printf("Voice markers: %s at %.0f,%.0f scale %.2f (marker %.0f,%.0f + tag %.0f,%.0f)%s\n", m->name, m->x,
+                       m->y, m->scale, RR_AT(placeable, 0x60, float), RR_AT(placeable, 0x64, float),
+                       RR_AT(tag, 0x60, float), RR_AT(tag, 0x64, float), m->shown ? "" : " hidden");
                 fflush(stdout);
             }
         }
