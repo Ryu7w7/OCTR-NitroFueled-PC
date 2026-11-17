@@ -2752,9 +2752,9 @@ void runtime_voice_markers_tick(int racing) {
     if (!racing) {
         marker_project = marker_manager = 0;
         marker_logged = 0;
-    } else if (++marker_frames % 3) {
-        return;                                         /* every third frame is plenty */
     } else {
+        /* every frame, so the loudspeaker moves with the nickname instead of trailing it */
+        ++marker_frames;
         void *kart = 0;
         for (int i = 0; i < 8 && !kart; i++) {
             void *k = rr_kart_of(i, 0);
