@@ -762,10 +762,13 @@ static int voice_kart_count;
  *   bubble:    the kart's CPowerShieldComponent (meta global 0x2ad1b60) +0x58 ShieldState is eSS_Shielded (1),
  *              or the bubble it holds (+0x50, an entity with CSpawnedPowerShieldComponent, meta 0x2ad7560) is
  *              eSSS_Spawned (2) at +0xd0 (0xe34ff0 reads them so when the kart is hit)
- *   clock:     N. Tropy's clock on this kart: the kart controller's +0xa8 object, +0x64 goes to 1.0 at
- *              OnNTropyStart (0xe3aa90) and back to 0 at OnNTropyEnd (0xe3abd0)
  *   invisible: CKartEffectsComponent (0x2ac5438) +0x48, the viewports that see the kart, is -1 but while the
- *              Invisibility item lasts (the invisibility look, runtime_replay_play.c) */
+ *              Invisibility item lasts (the invisibility look, runtime_replay_play.c)
+ *   clock, squashed: CKartDamageComponent (fields 0x1da44a0) +0x40 _damageStateInProgress and +0x4c
+ *              _damageAddedEffectInProgress (the effect that outlasts the hit), EKartDamageType: eKDT_Ntropied 7,
+ *              eKDT_Crushed 8 / eKDT_CrushedAndStopped 9; squashed also while the kart controller's +0xa8 object
+ *              +0x64 (set to 1.0 for damage types 8 and 9 at 0xe3aa90, back at 0xe3abd0) is up. The clock's
+ *              voice lasts at least kClockHold after it was last seen (the hit alone is ~4 s). */
 static int voice_effects(void *kart) {
     int fx = 0;
     void *shield = rr_component(kart, 0x2ad1b60);
@@ -775,18 +778,20 @@ static int voice_effects(void *kart) {
         if (RR_AT(shield, 0x58, int32_t) == 1 || (spawned && RR_AT(spawned, 0xd0, int32_t) == 2)) fx |= RUNTIME_VOICE_BUBBLE;
     }
     void *controller = rr_component(kart, RR_D_KART_CONTROLLER_META);
-    void *tropy = controller ? rr_handle_object(&RR_AT(controller, 0xa8, void *)) : 0;
-    if (tropy && RR_AT(tropy, 0x64, float) > 0.5f) fx |= RUNTIME_VOICE_CLOCK;
+    void *flat = controller ? rr_handle_object(&RR_AT(controller, 0xa8, void *)) : 0;
+    if (flat && RR_AT(flat, 0x64, float) > 0.5f) fx |= RUNTIME_VOICE_CRUSHED;
     void *effects = rr_component(kart, 0x2ac5438);
     if (effects && RR_AT(effects, 0x48, int32_t) != -1) fx |= RUNTIME_VOICE_INVISIBLE;
-    /* CKartDamageComponent +0x40 _damageStateInProgress (EKartDamageType): eKDT_Ntropied 7 (the clock's hit),
-     * eKDT_Crushed 8 / eKDT_CrushedAndStopped 9 (squashed: run over by a boosting kart and the like) */
     void *damage = rr_component(kart, RR_D_DAMAGE_META);
-    const int hurt_state = damage ? RR_AT(damage, 0x40, int32_t) : -1;
-    if (hurt_state == 7) fx |= RUNTIME_VOICE_CLOCK;
-    if (hurt_state == 8 || hurt_state == 9) fx |= RUNTIME_VOICE_CRUSHED;
+    for (int k = 0; damage && k < 2; k++) {
+        const int type = RR_AT(damage, k ? 0x4c : 0x40, int32_t);
+        if (type == 7) fx |= RUNTIME_VOICE_CLOCK;
+        if (type == 8 || type == 9) fx |= RUNTIME_VOICE_CRUSHED;
+    }
     return fx;
 }
+
+static const double kClockHold = 4.0;   /* seconds */
 
 static void voice_karts_tick(int racing) {
     struct RuntimeVoiceKart now[8];
@@ -810,8 +815,14 @@ static void voice_karts_tick(int racing) {
         memset(spawned_fx, 0, sizeof spawned_fx);
         rr_spawned_voice_effects(karts, n, spawned_fx);
     }
+    static void *clock_kart[8];
+    static double clock_until[8];
+    const double t = now_s();
     for (int i = 0; i < n; i++) {
         now[i].effects |= spawned_fx[i];
+        /* the clock's slowdown outlasts its hit: its voice stays a while after it was last seen */
+        if (now[i].effects & RUNTIME_VOICE_CLOCK) clock_kart[i] = karts[i], clock_until[i] = t + kClockHold;
+        else if (clock_kart[i] == karts[i] && t < clock_until[i]) now[i].effects |= RUNTIME_VOICE_CLOCK;
         if (strcmp(told[i].name, now[i].name) || told[i].fx != now[i].effects) {
             if (told[i].name[0] && !strcmp(told[i].name, now[i].name))
                 printf("Voice effects: %s%s%s%s%s%s\n", now[i].name, now[i].effects & RUNTIME_VOICE_BUBBLE ? " bubble" : "",

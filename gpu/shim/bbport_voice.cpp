@@ -94,13 +94,14 @@ public:
         }
         if (pitch_.empty()) {
             pitch_.assign(kPitchLen, 0.0f);
+            drag_.assign(kDragLen, 0.0f);
             for (int c = 0; c < 3; ++c) comb_[c].assign(kComb[c], 0.0f);
             allpass_.assign(kAllpass, 0.0f);
         }
         for (int i = 0; i < n; ++i) {
             for (int k = 0; k < 5; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
             float y = x[i];
-            if (mix_[1] > 1e-4f) y += (Pitch(y) - y) * mix_[1];
+            if (mix_[1] > 1e-4f) y += (Drag(Pitch(y)) - y) * mix_[1];
             if (mix_[0] > 1e-4f) {
                 lp1_ += kLowPass * (y - lp1_);
                 lp2_ += kLowPass * (lp1_ - lp2_);
@@ -116,12 +117,21 @@ public:
 private:
     // a pitch shifter: two read heads sliding through a short delay line, crossfaded
     static constexpr int kPitchLen = 2400; // 50 ms
-    static constexpr float kPitch = 0.72f; // lower by about a fourth and a half
+    static constexpr float kPitch = 0.6f; // lower by almost an octave
+    // ...and dragged, as slowed down: each sound smeared over the next 70 ms
+    static constexpr int kDragLen = 3360;
+    float Drag(float in) {
+        float& slot = drag_[drag_i_];
+        const float delayed = slot;
+        slot = in + delayed * 0.35f;
+        drag_i_ = (drag_i_ + 1) % kDragLen;
+        return in * 0.8f + delayed * 0.5f;
+    }
     // the bubble: two one-pole low-passes at about 500 Hz
     static constexpr float kLowPass = 0.063f;
-    // the covered microphone: a resonance at about 450 Hz (a state-variable band-pass) over a
-    // low-pass at about 1.1 kHz, quieter
-    static constexpr float kBoxF = 0.0589f, kBoxDamp = 0.7f, kCoverLowPass = 0.134f;
+    // the covered microphone: a resonance at about 400 Hz (a state-variable band-pass) over a
+    // low-pass at about 700 Hz, quieter
+    static constexpr float kBoxF = 0.0524f, kBoxDamp = 0.8f, kCoverLowPass = 0.087f;
     // squashed: the covered sound much stronger, nothing understood: a narrow resonance at about
     // 250 Hz over two low-passes at about 300 Hz, wobbling 7 times a second
     static constexpr float kSquashF = 0.0327f, kSquashDamp = 0.35f, kSquashLowPass = 0.039f;
@@ -140,7 +150,8 @@ private:
         const float high = in - box_low_ - kBoxDamp * box_band_;
         box_band_ += kBoxF * high;
         cover_lp_ += kCoverLowPass * (in - cover_lp_);
-        return (cover_lp_ * 0.55f + box_band_ * 0.8f) * 0.8f;
+        cover_lp2_ += kCoverLowPass * (cover_lp_ - cover_lp2_);
+        return (cover_lp2_ * 0.9f + box_band_ * 0.4f) * 0.85f;
     }
     // the echo: three feedback delays (110, 170, 240 ms) through an all-pass
     static constexpr int kComb[3] = {5281, 8161, 11519};
@@ -184,8 +195,9 @@ private:
     float mix_[5] = {};
     float squash_low_ = 0, squash_band_ = 0, squash_lp1_ = 0, squash_lp2_ = 0, wobble_ = 0;
     float lp1_ = 0, lp2_ = 0;
-    float box_low_ = 0, box_band_ = 0, cover_lp_ = 0;
-    std::vector<float> pitch_;
+    float box_low_ = 0, box_band_ = 0, cover_lp_ = 0, cover_lp2_ = 0;
+    std::vector<float> pitch_, drag_;
+    int drag_i_ = 0;
     int write_ = 0;
     float phase_ = 0;
     std::vector<float> comb_[3];
