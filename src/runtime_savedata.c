@@ -304,7 +304,22 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
         if (!slots[i].used && slot<0) slot=i;
     }
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
-    if (exists && !(mode & MODE_RDONLY)) backup_save(user,title,dir->data,host,meta);
+    /* A replay or a spectated race has someone else's character on the player: what the game saves
+     * now goes to a copy, thrown away at the next one (the player's own save stays as it was). */
+    int aside=0;
+    if (exists && !(mode & MODE_RDONLY) && runtime_replay_keeps_save_aside()) {
+        char copy[640], copy_meta[680];
+        snprintf(copy,sizeof(copy),"%s/savedata/replay-aside/%s",runtime_file_progress_dir(),dir->data);
+        snprintf(copy_meta,sizeof(copy_meta),"%s.sce_sys",copy);
+        remove_tree(copy);
+        remove_tree(copy_meta);
+        if (!copy_tree(host,copy) && !copy_tree(meta,copy_meta)) {
+            snprintf(host,sizeof(host),"%s",copy);
+            snprintf(meta,sizeof(meta),"%s",copy_meta);
+            aside=1;
+        }
+    }
+    if (exists && !aside && !(mode & MODE_RDONLY)) backup_save(user,title,dir->data,host,meta);
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
     slots[slot].used=1;
@@ -318,8 +333,9 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     runtime_file_mount(result->point.data,host);
     ++mounts_done;
     pthread_mutex_unlock(&lock);
-    printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
-           exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "");
+    printf("Runtime: save data '%s' mounted at %s (%s%s%s)\n",dir->data,result->point.data,
+           exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "",
+           aside ? ", a copy: a replay's character is on the player, the own save is kept" : "");
     return 0;
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
@@ -426,6 +442,11 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
         size_t n=strlen(e->d_name);
         if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
         if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
+        /* Only the game's saves (a folder with its .sce_sys beside it): the port keeps other things
+         * here too (RaceReplay, the replays), which are not saves of the game. */
+        char sys[680]; snprintf(sys,sizeof(sys),"%s/%s.sce_sys",base,e->d_name);
+        struct stat sys_st;
+        if (stat(sys,&sys_st) || !S_ISDIR(sys_st.st_mode)) continue;
         if (count==capacity) { capacity=capacity ? capacity*2 : 16; entries=realloc(entries,capacity*sizeof(*entries)); }
         snprintf(entries[count].name,32,"%s",e->d_name);
         char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);

@@ -711,7 +711,10 @@ def setup_online(env, config, data):
     env['BB_PUBLIC_ITEMLESS'] = '0'
 
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
-    online = env.get('BB_ONLINE', ini_values.get('online', '0'))
+    # No online= line: on, as the launchers show it (issue #15: a bbport.ini the launcher wrote
+    # without the line started the game offline while the launcher said online). Without a
+    # nickname of its own such a game stays offline, as before, instead of stopping.
+    online = env.get('BB_ONLINE', ini_values.get('online', '1' if nick_ok(name) else '0'))
     if online == '1' and not nick_ok(name):
         fail('Online play needs your own nickname: 3 to 16 letters, digits, _ or -, and not a default '
              'name like RyuPC. Set it in the launcher (Online tab) or as online_name= in bbport.ini.\n'

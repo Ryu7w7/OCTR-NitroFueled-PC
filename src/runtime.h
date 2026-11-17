@@ -203,6 +203,10 @@ int runtime_online_mode_private_nsane(void);
 int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
 /* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
 int runtime_replay_no_crates(void);
+/* 1 while a replay or a spectated race has the recorded racer's driver, outfit, kart or look on
+ * the player (runtime_replay_play.c, until give_back): a save the game writes then goes to a copy
+ * that is thrown away (runtime_savedata.c), not into the player's own. */
+int runtime_replay_keeps_save_aside(void);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
 void runtime_file_report(void);

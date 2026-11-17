@@ -422,6 +422,13 @@ static void restore_look(void *player) {
     OWN.saved = OWN.told = 0;
 }
 
+/* The player has someone else's character or look (a replay, a spectated race): the game's saves
+ * are kept aside until it is given back (runtime_savedata.c), or that character would be saved as
+ * the player's own (players' reports: a replay "copied" the other player's customization). */
+int runtime_replay_keeps_save_aside(void) {
+    return __atomic_load_n(&P.player, __ATOMIC_ACQUIRE) != NULL || __atomic_load_n(&OWN.saved, __ATOMIC_ACQUIRE);
+}
+
 static void give_back(void) {
     void *player = local_player();
     put_choice_back();

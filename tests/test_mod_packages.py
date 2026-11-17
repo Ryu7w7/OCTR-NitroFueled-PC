@@ -345,13 +345,19 @@ class PackageTests(unittest.TestCase):
         old=self.port/'mod-state/user/savedata/1/CUSA13795/savedata0/save';old.parent.mkdir(parents=True);old.write_bytes(b'mods')
         later=time.time()+60;os.utime(old,(later,later))
         self.package();self.enable('sample');self.prepare()
-        self.assertEqual(main.read_bytes(),b'mods')  # the newer one, made with mods
+        # the player's own save stays even when the mod one is newer (a newer file is not more
+        # progress); the mod save is kept aside, to restore by hand
+        self.assertEqual(main.read_bytes(),b'main')
         backups=self.port/'mod-state/save-backups'
         kept=[p.read_bytes() for p in backups.rglob('save')]
-        self.assertIn(b'main',kept);self.assertIn(b'mods',kept)
+        self.assertIn(b'mods',kept)
         self.assertFalse((self.port/'mod-state/user').exists())
         main.write_bytes(b'newer main');self.prepare()  # once: nothing left to merge
         self.assertEqual(main.read_bytes(),b'newer main')
+    def test_old_mod_save_profile_used_when_the_player_has_none(self):
+        old=self.port/'mod-state/user/savedata/1/CUSA13795/savedata0/save';old.parent.mkdir(parents=True);old.write_bytes(b'mods')
+        self.package();self.enable('sample');self.prepare()
+        self.assertEqual((self.port/'user/savedata/1/CUSA13795/savedata0/save').read_bytes(),b'mods')
     def test_old_mod_save_profile_older_than_main_kept_aside(self):
         main=self.port/'user/savedata/1/save';main.parent.mkdir(parents=True);main.write_bytes(b'main')
         old=self.port/'mod-state/user/savedata/1/save';old.parent.mkdir(parents=True);old.write_bytes(b'mods')
