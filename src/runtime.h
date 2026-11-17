@@ -255,6 +255,9 @@ int runtime_voice_speaking(const char *nick);
 /* The party's players by name, as of the lobby's last frame (runtime_public_itemless.c). */
 int runtime_room_members(char out[][24], int max);
 int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
+/* 1 when the game's fonts have the loudspeaker character (BB_VOICE_GLYPH=1, scripts/button_prompts.py): the
+ * nickname over a talking racer's kart then ends with it. */
+int runtime_voice_glyph(void);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */

@@ -1,6 +1,7 @@
 """Xbox button prompts (scripts/button_prompts.py): the font's button image found through its
 objects, the buttons copied to the cells its character metrics give, the PS4 tiling, the art PNG.
 Synthetic fonts only; no game data."""
+import os
 import struct
 import sys
 import tempfile
@@ -146,6 +147,34 @@ class ButtonPromptTests(unittest.TestCase):
         for name, (x0, y0, x1, y1) in bp.SHEET.items():
             middle = (((y0 + y1) // 2) * W + (x0 + x1) // 2) * 4
             self.assertEqual(art[middle + 3], 255, name)
+
+    def test_font_without_alternate_list_gets_no_speaker(self):
+        blob = font({code: inclusive(bp.SHEET[name]) for code, name in bp.CODES.items() if code >= 0xE000}, self.tiled)
+        self.assertIsNone(bp.with_speaker(blob, bp.read_png(bp.SPEAKER_ART)))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'needs the game (BB_TEST_GAME)')
+    def test_update_fonts_get_the_speaker(self):
+        from archive_reader import Archive
+        archive = Archive(Path(os.environ['BB_TEST_GAME']) / 'archives' / 'update.pak')
+        files = {f['path'].replace('\\', '/').lower(): f for f in archive.files}
+        glyph = bp.read_png(bp.SPEAKER_ART)
+        for name in bp.FONTS:
+            blob = bytes(archive.extract(files[name.lower()]))
+            made = bp.with_speaker(blob, glyph)
+            self.assertIsNotNone(made, name)
+            self.assertEqual(len(made), len(blob))
+            _, slots = bp._alternate_list(made)
+            codes = [char for _, _, char in slots]
+            self.assertEqual(codes[-1], bp.SPEAKER_CODE)
+            self.assertEqual(codes, sorted(codes))           # still sorted, the new one last
+            w, h, at, length = bp.image_location(made)
+            linear = bp.untile(made[at:at + length], w, h)
+            x0, y0 = bp.SPEAKER_CELL[:2]
+            middle = (40 * glyph[0] + 20) * 4                  # inside the loudspeaker's box: white
+            i = ((y0 + 40) * w + x0 + 20) * 4
+            self.assertEqual(linear[i:i + 4], bytes((glyph[2][middle + 2], glyph[2][middle + 1], glyph[2][middle],
+                                                      glyph[2][middle + 3])))
+            self.assertIsNone(bp.with_speaker(made, glyph))   # only once
 
     def test_chosen_style(self):
         with tempfile.TemporaryDirectory() as tmp:

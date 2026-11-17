@@ -77,6 +77,7 @@ extern "C" const char* runtime_np_get_online_name(void); // the player's nicknam
 extern "C" {
 struct RuntimeVoiceMarker { char name[24]; float x, y, scale; int shown; }; // src/runtime.h
 int runtime_voice_markers(struct RuntimeVoiceMarker* out, int max);  // src/runtime_replay_play.c
+int runtime_voice_glyph(void); // 1: the game's fonts have the loudspeaker, the nickname shows it
 }
 
 namespace BbOverlay {
@@ -3381,9 +3382,10 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
         SpectatorBadge(viewers);
     }
     if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
-        // in a race, a loudspeaker by the nickname over the kart; in the room list the game's row
-        // shows its own (runtime_voice_speaking), so nothing else on screen
-        if (!menu_open) VoiceOverKarts(speaking);
+        // in a race, a loudspeaker by the nickname over the kart: the game's own text ends with it
+        // when its fonts have it (runtime_voice_glyph), else drawn here; in the room list the game's
+        // row shows its own (runtime_voice_speaking), so nothing else on screen
+        if (!menu_open && !runtime_voice_glyph()) VoiceOverKarts(speaking);
     }
     if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {

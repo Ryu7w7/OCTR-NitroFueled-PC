@@ -2746,12 +2746,61 @@ static struct RuntimeVoiceMarker marker_copy[8];
 static int marker_count, marker_frames, marker_logged, marker_log_frames;
 static void *marker_project, *marker_manager;
 
+/* The loudspeaker as a character of the game's fonts (U+E013, scripts/button_prompts.py puts it there and
+ * sets BB_VOICE_GLYPH=1): while a racer talks, the nickname over its kart ends with it, so the game draws it
+ * as part of the name. The marker keeps its text meanwhile (+0x8a _keepDisplayTextUpdated off). */
+static const char VOICE_GLYPH[] = " \xee\x80\x93";
+static struct { void *marker; uint8_t keep; } glyph_on[8];
+
+int runtime_voice_glyph(void) {
+    static int glyph = -1;
+    if (glyph < 0) {
+        const char *v = getenv("BB_VOICE_GLYPH");
+        glyph = v && !strcmp(v, "1");
+    }
+    return glyph;
+}
+
+/* name: the tag's text without the loudspeaker; adds it while that racer talks, takes it off after */
+static void voice_glyph(void *marker, void *tag, const char *text, char *name, size_t size) {
+    const size_t len = strlen(text), suffix = sizeof VOICE_GLYPH - 1;
+    const int has = len > suffix && !strcmp(text + len - suffix, VOICE_GLYPH);
+    snprintf(name, size, "%.*s", (int)(has ? len - suffix : len), text);
+    if (!game.set_text || !runtime_voice_glyph()) return;
+    const int talking = runtime_voice_speaking(name);
+    if (talking == has) return;
+    int slot = -1;
+    for (int i = 0; i < 8; i++)
+        if (glyph_on[i].marker == marker) slot = i;
+    if (talking) {
+        if (slot < 0)
+            for (int i = 0; i < 8 && slot < 0; i++)
+                if (!glyph_on[i].marker) slot = i;
+        if (slot < 0) return;
+        if (glyph_on[slot].marker != marker) {
+            glyph_on[slot].marker = marker;
+            glyph_on[slot].keep = RR_AT(marker, 0x8a, uint8_t);
+        }
+        char with[96];
+        snprintf(with, sizeof with, "%s%s", name, VOICE_GLYPH);
+        RR_AT(marker, 0x8a, uint8_t) = 0;
+        game.set_text(tag, with);
+    } else {
+        game.set_text(tag, name);
+        if (slot >= 0) {
+            RR_AT(marker, 0x8a, uint8_t) = glyph_on[slot].keep;
+            glyph_on[slot].marker = 0;
+        }
+    }
+}
+
 void runtime_voice_markers_tick(int racing) {
     struct RuntimeVoiceMarker now[8];
     int n = 0;
     if (!racing) {
         marker_project = marker_manager = 0;
         marker_logged = 0;
+        memset(glyph_on, 0, sizeof glyph_on);           /* the markers go with the race */
     } else {
         /* every frame, so the loudspeaker moves with the nickname instead of trailing it */
         ++marker_frames;
@@ -2777,7 +2826,7 @@ void runtime_voice_markers_tick(int racing) {
             const char *name = tag ? RR_AT(tag, 0x30, const char *) : 0;
             if (!name || !*name) continue;
             struct RuntimeVoiceMarker *m = &now[n++];
-            snprintf(m->name, sizeof m->name, "%s", name);
+            voice_glyph(marker, tag, name, m->name, sizeof m->name);
             /* the tag sits at its offset in the marker, both scaled by the marker's scale (the game
              * makes far markers smaller) */
             float sx = RR_AT(placeable, 0x84, float), sy = RR_AT(placeable, 0x88, float);
