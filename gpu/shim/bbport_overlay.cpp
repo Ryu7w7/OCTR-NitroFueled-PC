@@ -721,6 +721,7 @@ void PollFriends() {
         if (kind == RF_EVENT_INVITED || kind == RF_EVENT_NO_ONE_ONLINE) {
             Notify(title, shown, detail, 5, nullptr, 0);
         } else {
+            runtime_avatar_want(shown.c_str()); // the friends list's pictures: the notice shows it too
             NotifyWithPicture(title, shown, detail, 5);
         }
     }
@@ -2861,9 +2862,17 @@ void NoticeBox(const Notice& n, float age) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const ImU32 c = ImGui::GetColorU32(color);
     // The picture (or a cup in the grade's colour), with a ring in that colour.
+    std::string friend_key = kind == 5 ? n.name : std::string();
+    for (char& c : friend_key) c = (char)std::tolower((unsigned char)c);
+    const auto friend_picture = friend_key.empty() ? avatar_pictures.end() : avatar_pictures.find(friend_key);
     if (n.texture) {
         dl->AddImageRounded(ImTextureRef(n.texture->GetTexRef()), p, ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0),
                             ImVec2(1, 1), ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
+    } else if (friend_picture != avatar_pictures.end() && friend_picture->second.texture) {
+        // a friend's notice: their picture from the friends list (src/runtime_avatars.c)
+        dl->AddImageRounded(ImTextureRef(friend_picture->second.texture->GetTexRef()), p,
+                            ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0), ImVec2(1, 1),
+                            ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
     } else if (kind == 7) {
         // A message: a speech bubble with three dots.
         dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
@@ -3357,6 +3366,7 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
         VoiceBadge(speaking);
     }
+    if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
         ReplayResults(replay);
     }
