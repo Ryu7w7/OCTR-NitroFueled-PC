@@ -14,6 +14,7 @@
 #include "bbport_d3d11.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
+#include "bbport_graphics_tab.h"
 
 extern "C" void runtime_party_experiment_request(int kind); // src/runtime_party_experiment.c
 
@@ -205,9 +206,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
 }
 
-// sacredfire: a small PNG reader for the window icon (8-bit RGB or RGBA, no interlace; the PS4's
-// icon0.png is 512x512 RGB). The game's files never enter the repository, so the icon is read from
-// the game folder at start. Anything unexpected leaves the default icon.
+// The shared launcher/game icon is an 8-bit RGB or RGBA PNG without interlace.
+// Anything unexpected leaves the default icon.
 static bool ReadPngRgba(const char* path, std::vector<u8>& rgba, int& width, int& height) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -339,6 +339,7 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
+    if (BbSettings::Refresh()) BbGraphicsTab::RequestRefresh();
     // SacredFire: the menu's fullscreen switch applies here, on the window thread.
     {
         // A failure is logged once per requested state, not on every poll.

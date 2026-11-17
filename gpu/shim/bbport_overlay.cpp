@@ -102,7 +102,7 @@ struct PadStatus {
 std::mutex pad_status_mutex;
 PadStatus pad_status[4];
 bool l3_down = false, r3_down = false;
-bool dirty = false; // settings changed while open: saved on close
+bool dirty = false; // Autosaved during editing, with a final flush on close.
 float base_scale = 1.0f;
 
 // The game's text dialog (ImeDialog, the character name), typed on the keyboard: drawn while it
@@ -3416,6 +3416,14 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     AnnouncementBanner();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
+    }
+    static auto saved_at = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (dirty && (!ImGui::IsAnyItemActive() || now - saved_at >= std::chrono::milliseconds(150))) {
+        BbSettings::Save();
+        BbGraphicsTab::RequestRefresh();
+        dirty = false;
+        saved_at = now;
     }
     ImGui::Render();
 }

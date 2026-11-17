@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -361,8 +362,16 @@ bool IsA(void* event, u64 meta_global) {
 
 std::mutex rows_mutex;
 std::atomic<bool> refresh_requested{false};
+std::thread::id guest_ui_thread;
 std::vector<u64> list_items; // native igGuiListItem objects, same lifetime as rows
 std::vector<u64> rows; ///< the language items, in the order the list filled them
+
+void ClearRows() {
+    std::scoped_lock lock{rows_mutex};
+    rows.clear();
+    list_items.clear();
+    guest_ui_thread = {};
+}
 
 const char* OnOff(bool on) {
     return on ? "On" : "Off";
@@ -777,6 +786,7 @@ u64 PS4_SYSV_ABI LanguageItemHook(void* self, void* event, void* a2, void* a3, v
             return 0;
         }
         if (type == 9) {
+            ClearRows();
             return language_item_original(self, event, a2, a3, a4, a5);
         }
         if (index != SIZE_MAX && index >= SettingRows) {
@@ -817,6 +827,7 @@ u64 PS4_SYSV_ABI LanguageItemHook(void* self, void* event, void* a2, void* a3, v
         std::size_t index;
         {
             std::scoped_lock lock{rows_mutex};
+            guest_ui_thread = std::this_thread::get_id();
             index = std::find(rows.begin(), rows.end(), item) - rows.begin();
             if (index == rows.size()) {
                 rows.push_back(item);
@@ -849,6 +860,7 @@ VscFn load_map_original = nullptr;
 using StringPinFn = void PS4_SYSV_ABI (*)(char**, void*, void*, const void*);
 
 u64 PS4_SYSV_ABI LoadMapHook(void* context, void* args, void* a2, void* a3, void* a4, void* a5) {
+    ClearRows();
     void** pins = nullptr;
     void* pin = nullptr;
     char* map = nullptr;
@@ -915,12 +927,8 @@ u64 PS4_SYSV_ABI Open2Hook(void* context, void* args, void* a2, void* a3, void* 
         std::scoped_lock lock{last_mutex};
         last_opened = name;
     }
-    if (ours) {
-        // The Graphics page: the language screen opens; its rows are filled again.
-        std::scoped_lock lock{rows_mutex};
-        rows.clear();
-        list_items.clear();
-    }
+    // A transition retires the previous page's guest objects before opening the next page.
+    ClearRows();
     return open2_original(context, args, a2, a3, a4, a5);
 }
 
@@ -954,6 +962,15 @@ VscFn Detour(u8* stub, u64 offset, const u8* prologue, std::size_t size, const v
 } // namespace
 
 void RequestRefresh() { refresh_requested = true; }
+
+void PollRefresh() {
+    if (!refresh_requested.load(std::memory_order_relaxed)) return;
+    {
+        std::scoped_lock lock{rows_mutex};
+        if (guest_ui_thread != std::this_thread::get_id()) return;
+    }
+    if (refresh_requested.exchange(false)) RefreshRows();
+}
 
 void PatchImage(unsigned char* base, std::uint64_t size) {
     if (!BbSettings::Get().graphics_tab) {

@@ -97,6 +97,11 @@ key, or unzip it into a new folder and copy `user\`, `bbport.ini`, `launcher.ini
 
 **Linux and Steam Deck:** Download the AppImage from the same Releases page (see [AppImage](#appimage-steam-deck) below). The v0.5 asset is `SacredFire-x86_64.AppImage`; automated releases use `SacredFire-<version>-x86_64.AppImage`. Data, saves and the nickname key live in `~/.local/share/sacredfire`.
 
+Linux releases use the shared Windows/Linux launcher. Updating an older GTK AppImage opens
+the native launcher and imports existing preferences; later updates keep using the native launcher.
+Maintainers: follow the [release instructions for Ryu](docs/shared-launcher.md#release-instructions-for-ryu)
+for every AppImage release.
+
 ### Online
 
 Online is on by default and connects to the community server **octr.ryu7w7.xyz**
@@ -310,18 +315,18 @@ the game. The game folder defaults to `orig/CUSA13795`. Saves and the shader cac
 settings to `bbport.ini`; `BB_DATA_DIR` moves all of them. The first start compiles shaders as it
 goes; later starts preload them from the cache (`BB_CLEAR_SHADER_CACHE=1` starts fresh).
 
-Or the launcher (pick the game folder and the controller, then *Start*):
+Or the launcher (pick the game folder and the controller, then *Play*):
 
 ```bash
 bash launcher/bb-launcher.sh         # launcher/install-desktop.sh adds it to the app menu
 ```
 
-The launcher (GTK4/libadwaita) has pages for the game folder, the controller, the game patches,
+The [shared native launcher](docs/shared-launcher.md) (Dear ImGui/SDL3) has pages for the game folder, the controller, the game patches,
 PS4 Pro mode, display (fullscreen, FPS counter) and developer switches (frame statistics, log to
 a file, clear the shader cache, Vulkan validation, extra environment), and shows the game's
 output. `--play` starts the game with the saved settings and no window (Steam Deck game mode).
-The menu entry and the launcher use the game's own icon (`sce_sys/icon0.png`), copied from your
-game folder into your icon theme; the game window shows it too.
+The launcher uses the bundled SacredFire icon. Desktop and Steam shortcuts keep a persistent
+copy in your icon theme, including when launched from an AppImage.
 
 **Native LZMA decoder (Linux).** Recognized CTR 01.21 executables use liblzma for independent
 archive blocks, keeping the original compressed game files and requiring no disk cache. The
@@ -351,13 +356,13 @@ descriptions and grades are encrypted in the game with the PS4's trophy key, whi
 not include: with your own key (the same shadPS4 uses; paste it, or import it from shadPS4's
 `keys.json`) they are decrypted as shadPS4 does and kept in `trophies.tsv`.
 
-**PS4 Pro mode** (`BB_NEO=1`, the launcher's switch): the game sees a PS4 Pro (7-CPU mode,
+**PS4 Pro mode** (`BB_NEO=1`, selected by the launcher's internal resolution): the game sees a PS4 Pro (7-CPU mode,
 5568 MiB of direct memory) and takes its Pro rendering path; with the 1080p patch it renders
 at 1920×1080. Off by default: the Steam Deck is closer to a base PS4.
 
-**Mods (Windows):** the Mods page lists built-in patches first, followed by installed
-add-ons. Add `.pak`, `.zip`, `.xml` files or an unpacked folder to `mods/` beside the
-launcher, using Add files / Add folder or copying them there and pressing Reload.
+**Mods (Windows and Linux):** the Mods page lists built-in patches first, followed by installed
+add-ons. Add `.pak`, `.zip`, `.xml` files or an unpacked folder to `mods/` in the data
+directory, using Add files / Add folder or copying them there and pressing Reload.
 Manifest packages can combine assets and executable patches under one switch;
 creator descriptions appear when the card's chevron is expanded. Legacy `patches/`
 is still read. See the [creator and packaging guide](docs/mod-packaging.html) and
@@ -381,23 +386,23 @@ are negotiated automatically, while game executable hashes, resource checksums,
 XML signatures, conflicts and online declarations remain enforced.
 
 The existing loose-folder CLI loader and `mods.json` remain available for older
-workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The unified
-Mods UI/import flow is Windows-only in this revision; AppImage `run.sh` integration
-is not included.
+workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The shared Mods
+UI uses the existing package preparation in `run.py` on Windows and `run.sh` on Linux.
 
 ## AppImage (Steam Deck)
 
-`packaging/appimage.sh` builds `dist/SacredFire-x86_64.AppImage` (about 430 MB) with Nix: the
+`packaging/appimage.sh` builds `dist/SacredFire-x86_64.AppImage` with Nix: the
 binaries are built in `nix-shell shell.nix` so the bundle can collect their libraries, then
-`nix bundle` packs them with the GTK launcher, Python and Mesa's Vulkan drivers (the header of
+`nix bundle` packs them with the native launcher, Python and Mesa's Vulkan drivers (the header of
 the script has the exact steps). Running it opens the launcher; `--play` starts the game. Data
-lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire-launcher`.
+lives in `~/.local/share/sacredfire`, including `launcher.ini`. The old GTK settings in
+`~/.config/sacredfire-launcher/settings.json` are imported once and preserved.
 Without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
 until a folder passes the game check.
 
 The [desktop build guide](docs/MANUAL_BUILDS.md) has the GitHub Actions workflow, Nix commands, version checks, Windows ZIP steps, and output checks.
 
-**Adding the AppImage to Steam**: the launcher's *Settings → Steam → Add to Steam* writes the
+**Adding the AppImage to Steam**: the launcher's *Tools → Add to Steam* writes the
 shortcut (with `--play`, for the Steam Deck's game mode) while Steam is closed; by hand, *Add a
 Non-Steam Game* needs no options. The compatibility tool does not matter. Steam's overlay is removed before the port's own programs start. Where
 Steam runs games without FUSE, set the launch options to
@@ -436,7 +441,7 @@ than the Steam Deck has). bbport's temporal upscalers (`BB_UPSCALER`, `BB_OBJECT
 | `scripts/` | Offline preparation of the game image, module linking, game check, patch compiler, mods |
 | `gpu/` | Renderer library: vendored shadPS4 video core (`gpu/VENDOR.txt`) with bbport's and SacredFire's changes, shims, ImGui menu |
 | `patches/` | Community patches for CTR (`CrashTeamRacing.xml`) |
-| `launcher/`, `packaging/` | GTK4 launcher and desktop entry; Nix package and AppImage |
+| `launcher/`, `packaging/` | Shared native launcher and desktop entry; Nix package and AppImage |
 | `tools/` | Developer tools: import-name generation, scripted runs, screenshots, A/B toggles, GPU checks |
 | `tests/` | Loader, runtime, patch, game-check and renderer tests |
 | `docs/sacredfire/` | SacredFire's notes: [status](docs/sacredfire/STATUS.md), setup, imports, Bloodborne gating and removal, fur, controllers, patches, other platforms |
@@ -460,7 +465,7 @@ can find the cause. **No game files** in issues or pull requests. See
 - Races with the 60 FPS patch reach 37–45 FPS on the Steam Deck: the port's GPU command thread
   is the limit at ~1400 draws per frame ([docs/sacredfire/08-patches.md](docs/sacredfire/08-patches.md)).
 - Online features are stubbed in SacredFire; this fork plays online (see [Online](#online)).
-- Windows: native build, from source only for now, without the GTK launcher and without the
+- Windows: native build without the
   PC memory model ([packaging/windows/README.md](packaging/windows/README.md)).
 - macOS is not supported ([docs/sacredfire/10-other-platforms.md](docs/sacredfire/10-other-platforms.md)).
 

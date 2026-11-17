@@ -1,4 +1,4 @@
-# Packaged port: the prebuilt game binaries (build.sh first), the start-up scripts and the GTK4
+# Packaged port: the prebuilt game binaries (build.sh first), the start-up scripts and the native ImGui
 # launcher, with their whole Nix closure and Mesa's Vulkan drivers. `bash packaging/appimage.sh`
 # turns it into an AppImage (Steam Deck); `nix-build packaging` alone gives result/bin/bbport.
 { pkgs ? import <nixpkgs> { }
@@ -9,13 +9,14 @@
 let
   lib = pkgs.lib;
   root = ./..;
-  assetDirs = [ "scripts" "patches" "launcher" "shaders" "third_party/gcn2hlsl" ];
+  assetDirs = [ "scripts" "patches" "launcher" "art" "shaders" "third_party/gcn2hlsl" "packaging/windows/steamgrid" "out/dlss" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
-    "out/VERSION" "tools" "tools/gen_import_names.py"
+    "out/launcher" "out/launcher/sacredfire-launcher" "out/VERSION" "tools" "tools/gen_import_names.py"
     # the native Vulkan engine's shaders are built on the player's PC (scripts/native_shaders.py)
-    "tools/shaders" "tools/shaders/build_spirv.py" "third_party"
+    "tools/shaders" "tools/shaders/build_spirv.py" "third_party" "packaging" "packaging/windows"
+    "out/eosbridge" "out/eosbridge/ryunet-bridge" "out/eosbridge/libEOSSDK-Linux-Shipping.so"
   ] ++ assetDirs;
   src = builtins.path {
     name = "bbport-src";
@@ -25,7 +26,7 @@ let
       in builtins.elem rel wanted
         || lib.any (dir: lib.hasPrefix (dir + "/") rel) assetDirs;
   };
-  python = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
+  python = pkgs.python3;
   # Mesa's Vulkan drivers come with the package (RADV and ANV); bbport_vulkan.py adds the host
   # NVIDIA ICD and only its vendor libraries (matching the host's kernel module). Only the two
   # drivers, not the whole Mesa: its OpenGL drivers and LLVM were ~800 MB of the package. RADV
@@ -68,14 +69,7 @@ let
       exit 1
     '';
   };
-  # The launcher's GTK without GStreamer (video playback: flite, x265, ... ~200 MB), printing and
-  # the search indexer, which it never uses; libadwaita on top of it.
-  gtk4 = (pkgs.gtk4.override { cupsSupport = false; trackerSupport = false; }).overrideAttrs (old: {
-    buildInputs = lib.filter (p: !(lib.hasPrefix "gst-" (p.pname or ""))) old.buildInputs;
-    mesonFlags = old.mesonFlags ++ [ "-Dmedia-gstreamer=disabled" ];
-  });
-  libadwaita = pkgs.libadwaita.override { inherit gtk4; };
-  # Fonts: bundled DejaVu and Adwaita plus the host's usual font directories, but not the host's
+  # Fonts: bundled DejaVu and Noto CJK plus the host's usual font directories, but not the host's
   # /etc/fonts: on NixOS it names fonts in the host's /nix/store, which the AppImage hides behind
   # its own store in some environments (Steam's FHS sandbox), and the launcher showed boxes.
   fontsConf = pkgs.writeText "bbport-fonts.conf" ''
@@ -83,7 +77,7 @@ let
     <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
     <fontconfig>
       <dir>${pkgs.dejavu_fonts}/share/fonts</dir>
-      <dir>${pkgs.adwaita-fonts}/share/fonts</dir>
+      <dir>${pkgs.noto-fonts-cjk-sans}/share/fonts</dir>
       <dir>/usr/share/fonts</dir>
       <dir>/usr/local/share/fonts</dir>
       <dir prefix="xdg">fonts</dir>
@@ -96,8 +90,7 @@ let
   # NVIDIA dlopens libxcb-glx.so.0. libX11's RUNPATH does not make it visible to
   # the driver: expose the bundled XCB directory explicitly, also on Wayland.
   common = ''
-      --prefix XDG_DATA_DIRS : ${mangohud}/share:${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${gtk4}/share/gsettings-schemas/${gtk4.name} \
-      --set-default GDK_PIXBUF_MODULE_FILE ${pkgs.librsvg}/${pkgs.gdk-pixbuf.moduleDir}.cache \
+      --prefix XDG_DATA_DIRS : ${mangohud}/share \
       --set-default FONTCONFIG_FILE ${fontsConf} \
       --set-default LC_ALL C.UTF-8 \
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libglvnd pkgs.libx11 pkgs.libxext pkgs.libxcb ]} \
@@ -108,10 +101,8 @@ pkgs.stdenv.mkDerivation {
   pname = "sacredfire";
   version = "0.1";
   inherit src;
-  # The hook adds its GTK to the wrapper (typelibs, schemas): ours, not nixpkgs' with GStreamer.
-  nativeBuildInputs = [ pkgs.makeShellWrapper (pkgs.wrapGAppsHook3.override { gtk3 = gtk4; }) pkgs.gobject-introspection ];
-  buildInputs = [ gtk4 libadwaita pkgs.adwaita-icon-theme pkgs.librsvg ]
-    ++ map builtins.storePath runtimePaths;
+  nativeBuildInputs = [ pkgs.makeShellWrapper ];
+  buildInputs = map builtins.storePath runtimePaths;
   dontBuild = true;
   dontConfigure = true;
   # The binaries live under share/ (next to the scripts run.sh expects): strip them too, which
@@ -120,14 +111,14 @@ pkgs.stdenv.mkDerivation {
   # patchelf (RPATH shrinking) corrupts the non-PIE game binary's symbol versions; it finds
   # its library through $ORIGIN/gpu and its other libraries through the build's RUNPATH.
   dontPatchELF = true;
-  dontWrapGApps = true; # wrapped once below, together with the launcher's own variables
   installPhase = ''
     runHook preInstall
     d=$out/share/sacredfire
     mkdir -p $d/bin $out/bin
     cp run.sh run.py $d/   # run.py: scripts/online_config.py reuses its online setup
     cp out/VERSION $d/VERSION   # the build's source revision (build.sh); run.sh and the launcher show it
-    cp -r scripts patches launcher $d/
+    cp -r scripts patches launcher art $d/
+    cp -r packaging/windows/steamgrid $d/art/steamgrid
     # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
     if [ -d shaders ]; then cp -r shaders $d/; fi
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
@@ -135,9 +126,19 @@ pkgs.stdenv.mkDerivation {
     # The native Vulkan engine's shader build: its translator and driver script (DXC: BB_DXC below).
     install -Dm644 tools/shaders/build_spirv.py $d/tools/shaders/build_spirv.py
     mkdir -p $d/third_party && cp -r third_party/gcn2hlsl $d/third_party/
+    install -m755 out/launcher/sacredfire-launcher $d/bin/sacredfire-launcher
     install -m755 out/sacredfire $d/bin/sacredfire
     install -m755 out/bb-gpu-capabilities $d/bin/bb-gpu-capabilities
     install -Dm755 out/gpu/libbbgpu.so $d/bin/gpu/libbbgpu.so
+    if [ -d out/dlss ]; then
+      cp -a out/dlss/*.so* $d/bin/
+      mkdir -p $d/licenses
+      cp out/dlss/*LICENSE.txt $d/licenses/
+    fi
+    if [ -f out/eosbridge/ryunet-bridge ]; then
+      mkdir -p $d/eos
+      cp out/eosbridge/ryunet-bridge out/eosbridge/libEOSSDK-Linux-Shipping.so $d/eos/
+    fi
     # Their debug info names the build environment's headers (the full GCC, Vulkan headers): Nix
     # took those for dependencies, ~300 MB. Symbols stay (crash reports).
     ${pkgs.binutils-unwrapped}/bin/strip --strip-debug $d/bin/sacredfire $d/bin/bb-gpu-capabilities
@@ -158,13 +159,12 @@ pkgs.stdenv.mkDerivation {
     gcc -O2 -Wall -Werror -static -L${pkgs.glibc.static}/lib -DTARGET="\"$out/libexec/sacredfire\"" \
       ${./bbport-entry.c} -o $out/bin/sacredfire
     makeShellWrapper ${python}/bin/python3 $out/libexec/sacredfire \
-      "''${gappsWrapperArgs[@]}" \
-      ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py ${python}/bin/python3 $out/share/sacredfire/launcher/sacredfire_launcher.py" \
+      ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py $out/share/sacredfire/bin/sacredfire-launcher" \
       --set BB_PREBUILT 1 \
       --set PYTHON ${pkgs.python3}/bin/python3 \
       --set BB_DXC ${pkgs.directx-shader-compiler}/bin/dxc \
       --set BB_BUNDLED_VK_DRIVER_FILES ${icds} \
-      --prefix PATH : ${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.util-linux pkgs.procps
+      --prefix PATH : ${lib.makeBinPath [ pkgs.glib pkgs.fontconfig pkgs.bash pkgs.coreutils pkgs.util-linux pkgs.procps
                                           pkgs.gawk pkgs.gnused pkgs.gnugrep ]} \
       --run 'export BB_DATA_DIR=''${BB_DATA_DIR:-''${XDG_DATA_HOME:-$HOME/.local/share}/sacredfire}; mkdir -p "$BB_DATA_DIR"'
     # The game alone, without the launcher (settings from the data directory's bbport.ini).

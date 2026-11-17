@@ -13,7 +13,7 @@ typedef struct {
     uint32_t sdk_version;       /* from the eboot's procparam */
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
-    const char *icon;           /* window icon: the game's sce_sys/icon0.png (may be NULL) */
+    const char *icon;           /* shared launcher/game PNG icon (may be NULL) */
 } BbGpuConfig;
 /* Registers kernel event queues (needed with or without graphics). */
 void bbgpu_register_kernel(void);
@@ -31,6 +31,7 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+void bbgpu_refresh_graphics_tab(void);
 /* SacredFire: 1 once after the in-game menu's "Rescan controllers" button (runtime_pad.c restarts
  * SDL's gamepad subsystem and enumerates devices afresh); cleared by the call. */
 int bbgpu_pad_rescan_take(void);

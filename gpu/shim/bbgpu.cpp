@@ -428,6 +428,10 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
+extern "C" void bbgpu_refresh_graphics_tab(void) {
+    BbGraphicsTab::PollRefresh();
+}
+
 extern "C" void bbgpu_notify(const char* title, const char* name, const char* detail, int kind, const void* png,
                              uint64_t png_size) {
     BbOverlay::Notify(title ? title : "", name ? name : "", detail ? detail : "", kind, png, size_t(png_size));

@@ -19,14 +19,23 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include "../../../../dlss_bridge/shadps4_dlss_bridge.h"
+#else
+#include <dlfcn.h>
+#include <codecvt>
+#include <locale>
 #endif
+#include "../../../../dlss_bridge/shadps4_dlss_bridge.h"
 
 namespace Vulkan {
 
 namespace {
+#ifdef _WIN32
 constexpr wchar_t BridgeName[] = L"sacredfire_dlss.dll";
 constexpr wchar_t NgxName[] = L"nvngx_dlss.dll";
+#else
+constexpr char BridgeName[] = "libsacredfire_dlss.so";
+constexpr char NgxName[] = "libnvidia-ngx-dlss.so";
+#endif
 
 std::filesystem::path ExecutableDirectory() {
 #ifdef _WIN32
@@ -35,8 +44,16 @@ std::filesystem::path ExecutableDirectory() {
     path.resize(length);
     return std::filesystem::path{path}.parent_path();
 #else
-    return std::filesystem::current_path();
+    std::error_code error;
+    return std::filesystem::read_symlink("/proc/self/exe", error).parent_path();
 #endif
+}
+std::filesystem::path BridgeDirectory() {
+    if (const char* path = std::getenv("BB_DLSS_DIR"); path && *path) return path;
+    const auto directory = ExecutableDirectory();
+    std::error_code error;
+    return std::filesystem::is_regular_file(directory / "dlss" / BridgeName, error)
+        ? directory / "dlss" : directory;
 }
 } // namespace
 
@@ -44,8 +61,6 @@ int DlssNgx::QualityForScale(float scale) {
     // DLAA only for equal sizes: any real upscale needs at least the Quality mode.
     return scale >= 2.9f ? 4 : scale >= 1.95f ? 3 : scale >= 1.65f ? 2 : scale > 1.01f ? 1 : 0;
 }
-
-#ifdef _WIN32
 
 namespace {
 void BridgeLog(int warning, const char* message) {
@@ -80,7 +95,11 @@ std::vector<const char*> Collect(const VkExtensionProperties* required, u32 coun
 } // namespace
 
 struct DlssNgx::Impl {
+#ifdef _WIN32
     HMODULE module{};
+#else
+    void* module{};
+#endif
     const ShadDlssApi* api{};
     std::vector<std::string> instance_extensions, device_extensions;
     std::optional<FeatureDesc> feature;
@@ -96,22 +115,41 @@ struct DlssNgx::Impl {
 };
 
 DlssNgx::DlssNgx() : impl{std::make_unique<Impl>()} {
-    const auto directory = ExecutableDirectory();
+    const auto directory = BridgeDirectory();
+#ifdef _WIN32
     impl->module = LoadLibraryW((directory / BridgeName).c_str());
     const auto get_api =
         impl->module
             ? reinterpret_cast<ShadDlssGetApiFn>(GetProcAddress(impl->module, "ShadDlssGetApi"))
             : nullptr;
+#else
+    impl->module = dlopen((directory / BridgeName).c_str(), RTLD_NOW | RTLD_LOCAL);
+    const auto get_api = impl->module
+        ? reinterpret_cast<ShadDlssGetApiFn>(dlsym(impl->module, "ShadDlssGetApi")) : nullptr;
+#endif
     impl->api = get_api ? get_api() : nullptr;
     if (!impl->api || impl->api->abi != SHADPS4_DLSS_BRIDGE_ABI) {
         impl->api = nullptr;
-        impl->Disable("sacredfire_dlss.dll is missing or from another version");
+        impl->Disable("the DLSS bridge is missing or from another version");
         return;
     }
-    const auto data = directory / "dlss";
+    auto data = directory / "dlss";
+    if (const char* user = std::getenv("BB_GPU_USER_DIR"); user && *user) data = std::filesystem::path(user) / "cache/dlss";
+#ifndef _WIN32
+    else if (const char* cache = std::getenv("XDG_CACHE_HOME"); cache && *cache) data = std::filesystem::path(cache) / "sacredfire/dlss";
+    else if (const char* home = std::getenv("HOME"); home && *home) data = std::filesystem::path(home) / ".cache/sacredfire/dlss";
+    else data = std::filesystem::temp_directory_path() / "sacredfire-dlss";
+#endif
     std::error_code error;
     std::filesystem::create_directories(data, error);
-    if (!impl->api->Configure(directory.c_str(), data.c_str(), BridgeLog)) {
+    if (error) { impl->Disable("cannot create the DLSS cache directory"); return; }
+#ifdef _WIN32
+    const auto library_path = directory.wstring(), data_path = data.wstring();
+#else
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> utf8;
+    const auto library_path = utf8.from_bytes(directory.string()), data_path = utf8.from_bytes(data.string());
+#endif
+    if (!impl->api->Configure(library_path.c_str(), data_path.c_str(), BridgeLog)) {
         impl->Disable("the bridge could not be configured");
     }
 }
@@ -124,7 +162,7 @@ DlssNgx* DlssNgx::Get() {
         if (setting && setting[0] == '0') {
             return;
         }
-        const auto directory = ExecutableDirectory();
+        const auto directory = BridgeDirectory();
         std::error_code ec;
         if (!std::filesystem::is_regular_file(directory / BridgeName, ec) ||
             !std::filesystem::is_regular_file(directory / NgxName, ec)) {
@@ -276,41 +314,5 @@ void DlssNgx::Shutdown() {
     }
 }
 
-#else
-
-struct DlssNgx::Impl {
-    std::string problem{"DLSS is Windows only"};
-};
-DlssNgx::DlssNgx() = default;
-DlssNgx::~DlssNgx() = default;
-DlssNgx* DlssNgx::Get() {
-    return nullptr;
-}
-const std::string& DlssNgx::Problem() const {
-    return impl->problem;
-}
-void DlssNgx::AppendInstanceExtensions(std::vector<const char*>&) {}
-std::vector<const char*> DlssNgx::DeviceExtensions(vk::Instance, vk::PhysicalDevice,
-                                                   const std::vector<std::string>&) {
-    return {};
-}
-void DlssNgx::Initialize(vk::Instance, vk::PhysicalDevice, vk::Device) {}
-void DlssNgx::Shutdown() {}
-bool DlssNgx::IsAvailable() const {
-    return false;
-}
-bool DlssNgx::CreateFeature(vk::CommandBuffer, const FeatureDesc&) {
-    return false;
-}
-bool DlssNgx::HasFeature(const FeatureDesc&) const {
-    return false;
-}
-bool DlssNgx::Evaluate(vk::CommandBuffer, const Resource&, const Resource&, const Resource&,
-                       const Resource&, const EvalDesc&) {
-    return false;
-}
-void DlssNgx::ReleaseFeatureAfterGpuDrain() {}
-
-#endif
 
 } // namespace Vulkan

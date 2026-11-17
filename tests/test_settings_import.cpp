@@ -3,8 +3,6 @@
 // copied. Build: ninja -C out/gpu-win settings-import-test; run out/gpu-win/settings-import-test.exe.
 #include "settings_import.h"
 
-#include <windows.h>
-
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -34,14 +32,13 @@ static std::string Read(const fs::path& p) {
 }
 
 int main() {
-    wchar_t temp[MAX_PATH];
-    GetTempPathW(MAX_PATH, temp);
-    const fs::path base = fs::path(temp) / L"ctr-settings-import-test";
+    const fs::path base = fs::temp_directory_path() / ("ctr-settings-import-test-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::remove_all(base);
     // Downloads\CTR-NitroFueled-PC-portable-v0.5.2-windows\CTR-NitroFueled-PC-portable (played)
     // and the same for v0.6 (just unpacked), plus an older one that the list knows (ñ in the path).
     const fs::path old_install = base / L"CTR-NitroFueled-PC-portable-v0.5.2-windows" / L"CTR-NitroFueled-PC-portable";
-    const fs::path listed = base / L"Juegos ñ" / L"octr";
+    const fs::path listed = base / u8"Juegos ñ 日本語" / L"octr";
     const fs::path fresh = base / L"CTR-NitroFueled-PC-portable-v0.6-windows" / L"CTR-NitroFueled-PC-portable";
     const fs::path installs = base / L"appdata" / L"installs.txt";
     Write(old_install / L"run.py", "");
@@ -93,6 +90,18 @@ int main() {
     CHECK(!fs::exists(fresh / L"user" / L"cache"));
     // The new one is a used installation now, and the old one stays as it was.
     CHECK(IsUsedInstall(fresh) && Read(old_install / L"dlc" / L"pack" / L"file") == "dlc");
+
+#ifndef _WIN32
+    const fs::path lower = base / "case", upper = base / "Case";
+    Write(lower / "launcher.ini", "language=en\n");
+    Write(upper / "launcher.ini", "language=es\n");
+    Remember(installs, lower); Remember(installs, upper);
+    const auto distinct = Previous(installs, fresh);
+    CHECK(distinct.size() == 4);
+#endif
+    Write(old_install / "user/savedata" / u8"日本語", "unicode save");
+    CHECK(Copy(old_install, fresh).empty());
+    CHECK(Read(fresh / "user/savedata" / u8"日本語") == "unicode save");
 
     fs::remove_all(base);
     if (failures) {

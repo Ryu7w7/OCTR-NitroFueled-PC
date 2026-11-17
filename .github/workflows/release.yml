@@ -44,16 +44,54 @@ jobs:
       - name: Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Shell syntax
-        run: bash -n run.sh build.sh launcher/bb-launcher.sh launcher/install-desktop.sh packaging/appimage.sh
+        run: bash -n run.sh build.sh launcher/bb-launcher.sh launcher/build.sh launcher/install-desktop.sh packaging/appimage.sh dlss_bridge/build.sh eosbridge/build.sh
       - name: Launcher compiles
-        run: python3 -m py_compile launcher/*.py tools/gen_import_names.py tools/shader_recipe.py scripts/*.py
+        run: python3 -m py_compile launcher/*.py launcher/linux/*.py packaging/test_launcher_upgrade.py tools/gen_import_names.py tools/shader_recipe.py scripts/*.py
       - name: Patch file parses
         run: python3 -c "import xml.etree.ElementTree as ET; ET.parse('patches/CrashTeamRacing.xml'); print('ok')"
+
+  launcher-linux:
+    name: Shared launcher (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - run: git submodule update --init gpu/third_party/imgui
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - run: sudo apt-get update && sudo apt-get install -y xvfb mesa-vulkan-drivers
+      - name: Build and test shared launcher
+        env:
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: nix-shell launcher/shell.nix --run 'cmake -S launcher -B out/launcher -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build out/launcher --parallel 2 && ctest --test-dir out/launcher --output-on-failure'
+
+  launcher-windows:
+    name: Shared launcher (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+      - run: git submodule update --init gpu/third_party/imgui
+        shell: bash
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+      - name: Build and test shared launcher
+        run: cmake -S launcher -B out/launcher-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build out/launcher-win --parallel 2 && ctest --test-dir out/launcher-win --output-on-failure
 
   linux:
     name: Linux AppImage
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, boot-cache-checks]
+    needs: [checks, boot-cache-checks, launcher-linux, launcher-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -66,7 +104,16 @@ jobs:
         with:
           nix_path: nixpkgs=channel:nixos-unstable
       - name: Build inside Nix shell
+        env:
+          EOS_SDK_URL: ${{ secrets.EOS_SDK_URL }}
+          EOS_BRIDGE_INI: ${{ secrets.EOS_BRIDGE_INI }}
         run: nix-shell shell.nix --run 'BB_IN_NIX_SHELL=1 bash build.sh'
+      - name: Fetch pinned NVIDIA DLSS SDK
+        run: python3 scripts/fetch_dlss_sdk.py linux "$RUNNER_TEMP/dlss-sdk"
+      - name: Build and check Linux DLSS bridge
+        run: |
+          export DLSS_SDK="$RUNNER_TEMP/dlss-sdk"
+          nix-shell shell.nix --run 'bash dlss_bridge/build.sh && c++ -std=c++20 -O2 -UNDEBUG tests/test_dlss_bridge.cpp -ldl -lvulkan -o out/dlss-bridge-test && out/dlss-bridge-test out/dlss'
       - name: Package AppImage
         run: bash packaging/appimage.sh
       - name: Name and verify AppImage
@@ -79,6 +126,11 @@ jobs:
           mv dist/SacredFire-x86_64.AppImage.sha256 "dist/$asset.sha256"
           mv dist/SacredFire-x86_64.AppImage.build.txt "dist/$asset.build.txt"
           (cd dist && sha256sum "$asset" > "$asset.sha256" && sha256sum --check "$asset.sha256")
+      - name: Verify GTK-to-native and subsequent launcher updates
+        run: |
+          # Ubuntu 24.04 restricts the user namespace used by the AppImage's Nix runtime.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python3 packaging/test_launcher_upgrade.py dist/*.AppImage
       - uses: actions/upload-artifact@v7
         with:
           name: linux-build
@@ -92,7 +144,7 @@ jobs:
   windows:
     name: Windows portable ZIP
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, boot-cache-checks]
+    needs: [checks, boot-cache-checks, launcher-linux, launcher-windows]
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
@@ -130,10 +182,17 @@ jobs:
             mingw-w64-clang-x86_64-spirv-tools
             mingw-w64-clang-x86_64-spirv-headers
             mingw-w64-clang-x86_64-spirv-cross
+      - name: Fetch pinned NVIDIA DLSS SDK
+        run: python3 scripts/fetch_dlss_sdk.py windows "$(cygpath -u "$RUNNER_TEMP")/dlss-sdk"
+      - name: Build Windows DLSS bridge
+        shell: cmd
+        run: dlss_bridge\build.bat "%RUNNER_TEMP%\dlss-sdk" "${{ steps.msys2.outputs.msys2-location }}\clang64\include"
       - name: Build and package Windows ZIP
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
           GH_TOKEN: ${{ github.token }}
+          EOS_SDK_URL: ${{ secrets.EOS_SDK_URL }}
+          EOS_BRIDGE_INI: ${{ secrets.EOS_BRIDGE_INI }}
         run: |
           set -euo pipefail
           version=$(git describe --tags --match 'v*' --always)
@@ -149,7 +208,7 @@ jobs:
             curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o dxc.zip "$url"
             unzip -q -o dxc.zip -d "$dxc_dir"
           fi
-          python3 packaging/windows/make_portable.py --version "$version"
+          python3 packaging/windows/make_portable.py --version "$version" --dlss-sdk "$(cygpath -u "$RUNNER_TEMP")/dlss-sdk"
           asset="CTR-NitroFueled-PC-portable-${version}-windows.zip"
           mv dist/CTR-NitroFueled-PC-portable-windows.zip "dist/$asset"
           mv dist/CTR-NitroFueled-PC-portable-windows.zip.sha256 "dist/$asset.sha256"

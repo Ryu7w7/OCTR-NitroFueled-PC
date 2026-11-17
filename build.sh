@@ -32,6 +32,7 @@ MINGW*|MSYS*)
     # BB_VERSION names a build before its release tag exists (BB_VERSION=v0.5 bash build.sh).
     version=$release
     printf '%s-windows\n' "$version" > out/VERSION
+    BB_VERSION="$release" bash eosbridge/build.sh --auto
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
     exit 0
     ;;
@@ -114,6 +115,7 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
 fi
 "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" "-DSACREDFIRE_RELEASE=\"$release\"" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
 echo "Built $PWD/out/sacredfire"
+bash launcher/build.sh
 # Embed and package the same platform-independent release/build identity.
 version=$release
 printf '%s\n' "$version" > out/VERSION

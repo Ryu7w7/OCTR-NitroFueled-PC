@@ -51,7 +51,6 @@ import button_prompts  # noqa: E402
 import season_art  # noqa: E402
 import signed_in_name  # noqa: E402
 import ctr_tv_logo  # noqa: E402
-import tacho_pack  # noqa: E402
 import track_names  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
@@ -62,6 +61,7 @@ import aspect_ratio  # noqa: E402
 import patches  # noqa: E402
 import boot_cache  # noqa: E402
 import launch_lock  # noqa: E402
+from run_log import LogLimit  # noqa: E402
 import ryunet_session  # noqa: E402
 sys.path.pop(0)
 
@@ -121,43 +121,6 @@ def isa_rewrite_wanted(missing, env):
     if policy in ('0', '1'):
         return policy == '1'
     return bool(missing)
-
-
-class LogLimit:
-    """Keeps last_run.log small enough to send (a player's grew to about 100 MB). A line that keeps
-    coming (the same words, its numbers aside) is written its first SAME times, then one in EVERY with
-    its count; past MAX bytes, only the lines that say something went wrong; past twice that, nothing.
-    The console and the performance report still get every line."""
-    SAME, EVERY, MAX = 100, 1000, 10 << 20
-    SHAPE = re.compile(r'0x[0-9a-fA-F]+|\d+')
-    # what went wrong, not a count of it ("0 failed" in the renderer's statistics)
-    CRITICAL = re.compile(r'(?i)\b(crash|fatal|exception|corrupt|bailing|abort|assert|unhandled)|'
-                          r'(?<!\d )\b(error|errors|failed|fails)\b|^---')
-
-    def __init__(self, written=0):
-        self.seen = {}
-        self.written = written  # an in-game restart appends to the same file
-
-    def __call__(self, text):
-        kept = []
-        for line in text.splitlines(keepends=True):
-            shape = self.SHAPE.sub('#', line[:160])
-            count = self.seen.get(shape, 0) + 1
-            if shape in self.seen or len(self.seen) < 50000:
-                self.seen[shape] = count
-            if count == self.SAME + 1:
-                line = f'(log: the next line keeps coming; from here only one in {self.EVERY} is kept)\n' + line
-            elif count > self.SAME:
-                if count % self.EVERY:
-                    continue
-                line = f'(x{count}) {line}'
-            if self.written >= 2 * self.MAX or (self.written >= self.MAX and not self.CRITICAL.search(line)):
-                continue
-            kept.append(line)
-            self.written += len(line)
-            if self.written >= self.MAX > self.written - len(line):
-                kept.append(f'(log: over {self.MAX >> 20} MB; from here only the errors)\n')
-        return ''.join(kept)
 
 
 LOG_LIMIT = LogLimit()
@@ -1039,6 +1002,7 @@ def remove_obsolete_files():
 
 def launch(args, restarted=False):
     env = os.environ
+    env.setdefault('BB_WINDOW_ICON', str(PORT / 'launcher/io.github.sacredfire.Launcher.png'))
     remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
@@ -1229,17 +1193,6 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"CTR TV logo: {error}; the game's own")
-        # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): its HUD, leaders list and main
-        # menu files by archive patch, and the Graphics tab's main menu made from the pack's.
-        # It has no off switch; a changed pack stops the launch (every player has the same rules).
-        try:
-            tacho_patches, tacho_env = startup_call('tacho_pack.prepare', tacho_pack.prepare, game, out, config, env, base_patches)
-            base_patches.update(tacho_patches)
-            env.update(tacho_env)
-        except tacho_pack.Modified as error:
-            fail(f'Pack Tacho: {error}')
-        except (OSError, ValueError, KeyError) as error:
-            say(f"Pack Tacho: {error}; the game's own files")
         # Discord presence (the launchers): the game writes what the player does to BB_PRESENCE_FILE
         # (src/runtime_presence.c), and the tracks' own names go beside it (scripts/track_names.py).
         presence = Path(env.setdefault('BB_PRESENCE_FILE', str((out / 'presence' / 'presence.txt').resolve())))
@@ -1287,7 +1240,6 @@ def launch(args, restarted=False):
             except (OSError, ValueError, KeyError, TypeError) as error:
                 say(f"Item rules: {error}; the game's own odds")
             env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
-            env.pop('BB_NSANE_ARCHIVE_PATCHES', None)
             env.pop('BB_ONLINE_MODE_HOOK', None)
             # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,
             # src/runtime_race_options.c); without them it keeps the native route guidance.
@@ -1318,7 +1270,6 @@ def launch(args, restarted=False):
                     else:
                         archives = '|'.join(map(str, normal_patches))
                         env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
-                        env['BB_NSANE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_mode.nsane_view(out / 'speed-mode')))
                         say(f'ITEMLESS: HUD prepared; native Time Trial track rules cover {track_count} tracks')
             if archives:
                 env['BB_ARCHIVE_PATCHES'] = archives
@@ -1358,38 +1309,53 @@ def launch(args, restarted=False):
         # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
-        if ini_value(config, 'renderer') == 'd3d11':
-            env['BB_D3D11'] = '1'
-            shaders = out / 'd3d11-shaders' / 'hlsl'
-            prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
-            if (shaders / 'shaders.idx').is_file():
-                env.setdefault('BB_D3D11_SHADERS', str(shaders))
-                env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
-                say('Direct3D 11 (experimental)')
-            else:
-                say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')
-        if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
-            if not native_shaders.supported(title_id, app_version):
-                say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
-                    f'{app_version}, so the game starts with Vulkan (shadPS4)')
-            else:
-                shaders = native_shaders.shader_dir(data, title_id, app_version)
-                if not native_shaders.ready(shaders, game):
-                    say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
-                    # "@progress" lines: the launchers show a window with a progress bar meanwhile
-                    last = [-1]
+        renderer_changes = {}
 
-                    def progress(percent, stage):
-                        if percent != last[0]:
-                            last[0] = percent
-                            emit(f'@progress native-shaders {percent} {stage}\n')
-                    built = native_shaders.build(PORT, game, shaders, say, progress=progress)
-                    emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
-                if native_shaders.ready(shaders, game):
-                    env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
-                    say('Graphics engine: native Vulkan (experimental)')
+        def apply_renderer():
+            # Drop only generated overrides; explicit user environment survives a restart.
+            for key, previous in renderer_changes.items():
+                if previous is None:
+                    env.pop(key, None)
                 else:
-                    say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
+                    env[key] = previous
+            renderer_changes.clear()
+            previous = env.copy()
+            if ini_value(config, 'renderer') == 'd3d11':
+                env['BB_D3D11'] = '1'
+                shaders = out / 'd3d11-shaders' / 'hlsl'
+                prepare_d3d11_shaders(game, out / 'd3d11-shaders')  # quick when ready
+                if (shaders / 'shaders.idx').is_file():
+                    env.setdefault('BB_D3D11_SHADERS', str(shaders))
+                    env.setdefault('BB_D3D11_ORDER', str(D3D11_ORDER))  # what the game compiles first
+                    say('Direct3D 11 (experimental)')
+                else:
+                    say('Direct3D 11 (experimental): no shaders in out/d3d11-shaders, so no picture of the game')
+            if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
+                if not native_shaders.supported(title_id, app_version):
+                    say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
+                        f'{app_version}, so the game starts with Vulkan (shadPS4)')
+                else:
+                    shaders = native_shaders.shader_dir(data, title_id, app_version)
+                    if not native_shaders.ready(shaders, game):
+                        say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
+                        # "@progress" lines: the launchers show a window with a progress bar meanwhile
+                        last = [-1]
+
+                        def progress(percent, stage):
+                            if percent != last[0]:
+                                last[0] = percent
+                                emit(f'@progress native-shaders {percent} {stage}\n')
+                        built = native_shaders.build(PORT, game, shaders, say, progress=progress)
+                        emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
+                    if native_shaders.ready(shaders, game):
+                        env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
+                        say('Graphics engine: native Vulkan (experimental)')
+                    else:
+                        say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
+            renderer_changes.update({key: previous.get(key) for key, value in env.items()
+                                     if previous.get(key) != value})
+
+        apply_renderer()
         # The GPU library builds its path table when it loads: the user directory must exist.
         user_dir.mkdir(parents=True, exist_ok=True)
         env['BB_GPU_USER_DIR'] = str(user_dir)
@@ -1411,6 +1377,7 @@ def launch(args, restarted=False):
             if not first:  # the in-game menu may have changed render_res
                 settings, layout_patches = apply_layout()
                 apply_render_res(env, settings)
+                apply_renderer()
                 if mod_packages.ACTIVE:
                     startup_call('mod_packages.preflight', mod_packages.preflight, Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
                                            [layout_patches] if layout_patches else [], title_id, app_version, game=game)

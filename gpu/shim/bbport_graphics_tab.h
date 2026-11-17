@@ -8,4 +8,6 @@ namespace BbGraphicsTab {
 void PatchImage(unsigned char* image, std::uint64_t size);
 /// Refresh native widgets on their guest thread after changing settings in ImGui.
 void RequestRefresh();
+/// Called by guest input polling, including when no button is pressed.
+void PollRefresh();
 } // namespace BbGraphicsTab

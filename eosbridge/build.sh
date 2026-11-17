@@ -2,6 +2,7 @@
 # ryunet-bridge (eosbridge.c) for Windows and Linux, into out/eosbridge/.
 #   bash eosbridge/build.sh            this platform (Windows: MSYS2 CLANG64)
 #   bash eosbridge/build.sh linux      Linux x86-64 from Windows, through WSL (the gateway)
+#   bash eosbridge/build.sh --auto     main build hook; skip only when EOS is unconfigured
 # EOS_SDK: the Epic Online Services SDK folder (the one with SDK/Include); it is not in the
 # repository. The SDK library is loaded at run time and copied next to the binary.
 # eosbridge/eosbridge.ini (the Epic product's ids, not in git), when there is one, is built into
@@ -9,11 +10,21 @@
 # bridge reads an eosbridge.ini next to itself, as a test or a server's gateway does.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
+automatic=0
+if [[ ${1:-} == --auto ]]; then automatic=1; shift; fi
 sdk=${EOS_SDK:-}
 if [[ -z $sdk ]]; then
-    for guess in "$HOME"/Downloads/EOS-SDK-* /c/Users/*/Downloads/EOS-SDK-* /mnt/c/Users/*/Downloads/EOS-SDK-*; do
+    for guess in out/deps/eos-sdk "$HOME"/Downloads/EOS-SDK-* /c/Users/*/Downloads/EOS-SDK-* /mnt/c/Users/*/Downloads/EOS-SDK-*; do
         [[ -d $guess/SDK/Include ]] && sdk=$guess
     done
+fi
+if (( automatic )); then
+    if [[ ! -f eosbridge/eosbridge.ini && -z ${EOS_SDK:-}${EOS_SDK_URL:-}${EOS_BRIDGE_INI:-} ]]; then
+        echo 'EOS is not configured; building with direct RyuNET. Maintainer setup: docs/eos-bridge.md'
+        exit 0
+    fi
+    sdk=${sdk:-$PWD/out/deps/eos-sdk}
+    "$(command -v python3 || command -v python)" scripts/fetch_eos_sdk.py "$sdk"
 fi
 [[ -d $sdk/SDK/Include ]] || { echo 'Set EOS_SDK to the EOS SDK folder (it has SDK/Include).' >&2; exit 1; }
 mkdir -p out/eosbridge
