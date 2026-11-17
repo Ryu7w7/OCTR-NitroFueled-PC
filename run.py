@@ -1323,7 +1323,7 @@ def launch(args, restarted=False):
         update_notice(env, version)
         env['BB_OCTR_VERSION'] = version.removeprefix('v').split('-')[0] if version else ''  # the game's login says it
         env['BB_MACHINE_ID'] = machine_header()  # this PC's anonymous fingerprint, for bans
-        # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
+        # The graphics engine (bbport.ini renderer): the native Vulkan renderer's
         # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
         # Anything that stops it starts the game with shadPS4's Vulkan, as before.
         renderer_changes = {}
@@ -1366,7 +1366,7 @@ def launch(args, restarted=False):
                         emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
                     if native_shaders.ready(shaders, game):
                         env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
-                        say('Graphics engine: native Vulkan (experimental)')
+                        say('Graphics engine: native Vulkan')
                     else:
                         say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
             renderer_changes.update({key: previous.get(key) for key, value in env.items()

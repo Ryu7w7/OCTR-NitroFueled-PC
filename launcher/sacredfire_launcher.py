@@ -119,7 +119,7 @@ ASPECT_OUTPUTS = {"16x10": [("1920 x 1200", "1920x1200"), ("1280 x 800", "1280x8
 UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
 # bbport.ini renderer: run.py sets the native renderer up and builds its shaders from the player's
 # game the first time (scripts/native_shaders.py); it has no FSR 3 (run.py uses FSR 1 instead).
-RENDERERS = [("Vulkan (shadPS4)", "shadps4"), ("Native Vulkan (experimental)", "native")]
+RENDERERS = [("Vulkan (shadPS4)", "shadps4"), ("Native Vulkan", "native")]
 # Settings the game reads from bbport.ini itself (gpu/shim/bbport_settings.cpp), with the
 # game's defaults: the launcher shows and writes them, the in-game menu changes the same keys.
 GAME_FLAGS = {"async_pipelines": "0", "msaa": "0", "borderless": "0"}
@@ -1315,7 +1315,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.renderer_row = combo_row(
             tr("Graphics engine"),
             tr("Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
-               "emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it builds "
+               "emulating the PS4's GPU: more FPS and fewer hitches. The first time it builds "
                "its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 (FSR 1 works). "
                "If something goes wrong, go back to Vulkan (shadPS4)."),
             RENDERERS, self.ini.get("renderer", "shadps4"))

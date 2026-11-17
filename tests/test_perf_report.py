@@ -109,7 +109,7 @@ class PerfReportTests(unittest.TestCase):
             self.assertNotIn(private, abort['reason'])
         self.assertEqual(perf_report.fault_of('Fault: exception 0x20474343 at 00007ffabcdef012 (thread 1)'),
                          {'kind': 'exception 0x20474343', 'where': 'unknown'})
-        self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
+        self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan'))
         self.assertNotIn('fault', self.collector().report({}))
 
     def test_a_lost_gpu_device_says_why_without_addresses(self):
