@@ -1837,6 +1837,28 @@ static void *entity_at(int slot) {
     return table ? RR_AT(table, 0x20, void **)[slot] : 0;
 }
 
+/* Voice chat's item effects (runtime_item_lead.c), from the spawned power-ups, which every PC has for every kart:
+ * RUNTIME_VOICE_TNT while a TNT sits on a kart's head (a crate, type 2, +0xb0 state 2, +0xa8 the kart: tnt() below)
+ * and RUNTIME_VOICE_BUBBLE while its bubble shield is up (type 8, +0x28 its owner, as the recorder's RS_SHIELD; not
+ * once thrown or popping: its CSpawnedPowerShieldComponent, meta global 0x2ad7560, +0xd0 eSSS_Spawned is 2). */
+void rr_spawned_voice_effects(void *const *karts, int n, int *fx) {
+    void *component;
+    for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
+        const int type = RR_AT(component, 0x34, int32_t);
+        void *kart = type == 8 ? rr_handle_object(&RR_AT(component, 0x28, void *))
+                   : type == 2 && RR_AT(component, 0xb0, int32_t) == 2 ? rr_handle_object(&RR_AT(component, 0xa8, void *))
+                   : 0;
+        if (!kart) continue;
+        if (type == 8) {
+            void *entity = entity_at(i);
+            void *bubble = entity ? rr_component(entity, 0x2ad7560) : 0;
+            if (bubble && RR_AT(bubble, 0xd0, int32_t) != 2) continue;
+        }
+        for (int k = 0; k < n; k++)
+            if (karts[k] == kart) fx[k] |= type == 8 ? RUNTIME_VOICE_BUBBLE : RUNTIME_VOICE_TNT;
+    }
+}
+
 static float distance2(void *entity, const float *at) {
     float d = 0.0f;
     for (int c = 0; c < 3; c++) {

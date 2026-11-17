@@ -583,7 +583,8 @@ static pthread_mutex_t voice_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct RuntimeVoiceKart voice_karts[8];
 static int voice_kart_count;
 
-/* What an item does to a kart, for the voice's effects (RUNTIME_VOICE_*):
+/* What an item does to a kart, for the voice's effects (RUNTIME_VOICE_*; TNT on its head and the bubble also from
+ * the spawned power-ups, rr_spawned_voice_effects):
  *   bubble:    the kart's CPowerShieldComponent (meta global 0x2ad1b60) +0x58 ShieldState is eSS_Shielded (1),
  *              or the bubble it holds (+0x50, an entity with CSpawnedPowerShieldComponent, meta 0x2ad7560) is
  *              eSSS_Spawned (2) at +0xd0 (0xe34ff0 reads them so when the kart is hit)
@@ -609,6 +610,8 @@ static int voice_effects(void *kart) {
 
 static void voice_karts_tick(int racing) {
     struct RuntimeVoiceKart now[8];
+    void *karts[8];
+    static int spawned_fx[8], frames;
     static struct { char name[24]; int fx; } told[8];
     int n = 0;
     for (int i = 0; racing && i < 8; i++) {
@@ -620,16 +623,26 @@ static void voice_karts_tick(int racing) {
         memcpy(now[n].pos, &RR_AT(kart, 0x20, float), sizeof now[n].pos);
         now[n].here = (uint32_t)RR_AT(player, 0x20, int32_t) <= 7;
         now[n].effects = voice_effects(kart);
-        if (strcmp(told[i].name, now[n].name) || told[i].fx != now[n].effects) {
-            if (told[i].name[0] && !strcmp(told[i].name, now[n].name))
-                printf("Voice effects: %s%s%s%s%s\n", now[n].name, now[n].effects & RUNTIME_VOICE_BUBBLE ? " bubble" : "",
-                       now[n].effects & RUNTIME_VOICE_CLOCK ? " clock" : "",
-                       now[n].effects & RUNTIME_VOICE_INVISIBLE ? " invisible" : "", now[n].effects ? "" : " none");
-            snprintf(told[i].name, sizeof told[i].name, "%s", now[n].name);
-            told[i].fx = now[n].effects;
-        }
-        n++;
+        karts[n++] = kart;
     }
+    /* the spawned power-ups (TNT on a head, a bubble up): every PC has them for every kart; a few times a second */
+    if (racing && ++frames % 4 == 1) {
+        memset(spawned_fx, 0, sizeof spawned_fx);
+        rr_spawned_voice_effects(karts, n, spawned_fx);
+    }
+    for (int i = 0; i < n; i++) {
+        now[i].effects |= spawned_fx[i];
+        if (strcmp(told[i].name, now[i].name) || told[i].fx != now[i].effects) {
+            if (told[i].name[0] && !strcmp(told[i].name, now[i].name))
+                printf("Voice effects: %s%s%s%s%s%s\n", now[i].name, now[i].effects & RUNTIME_VOICE_BUBBLE ? " bubble" : "",
+                       now[i].effects & RUNTIME_VOICE_CLOCK ? " clock" : "",
+                       now[i].effects & RUNTIME_VOICE_INVISIBLE ? " invisible" : "",
+                       now[i].effects & RUNTIME_VOICE_TNT ? " tnt" : "", now[i].effects ? "" : " none");
+            snprintf(told[i].name, sizeof told[i].name, "%s", now[i].name);
+            told[i].fx = now[i].effects;
+        }
+    }
+    if (!racing) memset(spawned_fx, 0, sizeof spawned_fx);
     if (!racing) memset(told, 0, sizeof told);
     pthread_mutex_lock(&voice_lock);
     memcpy(voice_karts, now, sizeof(now[0]) * (size_t)n);

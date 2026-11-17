@@ -56,7 +56,7 @@ int net_bridge_active(void);
 int runtime_public_match_active(void);                    // src/runtime_public_itemless.c
 int runtime_room_members(char out[][24], int max);        // src/runtime_public_itemless.c
 struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; int effects; }; // src/runtime.h
-enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4 };
+enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4, RUNTIME_VOICE_TNT = 8 };
 int runtime_voice_karts(struct RuntimeVoiceKart* out, int max); // src/runtime_item_lead.c
 }
 
@@ -79,15 +79,16 @@ double NowMs() {
 }
 
 // ---- what the items do to a voice: the speaker's kart in a bubble shield sounds muffled, under N.
-// Tropy's clock lower (as slowed down, without falling behind), invisible with an echo. Each one
-// fades in and out (no clicks). ----
+// Tropy's clock lower (as slowed down, without falling behind), invisible with an echo, with a TNT on
+// its head covered (as a hand over the microphone: boxy and dull). Each one fades in and out (no
+// clicks). ----
 class VoiceFx {
 public:
     void Process(float* x, int n, int effects) {
-        const float want[3] = {effects & RUNTIME_VOICE_BUBBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_CLOCK ? 1.0f : 0.0f,
-                               effects & RUNTIME_VOICE_INVISIBLE ? 1.0f : 0.0f};
-        if (!effects && mix_[0] + mix_[1] + mix_[2] < 1e-4f) {
-            mix_[0] = mix_[1] = mix_[2] = 0.0f;
+        const float want[4] = {effects & RUNTIME_VOICE_BUBBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_CLOCK ? 1.0f : 0.0f,
+                               effects & RUNTIME_VOICE_INVISIBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_TNT ? 1.0f : 0.0f};
+        if (!effects && mix_[0] + mix_[1] + mix_[2] + mix_[3] < 1e-4f) {
+            mix_[0] = mix_[1] = mix_[2] = mix_[3] = 0.0f;
             return;
         }
         if (pitch_.empty()) {
@@ -96,7 +97,7 @@ public:
             allpass_.assign(kAllpass, 0.0f);
         }
         for (int i = 0; i < n; ++i) {
-            for (int k = 0; k < 3; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
+            for (int k = 0; k < 4; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
             float y = x[i];
             if (mix_[1] > 1e-4f) y += (Pitch(y) - y) * mix_[1];
             if (mix_[0] > 1e-4f) {
@@ -104,6 +105,7 @@ public:
                 lp2_ += kLowPass * (lp1_ - lp2_);
                 y += (lp2_ * 1.6f - y) * mix_[0];
             }
+            if (mix_[3] > 1e-4f) y += (Covered(y) - y) * mix_[3];
             if (mix_[2] > 1e-4f) y = y * (1.0f - 0.25f * mix_[2]) + Echo(y) * 0.9f * mix_[2];
             x[i] = y;
         }
@@ -115,6 +117,16 @@ private:
     static constexpr float kPitch = 0.72f; // lower by about a fourth and a half
     // the bubble: two one-pole low-passes at about 500 Hz
     static constexpr float kLowPass = 0.063f;
+    // the covered microphone: a resonance at about 450 Hz (a state-variable band-pass) over a
+    // low-pass at about 1.1 kHz, quieter
+    static constexpr float kBoxF = 0.0589f, kBoxDamp = 0.7f, kCoverLowPass = 0.134f;
+    float Covered(float in) {
+        box_low_ += kBoxF * box_band_;
+        const float high = in - box_low_ - kBoxDamp * box_band_;
+        box_band_ += kBoxF * high;
+        cover_lp_ += kCoverLowPass * (in - cover_lp_);
+        return (cover_lp_ * 0.55f + box_band_ * 0.8f) * 0.8f;
+    }
     // the echo: three feedback delays (110, 170, 240 ms) through an all-pass
     static constexpr int kComb[3] = {5281, 8161, 11519};
     static constexpr int kAllpass = 1201;
@@ -154,8 +166,9 @@ private:
         return out;
     }
 
-    float mix_[3] = {};
+    float mix_[4] = {};
     float lp1_ = 0, lp2_ = 0;
+    float box_low_ = 0, box_band_ = 0, cover_lp_ = 0;
     std::vector<float> pitch_;
     int write_ = 0;
     float phase_ = 0;

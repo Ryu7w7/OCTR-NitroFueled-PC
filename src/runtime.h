@@ -245,8 +245,8 @@ void runtime_reserves_bar_tick(void);         /* the game's thread, every frame 
 /* Voice chat (gpu/shim/bbport_voice.cpp): the race's karts with their players' names, as of the
  * last frame (runtime_item_lead.c); 0 outside a race. here: a player of this PC. */
 /* effects: what an item does to that kart, for its voice (runtime_item_lead.c): the bubble shield (muffled),
- * N. Tropy's clock (lower, slowed) and Invisibility (an echo) */
-enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4 };
+ * N. Tropy's clock (lower, slowed), Invisibility (an echo) and a TNT on the head (covered, as a hand over the mic) */
+enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4, RUNTIME_VOICE_TNT = 8 };
 struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; int effects; };
 int runtime_voice_karts(struct RuntimeVoiceKart *out, int max);
 /* Where the game shows each racer's nickname over its kart (HUD kart markers, in the game's
