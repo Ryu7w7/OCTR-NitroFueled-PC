@@ -3392,8 +3392,13 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
         SpectatorBadge(viewers);
     }
     if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
-        VoiceBadge(speaking);
-        if (!menu_open) VoiceOverKarts(speaking);
+        // in a race, only the loudspeakers over the karts; elsewhere (the lobby) the list on the left
+        RuntimeVoiceMarker any[1];
+        if (runtime_voice_markers(any, 1) > 0) {
+            if (!menu_open) VoiceOverKarts(speaking);
+        } else {
+            VoiceBadge(speaking);
+        }
     }
     if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
