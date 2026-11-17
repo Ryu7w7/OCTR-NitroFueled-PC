@@ -41,6 +41,13 @@ class TachoPackTests(unittest.TestCase):
             for line in ET.parse(patches.TACHO_PACK_DIR / name).getroot().iter('Line'):
                 self.assertTrue(line.get('Signature') or line.get('ExpectedSHA256'), name)
 
+    def test_the_launch_applies_its_files(self):
+        # run.py must prepare the pack's game files (HUD, leaders list, Options > Game page) and hand
+        # N.Sane's view to the game: a merge once dropped both (no options, a crash at race start).
+        source = (ROOT / 'run.py').read_text(encoding='utf-8')
+        self.assertIn("startup_call('tacho_pack.prepare', tacho_pack.prepare", source)
+        self.assertIn("env['BB_NSANE_ARCHIVE_PATCHES'] = ", source)
+
     def test_the_european_game_has_them_too(self):
         # tools/port_patch_eu.py's copies for CUSA14876 1.21: the same six, each line verified
         pack = patches.tacho_pack_patches({}, '01.21', 'CUSA14876')
