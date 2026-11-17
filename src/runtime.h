@@ -246,6 +246,11 @@ void runtime_reserves_bar_tick(void);         /* the game's thread, every frame 
  * last frame (runtime_item_lead.c); 0 outside a race. here: a player of this PC. */
 struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; };
 int runtime_voice_karts(struct RuntimeVoiceKart *out, int max);
+/* Where the game shows each racer's nickname over its kart (HUD kart markers, in the game's
+ * 1920x1080 UI units), copied a few times a second during a race (runtime_replay_play.c). */
+struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; };
+void runtime_voice_markers_tick(int racing);
+int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */

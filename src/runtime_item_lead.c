@@ -616,6 +616,7 @@ void runtime_item_lead_tick(int racing) {
     net_config_tick();
     timing_tick(racing);
     voice_karts_tick(racing);
+    runtime_voice_markers_tick(racing);
     const double now = now_s();
     for (int i = 0; i < TRACKED; i++) {
         Tracked *t = &items[i];

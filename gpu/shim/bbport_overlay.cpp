@@ -74,6 +74,10 @@ extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
 extern "C" const char* runtime_np_get_online_name(void); // the player's nickname (src/runtime_np_online.c)
+extern "C" {
+struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; }; // src/runtime.h
+int runtime_voice_markers(struct RuntimeVoiceMarker* out, int max);  // src/runtime_replay_play.c
+}
 
 namespace BbOverlay {
 
@@ -1070,6 +1074,30 @@ void SpeakerIcon(ImDrawList* dl, ImVec2 at, float size, ImU32 color) {
     dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
     dl->PathArcTo(c, s * 0.4f, -0.8f, 0.8f, 10);
     dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
+}
+
+/// A loudspeaker over the nickname the game shows above each talking racer's kart (its HUD kart
+/// markers, in the game's 1920x1080 UI units, mapped into the 16:9 picture in the window).
+void VoiceOverKarts(const std::vector<std::string>& speaking) {
+    RuntimeVoiceMarker markers[8];
+    const int n = runtime_voice_markers(markers, 8);
+    if (n <= 0) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float w = viewport->Size.x, h = viewport->Size.y;
+    const float vw = std::min(w, h * 16.0f / 9.0f), vh = vw * 9.0f / 16.0f;
+    const float ox = viewport->Pos.x + (w - vw) * 0.5f, oy = viewport->Pos.y + (h - vh) * 0.5f;
+    const float size = 30.0f * vh / 1080.0f;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    for (int i = 0; i < n; ++i) {
+        if (!markers[i].shown) continue;
+        bool talking = false;
+        for (const std::string& nick : speaking) talking |= !SDL_strcasecmp(nick.c_str(), markers[i].name);
+        if (!talking) continue;
+        const float x = ox + markers[i].x / 1920.0f * vw, y = oy + markers[i].y / 1080.0f * vh;
+        const ImVec2 at(x - size * 0.5f, y - size * 1.9f);
+        dl->AddCircleFilled(ImVec2(at.x + size * 0.5f, at.y + size * 0.5f), size * 0.68f, IM_COL32(10, 20, 40, 170));
+        SpeakerIcon(dl, ImVec2(at.x + size * 0.1f, at.y + size * 0.1f), size * 0.8f, IM_COL32(110, 230, 140, 255));
+    }
 }
 
 /// Who is talking now (voice chat), on the left of the screen: a loudspeaker and the name.
@@ -3365,6 +3393,7 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     }
     if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
         VoiceBadge(speaking);
+        if (!menu_open) VoiceOverKarts(speaking);
     }
     if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {

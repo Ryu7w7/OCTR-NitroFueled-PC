@@ -2737,3 +2737,69 @@ int runtime_replay_live_append(const struct rr_header *header, const uint8_t *pa
 }
 
 uint32_t runtime_replay_live_count(void) { return P.live ? frames_now() : 0; }
+
+/* ---- Voice chat (gpu/shim/bbport_voice.cpp): where the game shows each racer's nickname over its kart
+ * (the HUD's kart markers above), so the overlay draws a loudspeaker over whoever is talking. Read on the
+ * game's thread a few times a second during a race; the overlay only reads the copy. ---- */
+static pthread_mutex_t marker_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct RuntimeVoiceMarker marker_copy[8];
+static int marker_count, marker_frames, marker_logged;
+static void *marker_project, *marker_manager;
+
+void runtime_voice_markers_tick(int racing) {
+    struct RuntimeVoiceMarker now[8];
+    int n = 0;
+    if (!racing) {
+        marker_project = marker_manager = 0;
+        marker_logged = 0;
+    } else if (++marker_frames % 3) {
+        return;                                         /* every third frame is plenty */
+    } else {
+        void *kart = 0;
+        for (int i = 0; i < 8 && !kart; i++) {
+            void *k = rr_kart_of(i, 0);
+            void *racer = k ? rr_racer_of(k) : 0;
+            void *player = racer ? rr_handle_object(&RR_AT(racer, 0x10, void *)) : 0;
+            if (player && (uint32_t)RR_AT(player, 0x20, int32_t) <= 7) kart = k;
+        }
+        void *meta = rr_ptr(D_HUD_META);
+        void *hud = kart && meta ? rr_find_component(kart, meta) : 0;
+        void *project = hud ? rr_handle_object(&RR_AT(hud, 0x38, void *)) : 0;
+        if (project != marker_project) {
+            marker_project = project;
+            marker_manager = project ? find_behavior(RR_AT(project, 0x10, void *), KART_MARKER_MANAGER_VTABLE, 0) : 0;
+        }
+        void *list = marker_manager ? RR_AT(marker_manager, 0x18, void *) : 0;
+        for (int i = 0; list && i < rr_count(list) && n < 8; i++) {
+            void *placeable = rr_handle_object(&RR_AT(list, 0x20, void **)[i]);
+            void *marker = placeable ? find_behavior(placeable, KART_MARKER_VTABLE, 0) : 0;
+            void *tag = marker ? RR_AT(marker, 0x50, void *) : 0;
+            const char *name = tag ? RR_AT(tag, 0x30, const char *) : 0;
+            if (!name || !*name) continue;
+            struct RuntimeVoiceMarker *m = &now[n++];
+            snprintf(m->name, sizeof m->name, "%s", name);
+            m->x = RR_AT(placeable, 0x60, float) + RR_AT(tag, 0x60, float);
+            m->y = RR_AT(placeable, 0x64, float) + RR_AT(tag, 0x64, float);
+            m->shown = !(RR_AT(placeable, 0xc, uint32_t) & 0x400) && !(RR_AT(tag, 0xc, uint32_t) & 0x400);
+            if (marker_logged < 6) {
+                marker_logged++;
+                printf("Voice markers: %s at %.0f,%.0f (marker %.0f,%.0f + tag %.0f,%.0f)%s\n", m->name, m->x, m->y,
+                       RR_AT(placeable, 0x60, float), RR_AT(placeable, 0x64, float), RR_AT(tag, 0x60, float),
+                       RR_AT(tag, 0x64, float), m->shown ? "" : " hidden");
+                fflush(stdout);
+            }
+        }
+    }
+    pthread_mutex_lock(&marker_lock);
+    memcpy(marker_copy, now, sizeof(now[0]) * (size_t)n);
+    marker_count = n;
+    pthread_mutex_unlock(&marker_lock);
+}
+
+int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max) {
+    pthread_mutex_lock(&marker_lock);
+    const int n = marker_count < max ? marker_count : max;
+    memcpy(out, marker_copy, sizeof(out[0]) * (size_t)(n > 0 ? n : 0));
+    pthread_mutex_unlock(&marker_lock);
+    return n;
+}
