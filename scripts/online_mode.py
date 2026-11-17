@@ -183,7 +183,7 @@ def ready_icon_clone(blob):
 
 def ranked_lobby_icons(blob):
     """PNG rank sprites (no decals). Tags OCTR_RANK_ICON_{mode}_{tier} for prebuilt."""
-    from ranked_ui_assets import HOST_CROWN, LOBBY_ICONS, tier_icon, tier_material
+    from ranked_ui_assets import HOST_CROWN, LOBBY_ICONS, VOICE_SPEAKER, tier_icon, tier_material
     g = Igz(blob)
     objects = dict(g.objects())
     names = [off for off, kind in objects.items()
@@ -294,6 +294,11 @@ def ranked_lobby_icons(blob):
                 x, y = 26.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
                 struct.pack_into('<2f', g.data, icon + 0x60, x, y)
                 struct.pack_into('<2f', g.data, icon + 0x90, 36.0, 36.0)
+            if (mode, tier) == VOICE_SPEAKER:
+                # The loudspeaker at the row's right end while that player talks (voice chat).
+                x, y = 372.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                struct.pack_into('<2f', g.data, icon + 0x60, x, y)
+                struct.pack_into('<2f', g.data, icon + 0x90, 34.0, 34.0)
             new.append(icon)
     # Keep the native style slots addressable by their behavior, but never render them.
     for source, kind in objects.items():

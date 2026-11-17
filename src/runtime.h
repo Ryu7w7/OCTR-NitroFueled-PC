@@ -250,6 +250,8 @@ int runtime_voice_karts(struct RuntimeVoiceKart *out, int max);
  * 1920x1080 UI units), copied a few times a second during a race (runtime_replay_play.c). */
 struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; };
 void runtime_voice_markers_tick(int racing);
+/* 1 while that player is heard (or this player talks): gpu/shim/bbport_voice.cpp. */
+int runtime_voice_speaking(const char *nick);
 int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);

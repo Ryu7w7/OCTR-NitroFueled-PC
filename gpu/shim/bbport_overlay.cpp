@@ -1076,7 +1076,7 @@ void SpeakerIcon(ImDrawList* dl, ImVec2 at, float size, ImU32 color) {
     dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
 }
 
-/// A loudspeaker over the nickname the game shows above each talking racer's kart (its HUD kart
+/// A loudspeaker right of the nickname the game shows above each talking racer's kart (its HUD kart
 /// markers, in the game's 1920x1080 UI units from the screen's centre, y down; mapped into the
 /// 16:9 picture in the window).
 void VoiceOverKarts(const std::vector<std::string>& speaking) {
@@ -1087,7 +1087,7 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
     const float w = viewport->Size.x, h = viewport->Size.y;
     const float vw = std::min(w, h * 16.0f / 9.0f), vh = vw * 9.0f / 16.0f;
     const float ox = viewport->Pos.x + (w - vw) * 0.5f, oy = viewport->Pos.y + (h - vh) * 0.5f;
-    const float size = 30.0f * vh / 1080.0f;
+    const float size = 26.0f * vh / 1080.0f; // about the nickname's height
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     for (int i = 0; i < n; ++i) {
         if (!markers[i].shown) continue;
@@ -1095,9 +1095,14 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
         for (const std::string& nick : speaking) talking |= !SDL_strcasecmp(nick.c_str(), markers[i].name);
         if (!talking) continue;
         const float x = ox + (960.0f + markers[i].x) / 1920.0f * vw, y = oy + (540.0f + markers[i].y) / 1080.0f * vh;
-        const ImVec2 at(x - size * 0.5f, y - size * 1.9f);
-        dl->AddCircleFilled(ImVec2(at.x + size * 0.5f, at.y + size * 0.5f), size * 0.68f, IM_COL32(10, 20, 40, 170));
-        SpeakerIcon(dl, ImVec2(at.x + size * 0.1f, at.y + size * 0.1f), size * 0.8f, IM_COL32(110, 230, 140, 255));
+        // right of the nickname, centred on it (the game's tag is centred on x; its letters are
+        // about 18 UI units wide each at that size): white, with a thin dark edge, as the name
+        const float half_name = float(std::strlen(markers[i].name)) * 9.0f * vh / 1080.0f;
+        const ImVec2 at(x + half_name + size * 0.3f, y - size * 0.5f);
+        const float edge = std::max(1.0f, size * 0.07f);
+        for (const ImVec2 d : {ImVec2(-edge, 0), ImVec2(edge, 0), ImVec2(0, -edge), ImVec2(0, edge)})
+            SpeakerIcon(dl, ImVec2(at.x + d.x, at.y + d.y), size, IM_COL32(20, 20, 30, 200));
+        SpeakerIcon(dl, at, size, IM_COL32(255, 255, 255, 255));
     }
 }
 

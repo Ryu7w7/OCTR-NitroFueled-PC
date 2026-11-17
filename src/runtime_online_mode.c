@@ -3900,6 +3900,14 @@ static void ranked_member_icons(unsigned char *self) {
         const char *rank = label + (background ? 17 : 15);
         const int icon_mode = rank[0] - '0';
         const int icon_tier = rank[1] == '_' ? atoi(rank + 2) : 0;
+        if (icon_mode == 3) {
+            /* "Mode" 3: a loudspeaker on the row of whoever is talking (voice chat). */
+            unsigned speaker_flags;
+            memcpy(&speaker_flags, icon + 12, sizeof speaker_flags);
+            const int speaker_hidden = !nick || !runtime_voice_speaking(nick);
+            if (!!(speaker_flags & 0x400) != speaker_hidden) hide_placeable(icon, speaker_hidden);
+            continue;
+        }
         if (icon_mode == 2) {
             /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
             unsigned crown_flags;

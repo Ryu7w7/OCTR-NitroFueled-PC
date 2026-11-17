@@ -540,6 +540,18 @@ bool Talking() {
     return g_talking.load(std::memory_order_relaxed);
 }
 
+} // namespace BbVoice
+
+// The room list's loudspeaker (src/runtime_online_mode.c), on the game's thread.
+extern "C" int runtime_voice_speaking(const char* nick) {
+    if (!nick || !*nick) return 0;
+    for (const std::string& who : BbVoice::Speaking())
+        if (!SDL_strcasecmp(who.c_str(), nick)) return 1;
+    return 0;
+}
+
+namespace BbVoice {
+
 float MicLevel() {
     return g_level.load(std::memory_order_relaxed);
 }
