@@ -6242,7 +6242,6 @@ void KeyboardTab() {    App& a = g_app;
     ImGui::EndDisabled();
     ImGui::TextColored(kGrey, "%s", T("Gris: tecla original. Las teclas van por su posición en el teclado.",
                                       "Grey: default key. Keys go by their place on the keyboard."));
-    ImGui::PopTextWrapPos();
 }
 
 // ---------------------------------------------------------------------------------------------

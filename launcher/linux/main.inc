@@ -121,7 +121,9 @@ int main(int argc, char** argv) {
     SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &bounds);
     g_app.hwnd = SDL_CreateWindow(Narrow(kLauncherName).c_str(), std::min(1120, bounds.w), std::min(840, bounds.h),
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_BORDERLESS);
-    if (g_app.hwnd) g_renderer = SDL_CreateRenderer(g_app.hwnd, "vulkan,opengl,opengles2");
+    const std::string render_driver = Env("SDL_RENDER_DRIVER");
+    if (g_app.hwnd) g_renderer = SDL_CreateRenderer(g_app.hwnd,
+        render_driver.empty() ? "vulkan,opengl,opengles2" : render_driver.c_str());
     if (!g_renderer) { std::fprintf(stderr, "%s\n", SDL_GetError()); FinishWorkers(); SDL_Quit(); return 1; }
     if (auto* icon = PngSurface(ReadText(g_app.root / "launcher/io.github.sacredfire.Launcher.png"))) {
         SDL_SetWindowIcon(g_app.hwnd, icon); SDL_DestroySurface(icon);
