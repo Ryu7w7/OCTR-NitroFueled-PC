@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Merges a dumped update into the base game without copying it: the game folder SacredFire runs.
 
-    python tools/merge_update.py <base game folder> <update folder> <merged folder>
+    python tools/merge_update.py [--progress] <base game folder> <update folder> <merged folder>
 
 The merged folder holds the base game's files with the update's files over them (eboot.bin and
 sce_sys included), as hard links to the originals: no extra disk space, and the two dumps stay as
@@ -21,6 +21,16 @@ import sys
 from pathlib import Path
 
 
+def report_progress(counts):
+    """--progress: a "progress 0.4 text" line for a program that shows the setup (RecompLauncher),
+    once per percent."""
+    percent = counts['done'] * 100 // max(counts['total'], 1)
+    if not counts['progress'] or percent == counts['shown']:
+        return
+    counts['shown'] = percent
+    print(f'progress {percent / 100:.2f} Merging the game and its update', flush=True)
+
+
 def link_or_copy(source, target, counts):
     if target.exists():
         target.unlink()
@@ -30,6 +40,8 @@ def link_or_copy(source, target, counts):
     except OSError:
         shutil.copy2(source, target)
         counts['copied'] += 1
+    counts['done'] += 1
+    report_progress(counts)
 
 
 def layout(folder):
@@ -59,12 +71,17 @@ def add_tree(root, out, counts, replaced=None, prefix=Path()):
             link_or_copy(Path(directory) / name, target, counts)
 
 
-def main():
+def count_files(trees):
+    return sum(len(files) for root, _prefix in trees for _dir, _subdirs, files in os.walk(root))
+
+
+def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--progress', action='store_true', help='print "progress 0.4 text" lines')
     p.add_argument('base', type=Path)
     p.add_argument('update', type=Path)
     p.add_argument('out', type=Path)
-    a = p.parse_args()
+    a = p.parse_args(argv)
     trees = {}
     for folder in (a.base, a.update):
         trees[folder] = layout(folder)
@@ -73,7 +90,8 @@ def main():
     if a.out.resolve() in (a.base.resolve(), a.update.resolve()):
         sys.exit('The merged folder must be a new folder')
     a.out.mkdir(parents=True, exist_ok=True)
-    counts = {'linked': 0, 'copied': 0}
+    total = count_files(trees[a.base] + trees[a.update])
+    counts = {'linked': 0, 'copied': 0, 'done': 0, 'total': total, 'shown': -1, 'progress': a.progress}
     replaced = []
     for root, prefix in trees[a.base]:
         add_tree(root, a.out, counts, prefix=prefix)

@@ -48,6 +48,12 @@ mkdir -p dist
 # The bundler names its output after the package's main program (sacredfire.AppImage).
 built=$(ls "$work"/*.AppImage | head -1)
 install -m755 "$built" dist/SacredFire-x86_64.AppImage
+# RecompLauncher reads recomplauncher.json from the root of the AppImage. nix-appimage has no
+# option for extra root files, so a second mksquashfs pass appends it, as nix-appimage itself
+# appends its AppRun. --appimage-offset prints where the squashfs starts, without mounting.
+offset=$(dist/SacredFire-x86_64.AppImage --appimage-offset)
+nix-shell -p squashfsTools --run \
+    "mksquashfs recomplauncher.json dist/SacredFire-x86_64.AppImage -offset $offset -all-root -no-recovery -quiet"
 (cd dist && sha256sum SacredFire-x86_64.AppImage > SacredFire-x86_64.AppImage.sha256)
 # What the package was built from (for the release notes: the GPL source of the binary is the
 # repository at this revision plus nixpkgs at this version for the bundled libraries).

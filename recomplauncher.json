@@ -1,0 +1,138 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "min": "0.90.0-beta.37",
+  "name": "Crash Team Racing Nitro-Fueled (OCTR)",
+  "repo": "Ryu7w7/OCTR-NitroFueled-PC",
+  "inputs": [
+    {
+      "id": "base",
+      "label": "Your dump of the base game: the folder with eboot.bin (CUSA13795 for the USA edition, CUSA14876 for the EU one), or a PS4 PKG Tool folder with Image0 and Sc0.",
+      "role": "game",
+      "formats": [{ "type": "folder" }]
+    },
+    {
+      "id": "update",
+      "label": "Your dump of its 1.21 update (CUSA13795-patch or CUSA14876-patch): the folder with eboot.bin, or a PS4 PKG Tool folder with Image0 and Sc0.",
+      "role": "update",
+      "formats": [{ "type": "folder" }]
+    },
+    {
+      "id": "dlss",
+      "label": "NVIDIA DLSS",
+      "role": "runtime",
+      "shared": "nvidia.dlss",
+      "optional": true,
+      "destination": "bin/nvngx_dlss.dll"
+    }
+  ],
+  "prepare": {
+    "program": ["Crash™ Team Racing Nitro-Fueled.exe", "CTR-NitroFueled-PC.exe", "SacredFire-x86_64.AppImage"],
+    "args": ["--prepare", "--base", "{input:base}", "--update", "{input:update}", "--out", "{install}/CUSA13795-1.21"],
+    "label": "Merging the game and its update",
+    "timeout": 3600
+  },
+  "start": {
+    "program": ["Crash™ Team Racing Nitro-Fueled.exe", "CTR-NitroFueled-PC.exe", "SacredFire-x86_64.AppImage"],
+    "args": ["--play", "--game={install}/CUSA13795-1.21"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        { "path": "{install}/bbport.ini", "if": "{install}/bbport.default.ini" },
+        { "path": "{local}/sacredfire/bbport.ini", "if": "{local}/sacredfire/bbport.ini" }
+      ]
+    }
+  ],
+  "saves": ["{install}/user/savedata/1", "{local}/sacredfire/user/savedata/1"],
+  "folders": {
+    "saves": [
+      { "path": "{install}/user/savedata/1", "if": "{install}/bbport.default.ini" },
+      { "path": "{local}/sacredfire/user/savedata/1" }
+    ],
+    "logs": [
+      { "path": "{install}", "if": "{install}/bbport.default.ini" },
+      { "path": "{local}/sacredfire" }
+    ]
+  },
+  "settings": [
+    {
+      "id": "window",
+      "label": "Window",
+      "help": "Fullscreen fills your screen. Windowed opens the game in a window.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Fullscreen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "help": "What the game draws at. 1080p is the base; higher needs a faster graphics card, lower helps modest PCs.",
+      "choices": [
+        { "label": "480p", "set": { "render_res": "480" } },
+        { "label": "720p", "set": { "render_res": "720" } },
+        { "label": "1080p", "set": { "render_res": "1080" } },
+        { "label": "1440p", "set": { "render_res": "1440" } },
+        { "label": "1620p", "set": { "render_res": "1620" } },
+        { "label": "4K", "set": { "render_res": "2160" } }
+      ],
+      "defaults": { "render_res": "1080" }
+    },
+    {
+      "id": "upscaling",
+      "label": "Upscaling",
+      "help": "Sharpens the picture as it is fitted to your screen. DLSS needs an NVIDIA RTX card and, on Windows, uses the DLSS file RecompLauncher downloads for you.",
+      "choices": [
+        { "label": "Off", "set": { "temporal": "off" } },
+        { "label": "FSR 1", "set": { "temporal": "fsr1" } },
+        { "label": "FSR 3.1", "set": { "temporal": "fsr3" } },
+        { "label": "DLSS", "set": { "temporal": "dlss" } }
+      ],
+      "defaults": { "temporal": "fsr1" }
+    },
+    {
+      "id": "fps_limit",
+      "label": "Frame rate limit",
+      "help": "The most frames per second the game draws. With the 60 FPS patch the game runs as fast as this allows. On a 144 Hz screen without G-Sync or FreeSync, 72 spaces the frames evenly.",
+      "choices": [
+        { "label": "30", "set": { "fps_limit": "30" } },
+        { "label": "60", "set": { "fps_limit": "60" } },
+        { "label": "72", "set": { "fps_limit": "72" } },
+        { "label": "90", "set": { "fps_limit": "90" } },
+        { "label": "120", "set": { "fps_limit": "120" } },
+        { "label": "144", "set": { "fps_limit": "144" } },
+        { "label": "240", "set": { "fps_limit": "240" } },
+        { "label": "No limit", "set": { "fps_limit": "0" } }
+      ],
+      "defaults": { "fps_limit": "60" }
+    },
+    {
+      "id": "skip_intro",
+      "label": "Intro videos",
+      "help": "The logos and videos when the game starts.",
+      "choices": [
+        { "label": "Play them", "set": { "skip_intro": "0" } },
+        { "label": "Skip them", "set": { "skip_intro": "1" } }
+      ],
+      "defaults": { "skip_intro": "0" }
+    },
+    {
+      "id": "show_fps",
+      "label": "Show FPS",
+      "help": "The frame rate in a corner of the game.",
+      "choices": [
+        { "label": "Off", "set": { "show_fps": "0" } },
+        { "label": "On", "set": { "show_fps": "1" } }
+      ],
+      "defaults": { "show_fps": "0" }
+    }
+  ],
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your save files.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "The log of the last run (last_run.log).", "open": "logs" }
+  ]
+}
