@@ -252,6 +252,8 @@ struct RuntimeVoiceMarker { char name[24]; float x, y; int shown; };
 void runtime_voice_markers_tick(int racing);
 /* 1 while that player is heard (or this player talks): gpu/shim/bbport_voice.cpp. */
 int runtime_voice_speaking(const char *nick);
+/* The party's players by name, as of the lobby's last frame (runtime_public_itemless.c). */
+int runtime_room_members(char out[][24], int max);
 int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);

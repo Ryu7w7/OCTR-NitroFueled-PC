@@ -53,6 +53,7 @@ int net_server_ipv4(uint32_t* ip);                        // src/runtime_net_bri
 uint16_t net_server_nat_port(void);
 int net_bridge_active(void);
 int runtime_public_match_active(void);                    // src/runtime_public_itemless.c
+int runtime_room_members(char out[][24], int max);        // src/runtime_public_itemless.c
 struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; }; // src/runtime.h
 int runtime_voice_karts(struct RuntimeVoiceKart* out, int max); // src/runtime_item_lead.c
 }
@@ -290,7 +291,8 @@ void Run() {
     SDL_AudioStream* self = nullptr; // the test: this player's own voice back
     Socket sock = kNoSocket;
     sockaddr_in server{};
-    std::string room, me, room_key;
+    std::string room, me, room_key, members_sent;
+    double next_members = 0;
     uint8_t token[16] = {};
     bool joined = false;
     double next_join = 0, next_keepalive = 0, open_until = 0, last_level = 0;
@@ -321,6 +323,21 @@ void Run() {
             room_key.clear();
             next_join = 0;
             DropSpeakers();
+        }
+        // this player hosts the private room: the server learns who its players are, and only
+        // they may join its voice (sent when it changes, and every 20 s)
+        if (!room.empty() && room != "match" && !SDL_strcasecmp(room.c_str(), me.c_str())) {
+            char names[8][24];
+            const int count = runtime_room_members(names, 8);
+            std::string list;
+            for (int i = 0; i < count; ++i)
+                if (ValidNick(names[i])) list += (list.empty() ? "" : ",") + std::string(names[i]);
+            if (list != members_sent || now >= next_members) {
+                char target[320], body[64];
+                std::snprintf(target, sizeof target, "/ryunet/voice/members?name=%s&members=%s", me.c_str(), list.c_str());
+                if (runtime_ryunet_request("GET", target, body, sizeof body) == 200) members_sent = list;
+                next_members = now + 20000;
+            }
         }
         // a public room may change (its host left): asked again now and then; the same room keeps
         // the token, another one gives a new one and other voices
