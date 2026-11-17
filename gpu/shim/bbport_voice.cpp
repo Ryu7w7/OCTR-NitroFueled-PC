@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include <opus/opus.h>
@@ -54,7 +55,8 @@ uint16_t net_server_nat_port(void);
 int net_bridge_active(void);
 int runtime_public_match_active(void);                    // src/runtime_public_itemless.c
 int runtime_room_members(char out[][24], int max);        // src/runtime_public_itemless.c
-struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; }; // src/runtime.h
+struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; int effects; }; // src/runtime.h
+enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4 };
 int runtime_voice_karts(struct RuntimeVoiceKart* out, int max); // src/runtime_item_lead.c
 }
 
@@ -76,12 +78,100 @@ double NowMs() {
     return double(duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count()) / 1000.0;
 }
 
+// ---- what the items do to a voice: the speaker's kart in a bubble shield sounds muffled, under N.
+// Tropy's clock lower (as slowed down, without falling behind), invisible with an echo. Each one
+// fades in and out (no clicks). ----
+class VoiceFx {
+public:
+    void Process(float* x, int n, int effects) {
+        const float want[3] = {effects & RUNTIME_VOICE_BUBBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_CLOCK ? 1.0f : 0.0f,
+                               effects & RUNTIME_VOICE_INVISIBLE ? 1.0f : 0.0f};
+        if (!effects && mix_[0] + mix_[1] + mix_[2] < 1e-4f) {
+            mix_[0] = mix_[1] = mix_[2] = 0.0f;
+            return;
+        }
+        if (pitch_.empty()) {
+            pitch_.assign(kPitchLen, 0.0f);
+            for (int c = 0; c < 3; ++c) comb_[c].assign(kComb[c], 0.0f);
+            allpass_.assign(kAllpass, 0.0f);
+        }
+        for (int i = 0; i < n; ++i) {
+            for (int k = 0; k < 3; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
+            float y = x[i];
+            if (mix_[1] > 1e-4f) y += (Pitch(y) - y) * mix_[1];
+            if (mix_[0] > 1e-4f) {
+                lp1_ += kLowPass * (y - lp1_);
+                lp2_ += kLowPass * (lp1_ - lp2_);
+                y += (lp2_ * 1.6f - y) * mix_[0];
+            }
+            if (mix_[2] > 1e-4f) y = y * (1.0f - 0.25f * mix_[2]) + Echo(y) * 0.9f * mix_[2];
+            x[i] = y;
+        }
+    }
+
+private:
+    // a pitch shifter: two read heads sliding through a short delay line, crossfaded
+    static constexpr int kPitchLen = 2400; // 50 ms
+    static constexpr float kPitch = 0.72f; // lower by about a fourth and a half
+    // the bubble: two one-pole low-passes at about 500 Hz
+    static constexpr float kLowPass = 0.063f;
+    // the echo: three feedback delays (110, 170, 240 ms) through an all-pass
+    static constexpr int kComb[3] = {5281, 8161, 11519};
+    static constexpr int kAllpass = 1201;
+
+    float Read(float delay) const {
+        float at = float(write_) - delay;
+        while (at < 0) at += kPitchLen;
+        const int a = int(at) % kPitchLen, b = (a + 1) % kPitchLen;
+        const float f = at - std::floor(at);
+        return pitch_[a] + (pitch_[b] - pitch_[a]) * f;
+    }
+    float Pitch(float in) {
+        pitch_[write_] = in;
+        phase_ += (1.0f - kPitch) / float(kPitchLen - 4);
+        if (phase_ >= 1.0f) phase_ -= 1.0f;
+        const float p2 = phase_ + 0.5f >= 1.0f ? phase_ - 0.5f : phase_ + 0.5f;
+        // Hann windows half a turn apart: their sum is always 1
+        const float w1 = std::sin(3.14159265f * phase_), w2 = std::sin(3.14159265f * p2);
+        const float out = Read(1.0f + phase_ * (kPitchLen - 4)) * w1 * w1 + Read(1.0f + p2 * (kPitchLen - 4)) * w2 * w2;
+        write_ = (write_ + 1) % kPitchLen;
+        return out;
+    }
+    float Echo(float in) {
+        float sum = 0.0f;
+        for (int c = 0; c < 3; ++c) {
+            float& slot = comb_[c][comb_i_[c]];
+            const float out = slot;
+            slot = in + out * 0.48f;
+            comb_i_[c] = (comb_i_[c] + 1) % kComb[c];
+            sum += out;
+        }
+        sum *= 0.4f;
+        float& slot = allpass_[allpass_i_];
+        const float delayed = slot, out = delayed - 0.5f * sum;
+        slot = sum + 0.5f * out;
+        allpass_i_ = (allpass_i_ + 1) % kAllpass;
+        return out;
+    }
+
+    float mix_[3] = {};
+    float lp1_ = 0, lp2_ = 0;
+    std::vector<float> pitch_;
+    int write_ = 0;
+    float phase_ = 0;
+    std::vector<float> comb_[3];
+    int comb_i_[3] = {};
+    std::vector<float> allpass_;
+    int allpass_i_ = 0;
+};
+
 struct Speaker {
     OpusDecoder* decoder = nullptr;
     SDL_AudioStream* stream = nullptr; // stereo: the voice from its kart's side
     double last = 0;
     uint16_t seq = 0;
     bool any = false;
+    VoiceFx fx;
 };
 
 // ---- proximity: this player's kart (the listener), the way it goes, and the others' sides ----
@@ -164,6 +254,13 @@ void Gains(const std::string& nick, float volume, bool proximity, float& left, f
     const float angle = (side * 0.8f + 1.0f) * 0.25f * 3.14159265f;
     left = volume * loud * std::cos(angle);
     right = volume * loud * std::sin(angle);
+}
+
+// What the items do to that player's kart now (bubble, clock, invisible), 0 when not racing.
+int EffectsOf(const std::string& nick) {
+    for (int i = 0; i < g_kart_count; ++i)
+        if (!g_karts[i].here && !SDL_strcasecmp(g_karts[i].name, nick.c_str())) return g_karts[i].effects;
+    return 0;
 }
 
 std::mutex g_mutex;                       // g_speakers, g_state
@@ -496,11 +593,15 @@ void Run() {
             if (!sp.decoder || !sp.stream) continue;
             float left = 1.0f, right = 1.0f;
             Gains(nick, volume, proximity, left, right);
+            const int effects = EffectsOf(nick);
             const auto put = [&](const int16_t* mono, int samples) {
                 static int16_t stereo[kFrame * 6 * 2];
+                static float voice[kFrame * 6];
+                for (int i = 0; i < samples; ++i) voice[i] = mono[i];
+                sp.fx.Process(voice, samples, effects);
                 for (int i = 0; i < samples; ++i) {
-                    stereo[2 * i] = int16_t(std::clamp(mono[i] * left, -32768.0f, 32767.0f));
-                    stereo[2 * i + 1] = int16_t(std::clamp(mono[i] * right, -32768.0f, 32767.0f));
+                    stereo[2 * i] = int16_t(std::clamp(voice[i] * left, -32768.0f, 32767.0f));
+                    stereo[2 * i + 1] = int16_t(std::clamp(voice[i] * right, -32768.0f, 32767.0f));
                 }
                 SDL_PutAudioStreamData(sp.stream, stereo, samples * 4);
             };

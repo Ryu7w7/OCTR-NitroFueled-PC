@@ -583,8 +583,33 @@ static pthread_mutex_t voice_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct RuntimeVoiceKart voice_karts[8];
 static int voice_kart_count;
 
+/* What an item does to a kart, for the voice's effects (RUNTIME_VOICE_*):
+ *   bubble:    the kart's CPowerShieldComponent (meta global 0x2ad1b60) +0x58 ShieldState is eSS_Shielded (1),
+ *              or the bubble it holds (+0x50, an entity with CSpawnedPowerShieldComponent, meta 0x2ad7560) is
+ *              eSSS_Spawned (2) at +0xd0 (0xe34ff0 reads them so when the kart is hit)
+ *   clock:     N. Tropy's clock on this kart: the kart controller's +0xa8 object, +0x64 goes to 1.0 at
+ *              OnNTropyStart (0xe3aa90) and back to 0 at OnNTropyEnd (0xe3abd0)
+ *   invisible: CKartEffectsComponent (0x2ac5438) +0x48, the viewports that see the kart, is -1 but while the
+ *              Invisibility item lasts (the invisibility look, runtime_replay_play.c) */
+static int voice_effects(void *kart) {
+    int fx = 0;
+    void *shield = rr_component(kart, 0x2ad1b60);
+    if (shield) {
+        void *bubble = rr_handle_object(&RR_AT(shield, 0x50, void *));
+        void *spawned = bubble ? rr_component(bubble, 0x2ad7560) : 0;
+        if (RR_AT(shield, 0x58, int32_t) == 1 || (spawned && RR_AT(spawned, 0xd0, int32_t) == 2)) fx |= RUNTIME_VOICE_BUBBLE;
+    }
+    void *controller = rr_component(kart, RR_D_KART_CONTROLLER_META);
+    void *tropy = controller ? rr_handle_object(&RR_AT(controller, 0xa8, void *)) : 0;
+    if (tropy && RR_AT(tropy, 0x64, float) > 0.5f) fx |= RUNTIME_VOICE_CLOCK;
+    void *effects = rr_component(kart, 0x2ac5438);
+    if (effects && RR_AT(effects, 0x48, int32_t) != -1) fx |= RUNTIME_VOICE_INVISIBLE;
+    return fx;
+}
+
 static void voice_karts_tick(int racing) {
     struct RuntimeVoiceKart now[8];
+    static struct { char name[24]; int fx; } told[8];
     int n = 0;
     for (int i = 0; racing && i < 8; i++) {
         void *kart = rr_kart_of(i, 0);
@@ -594,8 +619,18 @@ static void voice_karts_tick(int racing) {
         snprintf(now[n].name, sizeof now[n].name, "%s", name);
         memcpy(now[n].pos, &RR_AT(kart, 0x20, float), sizeof now[n].pos);
         now[n].here = (uint32_t)RR_AT(player, 0x20, int32_t) <= 7;
+        now[n].effects = voice_effects(kart);
+        if (strcmp(told[i].name, now[n].name) || told[i].fx != now[n].effects) {
+            if (told[i].name[0] && !strcmp(told[i].name, now[n].name))
+                printf("Voice effects: %s%s%s%s%s\n", now[n].name, now[n].effects & RUNTIME_VOICE_BUBBLE ? " bubble" : "",
+                       now[n].effects & RUNTIME_VOICE_CLOCK ? " clock" : "",
+                       now[n].effects & RUNTIME_VOICE_INVISIBLE ? " invisible" : "", now[n].effects ? "" : " none");
+            snprintf(told[i].name, sizeof told[i].name, "%s", now[n].name);
+            told[i].fx = now[n].effects;
+        }
         n++;
     }
+    if (!racing) memset(told, 0, sizeof told);
     pthread_mutex_lock(&voice_lock);
     memcpy(voice_karts, now, sizeof(now[0]) * (size_t)n);
     voice_kart_count = n;
