@@ -140,8 +140,12 @@ pkgs.stdenv.mkDerivation {
       cp out/eosbridge/ryunet-bridge out/eosbridge/libEOSSDK-Linux-Shipping.so $d/eos/
     fi
     # Their debug info names the build environment's headers (the full GCC, Vulkan headers): Nix
-    # took those for dependencies, ~300 MB. Symbols stay (crash reports).
-    ${pkgs.binutils-unwrapped}/bin/strip --strip-debug $d/bin/sacredfire $d/bin/bb-gpu-capabilities
+    # took those for dependencies, ~300 MB (the EOS bridge alone kept the whole GCC, 280 MB). Symbols
+    # stay (crash reports). NVIDIA's and Epic's libraries are left as they come.
+    for elf in $d/bin/sacredfire $d/bin/bb-gpu-capabilities $d/bin/sacredfire-launcher \
+               $d/bin/libsacredfire_dlss.so $d/eos/ryunet-bridge; do
+      if [ -f "$elf" ]; then ${pkgs.binutils-unwrapped}/bin/strip --strip-debug "$elf"; fi
+    done
     # Menu entry and icon: nix-appimage takes the .desktop whose Exec is the main program and its
     # 256x256 icon as the AppImage's own (.DirIcon), which AppImage managers (Gear Lever,
     # AppImageLauncher) need to integrate it.
