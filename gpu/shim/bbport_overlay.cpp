@@ -30,6 +30,7 @@
 #include <miniz.h>
 #include "bbport_perf.h"
 #include "bbport_settings.h"
+#include "bbport_voice.h"
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_http.h"
 #include "../../src/runtime_spectate.h"
@@ -37,6 +38,9 @@
 #include "../../src/runtime_name_colors.h"
 #include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
+#include "../../src/runtime_avatars.h"
+#include <cctype>
+#include <map>
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -69,6 +73,12 @@ extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
+extern "C" const char* runtime_np_get_online_name(void); // the player's nickname (src/runtime_np_online.c)
+extern "C" {
+struct RuntimeVoiceMarker { char name[24]; float x, y, scale; int shown; }; // src/runtime.h
+int runtime_voice_markers(struct RuntimeVoiceMarker* out, int max);  // src/runtime_replay_play.c
+int runtime_voice_glyph(void); // 1: the game's fonts have the loudspeaker, the nickname shows it
+}
 
 namespace BbOverlay {
 
@@ -193,6 +203,61 @@ bool DecodePngTo(const unsigned char* png, size_t size, std::vector<unsigned cha
 
 bool DecodePng(const unsigned char* png, size_t size, std::vector<unsigned char>& out) {
     return DecodePngTo(png, size, out, kIconSize, kIconSize);
+}
+
+// Tacho: the players' Discord pictures (src/runtime_avatars.c; the server sends Discord's default
+// one to players without a picture). Made into textures on the drawing thread, kept for the session.
+constexpr int kAvatarSize = 64;
+struct AvatarPicture {
+    std::unique_ptr<ImTextureData> texture; // null: none to show (an initial in a circle instead)
+};
+std::map<std::string, AvatarPicture> avatar_pictures; // by lower-case nickname; imgui_mutex
+
+void TakeAvatars() {
+    char who[RA_NAME];
+    unsigned char* png = nullptr;
+    size_t size = 0;
+    for (int n = 0; n < 8 && runtime_avatar_take(who, &png, &size); ++n) {  // a few per frame
+        AvatarPicture& pic = avatar_pictures[who];
+        std::vector<unsigned char> rgba;
+        if (png && DecodePngTo(png, size, rgba, kAvatarSize, kAvatarSize)) {
+            pic.texture = std::make_unique<ImTextureData>();
+            pic.texture->Create(ImTextureFormat_RGBA32, kAvatarSize, kAvatarSize);
+            std::memcpy(pic.texture->GetPixels(), rgba.data(), rgba.size());
+            pic.texture->UsedRect = {0, 0, (unsigned short)kAvatarSize, (unsigned short)kAvatarSize};
+            ImGui::RegisterUserTexture(pic.texture.get());
+        }
+        runtime_avatar_free(png);
+    }
+}
+
+/// The player's picture in a circle of `size` pixels at the cursor (a line's height when 0), then
+/// SameLine. Until it arrives, or with none, a coloured circle with the nickname's initial.
+void Avatar(const char* name, float size = 0.0f) {
+    if (!name || !*name) return;
+    if (size <= 0.0f) size = ImGui::GetFrameHeight();
+    std::string key(name);
+    for (char& c : key) c = (char)std::tolower((unsigned char)c);
+    auto it = avatar_pictures.find(key);
+    if (it == avatar_pictures.end()) runtime_avatar_want(name);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(size, size));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 q(p.x + size, p.y + size), mid(p.x + size * 0.5f, p.y + size * 0.5f);
+    if (it != avatar_pictures.end() && it->second.texture) {
+        dl->AddImageRounded(ImTextureRef(it->second.texture->GetTexRef()), p, q, ImVec2(0, 0), ImVec2(1, 1),
+                            IM_COL32_WHITE, size * 0.5f);
+    } else {
+        unsigned hash = 2166136261u;
+        for (char c : key) hash = (hash ^ (unsigned char)c) * 16777619u;
+        static const ImU32 colors[] = {IM_COL32(88, 101, 242, 255), IM_COL32(117, 126, 138, 255), IM_COL32(59, 165, 93, 255),
+                                       IM_COL32(250, 166, 26, 255), IM_COL32(237, 66, 69, 255), IM_COL32(235, 69, 158, 255)};
+        dl->AddCircleFilled(mid, size * 0.5f, colors[hash % 6]);
+        char initial[2] = {(char)std::toupper((unsigned char)name[0]), 0};
+        const ImVec2 t = ImGui::CalcTextSize(initial);
+        dl->AddText(ImVec2(mid.x - t.x * 0.5f, mid.y - t.y * 0.5f), IM_COL32_WHITE, initial);
+    }
+    ImGui::SameLine();
 }
 
 // Tacho: fondo del menu (Insert / L3+R3): <BB_ART_DIR>/ctr-overlay-background.png (el lanzador pone BB_ART_DIR = su
@@ -661,6 +726,7 @@ void PollFriends() {
         if (kind == RF_EVENT_INVITED || kind == RF_EVENT_NO_ONE_ONLINE) {
             Notify(title, shown, detail, 5, nullptr, 0);
         } else {
+            runtime_avatar_want(shown.c_str()); // the friends list's pictures: the notice shows it too
             NotifyWithPicture(title, shown, detail, 5);
         }
     }
@@ -753,7 +819,7 @@ void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
 
 /// The players in the room the game talks to, with their round trip (src/runtime_net_ping.h), as
 /// lines of text: in the Room tab and in the corner counter (show_ping). Their count.
-int PingLines() {
+int PingLines(bool pictures = false) {
     PingPeer peers[PING_MAX_PEERS];
     const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
     int older = 0;
@@ -764,6 +830,10 @@ int PingLines() {
             continue;
         }
         const char* name = p.name[0] ? p.name : "...";
+        if (pictures && p.name[0]) {   // Tacho: la foto de Discord del jugador (menu, apartado Sala)
+            ImGui::AlignTextToFramePadding();
+            Avatar(p.name);
+        }
         if (p.ms == PING_NO_ANSWER) {
             ImGui::TextColored(kMenuGrey, "%s  -", name);
             continue;
@@ -978,7 +1048,7 @@ void RoomTab() {
         ImGui::TextDisabled("%s", BbSettings::MenuText("You are not in an online room right now.",
                                                        "Сейчас вы не в онлайн-комнате."));
     } else {
-        PingLines();
+        PingLines(true);
     }
     ImGui::Spacing();
     bool ping = s.show_ping;
@@ -990,6 +1060,184 @@ void RoomTab() {
                                                    "older version show no ping.",
                                                    "Задержка до каждого игрока в вашей онлайн-комнате, в мс. У игроков "
                                                    "со старой версией пинга нет."));
+}
+
+/// A loudspeaker with sound waves, `size` high, at `at` (top left): who is talking (voice chat).
+void SpeakerIcon(ImDrawList* dl, ImVec2 at, float size, ImU32 color) {
+    const float s = size;
+    const ImVec2 box0(at.x, at.y + s * 0.35f), box1(at.x + s * 0.25f, at.y + s * 0.65f);
+    dl->AddRectFilled(box0, box1, color, s * 0.04f);
+    dl->AddTriangleFilled(ImVec2(at.x + s * 0.2f, at.y + s * 0.35f), ImVec2(at.x + s * 0.5f, at.y + s * 0.1f),
+                          ImVec2(at.x + s * 0.5f, at.y + s * 0.9f), color);
+    dl->AddRectFilled(ImVec2(at.x + s * 0.2f, at.y + s * 0.35f), ImVec2(at.x + s * 0.5f, at.y + s * 0.65f), color);
+    const ImVec2 c(at.x + s * 0.5f, at.y + s * 0.5f);
+    dl->PathArcTo(c, s * 0.22f, -0.8f, 0.8f, 8);
+    dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
+    dl->PathArcTo(c, s * 0.4f, -0.8f, 0.8f, 10);
+    dl->PathStroke(color, ImDrawFlags_None, s * 0.08f);
+}
+
+/// A loudspeaker right of the nickname the game shows above each talking racer's kart (its HUD kart
+/// markers, in the game's 1920x1080 UI units from the screen's centre, y down; mapped into the
+/// 16:9 picture in the window).
+void VoiceOverKarts(const std::vector<std::string>& speaking) {
+    RuntimeVoiceMarker markers[8];
+    const int n = runtime_voice_markers(markers, 8);
+    if (n <= 0) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float w = viewport->Size.x, h = viewport->Size.y;
+    const float vw = std::min(w, h * 16.0f / 9.0f), vh = vw * 9.0f / 16.0f;
+    const float ox = viewport->Pos.x + (w - vw) * 0.5f, oy = viewport->Pos.y + (h - vh) * 0.5f;
+    const float base = vh / 1080.0f;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    for (int i = 0; i < n; ++i) {
+        if (!markers[i].shown) continue;
+        bool talking = false;
+        for (const std::string& nick : speaking) talking |= !SDL_strcasecmp(nick.c_str(), markers[i].name);
+        if (!talking) continue;
+        const float x = ox + (960.0f + markers[i].x) / 1920.0f * vw, y = oy + (540.0f + markers[i].y) / 1080.0f * vh;
+        // right of the nickname, scaled as the game scales the marker with the distance (k), so it
+        // stays by the name from near and far: the marker's point is where its text ends, a little
+        // below the letters' middle (measured on screen); white, with a thin dark edge, as the name
+        const float k = base * std::clamp(markers[i].scale, 0.2f, 3.0f);
+        // measured on screen: the letters' middle is 72 units (scaled) above the marker's point, and
+        // the drawing fills about two thirds of its box, so 44 units match the letters' height
+        const float size = 44.0f * k;
+        const ImVec2 at(x + 14.0f * k, y - 72.0f * k - size * 0.5f);
+        const float edge = std::max(1.0f, size * 0.07f);
+        for (const ImVec2 d : {ImVec2(-edge, 0), ImVec2(edge, 0), ImVec2(0, -edge), ImVec2(0, edge)})
+            SpeakerIcon(dl, ImVec2(at.x + d.x, at.y + d.y), size, IM_COL32(20, 20, 30, 200));
+        SpeakerIcon(dl, at, size, IM_COL32(255, 255, 255, 255));
+    }
+}
+
+/// The Voice tab: voice chat on or off, push to talk or open microphone, the microphone, its
+/// level and a test, the others' volume.
+void VoiceTab() {
+    auto& s = BbSettings::Get();
+    MenuSection(BbSettings::MenuText("Voice chat", "Голосовой чат"));
+    Checkbox(BbSettings::MenuText("Voice chat in private rooms", "Голосовой чат в частных комнатах"), s.voice_enabled);
+    Hint(BbSettings::MenuText("Everyone in the room needs it turned on to hear each other. The voice goes through "
+                              "the RyuNET server, only to the players of your room.",
+                              "Чтобы слышать друг друга, его должны включить все в комнате. Голос идёт через "
+                              "сервер RyuNET только игрокам вашей комнаты."));
+    const char* state = "";
+    ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+    switch (BbVoice::Now()) {
+    case BbVoice::State::Off: state = BbSettings::MenuText("Off", "Выключен"); break;
+    case BbVoice::State::NoRoom:
+        state = BbSettings::MenuText("On: join a private room to talk", "Включён: войдите в частную комнату");
+        break;
+    case BbVoice::State::Joining:
+        state = BbSettings::MenuText("Connecting to the room's voice...", "Подключение к голосу комнаты...");
+        break;
+    case BbVoice::State::Connected:
+        state = BbSettings::MenuText("Connected: the room hears you", "Подключено: комната вас слышит");
+        color = ImVec4(0.45f, 0.85f, 0.5f, 1.0f);
+        break;
+    case BbVoice::State::NoServer:
+        state = BbSettings::MenuText("No connection to the server", "Нет связи с сервером");
+        color = ImVec4(1.0f, 0.75f, 0.3f, 1.0f);
+        break;
+    case BbVoice::State::NoMicrophone:
+        state = BbSettings::MenuText("No microphone found", "Микрофон не найден");
+        color = ImVec4(1.0f, 0.75f, 0.3f, 1.0f);
+        break;
+    }
+    ImGui::TextColored(color, "%s", state);
+
+    MenuSection(BbSettings::MenuText("How you talk", "Как говорить"));
+    bool open = s.voice_open_mic;
+    if (ImGui::RadioButton(BbSettings::MenuText("Push to talk", "Нажать и говорить"), !open)) Store(s.voice_open_mic, false, true);
+    ImGui::SameLine();
+    if (ImGui::RadioButton(BbSettings::MenuText("Open microphone", "Открытый микрофон"), open)) Store(s.voice_open_mic, true, true);
+    static bool waiting_key = false;
+    if (!s.voice_open_mic) {
+        const char* key_name = SDL_GetScancodeName(SDL_Scancode(s.voice_key.load()));
+        ImGui::Text("%s: %s", BbSettings::MenuText("Talk key", "Клавиша"), key_name && *key_name ? key_name : "?");
+        ImGui::SameLine();
+        if (waiting_key) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s",
+                               BbSettings::MenuText("Press a key... (Esc cancels)", "Нажмите клавишу... (Esc — отмена)"));
+            int count = 0;
+            const bool* keys = SDL_GetKeyboardState(&count);
+            for (int k = SDL_SCANCODE_A; keys && k < count; ++k) {
+                if (!keys[k]) continue;
+                if (k != SDL_SCANCODE_ESCAPE) Store(s.voice_key, k, true);
+                waiting_key = false;
+                break;
+            }
+        } else if (ImGui::SmallButton(BbSettings::MenuText("Change", "Изменить"))) {
+            waiting_key = true;
+        }
+    } else {
+        waiting_key = false;
+    }
+
+    MenuSection(BbSettings::MenuText("Microphone", "Микрофон"));
+    {
+        std::string current;
+        {
+            std::lock_guard lk{BbSettings::PortsMutex()};
+            current = s.voice_input.data();
+        }
+        const char* system = BbSettings::MenuText("System default", "Системный по умолчанию");
+        if (ImGui::BeginCombo("##voice_input", current.empty() ? system : current.c_str())) {
+            const auto pick = [&](const std::string& name) {
+                std::lock_guard lk{BbSettings::PortsMutex()};
+                std::snprintf(s.voice_input.data(), s.voice_input.size(), "%s", name.c_str());
+                dirty = true;
+            };
+            if (ImGui::Selectable(system, current.empty())) pick("");
+            for (const std::string& name : BbVoice::InputDevices())
+                if (ImGui::Selectable(name.c_str(), name == current)) pick(name);
+            ImGui::EndCombo();
+        }
+    }
+    {
+        int gain = int(s.voice_mic_gain * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Microphone volume", "Громкость микрофона"), &gain, 0,
+                                              400, "%d%%");
+        Store(s.voice_mic_gain, std::clamp(gain, 0, 400) / 100.0f, changed);
+    }
+    // the level, with the open microphone's threshold marked on it
+    const float level = BbVoice::MicLevel();
+    ImGui::ProgressBar(std::clamp(level, 0.0f, 1.0f), ImVec2(ImGui::GetFontSize() * 14.0f, 0.0f), "");
+    if (s.voice_open_mic) {
+        const ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+        const float x = r0.x + (r1.x - r0.x) * std::clamp(s.voice_threshold.load(), 0.0f, 1.0f);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(x, r0.y), ImVec2(x, r1.y), IM_COL32(255, 200, 60, 255), 2.0f);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(BbSettings::MenuText("Level", "Уровень"));
+    if (s.voice_open_mic) {
+        int threshold = int(s.voice_threshold * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Opens at", "Срабатывает от"), &threshold, 1, 60,
+                                              "%d%%");
+        Store(s.voice_threshold, std::clamp(threshold, 1, 60) / 100.0f, changed);
+    }
+    const bool testing = BbVoice::Testing();
+    if (ImGui::Button(testing ? BbSettings::MenuText("Stop the test", "Остановить проверку")
+                              : BbSettings::MenuText("Test the microphone", "Проверить микрофон"))) {
+        BbVoice::SetTest(!testing);
+    }
+    Hint(BbSettings::MenuText("You hear yourself; nothing is sent.", "Вы слышите себя; ничего не отправляется."));
+
+    MenuSection(BbSettings::MenuText("Others", "Другие"));
+    Checkbox(BbSettings::MenuText("Proximity in races", "Близость в гонках"), s.voice_proximity);
+    Hint(BbSettings::MenuText("In a race, each player sounds as loud as their kart is near, from the side it is on. "
+                              "In the lobby everyone sounds the same.",
+                              "В гонке каждого игрока слышно тем громче, чем ближе его карт, и с той стороны, где он. "
+                              "В лобби все звучат одинаково."));
+    if (s.voice_proximity) {
+        Checkbox(BbSettings::MenuText("Swap left and right", "Поменять лево и право"), s.voice_swap_sides);
+    }
+    {
+        int volume = int(s.voice_volume * 100.0f + 0.5f);
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Others' volume", "Громкость других"), &volume, 0, 200,
+                                              "%d%%");
+        Store(s.voice_volume, std::clamp(volume, 0, 200) / 100.0f, changed);
+    }
 }
 
 void ReportTab() {
@@ -1190,6 +1438,16 @@ void FriendsTab() {
         ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("The server is not answering; retrying...",
                                                                    "Сервер не отвечает; повтор..."));
     }
+    // Tacho: tu foto de Discord y tu apodo arriba.
+    if (const char* me = runtime_np_get_online_name(); me && *me) {
+        Avatar(me, ImGui::GetFrameHeight() * 1.6f);
+        ImGui::BeginGroup();
+        ImGui::TextUnformatted(me);
+        ImGui::TextColored(kMenuGrey, "%s", BbSettings::MenuText("Your picture is the one on your Discord account.",
+                                                                 "Ваше фото — из вашего аккаунта Discord."));
+        ImGui::EndGroup();
+        ImGui::Spacing();
+    }
     if (view.result[0] && !last_action.empty()) {
         char line[160];
         std::snprintf(line, sizeof line, FriendResultText(last_action, view.result), view.result_who);
@@ -1206,6 +1464,7 @@ void FriendsTab() {
             ImGui::BeginChild("##invite", ImVec2(0.0f, ImGui::GetFrameHeight() * 1.9f), ImGuiChildFlags_AlwaysUseWindowPadding,
                               ImGuiWindowFlags_NoScrollbar);
             ImGui::AlignTextToFramePadding();
+            Avatar(inv.from);
             ImGui::Text(BbSettings::MenuText("%s invites you to their room", "%s зовёт вас в комнату"), inv.from);
             char join[64];
             std::snprintf(join, sizeof join, "\xE2\x96\xB6  %s###join", BbSettings::MenuText("Join", "Войти"));
@@ -1295,6 +1554,7 @@ void FriendsTab() {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding();
+                Avatar(f.name);
                 StatusDot(f.online);
                 ImGui::SameLine();
                 ImGui::TextUnformatted(f.name);
@@ -1385,6 +1645,7 @@ void FriendsTab() {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::AlignTextToFramePadding();
+                    Avatar(view.incoming[i]);
                     ImGui::TextUnformatted(view.incoming[i]);
                     ImGui::TableNextColumn();
                     std::snprintf(label, sizeof label, "\xE2\x9C\x94  %s###accept", BbSettings::MenuText("Accept", "Принять"));
@@ -1402,6 +1663,7 @@ void FriendsTab() {
             for (int i = 0; i < view.outgoing_count; ++i) {
                 ImGui::PushID(2000 + i);
                 ImGui::AlignTextToFramePadding();
+                Avatar(view.outgoing[i]);
                 ImGui::TextUnformatted(view.outgoing[i]);
                 ImGui::SameLine();
                 if (ImGui::SmallButton(BbSettings::MenuText("Cancel", "Отменить"))) act("remove", view.outgoing[i]);
@@ -1432,6 +1694,7 @@ void FriendsTab() {
             const std::string relation = p.relation;
             ImGui::PushID(1000 + i);
             ImGui::AlignTextToFramePadding();
+            Avatar(p.name);
             StatusDot(p.online);
             ImGui::SameLine();
             ImGui::TextUnformatted(p.name);
@@ -1512,6 +1775,7 @@ void Menu() {
         return;
     }
     DrawMenuBackground();   // Tacho: la imagen del CTR detras de pestanas y texto
+    TakeAvatars();          // Tacho: fotos de Discord que llegaron (Amigos, Sala)
     // Moved: remembered (saved with the settings when the menu closes).
     if (!ImGui::IsWindowAppearing() && viewport->WorkSize.x > 0.0f && viewport->WorkSize.y > 0.0f) {
         const ImVec2 at = ImGui::GetWindowPos();
@@ -1809,6 +2073,7 @@ void Menu() {
     g_show_report_tab = false;
     const bool friends_page = SideTab("\xE2\x98\xBA", BbSettings::MenuText("Friends", "Друзья"));       // carita
     const bool room_page = SideTab("\xE2\x9A\x91", BbSettings::MenuText("Room", "Комната"));            // bandera
+    const bool voice_page = SideTab("\xE2\x99\xAA", BbSettings::MenuText("Voice", "Голос"));             // nota
     const bool replays_page = SideTab("\xE2\x96\xB6", BbSettings::MenuText("Replays", "Повторы"));      // play
     const bool report_page = SideTab("\xE2\x9A\xA0", report_label);                                     // aviso
     const bool settings_page = SideTab("\xE2\x98\x80", BbSettings::MenuText("Picture and performance",
@@ -1902,6 +2167,8 @@ void Menu() {
 
     if (friends_page) FriendsTab();
     if (room_page) RoomTab();
+    if (voice_page) VoiceTab();
+    else if (BbVoice::Testing()) BbVoice::SetTest(false); // the test ends with the tab
     if (replays_page) ReplaysTab();
     if (report_page) ReportTab();
 
@@ -2613,9 +2880,17 @@ void NoticeBox(const Notice& n, float age) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const ImU32 c = ImGui::GetColorU32(color);
     // The picture (or a cup in the grade's colour), with a ring in that colour.
+    std::string friend_key = kind == 5 ? n.name : std::string();
+    for (char& c : friend_key) c = (char)std::tolower((unsigned char)c);
+    const auto friend_picture = friend_key.empty() ? avatar_pictures.end() : avatar_pictures.find(friend_key);
     if (n.texture) {
         dl->AddImageRounded(ImTextureRef(n.texture->GetTexRef()), p, ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0),
                             ImVec2(1, 1), ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
+    } else if (friend_picture != avatar_pictures.end() && friend_picture->second.texture) {
+        // a friend's notice: their picture from the friends list (src/runtime_avatars.c)
+        dl->AddImageRounded(ImTextureRef(friend_picture->second.texture->GetTexRef()), p,
+                            ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0), ImVec2(1, 1),
+                            ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
     } else if (kind == 7) {
         // A message: a speech bubble with three dots.
         dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
@@ -2975,6 +3250,7 @@ bool HandleEvent(const SDL_Event& event) {
 
 bool Visible() {
     PollFriends();
+    BbVoice::Start(); // once: the voice thread (it waits while voice is off)
     if (initialized && !ultrawide_prompt_checked) {
         // Once, at the first presented frame: the first start, or every start with ultrawide_ask.
         ultrawide_prompt_checked = true;
@@ -2991,7 +3267,8 @@ bool Visible() {
     return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
                            BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
-                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
+                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing() ||
+                           !BbVoice::Speaking().empty());
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -3104,6 +3381,13 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     if (const int viewers = runtime_spectate_viewers(); viewers > 0 && !menu_open) {
         SpectatorBadge(viewers);
     }
+    if (const auto speaking = BbVoice::Speaking(); !speaking.empty()) {
+        // in a race, a loudspeaker by the nickname over the kart: the game's own text ends with it
+        // when its fonts have it (runtime_voice_glyph), else drawn here; in the room list the game's
+        // row shows its own (runtime_voice_speaking), so nothing else on screen
+        if (!menu_open && !runtime_voice_glyph()) VoiceOverKarts(speaking);
+    }
+    if (!menu_open) TakeAvatars(); // pictures that arrived: friend notices show them too
     if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
         ReplayResults(replay);
     }

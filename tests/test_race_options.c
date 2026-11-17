@@ -513,9 +513,11 @@ static void test_contact_timestep(void) {
     unsigned char *code = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(code != MAP_FAILED);
-    /* Native continuation selects max(corrective velocity, current velocity) using its flags. */
-    const unsigned char continuation[] = {0x48,0x8d,0x45,0x84,0x49,0x0f,0x46,0xc4,
-        0xc5,0xfa,0x10,0,0xc3};
+    /* Native continuation: the store and comparison the bridge resumes at (0xe47d24, 0xe47d29: they
+     * stay in the game, 0xe47b87 jumps to the comparison), then max(corrective velocity, current
+     * velocity) selected with its flags. */
+    const unsigned char continuation[] = {0xc5,0xfa,0x11,0x45,0x84,0xc5,0xf8,0x2e,0x45,0xb8,
+        0x48,0x8d,0x45,0x84,0x49,0x0f,0x46,0xc4,0xc5,0xfa,0x10,0,0xc3};
     memcpy(code+512,continuation,sizeof continuation);
     contact_timestep_bridge(code, code+512);
     unsigned char *original=code+1024;
@@ -524,7 +526,7 @@ static void test_contact_timestep(void) {
     assert((unsigned char *)ptr(code,8)+sizeof native+14+4<code+512);
     assert(!memcmp(code+512,continuation,sizeof continuation));
     memcpy(original,native,sizeof native);
-    jump(original+sizeof native,code+512);
+    jump(original+sizeof native,code+512+10); /* the native path already stored and compared */
     const float thirty=30;
     memcpy(original+128,&thirty,4);
     const int rates[] = {30,60,72,90,120,144,240};

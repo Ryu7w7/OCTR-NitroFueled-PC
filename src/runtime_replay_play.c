@@ -1837,6 +1837,39 @@ static void *entity_at(int slot) {
     return table ? RR_AT(table, 0x20, void **)[slot] : 0;
 }
 
+/* Voice chat's item effects (runtime_item_lead.c), from the spawned power-ups, which every PC has for every kart:
+ * RUNTIME_VOICE_TNT while a TNT sits on a kart's head (a crate, type 2, +0xb0 state 2, +0xa8 the kart: tnt() below)
+ * and RUNTIME_VOICE_BUBBLE while its bubble shield is up (type 8, +0x28 its owner, as the recorder's RS_SHIELD; not
+ * once thrown or popping: its CSpawnedPowerShieldComponent, meta global 0x2ad7560, +0xd0 eSSS_Spawned is 2). */
+void rr_spawned_voice_effects(void *const *karts, int n, int *fx) {
+    void *component;
+    for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
+        const int type = RR_AT(component, 0x34, int32_t);
+        if (type == 5) {
+            /* N. Tropy's clock (ePT_NTropy): while its CSpawnedNTropy (meta global 0x2ad74b8) +0x80 _nTropyState is
+             * eSNTS_Active (1), every kart but its owner's is slowed */
+            void *entity = entity_at(i);
+            void *clock = entity ? rr_component(entity, 0x2ad74b8) : 0;
+            void *owner = rr_handle_object(&RR_AT(component, 0x28, void *));
+            if (!clock || RR_AT(clock, 0x80, int32_t) != 1) continue;
+            for (int k = 0; k < n; k++)
+                if (karts[k] != owner) fx[k] |= RUNTIME_VOICE_CLOCK;
+            continue;
+        }
+        void *kart = type == 8 ? rr_handle_object(&RR_AT(component, 0x28, void *))
+                   : type == 2 && RR_AT(component, 0xb0, int32_t) == 2 ? rr_handle_object(&RR_AT(component, 0xa8, void *))
+                   : 0;
+        if (!kart) continue;
+        if (type == 8) {
+            void *entity = entity_at(i);
+            void *bubble = entity ? rr_component(entity, 0x2ad7560) : 0;
+            if (bubble && RR_AT(bubble, 0xd0, int32_t) != 2) continue;
+        }
+        for (int k = 0; k < n; k++)
+            if (karts[k] == kart) fx[k] |= type == 8 ? RUNTIME_VOICE_BUBBLE : RUNTIME_VOICE_TNT;
+    }
+}
+
 static float distance2(void *entity, const float *at) {
     float d = 0.0f;
     for (int c = 0; c < 3; c++) {
@@ -2737,3 +2770,131 @@ int runtime_replay_live_append(const struct rr_header *header, const uint8_t *pa
 }
 
 uint32_t runtime_replay_live_count(void) { return P.live ? frames_now() : 0; }
+
+/* ---- Voice chat (gpu/shim/bbport_voice.cpp): where the game shows each racer's nickname over its kart
+ * (the HUD's kart markers above), so the overlay draws a loudspeaker over whoever is talking. Read on the
+ * game's thread a few times a second during a race; the overlay only reads the copy. ---- */
+static pthread_mutex_t marker_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct RuntimeVoiceMarker marker_copy[8];
+static int marker_count, marker_frames, marker_logged, marker_log_frames;
+static void *marker_project, *marker_manager;
+
+/* The loudspeaker as a character of the game's fonts (U+E013, scripts/button_prompts.py puts it there and
+ * sets BB_VOICE_GLYPH=1): while a racer talks, the nickname over its kart ends with it, so the game draws it
+ * as part of the name. The marker keeps its text meanwhile (+0x8a _keepDisplayTextUpdated off). */
+static const char VOICE_GLYPH[] = " \xee\x80\x93";
+static struct { void *marker; uint8_t keep; } glyph_on[8];
+
+int runtime_voice_glyph(void) {
+    static int glyph = -1;
+    if (glyph < 0) {
+        const char *v = getenv("BB_VOICE_GLYPH");
+        glyph = v && !strcmp(v, "1");
+    }
+    return glyph;
+}
+
+/* name: the tag's text without the loudspeaker; adds it while that racer talks, takes it off after */
+static void voice_glyph(void *marker, void *tag, const char *text, char *name, size_t size) {
+    const size_t len = strlen(text), suffix = sizeof VOICE_GLYPH - 1;
+    const int has = len > suffix && !strcmp(text + len - suffix, VOICE_GLYPH);
+    snprintf(name, size, "%.*s", (int)(has ? len - suffix : len), text);
+    if (!game.set_text || !runtime_voice_glyph()) return;
+    const int talking = runtime_voice_speaking(name);
+    if (talking == has) return;
+    int slot = -1;
+    for (int i = 0; i < 8; i++)
+        if (glyph_on[i].marker == marker) slot = i;
+    if (talking) {
+        if (slot < 0)
+            for (int i = 0; i < 8 && slot < 0; i++)
+                if (!glyph_on[i].marker) slot = i;
+        if (slot < 0) return;
+        if (glyph_on[slot].marker != marker) {
+            glyph_on[slot].marker = marker;
+            glyph_on[slot].keep = RR_AT(marker, 0x8a, uint8_t);
+        }
+        char with[96];
+        snprintf(with, sizeof with, "%s%s", name, VOICE_GLYPH);
+        RR_AT(marker, 0x8a, uint8_t) = 0;
+        game.set_text(tag, with);
+    } else {
+        game.set_text(tag, name);
+        if (slot >= 0) {
+            RR_AT(marker, 0x8a, uint8_t) = glyph_on[slot].keep;
+            glyph_on[slot].marker = 0;
+        }
+    }
+}
+
+void runtime_voice_markers_tick(int racing) {
+    struct RuntimeVoiceMarker now[8];
+    int n = 0;
+    if (!racing) {
+        marker_project = marker_manager = 0;
+        marker_logged = 0;
+        memset(glyph_on, 0, sizeof glyph_on);           /* the markers go with the race */
+    } else {
+        /* every frame, so the loudspeaker moves with the nickname instead of trailing it */
+        ++marker_frames;
+        void *kart = 0;
+        for (int i = 0; i < 8 && !kart; i++) {
+            void *k = rr_kart_of(i, 0);
+            void *racer = k ? rr_racer_of(k) : 0;
+            void *player = racer ? rr_handle_object(&RR_AT(racer, 0x10, void *)) : 0;
+            if (player && (uint32_t)RR_AT(player, 0x20, int32_t) <= 7) kart = k;
+        }
+        void *meta = rr_ptr(D_HUD_META);
+        void *hud = kart && meta ? rr_find_component(kart, meta) : 0;
+        void *project = hud ? rr_handle_object(&RR_AT(hud, 0x38, void *)) : 0;
+        if (project != marker_project) {
+            marker_project = project;
+            marker_manager = project ? find_behavior(RR_AT(project, 0x10, void *), KART_MARKER_MANAGER_VTABLE, 0) : 0;
+        }
+        void *list = marker_manager ? RR_AT(marker_manager, 0x18, void *) : 0;
+        for (int i = 0; list && i < rr_count(list) && n < 8; i++) {
+            void *placeable = rr_handle_object(&RR_AT(list, 0x20, void **)[i]);
+            void *marker = placeable ? find_behavior(placeable, KART_MARKER_VTABLE, 0) : 0;
+            void *tag = marker ? RR_AT(marker, 0x50, void *) : 0;
+            const char *name = tag ? RR_AT(tag, 0x30, const char *) : 0;
+            if (!name || !*name) continue;
+            struct RuntimeVoiceMarker *m = &now[n++];
+            voice_glyph(marker, tag, name, m->name, sizeof m->name);
+            /* the tag sits at its offset in the marker, both scaled by the marker's scale (the game
+             * makes far markers smaller) */
+            float sx = RR_AT(placeable, 0x84, float), sy = RR_AT(placeable, 0x88, float);
+            if (!(sx > 0.01f && sx < 10.0f)) sx = 1.0f;
+            if (!(sy > 0.01f && sy < 10.0f)) sy = 1.0f;
+            float tag_scale = RR_AT(tag, 0x88, float);
+            if (!(tag_scale > 0.01f && tag_scale < 10.0f)) tag_scale = 1.0f;
+            m->x = RR_AT(placeable, 0x60, float) + RR_AT(tag, 0x60, float) * sx;
+            m->y = RR_AT(placeable, 0x64, float) + RR_AT(tag, 0x64, float) * sy;
+            m->scale = sy * tag_scale;
+            /* drawn: neither hidden nor faded out (a kart behind the camera keeps a marker at the
+             * screen's edge with its name faded) */
+            m->shown = !(RR_AT(placeable, 0xc, uint32_t) & 0x400) && !(RR_AT(tag, 0xc, uint32_t) & 0x400) &&
+                       RR_AT(placeable, 0xe0, float) > 0.05f && RR_AT(tag, 0xe0, float) > 0.05f;
+            /* a few positions per race, a couple of seconds apart (placement checks) */
+            if (marker_logged < 8 && i == 0 && marker_frames - marker_log_frames >= 180) {
+                marker_log_frames = marker_frames;
+                marker_logged++;
+                printf("Voice markers: %s at %.0f,%.0f scale %.2f (marker %.0f,%.0f + tag %.0f,%.0f)%s\n", m->name, m->x,
+                       m->y, m->scale, RR_AT(placeable, 0x60, float), RR_AT(placeable, 0x64, float),
+                       RR_AT(tag, 0x60, float), RR_AT(tag, 0x64, float), m->shown ? "" : " hidden");
+                fflush(stdout);
+            }
+        }
+    }
+    pthread_mutex_lock(&marker_lock);
+    memcpy(marker_copy, now, sizeof(now[0]) * (size_t)n);
+    marker_count = n;
+    pthread_mutex_unlock(&marker_lock);
+}
+
+int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max) {
+    pthread_mutex_lock(&marker_lock);
+    const int n = marker_count < max ? marker_count : max;
+    memcpy(out, marker_copy, sizeof(out[0]) * (size_t)(n > 0 ? n : 0));
+    pthread_mutex_unlock(&marker_lock);
+    return n;
+}

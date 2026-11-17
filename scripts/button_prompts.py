@@ -39,6 +39,13 @@ CODES = {0xE000: 'Cross', 0xE001: 'Circle', 0xE002: 'Triangle', 0xE003: 'Square'
          0x298: 'Cross', 0x5E: 'Circle', 0x60: 'Triangle', 0x7E: 'Square', 0x5B: 'L1', 0x5D: 'R1',
          0x3C: 'L2', 0x3E: 'R2'}
 MIN_CELL = 50  # a button cell is bigger than this both ways (the font's letters are much smaller)
+# The voice chat's loudspeaker (scripts/assets/voice_glyph.png, tools/make_voice_glyph.py), a
+# character of its own: the nickname over a talking racer's kart ends with it
+# (src/runtime_replay_play.c), so the game draws it with the name. In the 1.21 fonts' button image
+# it takes an unused badge's cell (x0, y0, x1, y1; end exclusive).
+SPEAKER_CODE = 0xE013
+SPEAKER_CELL = (180, 170, 263, 259)
+SPEAKER_ART = Path(__file__).resolve().parent / 'assets' / 'voice_glyph.png'
 # Where each button is in our art (button_prompts/<style>.png): the 1.21 font's cells
 # (x0, y0, x1, y1; end exclusive). The sticks (L, R) are left as they are.
 SHEET = {
@@ -260,6 +267,64 @@ def restyled_font(blob, art):
     return blob[:at] + tile(linear, width, height, original) + blob[at + length:]
 
 
+def _alternate_list(blob):
+    """(file offset of its pointer array, [(slot file offset, metrics file offset, character)]) of
+    the font's alternate character metrics (the ones drawn from the button image)."""
+    objects, _strings_list, file_offset = _objects(blob)
+    for at, kind in objects:
+        if kind != 'igCharMetricsList':
+            continue
+        count, = struct.unpack_from('<I', blob, at + 12)
+        data, = struct.unpack_from('<Q', blob, at + 32)
+        array = file_offset(data)
+        slots = []
+        for i in range(count):
+            encoded, = struct.unpack_from('<Q', blob, array + i * 8)
+            metrics = file_offset(encoded)
+            slots.append((array + i * 8, metrics, struct.unpack_from('<H', blob, metrics + CM_CHAR)[0]))
+        if any(char in CODES and char >= 0xE000 for _, _, char in slots):
+            return array, slots
+    return None, []
+
+
+def with_speaker(blob, glyph):
+    """The font with the voice chat's loudspeaker (glyph: width, height, RGBA) as character
+    SPEAKER_CODE, or None when the font has no room for it. It takes SPEAKER_CELL of the button
+    image, which the font's metrics give a character 0 (one no text can ask for): that metrics
+    gets the loudspeaker's code and moves to the end of the alternate list, which stays sorted."""
+    width, height, at, length = image_location(blob)
+    array, slots = _alternate_list(blob)
+    if array is None or any(char == SPEAKER_CODE for _, _, char in slots):
+        return None
+    chosen = None
+    for i, (_slot, metrics, char) in enumerate(slots):
+        u0, v0, u1, v1 = struct.unpack_from('<4f', blob, metrics + CM_UV)
+        cell = (round(u0 * width), round(v0 * height), round(u1 * width) + 1, round(v1 * height) + 1)
+        if char == 0 and cell == SPEAKER_CELL:
+            chosen = i
+    codes = [char for _, _, char in slots]
+    if chosen is None or max(codes) >= SPEAKER_CODE:
+        return None
+    glyph_width, glyph_height, glyph_rgba = glyph
+    x0, y0, x1, y1 = SPEAKER_CELL
+    if (glyph_width, glyph_height) != (x1 - x0, y1 - y0):
+        raise ValueError(f'the loudspeaker is {glyph_width}x{glyph_height}, its cell {x1 - x0}x{y1 - y0}')
+    out = bytearray(blob)
+    stored = swap_red_blue(glyph_rgba)
+    original = blob[at:at + length]
+    linear = bytearray(untile(original, width, height))
+    for row in range(y1 - y0):
+        dst = ((y0 + row) * width + x0) * 4
+        linear[dst:dst + glyph_width * 4] = stored[row * glyph_width * 4:(row + 1) * glyph_width * 4]
+    out[at:at + length] = tile(linear, width, height, original)
+    struct.pack_into('<H', out, slots[chosen][1] + CM_CHAR, SPEAKER_CODE)
+    # the pointers in the array, the chosen one last (each slot stays a pointer: fixups unchanged)
+    pointers = [blob[slot:slot + 8] for slot, _, _ in slots]
+    pointers.append(pointers.pop(chosen))
+    out[array:array + 8 * len(pointers)] = b''.join(pointers)
+    return bytes(out)
+
+
 def chosen_style(config, env):
     """BB_BUTTON_PROMPTS, else bbport.ini button_prompts; playstation when neither or unknown."""
     value = env.get('BB_BUTTON_PROMPTS', '')
@@ -273,23 +338,22 @@ def chosen_style(config, env):
 
 
 def prepare(game, out, config, env, base):
-    """{guest archive: patch file} of the chosen style's fonts (none for the PlayStation buttons),
-    each keeping the patch base ({guest: patch file}) has for the same archive. Kept between
-    launches while the archives, the art and the base patches are the same."""
-    style = chosen_style(config, env)
-    if style == 'playstation':
-        from cache_cleanup import discard_files
-        folder = Path(out) / 'button_prompts'
-        discard_files(folder, [*folder.glob('*.bbpatch'), folder/'stamp.json'])
-        return {}
+    """{guest archive: patch file} of the fonts: the chosen style's buttons (the game's own for
+    the PlayStation ones) and the voice chat's loudspeaker character (with_speaker; env gets
+    BB_VOICE_GLYPH=1 when the fonts have it), each keeping the patch base ({guest: patch file})
+    has for the same archive. Kept between launches while the archives, the art and the base
+    patches are the same."""
     import hashlib
     import json
-    art_path = ART / f'{style}.png'
+    style = chosen_style(config, env)
+    env.pop('BB_VOICE_GLYPH', None)
+    art_path = ART / f'{style}.png' if style != 'playstation' else None
     folder = Path(out) / 'button_prompts'
     from mod_file_paths import resolve
     archives = [resolve(Path(game) / 'archives' / name) for name in ARCHIVES if resolve(Path(game) / 'archives' / name).is_file()]
     stamp = {'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-             'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest(), 'fonts': list(FONTS),
+             'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest() if art_path else '',
+             'speaker': hashlib.sha256(SPEAKER_ART.read_bytes()).hexdigest(), 'fonts': list(FONTS),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}
     stamp_file = folder / 'stamp.json'
@@ -297,30 +361,40 @@ def prepare(game, out, config, env, base):
     try:
         made = json.loads(stamp_file.read_text(encoding='utf-8'))
         if made['stamp'] == stamp and all(Path(p).is_file() for p in made['patches'].values()):
+            if made.get('speaker'):
+                env['BB_VOICE_GLYPH'] = '1'
             return {g: Path(p) for g, p in made['patches'].items()}
     except (OSError, ValueError, KeyError, TypeError):
         pass
     from cache_cleanup import discard_files
     if isinstance(made, dict) and isinstance(made.get('patches'), dict):
         discard_files(folder, made['patches'].values())
-    art = read_png(art_path)
+    art = read_png(art_path) if art_path else None
+    glyph = read_png(SPEAKER_ART)
     folder.mkdir(parents=True, exist_ok=True)
-    patches = {}
+    patches, speakers = {}, 0
     for path in archives:
         archive = Archive(path)
         entries = {}
         for f in archive.files:
             if f['path'].replace('\\', '/').lower() in [name.lower() for name in FONTS]:
-                entries[f['index']] = restyled_font(bytes(archive.extract(f)), art)
+                blob = bytes(archive.extract(f))
+                styled = restyled_font(blob, art) if art else blob
+                spoken = with_speaker(styled, glyph)
+                speakers += spoken is not None
+                if spoken is not None or art:
+                    entries[f['index']] = spoken if spoken is not None else styled
         if not entries:
             continue
         guest = f'/app0/archives/{path.name}'
         target = folder / (path.stem + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, base.get(guest))
         patches[guest] = target
-    stamp_file.write_text(json.dumps({'stamp': stamp, 'patches': {g: str(p) for g, p in patches.items()}}),
-                          encoding='utf-8')
-    say(f'{style} buttons in {sum(1 for _ in patches)} archives')
+    stamp_file.write_text(json.dumps({'stamp': stamp, 'patches': {g: str(p) for g, p in patches.items()},
+                                      'speaker': speakers > 0}), encoding='utf-8')
+    if speakers:
+        env['BB_VOICE_GLYPH'] = '1'
+    say(f'{style} buttons, the loudspeaker in {speakers} fonts, {len(patches)} archives')
     return patches
 
 

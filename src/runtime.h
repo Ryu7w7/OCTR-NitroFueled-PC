@@ -242,6 +242,26 @@ const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_
 void runtime_reserves_bar_start(unsigned char *image, size_t size);
 void runtime_reserves_bar_save_closed(void);  /* the game closed its save (runtime_savedata.c) */
 void runtime_reserves_bar_tick(void);         /* the game's thread, every frame */
+/* Voice chat (gpu/shim/bbport_voice.cpp): the race's karts with their players' names, as of the
+ * last frame (runtime_item_lead.c); 0 outside a race. here: a player of this PC. */
+/* effects: what an item does to that kart, for its voice (runtime_item_lead.c): the bubble shield (muffled),
+ * N. Tropy's clock (lower, slowed), Invisibility (an echo), a TNT on the head (covered, as a hand over the mic)
+ * and squashed (the same, much stronger: nothing understood) */
+enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4, RUNTIME_VOICE_TNT = 8, RUNTIME_VOICE_CRUSHED = 16 };
+struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; int effects; };
+int runtime_voice_karts(struct RuntimeVoiceKart *out, int max);
+/* Where the game shows each racer's nickname over its kart (HUD kart markers, in the game's
+ * 1920x1080 UI units), copied a few times a second during a race (runtime_replay_play.c). */
+struct RuntimeVoiceMarker { char name[24]; float x, y, scale; int shown; };
+void runtime_voice_markers_tick(int racing);
+/* 1 while that player is heard (or this player talks): gpu/shim/bbport_voice.cpp. */
+int runtime_voice_speaking(const char *nick);
+/* The party's players by name, as of the lobby's last frame (runtime_public_itemless.c). */
+int runtime_room_members(char out[][24], int max);
+int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
+/* 1 when the game's fonts have the loudspeaker character (BB_VOICE_GLYPH=1, scripts/button_prompts.py): the
+ * nickname over a talking racer's kart then ends with it. */
+int runtime_voice_glyph(void);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */

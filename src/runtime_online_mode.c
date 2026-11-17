@@ -2452,11 +2452,15 @@ static void ABI private_race_timer_done(void) {
     return_to_lobby();
 }
 
-/* The native guest first asks the host to return to the lobby, then drops
- * the host when its grace timer expires. Cup needs the same end-of-results
- * deadline as the host, without that single-race disconnect handshake. */
+/* The native guest first asks the host to return to the lobby, then leaves
+ * the race session (keeping the room's party) when its grace timer expires.
+ * Cup races 1-3 need the same end-of-results deadline as the host, without
+ * that handshake. The last race ends like a single race: going back to the
+ * lobby still in the race session dropped the whole room, and the party reset
+ * that followed corrupted the heap. */
 static void ABI private_guest_return_timer(unsigned char *self) {
-    if (private_cup_race_active && current_cup()) {
+    const int index = current_cup_index();
+    if (private_cup_race_active && current_cup() && index >= 0 && index < 3) {
         puts("Native private CUP: guest following host countdown; retaining session");
         schedule_guest_return(self, private_race_timer_done, self);
         return;
@@ -3535,6 +3539,15 @@ static void ABI countdown_init(unsigned char *self) {
         float remaining;
         memcpy(&remaining, self + 0x28, 4);
         printf("Native private TEAM: initialized selector timer=%.1f (native UI/replication)\n", remaining);
+    } else if (config && is_private()) {
+        /* Private rooms start 5 seconds after the host starts, not the native 10: duration +0x110 and the
+         * race preparation threshold +0x114 (kept equal, so preparation still runs on the first tick). */
+        float saved[2], shorter[2];
+        memcpy(saved, config + 0x110, sizeof saved);
+        for (int i = 0; i < 2; ++i) shorter[i] = saved[i] > 5.f ? 5.f : saved[i];
+        memcpy(config + 0x110, shorter, sizeof shorter);
+        original_countdown_init(self);
+        memcpy(config + 0x110, saved, sizeof saved);
     } else original_countdown_init(self);
 }
 
@@ -3900,6 +3913,14 @@ static void ranked_member_icons(unsigned char *self) {
         const char *rank = label + (background ? 17 : 15);
         const int icon_mode = rank[0] - '0';
         const int icon_tier = rank[1] == '_' ? atoi(rank + 2) : 0;
+        if (icon_mode == 3) {
+            /* "Mode" 3: a loudspeaker on the row of whoever is talking (voice chat). */
+            unsigned speaker_flags;
+            memcpy(&speaker_flags, icon + 12, sizeof speaker_flags);
+            const int speaker_hidden = !nick || !runtime_voice_speaking(nick);
+            if (!!(speaker_flags & 0x400) != speaker_hidden) hide_placeable(icon, speaker_hidden);
+            continue;
+        }
         if (icon_mode == 2) {
             /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
             unsigned crown_flags;

@@ -28,6 +28,12 @@
 #include "bbport_overlay_d3d11.h"
 #include "d3d11/gfx.h"
 #include "d3d11/glue.h"
+#include <string>
+
+namespace BbOverlay {  // bbport_overlay.h (which brings Vulkan in)
+void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind, const void* png,
+            size_t png_size);
+}
 
 using Microsoft::WRL::ComPtr;
 #endif
@@ -58,6 +64,17 @@ ComPtr<ID3D11RenderTargetView> target;
 HWND window_handle = nullptr;
 UINT width = 0, height = 0, swap_flags = 0, present_flags = 0;
 std::uint64_t presents = 0;
+// How pictures reach the screen (issues #247, #251: single black frames in the menus, at ~150
+// presents a second, outside anything drawn here): 0 tearing allowed and no vblank wait (as
+// before), 1 no tearing and no wait, 2 vsync. BB_D3D11_PRESENT=tearing|flip|vsync, default flip;
+// Ctrl+F12 switches in play, with a notice.
+int present_mode = [] {
+    const char* v = std::getenv("BB_D3D11_PRESENT");
+    if (v && !std::strcmp(v, "tearing")) return 0;
+    if (v && !std::strcmp(v, "vsync")) return 2;
+    return 1;
+}();
+const char* const present_mode_names[3] = {"tearing, no vblank wait", "no tearing, no vblank wait", "vsync"};
 std::uint64_t last_address = 0;
 std::uint32_t last_snapshot = 0; // GfxSnapshot of last_address's flip, 0 none
 const char* const shaders = std::getenv("BB_D3D11_SHADERS"); // Start runs before PatchImage
@@ -269,10 +286,35 @@ void Present(std::uint64_t address, std::uint32_t snapshot) {
     const D3D11_VIEWPORT viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
     context->RSSetViewports(1, &viewport);
     BbOverlay::RenderD3d11(width, height);
+    if (shaders) {  // Shift+F12's glitch trap: the picture as it is presented, overlay included
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> back;
+        if (resource && SUCCEEDED(resource.As(&back))) GfxTrapFinal(back.Get());
+    }
     GfxForgetState();
     lock.unlock();
+    {
+        static bool held = false;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        const bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F12) & 0x8000) &&
+                          (GetAsyncKeyState(VK_CONTROL) & 0x8000);
+        if (down && !held) {
+            present_mode = (present_mode + 1) % 3;
+            std::printf("D3D11: presenting with %s (Ctrl+F12)\n", present_mode_names[present_mode]);
+            std::fflush(stdout);
+            BbOverlay::Notify("Direct3D 11", present_mode_names[present_mode], "Ctrl+F12", 7, nullptr, 0);
+        }
+        held = down;
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::printf("D3D11: presenting with %s (Ctrl+F12 switches)\n", present_mode_names[present_mode]);
+        }
+    }
     const auto present_start = std::chrono::steady_clock::now();
-    const HRESULT result = swap_chain->Present(0, present_flags);
+    const HRESULT result = swap_chain->Present(present_mode == 2 ? 1 : 0, present_mode == 0 ? present_flags : 0);
     GfxNotePresent(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - present_start).count());
     if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) {
         std::fprintf(stderr, "STOP: Direct3D 11: the GPU was lost (0x%08lx, reason 0x%08lx)\n", (unsigned long)result,

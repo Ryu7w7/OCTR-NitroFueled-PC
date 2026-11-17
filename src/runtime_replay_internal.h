@@ -31,6 +31,8 @@ void *rr_ptr(size_t offset);                /* the pointer stored there */
 void *rr_handle_object(void **slot);
 void *rr_kart_of(int i, int *player_id);
 void *rr_component(void *kart, int meta_at);
+/* fx[k] |= the voice effects the spawned power-ups give karts[k] (TNT on its head, bubble shield up) */
+void rr_spawned_voice_effects(void *const *karts, int n, int *fx);
 void *rr_find_component(void *entity, void *meta);
 void *rr_running_boost(void *boosts);
 float rr_boost_length(void *boost);

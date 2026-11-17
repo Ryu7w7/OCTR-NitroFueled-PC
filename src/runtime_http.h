@@ -46,6 +46,10 @@ int32_t runtime_http_wait_request(void *handle, void *events, int32_t max_events
 /* The port's own signed requests to the RyuNET server (runtime_friends.c). */
 int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size);
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size);
+/* The item-box rules id the game plays with since it applied rules while running (runtime_item_lead.c,
+ * GET /ryunet/items/live): logins say it (X-RyuNET-Items) instead of the startup's BB_ITEM_RULES_ID. */
+void runtime_items_id_set(const char *id);
+int runtime_items_id(char *out, size_t size);
 /* A signed request to the RyuNET server with a binary body (size bytes of data, may be 0) and a
  * binary answer of up to max_reply bytes, malloc'd in *reply (free it; NULL when none). The HTTP
  * status, 0 when the server could not be reached. */

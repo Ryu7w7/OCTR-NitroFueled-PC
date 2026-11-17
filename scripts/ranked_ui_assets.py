@@ -12,7 +12,10 @@ TIERS = tuple((mode, tier) for mode in range(2) for tier in range(0, 8))
 # The room host's crown (scripts/assets/host_crown.png), beside the host's name in the room list:
 # built like a rank icon, as "mode" 2 (src/runtime_online_mode.c shows it on the host's row).
 HOST_CROWN = (2, 0)
-LOBBY_ICONS = TIERS + (HOST_CROWN,)
+# A loudspeaker (scripts/assets/voice_speaker.png) at the row's right end while that player talks
+# (voice chat, gpu/shim/bbport_voice.cpp): "mode" 3.
+VOICE_SPEAKER = (3, 0)
+LOBBY_ICONS = TIERS + (HOST_CROWN, VOICE_SPEAKER)
 QUICK_ICON_TEXTURE = ('textures/GuiStandard_diffuse,'
                       'textures@!ui!Octane!Icons!octane_ui_ico_quick`tga,101.igz')
 RANKED_BACKGROUND_MATERIAL = 'octane_ui_online_bg_pattern_ranked_tga__material'
@@ -38,7 +41,7 @@ def _template(name):
 def tier_icon(mode, tier):
     """(PNG path, sprite image name, archive texture path) for one rank."""
     if (mode, tier) not in LOBBY_ICONS:
-        raise ValueError('ranked tier must be mode 0..1 and tier 0..7, or the host crown')
+        raise ValueError('ranked tier must be mode 0..1 and tier 0..7, the host crown or the loudspeaker')
     image = f'octane_ranked_tier_{mode}_{tier}'.ljust(34, '_')
     name = f'{"itemless" if mode else "normal"}_{tier}.png'
     png = ASSETS / name
@@ -46,6 +49,8 @@ def tier_icon(mode, tier):
         png = ART / name
     if (mode, tier) == HOST_CROWN:
         png = ASSETS / 'host_crown.png'
+    elif (mode, tier) == VOICE_SPEAKER:
+        png = ASSETS / 'voice_speaker.png'
     elif not tier:
         png = ASSETS / 'unranked.png'  # Unranked players get the neutral badge.
     return (png,

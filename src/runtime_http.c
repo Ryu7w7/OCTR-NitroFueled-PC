@@ -5,6 +5,7 @@
 #include "runtime_net_overrides.h"
 #include "runtime_net_bridge.h"
 #include "bb_sha256.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -512,6 +513,23 @@ static int ryunet_http_addr(const char *host, const char *port, struct sockaddr_
  * (BB_ONLINE_SERVER, BB_ONLINE_HTTP_PORT): the body goes to body (NUL-terminated, cut to
  * body_size). The HTTP status, or 0 when the server could not be reached. Blocking, with
  * 8-second timeouts: for background threads. */
+static pthread_mutex_t items_id_lock = PTHREAD_MUTEX_INITIALIZER;
+static char items_id[48];
+
+void runtime_items_id_set(const char *id) {
+    pthread_mutex_lock(&items_id_lock);
+    snprintf(items_id, sizeof items_id, "%s", id && strlen(id) < sizeof items_id && !strpbrk(id, "\r\n") ? id : "");
+    pthread_mutex_unlock(&items_id_lock);
+}
+
+int runtime_items_id(char *out, size_t size) {
+    pthread_mutex_lock(&items_id_lock);
+    const int have = items_id[0] && strlen(items_id) < size;
+    if (have) memcpy(out, items_id, strlen(items_id) + 1);
+    pthread_mutex_unlock(&items_id_lock);
+    return have;
+}
+
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
     if (body_size) body[0] = '\0';
     const char *host = getenv("BB_ONLINE_SERVER");
@@ -779,6 +797,8 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
      * them (its client_gate.go): older ports, or a game left with its own odds. */
     if (c->is_plain_http) {
         const char *version = getenv("BB_OCTR_VERSION"), *items = getenv("BB_ITEM_RULES_ID");
+        char live[48];
+        if (runtime_items_id(live, sizeof live)) items = live; /* rules applied while running */
         if (version && *version && strlen(version) < 48 && !strpbrk(version, "\r\n") &&
             hlen < (int)sizeof(header_buf) - 80)
             hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Client: octr/%s\r\n", version);

@@ -446,7 +446,41 @@ static void update_search_clock(void) {
     }
 }
 
+/* The party's players by name (a private room's are its host's party), copied on the game's
+ * thread in the lobby for voice chat (gpu/shim/bbport_voice.cpp: the host tells the server who
+ * may hear the room). */
+static pthread_mutex_t members_lock = PTHREAD_MUTEX_INITIALIZER;
+static char members_copy[8][24];
+static int members_count;
+
+static void members_tick(void) {
+    char now[8][24];
+    int n = 0;
+    /* only a private room's (the host's party): public rooms' players are the server's own */
+    unsigned char *party = party_manager && runtime_online_mode_in_private() ? *party_manager : NULL;
+    void *roster = party ? *(void **)(party + 0x30) : NULL;
+    const int count = roster ? *(int *)((char *)roster + 12) : 0;
+    void **items = roster ? *(void ***)((char *)roster + 0x20) : NULL;
+    for (int i = 0; items && count > 0 && count <= 8 && i < count && n < 8; ++i) {
+        const char *name = items[i] ? *(const char **)((char *)items[i] + 0x10) : NULL;
+        if (name && *name) snprintf(now[n++], sizeof now[0], "%s", name);
+    }
+    pthread_mutex_lock(&members_lock);
+    memcpy(members_copy, now, sizeof now[0] * (size_t)n);
+    members_count = n;
+    pthread_mutex_unlock(&members_lock);
+}
+
+int runtime_room_members(char out[][24], int max) {
+    pthread_mutex_lock(&members_lock);
+    const int n = members_count < max ? members_count : max;
+    memcpy(out, members_copy, sizeof members_copy[0] * (size_t)(n > 0 ? n : 0));
+    pthread_mutex_unlock(&members_lock);
+    return n;
+}
+
 void runtime_public_itemless_update(void) {
+    members_tick();
     update_search_clock();
     pthread_mutex_lock(&mode_lock);
     const int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);

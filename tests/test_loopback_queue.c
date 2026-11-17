@@ -5,6 +5,7 @@
  */
 #include "../src/runtime_online_mode.c"
 void runtime_party_experiment_tick(void) {}
+int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 #include <errno.h>
 #include <sched.h>
 #include <stdatomic.h>

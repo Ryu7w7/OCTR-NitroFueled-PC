@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
+  <img src="docs/images/octr-banner.webp" alt="CTR Nitro-Fueled PC">
 </p>
 
 # OCTR: CTR Nitro-Fueled PC, online

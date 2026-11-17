@@ -70,6 +70,7 @@ void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_update(void) {}
 void runtime_party_experiment_tick(void) {}
+int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
 int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
     *elapsed=search_test_elapsed;*timeout=180;*range=search_test_range;*ranked=search_test_ranked;
@@ -2027,10 +2028,12 @@ static void test_region(size_t shift) {
         void (ABI *guest_done)(void *) = (void *)(image + (0xf39630 - shift));
         const int host_advances = cup_advances, host_returns = lobby_returns;
         guest_done(manager);
-        assert(guest_schedules == cup_index + 1 && !guest_native_returns);
-        guest_deadline();
+        /* The last race ends natively (leaving the race session, keeping the room). */
+        assert(guest_schedules == (cup_index < 3 ? cup_index + 1 : 3));
+        assert(guest_native_returns == (cup_index == 3));
+        if (cup_index < 3) guest_deadline();
         assert(cup_advances == host_advances + (cup_index < 3));
-        assert(lobby_returns == host_returns + (cup_index == 3));
+        assert(lobby_returns == host_returns);
         cup_advances = host_advances;
         lobby_returns = host_returns;
         assert(cup_advances == (cup_index < 3 ? cup_index + 1 : 3));
@@ -2139,7 +2142,7 @@ static void test_region(size_t shift) {
     assert(lobby_returns == 1 && cup_advances == 3);
     void (ABI *guest_single_done)(void *) = (void *)(image + (0xf39630 - shift));
     guest_single_done(manager);
-    assert(guest_native_returns == 1);
+    assert(guest_native_returns == 2); /* plus the cup's last race */
     *race_mode = 1;
     unsigned before = *(unsigned *)cup_handle;
     received(packet);
@@ -2882,7 +2885,9 @@ static void test_region(size_t shift) {
     *(void **)(countdown + 0x18) = NULL;
     *(int *)(native_settings + 0x28) = 1;
     init_countdown(countdown);
-    assert(timer_ui_initial == 10.f); /* Private solo retains its native duration. */
+    assert(timer_ui_initial == 5.f); /* Private rooms start after 5 seconds, not the native 10. */
+    assert(*(float *)(countdown + 0x30) == 5.f && *(float *)(config + 0x110) == 10.f &&
+           *(float *)(config + 0x114) == 10.f);
     *(int *)(native_settings + 0x28) = 2;
     private = 0;
     init_countdown(countdown);

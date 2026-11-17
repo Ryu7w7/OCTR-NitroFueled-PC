@@ -120,6 +120,19 @@ struct Values {
     std::atomic<bool> show_fps{false};
     /// show_ping: the round trip to the players in the online room, under the FPS counter.
     std::atomic<bool> show_ping{false};
+    /// Voice chat in private rooms (bbport_voice.cpp): off by default. Push to talk with voice_key
+    /// (an SDL scancode, V) or an open microphone above voice_threshold; voice_input is the
+    /// microphone by name ("" the system's), guarded by PortsMutex().
+    std::atomic<bool> voice_enabled{false};
+    std::atomic<bool> voice_open_mic{false};
+    std::atomic<int> voice_key{25};
+    std::atomic<float> voice_volume{1.0f};
+    std::atomic<float> voice_mic_gain{1.0f};
+    std::atomic<float> voice_threshold{0.06f};
+    /// In a race, each voice as loud as its kart is near, from its side (off: all alike).
+    std::atomic<bool> voice_proximity{true};
+    std::atomic<bool> voice_swap_sides{false}; ///< left and right the other way round
+    std::array<char, 128> voice_input{};
     /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
     /// friends (the server hides it); no friend notices at all.
     std::atomic<bool> friends_hide_activity{false};
