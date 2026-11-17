@@ -2452,11 +2452,15 @@ static void ABI private_race_timer_done(void) {
     return_to_lobby();
 }
 
-/* The native guest first asks the host to return to the lobby, then drops
- * the host when its grace timer expires. Cup needs the same end-of-results
- * deadline as the host, without that single-race disconnect handshake. */
+/* The native guest first asks the host to return to the lobby, then leaves
+ * the race session (keeping the room's party) when its grace timer expires.
+ * Cup races 1-3 need the same end-of-results deadline as the host, without
+ * that handshake. The last race ends like a single race: going back to the
+ * lobby still in the race session dropped the whole room, and the party reset
+ * that followed corrupted the heap. */
 static void ABI private_guest_return_timer(unsigned char *self) {
-    if (private_cup_race_active && current_cup()) {
+    const int index = current_cup_index();
+    if (private_cup_race_active && current_cup() && index >= 0 && index < 3) {
         puts("Native private CUP: guest following host countdown; retaining session");
         schedule_guest_return(self, private_race_timer_done, self);
         return;

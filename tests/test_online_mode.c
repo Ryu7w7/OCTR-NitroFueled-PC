@@ -2028,10 +2028,12 @@ static void test_region(size_t shift) {
         void (ABI *guest_done)(void *) = (void *)(image + (0xf39630 - shift));
         const int host_advances = cup_advances, host_returns = lobby_returns;
         guest_done(manager);
-        assert(guest_schedules == cup_index + 1 && !guest_native_returns);
-        guest_deadline();
+        /* The last race ends natively (leaving the race session, keeping the room). */
+        assert(guest_schedules == (cup_index < 3 ? cup_index + 1 : 3));
+        assert(guest_native_returns == (cup_index == 3));
+        if (cup_index < 3) guest_deadline();
         assert(cup_advances == host_advances + (cup_index < 3));
-        assert(lobby_returns == host_returns + (cup_index == 3));
+        assert(lobby_returns == host_returns);
         cup_advances = host_advances;
         lobby_returns = host_returns;
         assert(cup_advances == (cup_index < 3 ? cup_index + 1 : 3));
@@ -2140,7 +2142,7 @@ static void test_region(size_t shift) {
     assert(lobby_returns == 1 && cup_advances == 3);
     void (ABI *guest_single_done)(void *) = (void *)(image + (0xf39630 - shift));
     guest_single_done(manager);
-    assert(guest_native_returns == 1);
+    assert(guest_native_returns == 2); /* plus the cup's last race */
     *race_mode = 1;
     unsigned before = *(unsigned *)cup_handle;
     received(packet);
