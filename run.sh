@@ -174,6 +174,20 @@ done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --setting
 # ...and the voice chat's loudspeaker character in them: the nickname over a talking racer shows it.
 unset BB_VOICE_GLYPH
 if grep -q '"speaker": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_VOICE_GLYPH=1; fi
+# Then, as run.py (scripts/startup_extras.py): the seasonal title screen, the nickname bottom left
+# of the menus online, the CTR TV logo and Pack Tacho's files (its executable patches need them:
+# without them a race crashed while loading), each keeping the patches before it.
+extras_patches=() extras_fail=
+while IFS= read -r line; do
+    case $line in
+        patch=*) extras_patches+=(--base "${line#patch=}") ;;
+        env.*=*) line=${line#env.}; export "${line%%=*}=${line#*=}" ;;
+        fail=*) extras_fail=${line#fail=} ;;
+        ?*) echo "$line" ;;
+    esac
+done < <(startup_python scripts/startup_extras.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
+if [[ -n $extras_fail ]]; then echo "$extras_fail" >&2; exit 3; fi
+if (( ${#extras_patches[@]} )); then base_patches=("${extras_patches[@]}"); fi
 # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
@@ -223,7 +237,7 @@ if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01
         echo "TT reference preparation failed; AI retains native route guidance." >&2
     fi
 fi
-unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
+unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE BB_NSANE_ARCHIVE_PATCHES
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
     if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
         speed_bases=()
@@ -256,6 +270,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             case $key in
                 archive_patches) export BB_ARCHIVE_PATCHES=$value ;;
                 private_archive_patches) export BB_PRIVATE_ARCHIVE_PATCHES=$value ;;
+                nsane_archive_patches) if [[ -n $value ]]; then export BB_NSANE_ARCHIVE_PATCHES=$value; fi ;;
                 'ITEMLESS: private overlays prepared for '* ) echo "$key" ;;
             esac
         done <<< "$speed_result"

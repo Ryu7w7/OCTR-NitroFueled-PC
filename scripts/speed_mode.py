@@ -215,6 +215,8 @@ def main():
     print('ITEMLESS: HUD overlays prepared; native Time Trial track rules cover', count, 'tracks')
     print('archive_patches=' + '|'.join(map(str, normal)))
     print('private_archive_patches=' + '|'.join(map(str, speed)))
+    # private N.Sane races' archive views (the extra crates), as run.py's BB_NSANE_ARCHIVE_PATCHES
+    print('nsane_archive_patches=' + '|'.join(map(str, nsane_view(args.out))))
 
 
 if __name__ == '__main__':
