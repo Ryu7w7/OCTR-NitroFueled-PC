@@ -1845,6 +1845,17 @@ void rr_spawned_voice_effects(void *const *karts, int n, int *fx) {
     void *component;
     for (int i = next_spawned(0, &component); i >= 0; i = next_spawned(i + 1, &component)) {
         const int type = RR_AT(component, 0x34, int32_t);
+        if (type == 5) {
+            /* N. Tropy's clock (ePT_NTropy): while its CSpawnedNTropy (meta global 0x2ad74b8) +0x80 _nTropyState is
+             * eSNTS_Active (1), every kart but its owner's is slowed */
+            void *entity = entity_at(i);
+            void *clock = entity ? rr_component(entity, 0x2ad74b8) : 0;
+            void *owner = rr_handle_object(&RR_AT(component, 0x28, void *));
+            if (!clock || RR_AT(clock, 0x80, int32_t) != 1) continue;
+            for (int k = 0; k < n; k++)
+                if (karts[k] != owner) fx[k] |= RUNTIME_VOICE_CLOCK;
+            continue;
+        }
         void *kart = type == 8 ? rr_handle_object(&RR_AT(component, 0x28, void *))
                    : type == 2 && RR_AT(component, 0xb0, int32_t) == 2 ? rr_handle_object(&RR_AT(component, 0xa8, void *))
                    : 0;

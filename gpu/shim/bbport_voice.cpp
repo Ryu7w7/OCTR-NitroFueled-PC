@@ -56,7 +56,7 @@ int net_bridge_active(void);
 int runtime_public_match_active(void);                    // src/runtime_public_itemless.c
 int runtime_room_members(char out[][24], int max);        // src/runtime_public_itemless.c
 struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; int effects; }; // src/runtime.h
-enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4, RUNTIME_VOICE_TNT = 8 };
+enum { RUNTIME_VOICE_BUBBLE = 1, RUNTIME_VOICE_CLOCK = 2, RUNTIME_VOICE_INVISIBLE = 4, RUNTIME_VOICE_TNT = 8, RUNTIME_VOICE_CRUSHED = 16 };
 int runtime_voice_karts(struct RuntimeVoiceKart* out, int max); // src/runtime_item_lead.c
 }
 
@@ -85,10 +85,11 @@ double NowMs() {
 class VoiceFx {
 public:
     void Process(float* x, int n, int effects) {
-        const float want[4] = {effects & RUNTIME_VOICE_BUBBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_CLOCK ? 1.0f : 0.0f,
-                               effects & RUNTIME_VOICE_INVISIBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_TNT ? 1.0f : 0.0f};
-        if (!effects && mix_[0] + mix_[1] + mix_[2] + mix_[3] < 1e-4f) {
-            mix_[0] = mix_[1] = mix_[2] = mix_[3] = 0.0f;
+        const float want[5] = {effects & RUNTIME_VOICE_BUBBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_CLOCK ? 1.0f : 0.0f,
+                               effects & RUNTIME_VOICE_INVISIBLE ? 1.0f : 0.0f, effects & RUNTIME_VOICE_TNT ? 1.0f : 0.0f,
+                               effects & RUNTIME_VOICE_CRUSHED ? 1.0f : 0.0f};
+        if (!effects && mix_[0] + mix_[1] + mix_[2] + mix_[3] + mix_[4] < 1e-4f) {
+            mix_[0] = mix_[1] = mix_[2] = mix_[3] = mix_[4] = 0.0f;
             return;
         }
         if (pitch_.empty()) {
@@ -97,7 +98,7 @@ public:
             allpass_.assign(kAllpass, 0.0f);
         }
         for (int i = 0; i < n; ++i) {
-            for (int k = 0; k < 4; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
+            for (int k = 0; k < 5; ++k) mix_[k] += (want[k] - mix_[k]) * 0.0015f; // ~15 ms
             float y = x[i];
             if (mix_[1] > 1e-4f) y += (Pitch(y) - y) * mix_[1];
             if (mix_[0] > 1e-4f) {
@@ -106,6 +107,7 @@ public:
                 y += (lp2_ * 1.6f - y) * mix_[0];
             }
             if (mix_[3] > 1e-4f) y += (Covered(y) - y) * mix_[3];
+            if (mix_[4] > 1e-4f) y += (Squashed(y) - y) * mix_[4];
             if (mix_[2] > 1e-4f) y = y * (1.0f - 0.25f * mix_[2]) + Echo(y) * 0.9f * mix_[2];
             x[i] = y;
         }
@@ -120,6 +122,19 @@ private:
     // the covered microphone: a resonance at about 450 Hz (a state-variable band-pass) over a
     // low-pass at about 1.1 kHz, quieter
     static constexpr float kBoxF = 0.0589f, kBoxDamp = 0.7f, kCoverLowPass = 0.134f;
+    // squashed: the covered sound much stronger, nothing understood: a narrow resonance at about
+    // 250 Hz over two low-passes at about 300 Hz, wobbling 7 times a second
+    static constexpr float kSquashF = 0.0327f, kSquashDamp = 0.35f, kSquashLowPass = 0.039f;
+    float Squashed(float in) {
+        squash_low_ += kSquashF * squash_band_;
+        const float high = in - squash_low_ - kSquashDamp * squash_band_;
+        squash_band_ += kSquashF * high;
+        squash_lp1_ += kSquashLowPass * (in - squash_lp1_);
+        squash_lp2_ += kSquashLowPass * (squash_lp1_ - squash_lp2_);
+        wobble_ += 2.0f * 3.14159265f * 7.0f / float(kRate);
+        if (wobble_ > 6.2831853f) wobble_ -= 6.2831853f;
+        return (squash_lp2_ * 1.3f + squash_band_ * 0.45f) * (0.6f + 0.4f * std::sin(wobble_));
+    }
     float Covered(float in) {
         box_low_ += kBoxF * box_band_;
         const float high = in - box_low_ - kBoxDamp * box_band_;
@@ -166,7 +181,8 @@ private:
         return out;
     }
 
-    float mix_[4] = {};
+    float mix_[5] = {};
+    float squash_low_ = 0, squash_band_ = 0, squash_lp1_ = 0, squash_lp2_ = 0, wobble_ = 0;
     float lp1_ = 0, lp2_ = 0;
     float box_low_ = 0, box_band_ = 0, cover_lp_ = 0;
     std::vector<float> pitch_;
@@ -201,7 +217,7 @@ Listener g_listener;
 RuntimeVoiceKart g_karts[8];
 int g_kart_count = 0;
 // In game units: full voice this near, silent this far (a track is several thousand across).
-constexpr float kNear = 1500.0f, kFar = 9000.0f;
+constexpr float kNear = 2500.0f, kFar = 14000.0f;
 
 void UpdateListener() {
     g_kart_count = runtime_voice_karts(g_karts, 8);

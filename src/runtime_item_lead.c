@@ -576,6 +576,180 @@ static void net_config_tick(void) {
     applied_hz = hz, applied_bandwidth = bandwidth;
 }
 
+/* ---- item-box rules while the game runs ----
+ * At start run.py writes the server's rules into systemData.igz (scripts/item_rules.py). A preset chosen in the
+ * admin panel afterwards reaches a running game too: every 20 s online it asks GET /ryunet/items/live?have=<the
+ * rules id it plays with>; the server answers "same", or every table in full (the preset over the game's own
+ * odds), and the values go into the loaded tables between races (a race keeps the odds it started with). The
+ * same walk as item_rules.py, in memory: systemData (0x9b9ec0, global 0x2ad9c38) +0xf8 CPowerUpData; +0x18 the
+ * online tables by race mode (an igHashTable: +0x18 values, +0x20 their byte size, +0x28 keys, +0x30 count;
+ * EOctaneRaceModes -> a list, +0xc count, +0x20 items, of weight tables EPowerUpType -> float), +0x20 the
+ * cooldowns, +0x88 the item names. The online draw (0xe38030) reads the table at the network config +0x138,
+ * written too when it is another one. Logins then say the new rules' id (X-RyuNET-Items). */
+#define LIVE_EMPTY 0xFFFFFFFFu
+static struct {
+    pthread_mutex_t lock;
+    char *pending;              /* the server's answer, applied by the game's thread */
+    char id[48];                /* the rules applied while running ("" the startup's) */
+    int asked;
+} LIVE = {PTHREAD_MUTEX_INITIALIZER, 0, "", 0};
+
+static void *ask_items(void *unused) {
+    (void)unused;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(20000);
+#else
+        sleep(20);
+#endif
+        char have[48] = "";
+        pthread_mutex_lock(&LIVE.lock);
+        snprintf(have, sizeof have, "%s", LIVE.id);
+        pthread_mutex_unlock(&LIVE.lock);
+        if (!have[0]) {
+            const char *start = getenv("BB_ITEM_RULES_ID");
+            snprintf(have, sizeof have, "%s", start && *start ? start : "-");
+        }
+        for (char *c = have; *c; c++)
+            if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || *c == '-')) *c = '-';
+        char target[96], *body = malloc(32768);
+        if (!body) continue;
+        snprintf(target, sizeof target, "/ryunet/items/live?have=%s", have);
+        const int status = runtime_ryunet_request("GET", target, body, 32768);
+        if (status == 200 && !strncmp(body, "id ", 3)) {
+            pthread_mutex_lock(&LIVE.lock);
+            free(LIVE.pending);
+            LIVE.pending = body, body = 0;
+            pthread_mutex_unlock(&LIVE.lock);
+        }
+        free(body);
+    }
+    return NULL;
+}
+
+/* The value slot of key in an igHashTable (step: the values' size), 0 none */
+static char *live_slot(char *table, uint32_t key, int step) {
+    char *values = table ? RR_AT(table, 0x18, char *) : 0;
+    uint32_t *keys = table ? RR_AT(table, 0x28, uint32_t *) : 0;
+    const uint32_t n = table ? RR_AT(table, 0x20, uint32_t) / 4 : 0;
+    for (uint32_t i = 0; values && keys && n <= 4096 && i < n; i++)
+        if (keys[i] == key) return values + (size_t)step * i;
+    return 0;
+}
+
+/* The EPowerUpType of an item named as the server names it (the game's names table), -1 none */
+static int live_item_key(char *data, const char *name) {
+    char *table = RR_AT(data, 0x88, char *);
+    char *values = table ? RR_AT(table, 0x18, char *) : 0;
+    uint32_t *keys = table ? RR_AT(table, 0x28, uint32_t *) : 0;
+    const uint32_t n = table ? RR_AT(table, 0x20, uint32_t) / 4 : 0;
+    for (uint32_t i = 0; values && keys && n <= 4096 && i < n; i++) {
+        const char *s = keys[i] != LIVE_EMPTY ? *(const char **)(values + 8 * (size_t)i) : 0;
+        if ((uintptr_t)s > 0x10000 && !strcmp(s, name)) return (int)keys[i];   /* a loaded name, not an index */
+    }
+    return -1;
+}
+
+/* The weight table at index of a race mode's list in an online table, 0 none */
+static char *live_weights(char *online, int mode, int index) {
+    char **slot = (char **)live_slot(online, (uint32_t)mode, 8);
+    char *list = slot ? *slot : 0;
+    if (!list || index < 0 || index >= RR_AT(list, 0xc, int32_t)) return 0;
+    char **items = RR_AT(list, 0x20, char **);
+    return items ? items[index] : 0;
+}
+
+/* A weight into a table: in its slot, or (an item the table lacks, weight above 0) in an empty one, as
+ * item_rules.py does (experimental). 1 written, 0 not. */
+static int live_put(char *table, int key, float weight, int *added) {
+    float *slot = (float *)live_slot(table, (uint32_t)key, 4);
+    if (slot) {
+        *slot = weight;
+        return 1;
+    }
+    if (weight <= 0.0f) return 1;
+    float *free_value = (float *)live_slot(table, LIVE_EMPTY, 4);
+    uint32_t *keys = RR_AT(table, 0x28, uint32_t *);
+    char *values = RR_AT(table, 0x18, char *);
+    if (!free_value || !keys || !values) return 0;
+    keys[((char *)free_value - values) / 4] = (uint32_t)key;
+    *free_value = weight;
+    RR_AT(table, 0x30, uint32_t) += 1;
+    ++*added;
+    return 1;
+}
+
+static void live_apply(char *text) {
+    char *system = rr_ptr(RR_D_SYSTEM_DATA);
+    char *data = system ? RR_AT(system, 0xf8, char *) : 0;
+    char *network = rr_ptr(D_NETWORK);
+    char *config = network ? RR_AT(network, 0x40, char *) : 0;
+    char *online[2] = {data ? RR_AT(data, 0x18, char *) : 0, config ? RR_AT(config, 0x138, char *) : 0};
+    if (online[1] == online[0]) online[1] = 0;
+    if (!data || !online[0] || !live_weights(online[0], 1, 7)) {
+        puts("Live item rules: the game's item tables are not there; asked again in 20 s");
+        return;
+    }
+    char id[48] = "";
+    int written = 0, added = 0, failed = 0;
+    for (char *line = text, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (!strncmp(line, "id ", 3)) {
+            snprintf(id, sizeof id, "%s", line + 3);
+            continue;
+        }
+        char section[16];
+        int position = 0, consumed = 0;
+        float value = 0.0f;
+        if (sscanf(line, "%15[a-z]\t%d\t%f\t%n", section, &position, &value, &consumed) != 3 || !consumed) continue;
+        const char *name = line + consumed;
+        const int key = live_item_key(data, name);
+        if (key < 0 || !(value >= 0.0f && value <= 1e6f)) {
+            failed++;
+            continue;
+        }
+        if (!strcmp(section, "cooldown")) {
+            float *slot = (float *)live_slot(RR_AT(data, 0x20, char *), (uint32_t)key, 4);
+            if (slot) *slot = value, written++;
+            else failed++;
+            continue;
+        }
+        const int mode = !strcmp(section, "race") ? 1 : !strcmp(section, "battle") ? 9 : !strcmp(section, "bacon") ? 12 : -1;
+        const int index = mode == 1 ? position - 1 : 0;
+        for (int t = 0; t < 2 && mode >= 0; t++) {
+            char *table = online[t] ? live_weights(online[t], mode, index) : 0;
+            if (!table) continue;
+            if (live_put(table, key, value, &added)) written += t == 0;
+            else failed++;
+        }
+    }
+    pthread_mutex_lock(&LIVE.lock);
+    snprintf(LIVE.id, sizeof LIVE.id, "%s", id);
+    pthread_mutex_unlock(&LIVE.lock);
+    runtime_items_id_set(id);
+    printf("Live item rules: %s applied while running (%d values%s, %d added, %d not taken)\n", id, written,
+           online[1] ? ", the network config's tables too" : "", added, failed);
+    fflush(stdout);
+}
+
+static void live_items_tick(int racing) {
+    if (!LIVE.asked && runtime_net_is_online() && getenv("BB_ONLINE_SERVER")) {
+        const char *off = getenv("BB_LIVE_ITEM_RULES");
+        LIVE.asked = 1;
+        pthread_t thread;
+        if (!(off && *off == '0') && pthread_create(&thread, NULL, ask_items, NULL) == 0) pthread_detach(thread);
+    }
+    if (racing) return;                     /* a race keeps the odds it started with */
+    pthread_mutex_lock(&LIVE.lock);
+    char *text = LIVE.pending;
+    LIVE.pending = 0;
+    pthread_mutex_unlock(&LIVE.lock);
+    if (!text) return;
+    live_apply(text);
+    free(text);
+}
+
 /* ---- voice chat's karts (gpu/shim/bbport_voice.cpp): where each player of the race is, copied
  * every frame on the game's thread, so the voice thread never reads the game's own objects ---- */
 
@@ -605,6 +779,12 @@ static int voice_effects(void *kart) {
     if (tropy && RR_AT(tropy, 0x64, float) > 0.5f) fx |= RUNTIME_VOICE_CLOCK;
     void *effects = rr_component(kart, 0x2ac5438);
     if (effects && RR_AT(effects, 0x48, int32_t) != -1) fx |= RUNTIME_VOICE_INVISIBLE;
+    /* CKartDamageComponent +0x40 _damageStateInProgress (EKartDamageType): eKDT_Ntropied 7 (the clock's hit),
+     * eKDT_Crushed 8 / eKDT_CrushedAndStopped 9 (squashed: run over by a boosting kart and the like) */
+    void *damage = rr_component(kart, RR_D_DAMAGE_META);
+    const int hurt_state = damage ? RR_AT(damage, 0x40, int32_t) : -1;
+    if (hurt_state == 7) fx |= RUNTIME_VOICE_CLOCK;
+    if (hurt_state == 8 || hurt_state == 9) fx |= RUNTIME_VOICE_CRUSHED;
     return fx;
 }
 
@@ -637,7 +817,8 @@ static void voice_karts_tick(int racing) {
                 printf("Voice effects: %s%s%s%s%s%s\n", now[i].name, now[i].effects & RUNTIME_VOICE_BUBBLE ? " bubble" : "",
                        now[i].effects & RUNTIME_VOICE_CLOCK ? " clock" : "",
                        now[i].effects & RUNTIME_VOICE_INVISIBLE ? " invisible" : "",
-                       now[i].effects & RUNTIME_VOICE_TNT ? " tnt" : "", now[i].effects ? "" : " none");
+                       now[i].effects & RUNTIME_VOICE_TNT ? " tnt" : "",
+                       now[i].effects & RUNTIME_VOICE_CRUSHED ? " squashed" : now[i].effects ? "" : " none");
             snprintf(told[i].name, sizeof told[i].name, "%s", now[i].name);
             told[i].fx = now[i].effects;
         }
@@ -662,6 +843,7 @@ int runtime_voice_karts(struct RuntimeVoiceKart *out, int max) {
 
 void runtime_item_lead_tick(int racing) {
     net_config_tick();
+    live_items_tick(racing);
     timing_tick(racing);
     voice_karts_tick(racing);
     runtime_voice_markers_tick(racing);
