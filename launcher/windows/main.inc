@@ -114,7 +114,10 @@ DWORD FrameWait(HWND hwnd) {
     if (NowSeconds() < g_active_until) return 0;
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput || ImGui::IsAnyItemActive()) return 0;
-    return GetForegroundWindow() == hwnd ? 50 : 250;
+    // In front: every refresh (vsync paces it). With NVIDIA G-SYNC for windowed mode the monitor
+    // runs at the front window's frame rate, so the 20 frames a second this used to draw slowed the
+    // whole desktop of that monitor to 20 Hz (players' report, 2026-11-17). Behind: a few a second.
+    return GetForegroundWindow() == hwnd ? 0 : 250;
 }
 
 void RenderFrame() {
