@@ -78,6 +78,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.voice_mic_gain = Clamp(f, 0.0f, 4.0f);
     } else if (key == "voice_threshold") {
         v.voice_threshold = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "voice_proximity") {
+        v.voice_proximity = i != 0;
+    } else if (key == "voice_swap_sides") {
+        v.voice_swap_sides = i != 0;
     } else if (key == "voice_input") {
         std::lock_guard lk{PortsMutex()};
         std::snprintf(v.voice_input.data(), v.voice_input.size(), "%s", value.c_str());
@@ -454,6 +458,8 @@ void Save() {
     put("voice_volume", fixed(v.voice_volume, 2));
     put("voice_mic_gain", fixed(v.voice_mic_gain, 2));
     put("voice_threshold", fixed(v.voice_threshold, 3));
+    put("voice_proximity", flag(v.voice_proximity));
+    put("voice_swap_sides", flag(v.voice_swap_sides));
     {
         std::lock_guard lk{PortsMutex()};
         put("voice_input", std::string(v.voice_input.data()));

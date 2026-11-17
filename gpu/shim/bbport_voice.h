@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Voice chat in a private room (RyuNET server/voice.go): the microphone in Opus to the server,
-// which forwards it to the room's other players; their voices mixed into the speakers.
+// Voice chat in a room, private, public or Ranked (RyuNET server/voice.go): the microphone in Opus
+// to the server, which forwards it to the room's other players; their voices mixed into the
+// speakers, in a race as loud as their karts are near and from their side (voice_proximity).
 // Push to talk (a key, V by default) or open microphone (above a level). Off by default:
 // the menu's Voice tab (bbport_overlay.cpp) turns it on and picks the microphone.
 

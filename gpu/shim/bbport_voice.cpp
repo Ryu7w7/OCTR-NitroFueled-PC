@@ -52,6 +52,9 @@ int runtime_ryunet_request(const char* method, const char* target, char* body, s
 int net_server_ipv4(uint32_t* ip);                        // src/runtime_net_bridge.c
 uint16_t net_server_nat_port(void);
 int net_bridge_active(void);
+int runtime_public_match_active(void);                    // src/runtime_public_itemless.c
+struct RuntimeVoiceKart { char name[24]; float pos[3]; int here; }; // src/runtime.h
+int runtime_voice_karts(struct RuntimeVoiceKart* out, int max); // src/runtime_item_lead.c
 }
 
 namespace BbOverlay {
@@ -74,11 +77,93 @@ double NowMs() {
 
 struct Speaker {
     OpusDecoder* decoder = nullptr;
-    SDL_AudioStream* stream = nullptr;
+    SDL_AudioStream* stream = nullptr; // stereo: the voice from its kart's side
     double last = 0;
     uint16_t seq = 0;
     bool any = false;
 };
+
+// ---- proximity: this player's kart (the listener), the way it goes, and the others' sides ----
+struct Listener {
+    bool valid = false;
+    float pos[3] = {};
+    float forward[3] = {1, 0, 0};
+    float last[3] = {};
+    bool has_last = false;
+    float travel[3] = {}; // movement along each axis: the least is the vertical one
+    int up = 2;           // Alchemy is Z-up; confirmed by the travel once the kart has moved
+};
+Listener g_listener;
+RuntimeVoiceKart g_karts[8];
+int g_kart_count = 0;
+// In game units: full voice this near, silent this far (a track is several thousand across).
+constexpr float kNear = 1500.0f, kFar = 9000.0f;
+
+void UpdateListener() {
+    g_kart_count = runtime_voice_karts(g_karts, 8);
+    const RuntimeVoiceKart* me = nullptr;
+    for (int i = 0; i < g_kart_count; ++i)
+        if (g_karts[i].here) {
+            me = &g_karts[i];
+            break;
+        }
+    Listener& l = g_listener;
+    if (!me) {
+        l = Listener{};
+        return;
+    }
+    l.valid = true;
+    std::memcpy(l.pos, me->pos, sizeof l.pos);
+    if (!l.has_last) {
+        std::memcpy(l.last, l.pos, sizeof l.pos);
+        l.has_last = true;
+        return;
+    }
+    float d[3];
+    for (int k = 0; k < 3; ++k) d[k] = l.pos[k] - l.last[k];
+    for (int k = 0; k < 3; ++k) l.travel[k] += std::fabs(d[k]);
+    if (l.travel[0] + l.travel[1] + l.travel[2] > 3000.0f)
+        l.up = int(std::min_element(l.travel, l.travel + 3) - l.travel);
+    d[l.up] = 0.0f;
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (len > 2000.0f) { // put back on the track: no direction from that
+        std::memcpy(l.last, l.pos, sizeof l.pos);
+    } else if (len > 40.0f) { // it moved: the way it goes is the way the camera looks
+        for (int k = 0; k < 3; ++k) l.forward[k] = d[k] / len;
+        std::memcpy(l.last, l.pos, sizeof l.pos);
+    }
+}
+
+// The left and right gains of a speaker: its kart's distance and side from this player's kart.
+void Gains(const std::string& nick, float volume, bool proximity, float& left, float& right) {
+    left = right = volume * 0.70710678f; // centred, the same power as one side
+    const Listener& l = g_listener;
+    if (!proximity || !l.valid) return;
+    const RuntimeVoiceKart* them = nullptr;
+    for (int i = 0; i < g_kart_count; ++i)
+        if (!g_karts[i].here && !SDL_strcasecmp(g_karts[i].name, nick.c_str())) them = &g_karts[i];
+    if (!them) return; // not racing (a spectator, or between races): heard as in the lobby
+    float to[3];
+    for (int k = 0; k < 3; ++k) to[k] = them->pos[k] - l.pos[k];
+    const float distance = std::sqrt(to[0] * to[0] + to[1] * to[1] + to[2] * to[2]);
+    const float loud = std::clamp((kFar - distance) / (kFar - kNear), 0.0f, 1.0f);
+    to[l.up] = 0.0f;
+    const float flat = std::sqrt(to[0] * to[0] + to[1] * to[1] + to[2] * to[2]);
+    float side = 0.0f;
+    if (flat > 1.0f) {
+        // right = forward x up (the up axis as a unit vector)
+        float upv[3] = {0, 0, 0};
+        upv[l.up] = 1.0f;
+        const float* f = l.forward;
+        const float r[3] = {f[1] * upv[2] - f[2] * upv[1], f[2] * upv[0] - f[0] * upv[2], f[0] * upv[1] - f[1] * upv[0]};
+        side = std::clamp((to[0] * r[0] + to[1] * r[1] + to[2] * r[2]) / flat, -1.0f, 1.0f);
+        if (BbSettings::Get().voice_swap_sides.load(std::memory_order_relaxed)) side = -side;
+    }
+    // constant power across the field; never quite silent on the far side
+    const float angle = (side * 0.8f + 1.0f) * 0.25f * 3.14159265f;
+    left = volume * loud * std::cos(angle);
+    right = volume * loud * std::sin(angle);
+}
 
 std::mutex g_mutex;                       // g_speakers, g_state
 std::map<std::string, Speaker> g_speakers; // by nickname, while heard lately
@@ -140,8 +225,8 @@ void DropSpeakers() {
     g_speakers.clear();
 }
 
-// GET /ryunet/voice/join: the token (16 bytes) or false.
-bool Join(const std::string& me, const std::string& room, uint8_t token[16]) {
+// GET /ryunet/voice/join: the token (16 bytes) and the server's name for the room, or false.
+bool Join(const std::string& me, const std::string& room, uint8_t token[16], std::string& key) {
     char target[160], body[256] = {};
     std::snprintf(target, sizeof target, "/ryunet/voice/join?name=%s&room=%s", me.c_str(), room.c_str());
     const int status = runtime_ryunet_request("GET", target, body, sizeof body);
@@ -157,8 +242,15 @@ bool Join(const std::string& me, const std::string& room, uint8_t token[16]) {
         if (std::sscanf(at + 2 * i, "%2x", &v) != 1) return false;
         token[i] = uint8_t(v);
     }
-    std::printf("Voice: in %s's room\n", room.c_str());
-    std::fflush(stdout);
+    std::string was = key;
+    key.clear();
+    if (const char* r = std::strstr(body, "\"room\":\"")) {
+        for (r += 8; *r && *r != '"' && key.size() < 40; ++r) key.push_back(*r);
+    }
+    if (key != was) {
+        std::printf("Voice: in room %s\n", key.c_str());
+        std::fflush(stdout);
+    }
     return true;
 }
 
@@ -198,7 +290,7 @@ void Run() {
     SDL_AudioStream* self = nullptr; // the test: this player's own voice back
     Socket sock = kNoSocket;
     sockaddr_in server{};
-    std::string room, me;
+    std::string room, me, room_key;
     uint8_t token[16] = {};
     bool joined = false;
     double next_join = 0, next_keepalive = 0, open_until = 0, last_level = 0;
@@ -211,23 +303,34 @@ void Run() {
         // the room: a private one, named after its host
         const char* name = runtime_np_get_online_name();
         me = name ? name : "";
+        // the room: a private one by its host; a public or Ranked one by the server ("match")
         std::string want;
-        if (enabled && ValidNick(me) && runtime_online_mode_room_on()) {
-            char host[24] = {};
-            runtime_room_mode_host_name(host);
-            if (ValidNick(host)) want = host;
+        if (enabled && ValidNick(me)) {
+            if (runtime_online_mode_room_on()) {
+                char host[24] = {};
+                runtime_room_mode_host_name(host);
+                if (ValidNick(host)) want = host;
+            } else if (runtime_public_match_active()) {
+                want = "match";
+            }
         }
         if (want != room) {
             if (joined) Leave(me);
             joined = false;
             room = want;
+            room_key.clear();
             next_join = 0;
             DropSpeakers();
         }
-        if (!room.empty() && !joined && now >= next_join) {
-            joined = Join(me, room, token);
-            next_join = now + 10000;
-            next_keepalive = 0;
+        // a public room may change (its host left): asked again now and then; the same room keeps
+        // the token, another one gives a new one and other voices
+        if (!room.empty() && (!joined || room == "match") && now >= next_join) {
+            const std::string was = room_key;
+            const bool ok = Join(me, room, token, room_key);
+            if (ok && joined && room_key != was) DropSpeakers();
+            if (ok && !joined) next_keepalive = 0;
+            joined = ok || (joined && room == "match");
+            next_join = now + (joined ? 15000 : 10000);
         }
         if (!enabled && !test) {
             if (mic) SDL_DestroyAudioStream(mic), mic = nullptr;
@@ -337,8 +440,10 @@ void Run() {
             sendto(sock, reinterpret_cast<const char*>(packet), sizeof packet, 0,
                    reinterpret_cast<const sockaddr*>(&server), sizeof server);
         }
-        // the others
+        // the others, from where their karts are
         const float volume = s.voice_volume.load(std::memory_order_relaxed);
+        const bool proximity = s.voice_proximity.load(std::memory_order_relaxed);
+        UpdateListener();
         for (;;) {
             unsigned char in[1024];
             sockaddr_in from{};
@@ -363,25 +468,34 @@ void Run() {
             if (!sp.decoder) {
                 int error = 0;
                 sp.decoder = opus_decoder_create(kRate, 1, &error);
-                const SDL_AudioSpec spec{SDL_AUDIO_S16, 1, kRate};
+                const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, kRate};
                 sp.stream = SDL_CreateAudioStream(&spec, nullptr);
                 if (sp.stream && speakers) SDL_BindAudioStream(speakers, sp.stream);
             }
             if (!sp.decoder || !sp.stream) continue;
-            SDL_SetAudioStreamGain(sp.stream, volume);
+            float left = 1.0f, right = 1.0f;
+            Gains(nick, volume, proximity, left, right);
+            const auto put = [&](const int16_t* mono, int samples) {
+                static int16_t stereo[kFrame * 6 * 2];
+                for (int i = 0; i < samples; ++i) {
+                    stereo[2 * i] = int16_t(std::clamp(mono[i] * left, -32768.0f, 32767.0f));
+                    stereo[2 * i + 1] = int16_t(std::clamp(mono[i] * right, -32768.0f, 32767.0f));
+                }
+                SDL_PutAudioStreamData(sp.stream, stereo, samples * 4);
+            };
             int16_t out[kFrame * 6];
             // a few lost frames: Opus fills them in
             const int gap = sp.any ? int(uint16_t(pseq - sp.seq)) - 1 : 0;
             for (int i = 0; i > -1 && i < std::min(gap, 3); ++i) {
                 const int k = opus_decode(sp.decoder, nullptr, 0, out, kFrame, 0);
-                if (k > 0) SDL_PutAudioStreamData(sp.stream, out, k * 2);
+                if (k > 0) put(out, k);
             }
             sp.seq = pseq, sp.any = true;
             const int k = opus_decode(sp.decoder, payload, payload_len, out, kFrame * 6, 0);
             if (k > 0) {
                 // never more than a quarter second behind
-                if (SDL_GetAudioStreamQueued(sp.stream) > kRate * 2 / 4) SDL_ClearAudioStream(sp.stream);
-                SDL_PutAudioStreamData(sp.stream, out, k * 2);
+                if (SDL_GetAudioStreamQueued(sp.stream) > kRate * 4 / 4) SDL_ClearAudioStream(sp.stream);
+                put(out, k);
             }
             sp.last = now;
         }

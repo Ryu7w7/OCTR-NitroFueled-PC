@@ -129,6 +129,9 @@ struct Values {
     std::atomic<float> voice_volume{1.0f};
     std::atomic<float> voice_mic_gain{1.0f};
     std::atomic<float> voice_threshold{0.06f};
+    /// In a race, each voice as loud as its kart is near, from its side (off: all alike).
+    std::atomic<bool> voice_proximity{true};
+    std::atomic<bool> voice_swap_sides{false}; ///< left and right the other way round
     std::array<char, 128> voice_input{};
     /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
     /// friends (the server hides it); no friend notices at all.

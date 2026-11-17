@@ -576,11 +576,46 @@ static void net_config_tick(void) {
     applied_hz = hz, applied_bandwidth = bandwidth;
 }
 
+/* ---- voice chat's karts (gpu/shim/bbport_voice.cpp): where each player of the race is, copied
+ * every frame on the game's thread, so the voice thread never reads the game's own objects ---- */
+
+static pthread_mutex_t voice_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct RuntimeVoiceKart voice_karts[8];
+static int voice_kart_count;
+
+static void voice_karts_tick(int racing) {
+    struct RuntimeVoiceKart now[8];
+    int n = 0;
+    for (int i = 0; racing && i < 8; i++) {
+        void *kart = rr_kart_of(i, 0);
+        void *player = player_of(kart);
+        const char *name = player ? RR_AT(player, 0x68, const char *) : 0;
+        if (!kart || !name || !*name) continue;
+        snprintf(now[n].name, sizeof now[n].name, "%s", name);
+        memcpy(now[n].pos, &RR_AT(kart, 0x20, float), sizeof now[n].pos);
+        now[n].here = (uint32_t)RR_AT(player, 0x20, int32_t) <= 7;
+        n++;
+    }
+    pthread_mutex_lock(&voice_lock);
+    memcpy(voice_karts, now, sizeof(now[0]) * (size_t)n);
+    voice_kart_count = n;
+    pthread_mutex_unlock(&voice_lock);
+}
+
+int runtime_voice_karts(struct RuntimeVoiceKart *out, int max) {
+    pthread_mutex_lock(&voice_lock);
+    const int n = voice_kart_count < max ? voice_kart_count : max;
+    memcpy(out, voice_karts, sizeof(out[0]) * (size_t)(n > 0 ? n : 0));
+    pthread_mutex_unlock(&voice_lock);
+    return n;
+}
+
 /* ---- every frame, and the install ---- */
 
 void runtime_item_lead_tick(int racing) {
     net_config_tick();
     timing_tick(racing);
+    voice_karts_tick(racing);
     const double now = now_s();
     for (int i = 0; i < TRACKED; i++) {
         Tracked *t = &items[i];

@@ -1205,6 +1205,14 @@ void VoiceTab() {
     Hint(BbSettings::MenuText("You hear yourself; nothing is sent.", "Вы слышите себя; ничего не отправляется."));
 
     MenuSection(BbSettings::MenuText("Others", "Другие"));
+    Checkbox(BbSettings::MenuText("Proximity in races", "Близость в гонках"), s.voice_proximity);
+    Hint(BbSettings::MenuText("In a race, each player sounds as loud as their kart is near, from the side it is on. "
+                              "In the lobby everyone sounds the same.",
+                              "В гонке каждого игрока слышно тем громче, чем ближе его карт, и с той стороны, где он. "
+                              "В лобби все звучат одинаково."));
+    if (s.voice_proximity) {
+        Checkbox(BbSettings::MenuText("Swap left and right", "Поменять лево и право"), s.voice_swap_sides);
+    }
     {
         int volume = int(s.voice_volume * 100.0f + 0.5f);
         const bool changed = ImGui::SliderInt(BbSettings::MenuText("Others' volume", "Громкость других"), &volume, 0, 200,
