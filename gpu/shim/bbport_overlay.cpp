@@ -1099,8 +1099,10 @@ void VoiceOverKarts(const std::vector<std::string>& speaking) {
         // stays by the name from near and far: the marker's point is where its text ends, a little
         // below the letters' middle (measured on screen); white, with a thin dark edge, as the name
         const float k = base * std::clamp(markers[i].scale, 0.2f, 3.0f);
-        const float size = 34.0f * k; // a little more than the nickname's letters
-        const ImVec2 at(x + 6.0f * k, y - 22.0f * k - size * 0.5f);
+        // measured on screen: the letters' middle is 72 units (scaled) above the marker's point, and
+        // the drawing fills about two thirds of its box, so 44 units match the letters' height
+        const float size = 44.0f * k;
+        const ImVec2 at(x + 4.0f * k, y - 72.0f * k - size * 0.5f);
         const float edge = std::max(1.0f, size * 0.07f);
         for (const ImVec2 d : {ImVec2(-edge, 0), ImVec2(edge, 0), ImVec2(0, -edge), ImVec2(0, edge)})
             SpeakerIcon(dl, ImVec2(at.x + d.x, at.y + d.y), size, IM_COL32(20, 20, 30, 200));

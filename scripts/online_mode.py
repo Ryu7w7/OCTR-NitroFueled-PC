@@ -288,15 +288,15 @@ def ranked_lobby_icons(blob):
                 struct.pack_into('<2f', g.data, icon + 0x60, x + 2.0, y + 2.0)
                 struct.pack_into('<4f', g.data, icon + 0xc0, 0.0, 0.0, 0.0, 1.0)
             if (mode, tier) == HOST_CROWN:
-                # The crown first in the row, before the rank icon (centred at 62, 32 wide) and the
-                # name (from 82): icons are placed by their centre, and the row clips what leaves it
-                # (at x -12 only a sliver showed).
-                x, y = 26.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                # The crown after the name, before the loudspeaker: the row's left holds the game's
+                # ready tick (x 20), the rank icon (62) and the name (from 82; 16 letters end near
+                # 340); the row is 467 wide. Icons are placed by their centre.
+                x, y = 410.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
                 struct.pack_into('<2f', g.data, icon + 0x60, x, y)
                 struct.pack_into('<2f', g.data, icon + 0x90, 36.0, 36.0)
             if (mode, tier) == VOICE_SPEAKER:
                 # The loudspeaker at the row's right end while that player talks (voice chat).
-                x, y = 372.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
+                x, y = 446.0 + (2.0 if kind == 'SHADOW' else 0.0), 16.0 + (2.0 if kind == 'SHADOW' else 0.0)
                 struct.pack_into('<2f', g.data, icon + 0x60, x, y)
                 struct.pack_into('<2f', g.data, icon + 0x90, 34.0, 34.0)
             new.append(icon)

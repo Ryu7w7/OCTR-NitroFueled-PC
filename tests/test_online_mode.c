@@ -2883,7 +2883,9 @@ static void test_region(size_t shift) {
     *(void **)(countdown + 0x18) = NULL;
     *(int *)(native_settings + 0x28) = 1;
     init_countdown(countdown);
-    assert(timer_ui_initial == 10.f); /* Private solo retains its native duration. */
+    assert(timer_ui_initial == 5.f); /* Private rooms start after 5 seconds, not the native 10. */
+    assert(*(float *)(countdown + 0x30) == 5.f && *(float *)(config + 0x110) == 10.f &&
+           *(float *)(config + 0x114) == 10.f);
     *(int *)(native_settings + 0x28) = 2;
     private = 0;
     init_countdown(countdown);

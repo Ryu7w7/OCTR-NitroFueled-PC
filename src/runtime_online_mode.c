@@ -3535,6 +3535,15 @@ static void ABI countdown_init(unsigned char *self) {
         float remaining;
         memcpy(&remaining, self + 0x28, 4);
         printf("Native private TEAM: initialized selector timer=%.1f (native UI/replication)\n", remaining);
+    } else if (config && is_private()) {
+        /* Private rooms start 5 seconds after the host starts, not the native 10: duration +0x110 and the
+         * race preparation threshold +0x114 (kept equal, so preparation still runs on the first tick). */
+        float saved[2], shorter[2];
+        memcpy(saved, config + 0x110, sizeof saved);
+        for (int i = 0; i < 2; ++i) shorter[i] = saved[i] > 5.f ? 5.f : saved[i];
+        memcpy(config + 0x110, shorter, sizeof shorter);
+        original_countdown_init(self);
+        memcpy(config + 0x110, saved, sizeof saved);
     } else original_countdown_init(self);
 }
 
