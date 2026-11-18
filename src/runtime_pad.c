@@ -168,6 +168,23 @@ static int claimed_by_other_port(SDL_JoystickID id, int except) {
     }
     return 0;
 }
+/* The Steam Deck's own controls while Steam Input also offers them as a Steam Virtual Gamepad (Game
+ * Mode, issue #258): one pair of hands, two gamepads. Taken automatically, the built-in one became
+ * player 2, every press reached both users, and at the title screen the game sometimes took user 2:
+ * the licence again and a new "Player 2" profile with no progress. So the built-in controller counts
+ * only when no Steam Virtual Gamepad is there (Steam Input off for the game). A port that names it
+ * (port.N=, gamepad=) still gets it. Valve: vendor 0x28de; the Deck 0x1205, the virtual pad 0x11ff. */
+static int steam_virtual_gamepad(SDL_JoystickID id) {
+    const char *name = SDL_GetGamepadNameForID(id);
+    return SDL_GetGamepadVendorForID(id) == 0x28de &&
+           (SDL_GetGamepadProductForID(id) == 0x11ff || (name && strcasestr(name, "Steam Virtual Gamepad")));
+}
+static int deck_twin(SDL_JoystickID id, const SDL_JoystickID *ids, int count) {
+    if (SDL_GetGamepadVendorForID(id) != 0x28de || SDL_GetGamepadProductForID(id) != 0x1205) return 0;
+    for (int i = 0; ids && i < count; ++i)
+        if (ids[i] != id && steam_virtual_gamepad(ids[i])) return 1;
+    return 0;
+}
 /* A controller a named port 2..4 is still waiting for, or player 1's chosen one while player 1 is
  * on another: a port taking pads automatically (split_auto) leaves it to them. */
 static const char *preferred_gamepad(void);
@@ -211,10 +228,14 @@ static SDL_Gamepad *port_gamepad(int p) {
     if (automatic && !gamepad) return NULL;
     int count=0;
     SDL_JoystickID *ids=SDL_GetGamepads(&count);
+    /* Player 1 still on the Deck's built-in controller its Steam Virtual Gamepad has just joined:
+     * that pad is player 1's too, wait until player 1 moves to it (the scan below). */
+    if (automatic && gamepad && deck_twin(SDL_GetGamepadID(gamepad),ids,count)) { SDL_free(ids); return NULL; }
     for (int i=0; ids && i<count && !port->pad; ++i) {
         if (!automatic && !is_preferred(ids[i],port->want)) continue;
         if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue; /* port 1 has it */
         if (claimed_by_other_port(ids[i],p) || (automatic && wanted_by_named_port(ids[i]))) continue;
+        if (automatic && deck_twin(ids[i],ids,count)) continue;      /* player 1's own hands */
         port->pad=SDL_OpenGamepad(ids[i]);
         if (port->pad) cal_reset(&cals[p]);
         if (port->pad) printf("Runtime: controller port %d: %s connected\n",p+1,SDL_GetGamepadName(port->pad));
@@ -446,7 +467,8 @@ static SDL_Gamepad *current_gamepad(void) {
             else if (++attempts==PAD_RESCAN_ATTEMPTS)
                 printf("Runtime: a bound controller was not found in %d rescans: treated as disconnected (the in-game menu's Rescan controllers tries again)\n",PAD_RESCAN_ATTEMPTS);
         }
-        if (pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i) if (!claimed_by_other_port(ids[i],0)) pick=i;
+        if (pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i)
+            if (!claimed_by_other_port(ids[i],0) && !deck_twin(ids[i],ids,count)) pick=i; /* issue #258 */
         /* If player 1's chosen pad is absent, use the first available split-screen pad for
          * player 1. Otherwise its input can silently create a different user's save. */
         int port_fallback=0;
@@ -486,6 +508,12 @@ static SDL_Gamepad *current_gamepad(void) {
         last_switch_scan=now;
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
+        /* issue #258: a Steam Virtual Gamepad joined after port 1 took the Deck's built-in
+         * controller (not one named for it): port 1 lets go and picks again, skipping the twin. */
+        if (gamepad && !on_preferred && deck_twin(SDL_GetGamepadID(gamepad),ids,count)) {
+            printf("Runtime: %s is the Steam Virtual Gamepad's twin: port 1 moves to the virtual one\n",SDL_GetGamepadName(gamepad));
+            SDL_CloseGamepad(gamepad); gamepad=NULL;
+        }
         for (int i=0;i<other_count;++i) {
             SDL_Gamepad *other=other_gamepads[i];
             if (other && (!SDL_GamepadConnected(other) || claimed_by_other_port(SDL_GetGamepadID(other),0))) {
@@ -495,7 +523,7 @@ static SDL_Gamepad *current_gamepad(void) {
         }
         for (int i=0; ids && i<count; ++i) {
             if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
-            if (claimed_by_other_port(ids[i],0)) continue;
+            if (claimed_by_other_port(ids[i],0) || deck_twin(ids[i],ids,count)) continue;
             int known=0;
             for (int j=0;j<other_count;++j) if (other_gamepads[j] && SDL_GetGamepadID(other_gamepads[j])==ids[i]) known=1;
             if (!known) {

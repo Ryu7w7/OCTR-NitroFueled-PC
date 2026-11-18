@@ -343,6 +343,45 @@ int main(void) {
         SDL_CloseGamepad(gamepad); gamepad=NULL;
         for (int i=0;i<4;++i) assert(SDL_DetachVirtualJoystick(same[i]));
     }
+    /* Issue #258, Steam Deck in Game Mode: the built-in controls (28de:1205) and Steam Input's
+     * Steam Virtual Gamepad for them (28de:11ff) are one player. Player 1 takes the virtual one, no
+     * player 2 logs in, also when the virtual one shows up after player 1 took the built-in one;
+     * a second Steam Virtual Gamepad (a pad plugged in) is player 2. Without Steam Input the
+     * built-in controls are player 1 as always. */
+    {
+        FILE *f=fopen(config,"w"); assert(f); fclose(f);
+        config_checked=0; memset(&config_mtime,0,sizeof config_mtime);
+        SDL_VirtualJoystickDesc deck=desc, steam=desc;
+        deck.name="Steam Deck Controller"; deck.vendor_id=0x28de; deck.product_id=0x1205;
+        steam.name="Steam Virtual Gamepad"; steam.vendor_id=0x28de; steam.product_id=0x11ff;
+        const SDL_JoystickID built_in=SDL_AttachVirtualJoystick(&deck);
+        const SDL_JoystickID virtual_pad=SDL_AttachVirtualJoystick(&steam);
+        assert(built_in && virtual_pad);
+        for (int round=0;round<3;++round) { current_gamepad(); update_port_presence(); }
+        assert(gamepad && SDL_GetGamepadID(gamepad)==virtual_pad);
+        for (int p=1;p<PORTS;++p) assert(!ports[p].pad && !ports[p].present);
+        const SDL_JoystickID plugged=SDL_AttachVirtualJoystick(&steam);
+        assert(plugged);
+        for (int round=0;round<3;++round) { current_gamepad(); update_port_presence(); }
+        assert(SDL_GetGamepadID(gamepad)==virtual_pad && ports[1].present);
+        assert(SDL_GetGamepadID(ports[1].pad)==plugged && !ports[2].present && !ports[3].present);
+        SDL_CloseGamepad(ports[1].pad); ports[1].pad=NULL; ports[1].present=0;
+        assert(SDL_DetachVirtualJoystick(plugged));
+        /* Steam Input off: the built-in controls alone are player 1 */
+        SDL_CloseGamepad(gamepad); gamepad=NULL;
+        assert(SDL_DetachVirtualJoystick(virtual_pad));
+        for (int round=0;round<3;++round) { current_gamepad(); update_port_presence(); }
+        assert(gamepad && SDL_GetGamepadID(gamepad)==built_in);
+        /* ... until Steam Input's pad joins: player 1 moves to it, nobody becomes player 2 */
+        const SDL_JoystickID late=SDL_AttachVirtualJoystick(&steam);
+        assert(late);
+        for (int round=0;round<3;++round) { current_gamepad(); update_port_presence(); SDL_Delay(120); }
+        current_gamepad(); update_port_presence();
+        assert(gamepad && SDL_GetGamepadID(gamepad)==late);
+        for (int p=1;p<PORTS;++p) assert(!ports[p].pad && !ports[p].present);
+        SDL_CloseGamepad(gamepad); gamepad=NULL;
+        assert(SDL_DetachVirtualJoystick(late) && SDL_DetachVirtualJoystick(built_in));
+    }
     /* A pad thread stuck in SDL (device detection): the game retains held buttons on every port,
      * without inventing a release/press during short stalls, but expires after 3 s. */
     {
