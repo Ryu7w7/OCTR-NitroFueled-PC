@@ -78,6 +78,7 @@ static int party_at_entry = 1;
 /* That session is a private room: leaving it never brings anyone along, not even a party that
  * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
 static int entry_private;
+static int private_lobby_open;
 static void (ABI *native_party_quit_trace)(void *);
 static int ranked_party_size(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
@@ -90,6 +91,7 @@ static void arm_party_return(void) {
 static void arm_private_room(void) {
     arm_party_return();
     __atomic_store_n(&entry_private,1,__ATOMIC_SEQ_CST);
+    __atomic_store_n(&private_lobby_open,0,__ATOMIC_SEQ_CST);
 }
 static void (ABI *native_party_return)(void *);
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
@@ -1012,7 +1014,10 @@ static void native_return_focus(void *node, int ancestors) {
              * came in together (2026-11-16: leaving a private room took them all along). The
              * private room is armed on entering it (the online menu's Private Match button, or
              * the mode screen's way into the lobby). */
-            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) return;
+            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) {
+                __atomic_store_n(&private_lobby_open,1,__ATOMIC_SEQ_CST);
+                return;
+            }
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {
                 arm_party_return();
                 return;
@@ -1020,13 +1025,14 @@ static void native_return_focus(void *node, int ancestors) {
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
                 if (__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) return;
-                /* Initial ModeSelect focus is entry, not Back from a live private lobby. */
+                /* ModeSelect appears before PrivateGame while entering, and after it on Back. */
                 if (__atomic_load_n(&entry_private,__ATOMIC_SEQ_CST) &&
-                    !runtime_private_match_active()) return;
+                    !__atomic_exchange_n(&private_lobby_open,0,__ATOMIC_SEQ_CST)) return;
                 runtime_public_itemless_menu_return();
                 return;
             }
             if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_Main_Root")) continue;
+            __atomic_store_n(&private_lobby_open,0,__ATOMIC_SEQ_CST);
             if (!ancestors && !__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) {
                 runtime_public_itemless_menu_return();
             }
