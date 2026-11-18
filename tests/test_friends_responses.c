@@ -8,6 +8,7 @@ int runtime_online_party_active(void) { return connected_party; }
 int runtime_party_hosting(void) { return 0; }
 void runtime_room_mode_joined(const char *sid) { (void)sid; }
 void runtime_room_mode_hosting(void) {}
+void runtime_public_itemless_guest_left(const char *sid) { (void)sid; }
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
 void runtime_room_mode_left(void) { ++left_room; }
 void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", current_host); }

@@ -1084,6 +1084,15 @@ static void test_guest_main_menu_leaves_party(void) {
     /* In the room again and out within 5 s: the native leave already ran once. */
     guest_room_open=1;
     native_return_focus(root,0);assert(party_quits==saved_quits+1 && !guest_room_open);
+    /* Leaving the host's session the game's own way means the same party leave; our own
+     * session's delete (closing a room we host) does not. */
+    guest_quit_at=0;
+    runtime_public_itemless_guest_left("cusa13795-session-LocalHost");
+    assert(party_quits==saved_quits+1);
+    runtime_public_itemless_guest_left("cusa13795-session-HostPlayer");
+    assert(party_quits==saved_quits+2);
+    runtime_public_itemless_guest_left("cusa13795-session-HostPlayer");
+    assert(party_quits==saved_quits+2);
     party_manager=saved_party;native_party_quit_trace=saved_quit;party_guest=saved_guest;
     party_quits=saved_quits;online_return_button=saved_return;guest_room_open=0;
     guest_quit_at=0;

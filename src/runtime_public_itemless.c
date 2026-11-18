@@ -225,6 +225,16 @@ static int leave_party_as_guest(void) {
     puts("Online party: guest left the host's party");
     return 1;
 }
+/* The game left a session that is not this player's own: a party guest back out of the host's
+ * room. The party leave is the same, whatever screen the guest ended on. */
+void runtime_public_itemless_guest_left(const char *sid) {
+    const char *me = runtime_np_get_online_name();
+    char mine[128];
+    if (!me || !*me || !sid || !*sid) return;
+    snprintf(mine, sizeof mine, "cusa13795-session-%s", me);
+    if (!strncmp(sid, mine, strlen(mine))) return; /* its own session, not a host's room */
+    leave_party_as_guest();
+}
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
@@ -1055,7 +1065,10 @@ static void native_return_focus(void *node, int ancestors) {
              * private room is armed on entering it (the online menu's Private Match button, or
              * the mode screen's way into the lobby). */
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) {
-                if (runtime_room_mode_following()) guest_room_open = 1; /* this guest is in the room */
+                if (runtime_room_mode_following() && !guest_room_open) {
+                    guest_room_open = 1; /* this guest is in the room */
+                    puts("Online party: guest in the host's room");
+                }
                 return;
             }
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {

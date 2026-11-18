@@ -1334,7 +1334,11 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         if (members) {
             char sid[96];
             path_segment_after(req->path, "/v1/sessions/", sid, sizeof sid);
-            if (sid[0]) forget_session_member(sid);
+            if (sid[0]) {
+                forget_session_member(sid);
+                /* Not this player's own session: a party guest has left the host's room. */
+                runtime_public_itemless_guest_left(sid);
+            }
         }
         /* Leaving another player's session after this player made its own party (it took over
          * as host: runtime_party_experiment.c): its own session stays. */
