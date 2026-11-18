@@ -359,6 +359,17 @@ static int ranked_account_allowed(void) {
     return 0;
 }
 
+/* Public matchmaking and Ranked take the game's own files and character mods only; any other mod or
+ * executable patch is for private rooms (scripts/online_content.py, runtime_online_content). */
+#define PUBLIC_CONTENT_NOTICE "Public matchmaking and Ranked allow only character, sound and HUD mods. Your game has other mods or patches: play them in private rooms."
+/* A public search refused for its content: 1 the notice is up, 2 its Continue was pressed (go back) */
+static int content_return;
+static int public_content_allowed(void) {
+    if (strcmp(runtime_online_content(), "modified")) return 1;
+    notice(PUBLIC_CONTENT_NOTICE);
+    return 0;
+}
+
 static int ranked_party_size(void) {
     unsigned char *party=party_manager ? *party_manager : NULL;
     void *roster=party ? *(void **)(party+0x30) : NULL;
@@ -520,6 +531,16 @@ int runtime_room_members(char out[][24], int max) {
 void runtime_public_itemless_update(void) {
     members_tick();
     update_search_clock();
+    /* the content notice was dismissed: out of the refused search, back to the lobby (start_search) */
+    if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 2) {
+        __atomic_store_n(&content_return, 0, __ATOMIC_SEQ_CST);
+        fprintf(stderr, "Public ITEMLESS: content notice dismissed: back to the lobby\n");
+        if (network_manager && *network_manager) {
+            native_stop_matchmaking(*network_manager);
+            native_return_to_lobby();
+        }
+        return;
+    }
     pthread_mutex_lock(&mode_lock);
     const int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
     const int leave_room=confirmed_ranked!=0;
@@ -852,9 +873,9 @@ int runtime_private_party_update(void) {
         else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
-    if (pending_private.ranked && runtime_ranked_account() == 0) {
+    if (pending_private.ranked && (runtime_ranked_account() == 0 || !strcmp(runtime_online_content(), "modified"))) {
         clear_private_pending();
-        (void)ranked_account_allowed();     /* the notice */
+        if (ranked_account_allowed()) (void)public_content_allowed();     /* the notice */
         return 0;
     }
     struct PendingPrivate ready=pending_private;
@@ -1183,6 +1204,13 @@ static void ABI placeable_event(void *self, void *event) {
                                   !strcmp(type, "igGuiEventPlaceableGainFocus"));
         if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
         if (gain) native_return_focus(self, 0);
+        /* the content notice's Continue (Confirm 8) or Back (9): leave the refused search */
+        if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 1 && type &&
+            (!strcmp(type, "igGuiEventFocusInputPressed") || !strcmp(type, "igGuiEventProjectInputPressed"))) {
+            int pressed = 0;
+            memcpy(&pressed, (char *)event + 0x18, sizeof pressed);
+            if (pressed == 8 || pressed == 9) __atomic_store_n(&content_return, 2, __ATOMIC_SEQ_CST);
+        }
         int signal = 0;
         if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
             memcpy(&signal, (char *)event + 0x18, sizeof signal);
@@ -1250,7 +1278,7 @@ static void ABI placeable_event(void *self, void *event) {
                         pending_private.ranked = pending_private.target != NULL;
                     }
                     if (state != 1) return;
-                    if (!ranked_account_allowed()) return;
+                    if (!ranked_account_allowed() || !public_content_allowed()) return;
                 }
                 if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
@@ -1314,6 +1342,16 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
 }
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
     if (rejection[0]) { *result = NULL; return result; }
+    /* any public search (Normal, Itemless, Ranked): character mods only (private rooms never search).
+     * The notice first; its Continue (or Back) stops the search and goes back to the lobby
+     * (placeable_event, then runtime_public_itemless_update). */
+    if (!strcmp(runtime_online_content(), "modified")) {
+        fprintf(stderr, "Public ITEMLESS: search refused: online content is modified (private rooms only)\n");
+        notice(PUBLIC_CONTENT_NOTICE);
+        __atomic_store_n(&content_return, 1, __ATOMIC_SEQ_CST);
+        *result = NULL;
+        return result;
+    }
     /* A matchmaking search is never a private room: the party's room flag must not open the
      * private lobby (map selector) while the host waits for opponents (2026-11-17). */
     clear_room_private(party_manager ? *party_manager : NULL);

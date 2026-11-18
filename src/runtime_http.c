@@ -516,6 +516,17 @@ static int ryunet_http_addr(const char *host, const char *port, struct sockaddr_
 static pthread_mutex_t items_id_lock = PTHREAD_MUTEX_INITIALIZER;
 static char items_id[48];
 
+/* What this launch plays online with (scripts/online_content.py, BB_ONLINE_CONTENT from run.py and
+ * run.sh): "clean" the game's own files, "characters" character mods only, "modified" anything else
+ * (private rooms only), "unknown" not checked (offline, or an older launcher). */
+const char *runtime_online_content(void) {
+    static const char *const known[] = {"clean", "characters", "modified"};
+    const char *v = getenv("BB_ONLINE_CONTENT");
+    for (unsigned i = 0; v && i < sizeof known / sizeof *known; ++i)
+        if (!strcmp(v, known[i])) return known[i];
+    return "unknown";
+}
+
 void runtime_items_id_set(const char *id) {
     pthread_mutex_lock(&items_id_lock);
     snprintf(items_id, sizeof items_id, "%s", id && strlen(id) < sizeof items_id && !strpbrk(id, "\r\n") ? id : "");
@@ -811,6 +822,11 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
         if (machine && *machine && strlen(machine) < 80 && !strpbrk(machine, "\r\n") &&
             hlen < (int)sizeof(header_buf) - 112)
             hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Machine: %s\r\n", machine);
+        /* What this launch plays with (runtime_online_content): the server can keep "modified"
+         * games out of public matchmaking and Ranked (its online_content.go). */
+        if (hlen < (int)sizeof(header_buf) - 48)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Content: %s\r\n",
+                             runtime_online_content());
     }
     hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
 

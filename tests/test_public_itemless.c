@@ -23,6 +23,8 @@ static int ranked_status_state = 1;
 int runtime_ranked_status(int fresh) { (void)fresh; return ranked_status_state; }
 static int ranked_account_state = 1;
 int runtime_ranked_account(void) { return ranked_account_state; }
+static const char *online_content_state = "clean";
+const char *runtime_online_content(void) { return online_content_state; }
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
 int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
@@ -561,6 +563,40 @@ static int account_notices;
 static void ABI account_notice(const char *body, void *options) {
     assert(options == NULL && strstr(body, "Discord or Steam"));
     ++account_notices;
+}
+
+static int content_notices;
+static void ABI content_notice(const char *body, void *options) {
+    assert(options == NULL && strstr(body, "character, sound and HUD mods"));
+    ++content_notices;
+}
+
+/* A "modified" game (scripts/online_content.py) never starts a public search; character mods do. */
+static void test_public_content_gate(void) {
+    Notice saved = native_notice;
+    native_notice = content_notice;
+    void *result = (void *)1;
+    const int before = sent;
+    online_content_state = "modified";
+    start_search(&result, NULL, "{}", 3, NULL);
+    /* the notice at once; the search left only when its Continue is pressed */
+    assert(result == NULL && sent == before && content_notices == 1 && content_return == 1);
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *pressed_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
+    void *press[5] = {vtable, pressed_meta, 0, (void *)8, 0};
+    unsigned char dialog_button[0xf0] = {0};
+    native_placeable_event = forward_event;
+    placeable_event(dialog_button, press);
+    assert(content_return == 2);
+    runtime_public_itemless_update();
+    assert(content_return == 0);
+    assert(!public_content_allowed() && content_notices == 2);      /* Ranked's GO TO LOBBY says it at once */
+    online_content_state = "characters";
+    assert(public_content_allowed() && content_notices == 2);
+    online_content_state = "unknown";            /* not checked (an older launcher): not refused */
+    assert(public_content_allowed() && content_notices == 2);
+    online_content_state = "clean";
+    native_notice = saved;
 }
 
 static void test_ranked_season_gate(void) {
@@ -1266,6 +1302,7 @@ static void test_ranked_device_and_search_clock(void) {
 }
 
 int main(void) {
+    test_public_content_gate();
     test_ranked_device_and_search_clock();
     test_guest_main_menu_leaves_party();
     test_native_party_menu_return();

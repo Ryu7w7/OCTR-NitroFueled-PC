@@ -1107,6 +1107,7 @@ def launch(args, restarted=False):
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
     import mod_packages
+    source_game = game          # the game's own files, before any mod (scripts/online_content.py)
     try:
         game, config = startup_call('mod_packages.prepare', mod_packages.prepare, PORT, data, env, game, config,log=say)
     except (ValueError, RuntimeError, OSError) as error:
@@ -1405,6 +1406,26 @@ def launch(args, restarted=False):
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out, '--boot-dir', boot,
                        '--settings', settings)
+            # What this launch plays online with (scripts/online_content.py): public matchmaking and
+            # Ranked take the game's own files and character mods only, private rooms anything. The
+            # game tells RyuNET (X-RyuNET-Content) and refuses public play itself when "modified".
+            env.pop('BB_ONLINE_CONTENT', None)
+            if env.get('BB_ONLINE') == '1':
+                result = run_python('scripts/online_content.py', '--game', source_game, '--view', game, '--out', out,
+                                    *(['--file-map', env['BB_MOD_FILE_MAP']] if env.get('BB_MOD_FILE_MAP') else []),
+                                    *(['--archive-plan', env['BB_MOD_ARCHIVE_PLAN']] if env.get('BB_MOD_ARCHIVE_PLAN') else []),
+                                    *(['--layout-dir', layout_patches] if layout_patches else []),
+                                    '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
+                                    '--app-version', app_version, '--title-id', title_id, capture=True, check=False)
+                lines = [line for line in result.stdout.splitlines() if line.strip()]
+                content = lines[0].partition('=')[2] if result.returncode == 0 and lines and lines[0].startswith('class=') else 'unknown'
+                env['BB_ONLINE_CONTENT'] = content
+                say({'clean': 'Online content: the game\'s own files (public matchmaking and Ranked allowed)',
+                     'characters': 'Online content: character mods only (public matchmaking and Ranked allowed)',
+                     'modified': 'Online content: modified (private rooms only):'}.get(
+                         content, 'Online content: could not be checked (scripts/online_content.py stopped)'))
+                for reason in lines[1:6]:
+                    say('  ' + reason)
             # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
             for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
                 env.pop(key, None)
