@@ -132,6 +132,16 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 const char *runtime_thread_current_name(void);
+/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
+static long allocators_shift(void) {
+    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
+    static long shift = -2;
+    if (shift == -2) {
+        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
+              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
+    }
+    return shift;
+}
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -302,17 +312,6 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
-/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
-static long allocators_shift(void) {
-    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
-    static long shift = -2;
-    if (shift == -2) {
-        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
-              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
-    }
-    return shift;
-}
-
 /* What a corrupt block and the blocks beside it hold, and who was freeing it: whether something
  * wrote over the block, it was freed twice or it never was one tells where to look next. */
 static void dump_corrupt_block(const CONTEXT *c, uintptr_t block) {
@@ -508,8 +507,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         const long shift = image ? allocators_shift() : -1;
         if (shift >= 0) {
             const uintptr_t at = c->Rip - (uintptr_t)image + (uintptr_t)shift;
-            const int tlsf = (at >= 0x1590e1e && at <= 0x1590e65) || (at >= 0x1590f46 && at <= 0x1590f70) ||
-                             (at >= 0x159101b && at <= 0x1591040);
+            const int tlsf = at >= 0x1590e1e && at <= 0x15910f7;
             const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
             if (tlsf || wrapper) {
                 static int count = 0;
@@ -518,7 +516,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
                 if (!count) heap_summary(c, wrapper ? c->R15 : c->Rsi);
                 if (count < 4) dump_corrupt_block(c, wrapper ? c->R15 : c->Rsi);
                 ++count;
-                c->Rip = (uintptr_t)image + (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift;
+                c->Rip = (uintptr_t)image + (tlsf ? 0x15910f8 : 0x14af709) - (uintptr_t)shift;
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
@@ -731,8 +729,30 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    greg_t *g = uc->uc_mcontext.gregs;
+    uintptr_t rip = (uintptr_t)g[REG_RIP];
     char line[512];
+    /* Host takeover can expose the same corrupt free already recovered on Windows. */
+    const long shift = image ? allocators_shift() : -1;
+    if (shift >= 0) {
+        const uintptr_t at = rip - (uintptr_t)image + (uintptr_t)shift;
+        const int tlsf = at >= 0x1590e1e && at <= 0x15910f7;
+        const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
+        if (tlsf || wrapper) {
+            static int count;
+            if (!count++) {
+                int n = snprintf(line, sizeof line,
+                    "Runtime: bailing corrupt free guest offset 0x%llx (block %p, pool=%p)\n",
+                    (unsigned long long)(rip - (uintptr_t)image),
+                    (void *)(uintptr_t)g[wrapper ? REG_R15 : REG_RSI],
+                    (void *)(uintptr_t)g[REG_RDI]);
+                if (n > 0) { ssize_t written_=write(2, line, (size_t)n); (void)written_; }
+            }
+            g[REG_RIP] = (greg_t)((uintptr_t)image +
+                                  (tlsf ? 0x15910f8 : 0x14af709) - (uintptr_t)shift);
+            return;
+        }
+    }
     Dl_info where;
     int site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
     char emulating[64] = "";
