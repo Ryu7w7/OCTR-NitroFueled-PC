@@ -1014,10 +1014,7 @@ static void native_return_focus(void *node, int ancestors) {
              * came in together (2026-11-16: leaving a private room took them all along). The
              * private room is armed on entering it (the online menu's Private Match button, or
              * the mode screen's way into the lobby). */
-            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) {
-                __atomic_store_n(&private_lobby_open,1,__ATOMIC_SEQ_CST);
-                return;
-            }
+            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) return;
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {
                 arm_party_return();
                 return;
@@ -1151,6 +1148,7 @@ static void ABI placeable_event(void *self, void *event) {
                 if (confirm && private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     arm_private_room();
+                    __atomic_store_n(&private_lobby_open,1,__ATOMIC_SEQ_CST);
                 }
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
