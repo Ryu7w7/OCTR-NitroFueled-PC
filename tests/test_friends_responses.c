@@ -6,6 +6,8 @@ static char current_host[24];
 static int frozen_race, left_room, connected_party;
 int runtime_online_party_active(void) { return connected_party; }
 int runtime_party_hosting(void) { return 0; }
+void runtime_room_mode_joined(const char *sid) { (void)sid; }
+void runtime_room_mode_hosting(void) {}
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
 void runtime_room_mode_left(void) { ++left_room; }
 void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", current_host); }
@@ -33,6 +35,16 @@ int main(void) {
     frozen_race = 0;
     remove_active_session();
     assert(!s_private_room && left_room == 1 && access(session_path,F_OK)==-1);
+    /* Leaving a session drops the local user from its member list (a party guest that left). */
+    assert(record_session_member("cusa13795-session-HostPlayer") == 1);
+    char mnames[8][64];
+    uint64_t maccs[8];
+    assert(read_session_members("cusa13795-session-HostPlayer", mnames, maccs, 8) == 1);
+    WebApiReq leave = {0};
+    leave.method = 3;
+    snprintf(leave.path, sizeof leave.path, "/v1/sessions/cusa13795-session-HostPlayer/members/me");
+    free(get_webapi_response_for_req(&leave));
+    assert(read_session_members("cusa13795-session-HostPlayer", mnames, maccs, 8) == 0);
     assert(!rmdir(sessions));
     assert(!unsetenv("BB_SESSIONS_DIR"));
     assert(queue_invite("cusa13795-session-HostPlayer", "HostPlayer", 1000));

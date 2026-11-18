@@ -159,7 +159,7 @@ static void look(struct Look *l) {
 }
 
 static void print_look(const char *when, const struct Look *l) {
-    fprintf(stderr, "Host experiment: %s state=%d role=%d peers=%d roster=%d [%s] pending=%p session=%p connection=%p\n",
+    fprintf(stderr, "Party state: %s state=%d role=%d peers=%d roster=%d [%s] pending=%p session=%p connection=%p\n",
             when, l->state, l->role, l->peers, l->roster, l->names, l->pending, l->session, l->connection);
 }
 
@@ -240,7 +240,9 @@ void runtime_party_experiment_tick(void) {
             }
         }
     }
-    if (!watch_until || now < next_look) return;
+    /* Always report every change of the party, roster included: a guest leaving must show here
+     * (2026-11-18: the host's roster kept a guest who had left). */
+    if (now < next_look) return;
     next_look = now + 250;
     struct Look l;
     look(&l);
@@ -249,7 +251,7 @@ void runtime_party_experiment_tick(void) {
         strcmp(l.names, last.names))
         print_look("changed", &l);
     last = l;
-    if (now >= watch_until) {
+    if (watch_until && now >= watch_until) {
         print_look("30 s later", &l);
         watch_until = 0;
     }

@@ -206,12 +206,32 @@ void runtime_public_itemless_party_ready(void) {
 /* The host is back in the online menus: the room's private flag must not follow it into the
  * next mode (2026-11-17: matchmaking with a party opened the private lobby's map selector). */
 static void clear_room_private(unsigned char *party) { if (party) party[0x6c] = 0; }
+/* A guest back in the menus has left the host's room for good, but nothing leaves the party:
+ * both sides keep it in their Lobby Members list and the host never hears about it (2026-11-18).
+ * Leave it the game's way: 0xa9ffd0 tells the host (message 0x29) and empties the roster. */
+static uint64_t guest_quit_at;
+static int guest_room_open; /* this guest is on the room's own screens */
+static int leave_party_as_guest(void) {
+    if (guest_quit_at && check_clock() - guest_quit_at < 5000) return 0;
+    unsigned char *party = party_manager ? *party_manager : NULL;
+    unsigned char *session = party ? *(void **)(party + 0x18) : NULL;
+    if (!session || ranked_party_size() < 2) return 0;
+    unsigned char *connection = *(void **)(session + 0x10);
+    int role = 0;
+    if (connection) memcpy(&role, connection + 0x118, sizeof role);
+    if (role < 2) return 0;
+    guest_quit_at = check_clock();
+    if (native_party_quit_trace) native_party_quit_trace(party);
+    puts("Online party: guest left the host's party");
+    return 1;
+}
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
     runtime_public_itemless_reset();
     if (runtime_room_mode_following()) runtime_public_itemless_party_ready();
     if (!notify) return;
+    const int private_room = runtime_private_match_active() || runtime_online_mode_in_private();
     if (network_manager && *network_manager) native_stop_matchmaking(*network_manager);
     unsigned char *party = party_manager ? *party_manager : NULL;
     clear_room_private(party);
@@ -224,6 +244,7 @@ void runtime_public_itemless_menu_return(void) {
      * together; a player who came alone leaves the room's players behind (2026-11-15: after a
      * private, public or Ranked room everyone stayed grouped with its host). */
     const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
+    printf("Online party: menu return role=%d private=%d before=%d\n", role, private_room, before);
     if (role == 1 && __atomic_load_n(&entry_private, __ATOMIC_SEQ_CST)) {
         /* Leave this party without the Quit With Party return message. Guests see the connection
          * close and recreate the private party under a remaining member. */
@@ -235,6 +256,8 @@ void runtime_public_itemless_menu_return(void) {
                ranked_party_size(), before);
     } else if (role == 1) {
         printf("Online party: no party before the room; its players are not brought along\n");
+    } else if (private_room) {
+        leave_party_as_guest();
     }
 }
 void runtime_public_itemless_select(int enabled) {
@@ -1031,13 +1054,18 @@ static void native_return_focus(void *node, int ancestors) {
              * came in together (2026-11-16: leaving a private room took them all along). The
              * private room is armed on entering it (the online menu's Private Match button, or
              * the mode screen's way into the lobby). */
-            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) return;
+            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) {
+                if (runtime_room_mode_following()) guest_room_open = 1; /* this guest is in the room */
+                return;
+            }
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {
                 arm_party_return();
                 return;
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
+                if (runtime_room_mode_following() &&
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root")) guest_room_open = 1;
                 if (__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) return;
                 /* ModeSelect appears before PrivateGame while entering, and after it on Back. */
                 if (__atomic_load_n(&entry_private,__ATOMIC_SEQ_CST) &&
@@ -1049,6 +1077,12 @@ static void native_return_focus(void *node, int ancestors) {
             __atomic_store_n(&private_lobby_open,0,__ATOMIC_SEQ_CST);
             if (!ancestors && !__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) {
                 runtime_public_itemless_menu_return();
+            }
+            /* Back to the menus from the room without going through its screens: the guest still
+             * has to leave the host's party (its Lobby Members row and the host's notice). */
+            if (!ancestors && guest_room_open) {
+                guest_room_open = 0;
+                leave_party_as_guest();
             }
             typedef void *(ABI *GetType)(void *);
             void *meta = (*(GetType **)items[i])[0](items[i]);

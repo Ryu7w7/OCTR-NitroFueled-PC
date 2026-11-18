@@ -1026,6 +1026,19 @@ static void test_native_party_menu_return(void) {
         menu_party_returned=0;party_at_entry=2;entry_private=1;
         runtime_public_itemless_menu_return();
         assert(party_returns==returns+1 && party_quits==1);
+        /* A guest of that room leaves the party on the way out: the host's notification
+         * (message 0x29) and the roster reset are the game's way out. */
+        menu_party_returned=0;party_at_entry=2;entry_private=0;
+        *(int *)(connection+0x118)=2;party[0x6c]=1;
+        unsigned char roster[0x28]={0},peer[0x30]={0};
+        void *items[1]={peer};
+        *(int *)(roster+12)=1;*(void ***)(roster+0x20)=items;
+        *(void **)(party+0x30)=roster;
+        const int saved_installed=installed;installed=1;
+        runtime_public_itemless_menu_return();
+        installed=saved_installed;
+        assert(party_quits==2 && party_returns==returns+1 && !party[0x6c]);
+        *(int *)(connection+0x118)=1;
         /* The next search is not a private room any more. */
         arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;
@@ -1037,8 +1050,47 @@ static void test_native_party_menu_return(void) {
     stopped=old_stops;selected=ranked_selected=0;strcpy(reply,"ok");
 }
 
-static int native_race_party_returns;
-static unsigned char ABI race_party_return_mock(void *sender,void *message,void *context) {
+/* The guest gets back to the main menu without passing the room's own screens: the party must
+ * still be left (its Lobby Members row and the host's notice), once per visit. */
+static void *ABI missing_field(void *meta,const char *name){(void)meta;(void)name;return NULL;}
+static void test_guest_main_menu_leaves_party(void) {
+    void *(ABI *graph_vtable[])(void*)={graph_type};
+    void *behavior_meta[3]={0,0,"igGuiVscBehavior"};
+    void *root_meta[3]={0,0,"Scripts.Graph.Octane_Lobby_PrivateGame_Root"};
+    unsigned char graph[0x40]={0},root[0xf0]={0};
+    *(void ***)graph=(void **)graph_vtable;
+    *(void **)(graph+8)=behavior_meta;
+    *(void **)(graph+0x20)=root_meta;
+    void *items[]={graph};
+    unsigned char behaviors[0x28]={0};
+    *(int *)(behaviors+12)=1;*(void ***)(behaviors+0x20)=items;
+    *(void **)(root+0xe8)=behaviors;
+    unsigned char party[0x80]={0},session[0x20]={0},connection[0x120]={0};
+    unsigned char roster[0x28]={0},peer[0x30]={0};
+    void *members[1]={peer},*party_value=party;
+    *(void **)(party+0x18)=session;*(void **)(session+0x10)=connection;
+    *(int *)(connection+0x118)=2;
+    *(void **)(party+0x30)=roster;*(int *)(roster+12)=1;*(void ***)(roster+0x20)=members;
+    void **saved_party=party_manager;
+    void (ABI *saved_quit)(void *)=native_party_quit_trace;
+    void *(ABI *saved_field)(void *,const char *)=native_meta_field;
+    const int saved_guest=party_guest,saved_quits=party_quits,saved_return=online_return_button;
+    party_manager=&party_value;native_party_quit_trace=quit_party_mock;native_meta_field=missing_field;
+    party_guest=1;guest_room_open=0;guest_quit_at=0;menu_party_returned=1;online_return_button=1;
+    native_return_focus(root,0);assert(guest_room_open); /* PrivateGame_Root: in the room */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_Main_Root";
+    native_return_focus(root,0);
+    assert(party_quits==saved_quits+1 && !guest_room_open);
+    /* In the room again and out within 5 s: the native leave already ran once. */
+    guest_room_open=1;
+    native_return_focus(root,0);assert(party_quits==saved_quits+1 && !guest_room_open);
+    party_manager=saved_party;native_party_quit_trace=saved_quit;party_guest=saved_guest;
+    party_quits=saved_quits;online_return_button=saved_return;guest_room_open=0;
+    guest_quit_at=0;
+    native_meta_field=saved_field;
+}
+
+static int native_race_party_returns;static unsigned char ABI race_party_return_mock(void *sender,void *message,void *context) {
     assert(sender==(void *)1 && message==(void *)2 && context==(void *)3);
     ++native_race_party_returns;return 1;
 }
@@ -1170,6 +1222,7 @@ static void test_ranked_device_and_search_clock(void) {
 
 int main(void) {
     test_ranked_device_and_search_clock();
+    test_guest_main_menu_leaves_party();
     test_native_party_menu_return();
     test_guest_menu_return_destination();
     native_deferred_event_create = allocate_input_event;
