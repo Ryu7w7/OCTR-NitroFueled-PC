@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <stdlib.h>
 #include "../src/runtime_itemless.c"
 void runtime_race_options_stop_boost(void *b, void (ABI *stop)(void *)) { stop(b); }
 static int active, responses, removals, nested;
@@ -273,6 +274,10 @@ static void test_collision_filter(void) {
     munmap(code, 4096);
 }
 int main(void) {
+    assert(runtime_itemless_start(NULL, 0));
+    unsigned char *invalid_image = calloc(1, 0x2ad4b78);
+    assert(invalid_image && !runtime_itemless_start(invalid_image, 0x2ad4b78));
+    free(invalid_image);
     test_banked_wall();
     test_start_grid();
     test_track_rules();

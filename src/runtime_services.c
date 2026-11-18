@@ -562,6 +562,42 @@ static int read_session_members(const char *sid, char names[][64], uint64_t *acc
     return count;
 }
 
+/* Leaving a session drops the local user from its member list: the game reads the list back and
+ * otherwise keeps showing a player who already left (2026-11-18: a party guest stayed in the
+ * room's members after leaving). */
+static void forget_session_member(const char *sid) {
+    const char *me = runtime_np_get_online_name();
+    char path[512];
+    if (!me || !*me || !session_members_path(sid, path, sizeof(path))) return;
+    pthread_mutex_lock(&s_members_lock);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char kept[8][160];
+        int count = 0;
+        char line[160];
+        while (count < 8 && fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char *bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            if (!strcmp(line, me)) continue;
+            snprintf(kept[count++], sizeof(kept[0]), "%s|%s", line, bar + 1);
+        }
+        fclose(f);
+        if (count == 0) {
+            remove(path); /* an empty list leaves no stale file behind */
+        } else {
+            f = fopen(path, "w");
+            if (f) {
+                for (int i = 0; i < count; ++i) fprintf(f, "%s\n", kept[i]);
+                fclose(f);
+            }
+        }
+        runtime_net_trace("webapi: %s left session %s (%d member(s) left)", me, sid, count);
+    }
+    pthread_mutex_unlock(&s_members_lock);
+}
+
 /* Members recorded for sid excluding host_name (the host is counted separately). */
 static int session_join_count(const char *sid, const char *host_name) {
     char names[8][64];
@@ -1292,6 +1328,18 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
     }
     /* DELETE /v1/sessions -> delete session (method 3 is DELETE) */
     if (req->method == 3 && strstr(req->path, "/v1/sessions")) {
+        /* Leaving a session (its members/me) also drops this user from that session's member
+         * list; the session itself is removed only when it is this player's own. */
+        const char *members = strstr(req->path, "/members");
+        if (members) {
+            char sid[96];
+            path_segment_after(req->path, "/v1/sessions/", sid, sizeof sid);
+            if (sid[0]) {
+                forget_session_member(sid);
+                /* Not this player's own session: a party guest has left the host's room. */
+                runtime_public_itemless_guest_left(sid);
+            }
+        }
         /* Leaving another player's session after this player made its own party (it took over
          * as host: runtime_party_experiment.c): its own session stays. */
         const char *me = runtime_np_get_online_name();

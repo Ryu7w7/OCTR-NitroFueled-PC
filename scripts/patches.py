@@ -49,6 +49,8 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
 TACHO_PACK_FILES=('RaceLeaders_hud.xml','HudOriginal.xml','ItemsMejorados.xml','NtropyPosicion.xml',
                   'SinItemsPortales.xml','BarraReservas.xml')
 TACHO_PACK_DIR=Path(__file__).resolve().parent/'tacho_pack'/'patches'
+# The same patches for the European game (CUSA14876 1.21), ported by tools/port_patch_eu.py.
+TACHO_PACK_EU_DIR=Path(__file__).resolve().parent/'tacho_pack'/'patches_eu'
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
                'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
@@ -537,10 +539,12 @@ def tacho_pack_patches(ini=None, app_version=APP_VERSION, title_id=TITLE_ID):
     the same rules. Raises tacho_pack.Modified when a file of the pack was changed. ini is unused."""
     from tacho_pack import verify
     verify()
-    found=[patch for patch in external_patches(TACHO_PACK_DIR,app_version,title_id) if tacho_pack_patch(patch[0])]
-    # Made for the USA game (CUSA13795) 1.21 only: another edition or update has none of them.
-    if (title_id,app_version)==('CUSA13795','01.21') and len(found)!=len(TACHO_PACK_FILES):
-        raise ValueError('Pack Tacho: patches missing from scripts/tacho_pack/patches; install the port again')
+    folder={('CUSA13795','01.21'):TACHO_PACK_DIR,('CUSA14876','01.21'):TACHO_PACK_EU_DIR}.get((title_id,app_version))
+    # Made for the USA and European games 1.21: another update has none of them.
+    if folder is None: return []
+    found=[patch for patch in external_patches(folder,app_version,title_id) if tacho_pack_patch(patch[0])]
+    if len(found)!=len(TACHO_PACK_FILES):
+        raise ValueError(f'Pack Tacho: patches missing from scripts/tacho_pack/{folder.name}; install the port again')
     return found
 
 

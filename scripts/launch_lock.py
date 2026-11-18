@@ -6,6 +6,7 @@ import sys
 import subprocess
 import signal
 from mod_components import long_path
+from run_log import LogLimit
 
 HELD = {}
 FD_ENV = 'BB_LAUNCH_LOCK_FD'
@@ -79,7 +80,8 @@ def main():
         return 0 if inherited(lock_path(data)) else 1
     if mode != '--run' or not command or os.name == 'nt':
         raise ValueError('usage: launch_lock.py --run DATA COMMAND [ARGS...] (POSIX)')
-    with session(data):
+    with session(data), (Path(data) / 'last_run.log').open('w', encoding='utf-8', errors='replace') as log:
+        limit = LogLimit()
         stream = HELD[lock_path(data)]
         os.environ[FD_ENV] = str(stream.fileno())
         # The runtime closes descriptors on exec-based restart. Exit to this supervisor instead,
@@ -96,10 +98,23 @@ def main():
             signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
             previous = {sig: signal.signal(sig, stop) for sig in signals}
             try:
-                with subprocess.Popen(command, pass_fds=(stream.fileno(),), start_new_session=True) as child:
+                with subprocess.Popen(command, pass_fds=(stream.fileno(),), start_new_session=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                      encoding='utf-8', errors='replace') as child:
                     try:
                         if received[0]:
                             raise KeyboardInterrupt
+                        for line in child.stdout:
+                            try:
+                                log.write(limit(line))
+                                log.flush()
+                            except OSError:
+                                pass
+                            try:
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
+                            except BrokenPipeError:
+                                pass
                         code = child.wait()
                     except KeyboardInterrupt:
                         # Steam may signal only the supervisor. Stop its whole child group,

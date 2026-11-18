@@ -150,6 +150,7 @@ int runtime_ranked_active(void);
 int runtime_ranked_selected(void);
 /* -1 checking, 0 closed/unavailable, 1 open; fresh rechecks before entry. */
 int runtime_ranked_status(int fresh);
+int runtime_ranked_account(void); /* 1 may enter Ranked, 0 must link Discord or Steam first, -1 not known yet */
 void runtime_ranked_gate_update(void *root, int ranked);
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode);
@@ -176,6 +177,8 @@ void *runtime_online_mode_content(void *placeable);
 void runtime_public_itemless_reset(void);
 void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_menu_return(void);
+void runtime_public_itemless_guest_left(const char *session_id);
+void runtime_public_itemless_guest_room(int inside);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
 int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);
@@ -192,6 +195,7 @@ int runtime_itemless_start(unsigned char *image, size_t size);
 int runtime_itemless_collisions_disabled(void);
 /* N.Sane Mode (runtime_nsane.c, runtime_file.c): a second stored item in private N.Sane races. */
 int runtime_nsane_start(unsigned char *image, size_t size);
+int runtime_hero_guard_start(unsigned char *image, size_t size);
 int runtime_nsane_available(void);
 void runtime_nsane_map_loading(const char *map);
 void runtime_nsane_tick(void);                   /* the game's thread, every frame: the second slot's roulette */
@@ -202,6 +206,10 @@ int runtime_online_mode_private_nsane(void);
 int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
 /* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
 int runtime_replay_no_crates(void);
+/* 1 while a replay or a spectated race has the recorded racer's driver, outfit, kart or look on
+ * the player (runtime_replay_play.c, until give_back): a save the game writes then goes to a copy
+ * that is thrown away (runtime_savedata.c), not into the player's own. */
+int runtime_replay_keeps_save_aside(void);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
 void runtime_file_report(void);
@@ -262,10 +270,18 @@ int runtime_voice_markers(struct RuntimeVoiceMarker *out, int max);
 /* 1 when the game's fonts have the loudspeaker character (BB_VOICE_GLYPH=1, scripts/button_prompts.py): the
  * nickname over a talking racer's kart then ends with it. */
 int runtime_voice_glyph(void);
+/* The port's own texts in the game's language (src/runtime_text.c, scripts/octr_texts.py): the
+ * translation of an English text, or the text itself when it has none. runtime_text_is: a shown
+ * text is that English text or its translation. */
+const char *runtime_text(const char *english);
+int runtime_text_is(const char *shown, const char *english);
+int runtime_text_column(void);
+void runtime_text_set_language(int id);
 /* Host handoff research (runtime_party_experiment.c): Ctrl+F9 / Ctrl+Shift+F9 / Ctrl+F10 in a lobby. */
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */
 int runtime_party_hosting(void);                 /* this player hosts its party */
+void runtime_party_host_lost(int role, int private_match, int announced_return); /* old host connection was torn down */
 void runtime_party_experiment_tick(void);          /* the game's thread, in an online lobby */
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);

@@ -1,4 +1,5 @@
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -2339,6 +2340,10 @@ static void test_all_items(void) {
 }
 
 int main(void) {
+    assert(runtime_race_options_start(NULL, 0));
+    unsigned char *invalid_image = calloc(1, 0x2af2608);
+    assert(invalid_image && !runtime_race_options_start(invalid_image, 0x2af2608));
+    free(invalid_image);
     test_overspeed_timestep();
     test_acceleration_timestep();
     test_deceleration_timestep();

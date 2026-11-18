@@ -269,7 +269,7 @@ static void walk(void *node, int row, int control, int depth) {
         if (!strcmp(tag, "[ItemText]") && control) {
             if (control == 1) value = mode ? "ITEMLESS" : "NORMAL";
             else if (control == 2) value = population ? "FRIENDS" : "EVERYONE";
-            else { snprintf(text, sizeof text, "SEASON %d", season); value = season ? text : "LOADING..."; }
+            else { snprintf(text, sizeof text, runtime_text("SEASON %d"), season); value = season ? text : "LOADING..."; }
         }
         if (!strcmp(tag, "[EmptyLeaderboard]")) {
             value = failed ? "LEADERBOARD UNAVAILABLE" : ready ? "No Data" : "LOADING...";

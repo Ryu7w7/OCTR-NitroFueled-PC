@@ -132,6 +132,16 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 const char *runtime_thread_current_name(void);
+/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
+static long allocators_shift(void) {
+    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
+    static long shift = -2;
+    if (shift == -2) {
+        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
+              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
+    }
+    return shift;
+}
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -312,17 +322,6 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
-/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
-static long allocators_shift(void) {
-    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
-    static long shift = -2;
-    if (shift == -2) {
-        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
-              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
-    }
-    return shift;
-}
-
 /* What a corrupt block and the blocks beside it hold, and who was freeing it: whether something
  * wrote over the block, it was freed twice or it never was one tells where to look next. */
 static void dump_corrupt_block(const CONTEXT *c, uintptr_t block) {
@@ -518,8 +517,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         const long shift = image ? allocators_shift() : -1;
         if (shift >= 0) {
             const uintptr_t at = c->Rip - (uintptr_t)image + (uintptr_t)shift;
-            const int tlsf = (at >= 0x1590e1e && at <= 0x1590e65) || (at >= 0x1590f46 && at <= 0x1590f70) ||
-                             (at >= 0x159101b && at <= 0x1591040);
+            const int tlsf = at >= 0x1590e1e && at <= 0x15910f7;
             const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
             if (tlsf || wrapper) {
                 static int count = 0;
@@ -729,6 +727,30 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+    /* A stale lobby-player object reaches FUN_014a1fa0 with a vtable pointer of
+     * image+0x1490000. Its virtual calls (+0x158/+0x168/+0x268) land on that page
+     * start, whose first instruction writes through RAX and faults in read-only
+     * code. The call returns no value the loop needs, so skip that one call. */
+    if (sig == SIGSEGV && image && info &&
+        (uintptr_t)info->si_addr == (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] &&
+        (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] - (uintptr_t)image == 0x1490000) {
+        greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
+        uintptr_t ret = 0;
+        const uintptr_t at = (uintptr_t)g[REG_RSP];
+        if (read_self_memory(&ret, at, sizeof ret) == (ssize_t)sizeof ret &&
+            ret - (uintptr_t)image >= 0x14a1fa0 && ret - (uintptr_t)image <= 0x14a235b) {
+            static int warned;
+            if (!warned++) {
+                const char msg[] = "Runtime: skipped stale lobby-player vtable call (image+0x1490000)\n";
+                ssize_t n = write(2, msg, sizeof msg - 1);
+                (void)n;
+            }
+            g[REG_RIP] = (greg_t)ret;
+            g[REG_RSP] = (greg_t)(at + sizeof ret);
+            g[REG_RAX] = 0;
+            return;
+        }
+    }
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -741,8 +763,30 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    greg_t *g = uc->uc_mcontext.gregs;
+    uintptr_t rip = (uintptr_t)g[REG_RIP];
     char line[512];
+    /* Host takeover can expose the same corrupt free already recovered on Windows. */
+    const long shift = image ? allocators_shift() : -1;
+    if (shift >= 0) {
+        const uintptr_t at = rip - (uintptr_t)image + (uintptr_t)shift;
+        const int tlsf = at >= 0x1590e1e && at <= 0x15910f7;
+        const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
+        if (tlsf || wrapper) {
+            static int count;
+            if (!count++) {
+                int n = snprintf(line, sizeof line,
+                    "Runtime: bailing corrupt free guest offset 0x%llx (block %p, pool=%p)\n",
+                    (unsigned long long)(rip - (uintptr_t)image),
+                    (void *)(uintptr_t)g[wrapper ? REG_R15 : REG_RSI],
+                    (void *)(uintptr_t)g[REG_RDI]);
+                if (n > 0) { ssize_t written_=write(2, line, (size_t)n); (void)written_; }
+            }
+            g[REG_RIP] = (greg_t)((uintptr_t)image +
+                                  (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift);
+            return;
+        }
+    }
     Dl_info where;
     int site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
     char emulating[64] = "";
@@ -1270,7 +1314,8 @@ int main(int argc, char **argv) {
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         char icon[4200];
-        snprintf(icon,sizeof(icon),"%s/sce_sys/icon0.png",app0);
+        const char *window_icon=getenv("BB_WINDOW_ICON");
+        snprintf(icon,sizeof(icon),"%s",window_icon && *window_icon ? window_icon : "launcher/io.github.sacredfire.Launcher.png");
         BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,icon};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
@@ -1388,6 +1433,7 @@ int main(int argc, char **argv) {
     if (!runtime_party_experiment_start(image, size)) puts("Host experiment: not available in this executable");
     /* After the replays: N.Sane chains through their item-box hook (runtime_nsane.c). */
     if (!runtime_nsane_start(image, size)) fail("native N.Sane item callbacks could not be installed");
+    if (!runtime_hero_guard_start(image, size)) fail("start screen racer guard could not be installed");
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};

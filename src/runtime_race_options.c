@@ -44,7 +44,7 @@ static void put_ptr(void *p, size_t offset, void *value) {
 
 static void ABI team_event(unsigned char *self, unsigned char *event, void *owner) {
     const char *name = ptr(self, 0x148);
-    if (name && !strcmp(name, "COLLISION")) {
+    if (runtime_text_is(name, "COLLISION")) {
         team_event_original(self, event, owner);
         return;
     }
@@ -3109,7 +3109,9 @@ static int writable(void *address, size_t length) {
 }
 
 int runtime_race_options_start(unsigned char *image, size_t size) {
-    if (size < 0x2af2608 || !camera_timestep_contract(image,size) ||
+    /* Small loader images do not contain CTR's native race option hooks. */
+    if (size < 0x2af2608) return 1;
+    if (!camera_timestep_contract(image,size) ||
         !vfx_timestep_contract(image,size) || !angular_timestep_contract(image,size) ||
         !deceleration_timestep_contract(image,size) || !scaled_clock_contract(image,size) ||
         !ground_speed_project_contract(image,size) || !freeflight_timestep_contract(image,size)) return 0;

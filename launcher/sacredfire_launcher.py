@@ -119,7 +119,7 @@ ASPECT_OUTPUTS = {"16x10": [("1920 x 1200", "1920x1200"), ("1280 x 800", "1280x8
 UPSCALERS = [("Off", "off"), ("AMD FSR 1", "fsr1"), ("AMD FSR 3 (experimental)", "fsr3")]
 # bbport.ini renderer: run.py sets the native renderer up and builds its shaders from the player's
 # game the first time (scripts/native_shaders.py); it has no FSR 3 (run.py uses FSR 1 instead).
-RENDERERS = [("Vulkan (shadPS4)", "shadps4"), ("Native Vulkan (experimental)", "native")]
+RENDERERS = [("Vulkan (shadPS4)", "shadps4"), ("Native Vulkan", "native")]
 # Settings the game reads from bbport.ini itself (gpu/shim/bbport_settings.cpp), with the
 # game's defaults: the launcher shows and writes them, the in-game menu changes the same keys.
 GAME_FLAGS = {"async_pipelines": "0", "msaa": "0", "borderless": "0"}
@@ -882,29 +882,7 @@ def flat_button(icon, tooltip, handler):
 # What the AppImage's wrapper and runtime add to the environment (packaging/default.nix): the
 # bundled GTK's data, libraries, fonts and pixbuf loaders. A browser or file manager started with
 # them finds the wrong libraries, and the bundled GIO does not see the system's applications.
-FOREIGN_ENV = ("LD_LIBRARY_PATH", "LD_PRELOAD", "GDK_PIXBUF_MODULE_FILE", "FONTCONFIG_FILE", "GIO_EXTRA_MODULES",
-               "GI_TYPELIB_PATH", "GSETTINGS_SCHEMA_DIR", "GTK_PATH", "GTK_EXE_PREFIX", "GTK_DATA_PREFIX",
-               "PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE", "APPDIR", "APPIMAGE", "ARGV0", "OWD",
-               "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_ADD_LAYER_PATH", "VK_LAYER_PATH", "LIBGL_DRIVERS_PATH",
-               "__EGL_VENDOR_LIBRARY_DIRS", "LIBVA_DRIVERS_PATH")
-
-
-def host_environment():
-    """The environment for a program of the player's system: without what the AppImage added, and
-    with the system's own PATH and data directories."""
-    env = {k: v for k, v in os.environ.items() if k not in FOREIGN_ENV and not k.startswith(("BB_", "NIX"))}
-    path = [p for p in env.get("PATH", "").split(":") if p and not p.startswith("/nix/")]
-    env["PATH"] = ":".join(path + [p for p in ("/usr/local/bin", "/usr/bin", "/bin") if p not in path])
-    data = [d for d in env.get("XDG_DATA_DIRS", "").split(":") if d and not d.startswith("/nix/")]
-    home = Path.home()
-    for d in (str(home / ".local/share/flatpak/exports/share"), "/var/lib/flatpak/exports/share",
-              "/usr/local/share", "/usr/share"):
-        if d not in data:
-            data.append(d)
-    env["XDG_DATA_DIRS"] = ":".join(data)
-    if env.get("LC_ALL") == "C.UTF-8":
-        del env["LC_ALL"]  # the wrapper's default, not the player's
-    return env
+from host_environment import host_environment
 
 
 def open_external(target):
@@ -1337,7 +1315,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.renderer_row = combo_row(
             tr("Graphics engine"),
             tr("Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
-               "emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it builds "
+               "emulating the PS4's GPU: more FPS and fewer hitches. The first time it builds "
                "its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 (FSR 1 works). "
                "If something goes wrong, go back to Vulkan (shadPS4)."),
             RENDERERS, self.ini.get("renderer", "shadps4"))
@@ -1569,7 +1547,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.store()
         try:
             subprocess.Popen([str(appimage), "--updated"], cwd=str(appimage.parent),
-                             env=host_environment(), start_new_session=True,
+                             env=host_environment(for_restart=True), start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as error:
             self.update_banner.set_title(tr("Updated, but could not restart the launcher: {}").format(error))

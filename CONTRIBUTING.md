@@ -1,4 +1,7 @@
-# Contributing to SacredFire
+# Contributing
+
+Building from source, packaging, the developer environment and the local-server workflow are in
+[docs/BUILDING.md](docs/BUILDING.md); player documentation is in [README.md](README.md).
 
 ## Game files
 
@@ -17,6 +20,11 @@ Use the bug report template. The log is what matters: the launcher's *Log* tab o
 *Save the log to a file*, or `run.sh`'s output. `BB_FRAME_STATS=1` adds the `Frame stats:` lines
 needed for performance and rendering issues; for a crash, everything from `STOP` or `Guest fault`
 to the end. Name your GPU and driver.
+
+If the log says `SacredFire issue #2` (the launcher shows a notice with an *Open issue #2*
+button), the game hit the known clobbered command buffer bug: attach that whole log to
+[issue #2](https://github.com/T3CHNOLOG1C/SacredFire/issues/2), it carries the diagnostics that
+can find the cause. **No game files** in issues or pull requests.
 
 ## Changes
 
@@ -50,5 +58,6 @@ The AppImage is a GPL binary, so each published one has to match a published com
 SacredFire is GPL-2.0-or-later (see `LICENSE`), as are bbport and shadPS4 it is built on.
 Contributions are accepted under the same license. Third-party components keep theirs
 (README, *Credits and licenses*). The game patches in `patches/CrashTeamRacing.xml` are community
-work by illusion and TroyWarez from [illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch);
-keep the attribution when touching them.
+work by illusion and TroyWarez from
+[illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch); keep the attribution when
+touching them.

@@ -235,7 +235,7 @@ def main(argv=None):
     with open(a.env_file, 'wb') as out:
         for key, value in environment(folder, a.temporal).items():
             out.write(f'{key}={value}'.encode('utf-8') + b'\0')
-    say('Graphics engine: native Vulkan (experimental)')
+    say('Graphics engine: native Vulkan')
     return 0
 
 

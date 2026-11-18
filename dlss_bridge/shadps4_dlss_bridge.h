@@ -50,7 +50,7 @@ typedef struct ShadDlssEvaluate {
 
 typedef struct ShadDlssApi {
     uint32_t abi;
-    // Directories are UTF-16 paths: where nvngx_dlss.dll lives, and a writable data directory.
+    // Native wchar_t paths: the DLSS library directory and a writable data directory.
     int32_t (*Configure)(const wchar_t* dll_directory, const wchar_t* data_directory,
                          ShadDlssLogFn log);
     // Extensions NGX needs. The arrays stay valid until Shutdown.

@@ -78,6 +78,17 @@ static int json_int(const char *s, const char *key, int *out);
 /* Status requests never touch guest objects or block the game thread. */
 static int status_state = -1, status_pending, status_season;
 static uint64_t status_until;
+/* Ranked needs a nickname linked to Discord or Steam (the server's ranked_account.go): 1 this
+ * player may enter, 0 they must link an account first, -1 not known yet. A server that does not
+ * say (older, or the request was not signed) lets them in; its admission check still refuses. */
+static int status_account = -1;
+
+int runtime_ranked_account(void) {
+    pthread_mutex_lock(&lock);
+    const int account = status_account;
+    pthread_mutex_unlock(&lock);
+    return account;
+}
 
 int runtime_ranked_status(int fresh) {
     const uint64_t now = monotonic_ms();
@@ -103,17 +114,30 @@ static int status_integer(const char *reply, const char *key, int *out) {
     return 1;
 }
 
-static int ranked_status_reply(const char *reply, int *season, int *enabled, int *retry) {
-    if (!reply || !status_integer(reply, "season", season) || *season < 1 ||
-        !status_integer(reply, "retry_after", retry)) return 0;
-    const char *p = runtime_json_field(reply, "enabled");
+/* A JSON true/false field: 1 found (its value in *out), 0 missing or not a boolean */
+static int status_bool(const char *reply, const char *key, int *out) {
+    const char *p = runtime_json_field(reply, key);
     if (!p) return 0;
     size_t n = !strncmp(p, "true", 4) ? 4 : !strncmp(p, "false", 5) ? 5 : 0;
     if (!n) return 0;
-    *enabled = n == 4;
     p += n;
     while (isspace((unsigned char)*p)) ++p;
-    return *p == ',' || *p == '}';
+    if (*p != ',' && *p != '}') return 0;
+    *out = n == 4;
+    return 1;
+}
+
+static int ranked_status_reply(const char *reply, int *season, int *enabled, int *retry) {
+    if (!reply || !status_integer(reply, "season", season) || *season < 1 ||
+        !status_integer(reply, "retry_after", retry)) return 0;
+    return status_bool(reply, "enabled", enabled);
+}
+
+/* 1 may enter Ranked, 0 must link an account (account_required and not account_linked) */
+static int ranked_account_reply(const char *reply) {
+    int required = 0, linked = 0;
+    if (!status_bool(reply, "account_required", &required) || !required) return 1;
+    return status_bool(reply, "account_linked", &linked) && linked;
 }
 
 static void ranked_status_fetch(void) {
@@ -124,10 +148,16 @@ static void ranked_status_fetch(void) {
     char *reply = NULL;
     size_t size = 0;
     int season = 0, enabled = 0, retry = 5;
-    const int valid = runtime_ryunet_transfer("GET", "/ryunet/ranked-status", NULL, 0,
+    /* signed with this player's nickname: the server also says whether Ranked lets them in */
+    const char *me = runtime_np_get_online_name();
+    char target[96] = "/ryunet/ranked-status";
+    if (me && *me && strlen(me) <= 16) snprintf(target, sizeof target, "/ryunet/ranked-status?name=%s", me);
+    const int valid = runtime_ryunet_transfer("GET", target, NULL, 0,
         &reply, &size, 1024) == 200 && ranked_status_reply(reply, &season, &enabled, &retry);
+    const int account = valid ? ranked_account_reply(reply) : -1;
     free(reply);
     pthread_mutex_lock(&lock);
+    if (valid) status_account = account;
     if (valid && season != status_season) {
         status_season = season;
         runtime_hof_season_changed(season);

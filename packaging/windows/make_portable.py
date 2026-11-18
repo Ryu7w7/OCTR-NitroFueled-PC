@@ -326,6 +326,8 @@ def main():
     bundle_wheel(folder, a.dist / 'pycache', NUMPY_URL, NUMPY_SHA256,
                  ('numpy', 'numpy.libs', f'numpy-{NUMPY_VERSION}.dist-info'))
     shutil.copy2(ROOT / 'run.py', folder)
+    (folder / 'launcher').mkdir(exist_ok=True)
+    shutil.copy2(ROOT / 'launcher/io.github.sacredfire.Launcher.png', folder / 'launcher')
     # No docs/ (v0.8.5): the mod guides are read on GitHub (the launcher's Mods tab links them).
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')

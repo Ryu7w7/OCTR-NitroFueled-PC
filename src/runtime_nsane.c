@@ -61,6 +61,10 @@ static RollType roll_type;
 static Statistic statistic;
 static void **block_meta, **hud_meta, **racers, **game_manager;
 static unsigned char *game_image;
+/* The European game (CUSA14876 1.21): many of these functions sit 0x10 lower (found by comparing
+ * the two executables' code, tools/port_patch_eu.py). at(usa, moved): the address in this game. */
+static int game_eu;
+static unsigned char *at(size_t usa, int moved) { return game_image + usa - (game_eu && moved ? 0x10 : 0); }
 static int available;
 
 #define SLOTS 8
@@ -252,10 +256,10 @@ static void ABI item_finished(unsigned char *controller, void *item) {
      * returns to 0xf154e0), and the component's start empties it too (0xf0a7d0, returns to 0xf0aa4d). Handing
      * the second over there gave the HUD that item while the roulette then gave another: the second stays. */
     const uintptr_t from = (uintptr_t)__builtin_return_address(0);
-    if (from == (uintptr_t)(game_image + 0xf154e0) || from == (uintptr_t)(game_image + 0xf0aa4d)) {
+    if (from == (uintptr_t)at(0xf154e0, 1) || from == (uintptr_t)at(0xf0aa4d, 1)) {
         native_finished(controller, item);
         /* the beaker's roulette may land on the stored item: runtime_nsane_tick waits for it, then differs */
-        const int slot = from == (uintptr_t)(game_image + 0xf154e0) && controller ? find_slot(controller) : -1;
+        const int slot = from == (uintptr_t)at(0xf154e0, 1) && controller ? find_slot(controller) : -1;
         if (slot >= 0 && runtime_nsane_race_active()) second[slot].spin = now_ms();
         return;
     }
@@ -330,10 +334,17 @@ int runtime_nsane_start(unsigned char *image, size_t size) {
     static const unsigned char crate_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x49,0x89,0xfc};
     /* push rbp; mov rbp,rsp; push r15; push r14; push rbx; push rax; mov rbx,rsi; mov r14,rdi */
     static const unsigned char used_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x48,0x89,0xf3,0x49,0x89,0xfe};
-    /* the call that tells the HUD the hand is empty (0xeb11c3 -> 0xe368a0) */
-    static const unsigned char notify_call[] = {0xe8,0xd8,0x56,0xf8,0xff};
     if (size < 0x2ad4b78) return 1;
-    unsigned char *crate = image + 0xe36230, *used = image + 0xeb10d0;
+    /* USA 1.21, or the European 1.21 (the item functions 0x10 lower) */
+    game_image = image;
+    game_eu = memcmp(image + 0xeb10d0, used_code, sizeof used_code) &&
+              !memcmp(image + 0xeb10c0, used_code, sizeof used_code);
+    unsigned char *crate = at(0xe36230, 0), *used = at(0xeb10d0, 1);
+    /* the call that tells the HUD the hand is empty (0xeb11c3 -> 0xe368a0) */
+    unsigned char *notify = at(0xeb11c3, 1);
+    unsigned char notify_call[5] = {0xe8};
+    const int32_t notify_rel = (int32_t)(at(0xe368a0, 0) - (notify + 5));
+    memcpy(notify_call + 1, &notify_rel, sizeof notify_rel);
     /* Native replays (runtime_replay.c hook_bytes, installed before this) put "jmp rel32" to a
      * trampoline ("jmp [rip]" + address) over the crate function's first 6 bytes. Then N.Sane goes
      * in that trampoline and calls the replay's handler as the game's function (it runs the
@@ -350,8 +361,8 @@ int runtime_nsane_start(unsigned char *image, size_t size) {
         }
     }
     if ((!replay_handler && memcmp(crate, crate_code, sizeof crate_code)) || memcmp(used, used_code, sizeof used_code) ||
-        memcmp(image + 0xeb11c3, notify_call, sizeof notify_call)) {
-        puts("Native N.SANE: this game version is not supported (USA 1.21 only); mode unavailable");
+        memcmp(notify, notify_call, sizeof notify_call)) {
+        puts("Native N.SANE: this game version is not supported (USA and EU 1.21 only); mode unavailable");
         return 1; /* not fatal: the selector hides N.Sane */
     }
 #ifdef _WIN32
@@ -366,19 +377,18 @@ int runtime_nsane_start(unsigned char *image, size_t size) {
     jump(stub + sizeof crate_code, crate + sizeof crate_code);
     memcpy(stub + 64, used_code, sizeof used_code);
     jump(stub + 64 + sizeof used_code, used + sizeof used_code);
-    game_image = image;
     native_crate = replay_handler ? (CrateCollected)replay_handler : (CrateCollected)stub;
     native_finished = (ItemFinished)(stub + 64);
-    give_item = (GiveItem)(image + 0xe366b0);
-    get_component = (GetComponent)(image + 0x3dbf90);
-    resolve_handle = (ResolveHandle)(image + 0x149fca0);
-    odds_owner = (NoArgs)(image + 0x9b9ec0);
-    racer_of = (RacerOf)(image + 0xfd4230);
-    is_local = (IsLocal)(image + 0xc02470);
-    odds_table = (OddsTable)(image + 0xe38030);
-    prepare_odds = (PrepareOdds)(image + 0xe38190);
-    roll_type = (RollType)(image + 0xe38280);
-    statistic = (Statistic)(image + 0xfddb30);
+    give_item = (GiveItem)at(0xe366b0, 0);
+    get_component = (GetComponent)at(0x3dbf90, 0);
+    resolve_handle = (ResolveHandle)at(0x149fca0, 1);
+    odds_owner = (NoArgs)at(0x9b9ec0, 0);
+    racer_of = (RacerOf)at(0xfd4230, 1);
+    is_local = (IsLocal)at(0xc02470, 0);
+    odds_table = (OddsTable)at(0xe38030, 0);
+    prepare_odds = (PrepareOdds)at(0xe38190, 0);
+    roll_type = (RollType)at(0xe38280, 0);
+    statistic = (Statistic)at(0xfddb30, 1);
     block_meta = (void **)(image + 0x2ac40f0);
     hud_meta = (void **)(image + 0x2ad4940);
     racers = (void **)(image + 0x2ad4b70);
@@ -394,6 +404,7 @@ int runtime_nsane_start(unsigned char *image, size_t size) {
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
     available = 1;
-    puts("Native N.SANE: second stored item and its HUD slot (private N.Sane races only)");
+    printf("Native N.SANE: second stored item and its HUD slot (private N.Sane races only; %s 1.21)\n",
+           game_eu ? "EU" : "USA");
     return 1;
 }

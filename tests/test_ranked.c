@@ -44,7 +44,8 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
                             char **reply, size_t *reply_size, size_t max_reply) {
     (void)size; (void)max_reply;
     if (!strcmp(method, "GET")) {
-        if (!strcmp(target, "/ryunet/ranked-status")) {
+        /* signed with the player's nickname when the game has one (the server answers the account too) */
+        if (!strcmp(target, "/ryunet/ranked-status") || !strncmp(target, "/ryunet/ranked-status?name=", 27)) {
             ++status_gets;
             *reply = strdup(status_reply);
             *reply_size = strlen(*reply);
@@ -98,6 +99,15 @@ static void test_status_contract(void) {
         "{\"season\":99999999999999999999,\"enabled\":true,\"retry_after\":0}"};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i)
         assert(!ranked_status_reply(bad[i], &season, &enabled, &retry));
+    /* the account the server asks for (ranked_account.go): only "required and not linked" stops */
+    assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0}") == 1);
+    assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,"
+                                "\"account_required\":false,\"account_linked\":false}") == 1);
+    assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,"
+                                "\"account_required\":true,\"account_linked\":true}") == 1);
+    assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,"
+                                "\"account_required\":true,\"account_linked\":false}") == 0);
+    assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,\"account_required\":true}") == 0);
     status_state = 0;
     status_until = monotonic_ms() + 895000;
     assert(runtime_ranked_status(1) == 0 && !status_pending);

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pack Tacho 1.2.8 by Tacho, built into the port with his permission (scripts/tacho_pack/README.txt). -->
+<!-- Reloj de N. Tropy por posicion: duracion x[1.0, 0.85, 0.7, 0.55, 0.5, 0.5, 0.5, 0.5] segun el lugar; los que van detras del que lo lanza no se
+     ven afectados. Address = VA + 0x400000. -->
+<!-- European game (CUSA14876 1.21): ported from scripts/tacho_pack/patches by tools/port_patch_eu.py
+     (the same code; calls and sites at the EU addresses). -->
+<Patch>
+    <TitleID>
+        <ID>CUSA14876</ID>
+    </TitleID>
+    <Metadata isEnabled="true" Title="Crash Team Racing Nitro-Fueled" Name="Reloj de N. Tropy por posicion" Author="Tacho" PatchVer="0.3" AppVer="01.21" AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x02725e00" Value="534154415541564883ec084889fb4989f44989d5488b3d55ed7a004c89e6e8fde3cafe4885c0750841be02000000eb35448b7058488b43284885c07428f700000000307520488b70284885f67417488b3d1bed7a00e8c6e3cafe4885c07406443b70587f52eb42488b43104885c07439488b40184885c07430f30f104018418d4eff85c9790231c983f9077e05b907000000488d052b000000f30f590488f3410f11451841c64514014889df4c89e64c89eae8899cbffe4883c408415e415d415c5bc3cc0000803f9a99593f3333333fcdcc0c3f0000003f0000003f0000003f0000003f" ExpectedSHA256="fb678f67aea5293efa9930a41b828fdfb475dc2b427628588640e080884f0e45" />
+            <Line Type="bytes" Address="0x0131f752" Value="e8a9664001" Signature="4c 89 ff 4c 89 e6 4c 89 ea e8 e9 03 00 00 48 83 c3 08 4c 39 f3" SignatureOffset="0x9" ExpectedSHA256="6409801e2507db819c35dc0476f90597def63689b8d39cdd8c5e8d49fb58006d" />
+        </PatchList>
+    </Metadata>
+</Patch>

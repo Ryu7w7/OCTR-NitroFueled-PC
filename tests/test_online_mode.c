@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include "../src/runtime_text.c"
 
 extern unsigned char *ranked_mode_select_root(unsigned char *owner);
 extern void ranked_mode_select_layout(unsigned char *root, int ranked);
@@ -68,6 +69,7 @@ int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
+void runtime_public_itemless_guest_room(int inside) { (void)inside; }
 void runtime_public_itemless_update(void) {}
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
@@ -670,7 +672,6 @@ static void ABI place_racers_mock(unsigned char *manager) {
         int position = expected_grid >= 2 ?
             (id == 7 ? 1 : id == 0 ? 8 : id + 1) : expected_grid ? id + 1 : 0;
         if (expected_grid >= 3 && player && *(uint64_t *)(player + 0xa8) == 100) position = 8;
-        if (expected_grid == 4 && position > 4) --position;
         assert(*(int *)(items[i] + 0x60) == position);
     }
     ++grid_calls;
@@ -2075,7 +2076,7 @@ static void test_region(size_t shift) {
     load_map(maps[cup_index], 8);
     for (int k = 0; k < 8; ++k) *(int *)(racers[k] + 0x60) = 0;
     *(int *)(players[0] + 0xc8) = 42; /* Network slot can change between CUP tracks. */
-    expected_grid = 4;
+    expected_grid = 3;
     place_racers(racers_manager);
     *(int *)(players[0] + 0xc8) = 0;
     put_pointer(racers_list, 0x20, racer_items);

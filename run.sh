@@ -19,6 +19,7 @@ data=${BB_DATA_DIR:-.}
 out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
+export BB_WINDOW_ICON=${BB_WINDOW_ICON:-$PWD/launcher/io.github.sacredfire.Launcher.png}
 if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
     exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash run.sh $args"
@@ -173,6 +174,20 @@ done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --setting
 # ...and the voice chat's loudspeaker character in them: the nickname over a talking racer shows it.
 unset BB_VOICE_GLYPH
 if grep -q '"speaker": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_VOICE_GLYPH=1; fi
+# Then, as run.py (scripts/startup_extras.py): the seasonal title screen, the nickname bottom left
+# of the menus online, the CTR TV logo and Pack Tacho's files (its executable patches need them:
+# without them a race crashed while loading), each keeping the patches before it.
+extras_patches=() extras_fail=
+while IFS= read -r line; do
+    case $line in
+        patch=*) extras_patches+=(--base "${line#patch=}") ;;
+        env.*=*) line=${line#env.}; export "${line%%=*}=${line#*=}" ;;
+        fail=*) extras_fail=${line#fail=} ;;
+        ?*) echo "$line" ;;
+    esac
+done < <(startup_python scripts/startup_extras.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
+if [[ -n $extras_fail ]]; then echo "$extras_fail" >&2; exit 3; fi
+if (( ${#extras_patches[@]} )); then base_patches=("${extras_patches[@]}"); fi
 # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py), as run.py: the
 # render path and the patches read its settings, and it adds its archive patches (the playlist's
 # kept in them), executable patch and HUD scale.
@@ -222,7 +237,7 @@ if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01
         echo "TT reference preparation failed; AI retains native route guidance." >&2
     fi
 fi
-unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE
+unset BB_ONLINE_MODE_HOOK BB_SPEED_MODE BB_NSANE_ARCHIVE_PATCHES
 if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
     if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
         speed_bases=()
@@ -255,6 +270,7 @@ if [[ ${BB_ONLINE:-0} == 1 || ${BB_SPEED_SOLO_TEST:-0} == 1 ]]; then
             case $key in
                 archive_patches) export BB_ARCHIVE_PATCHES=$value ;;
                 private_archive_patches) export BB_PRIVATE_ARCHIVE_PATCHES=$value ;;
+                nsane_archive_patches) if [[ -n $value ]]; then export BB_NSANE_ARCHIVE_PATCHES=$value; fi ;;
                 'ITEMLESS: private overlays prepared for '* ) echo "$key" ;;
             esac
         done <<< "$speed_result"
@@ -266,14 +282,15 @@ fi
 # keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
 # in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-# Contributor testing against a LOCAL RyuNET checkout: BB_AUTH_KEY names that server's
-# ctr_ps4.key, and the data folder's patch replaces the bundled Demonware key with it (the
-# bundled file is never touched, so production play keeps the production key). Without it,
-# a local server's signed auth is refused by the game and it retries for ever (code=700).
-if [[ ${BB_ONLINE:-0} == 1 && -n ${BB_AUTH_KEY:-} ]]; then
-    startup_python scripts/online_key_local.py --data "$data" --key "$BB_AUTH_KEY" || exit 1
-elif [[ ${BB_ONLINE:-0} == 1 && ${BB_ONLINE_SERVER:-} == 127.0.0.1 ]] && [[ -z ${BB_AUTH_KEY:-} ]]; then
-    echo "Online: a localhost server signs auth with its own key; set BB_AUTH_KEY=<RyuNET checkout>/ctr_ps4.key or the game refuses every auth reply." >&2
+# Contributor testing against a LOCAL RyuNET checkout or any other private server: the game only
+# accepts auth signed by a key it trusts, so a server that is not the production one needs its
+# ctr_ps4 key in $data/ryunet_keys/<host>.pub (or BB_AUTH_KEY=<path>). The data folder is shared
+# with the packaged game, so the patch is removed again on every run that does not need it.
+if [[ ${BB_ONLINE:-0} == 1 ]]; then
+    startup_python scripts/online_key_local.py --data "$data" --server "${BB_ONLINE_SERVER:-}" \
+        ${BB_AUTH_KEY:+--key "$BB_AUTH_KEY"} || exit 1
+else
+    startup_python scripts/online_key_local.py --data "$data" --restore
 fi
 startup_python scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
     "${layout_patches[@]}" "${strict_overlap[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \

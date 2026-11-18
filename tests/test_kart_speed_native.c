@@ -1,6 +1,7 @@
 /* Offline native-function fixture, invoked by test_kart_timestep_native.py. */
 #define _GNU_SOURCE
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 #include <assert.h>
 #include <elf.h>
 

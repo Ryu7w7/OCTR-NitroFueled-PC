@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_settings.h"
+#include "../../src/settings_lock.h"
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +24,11 @@ const char* Path() {
     return env && env[0] ? env : "bbport.ini";
 }
 
+const char* PreferencesPath() {
+    const char* env = std::getenv("BB_LAUNCHER_CONFIG");
+    return env && env[0] ? env : Path();
+}
+
 float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
 }
@@ -32,10 +41,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         auto& slot = v.ports[size_t(key[5] - '1')];
         std::snprintf(slot.data(), slot.size(), "%s", value.c_str());
     } else if (key == "menu_language") {
-        if (value == "en") v.menu_language = MenuLanguage::English;
-        else if (value == "ru") v.menu_language = MenuLanguage::Russian;
-        else if (value == "es") v.menu_language = MenuLanguage::Spanish;
-        else std::printf("Settings: unknown menu_language '%s' (expected en, ru or es)\n", value.c_str());
+        bool known = false;
+        const MenuLanguage language = MenuLanguageOf(value.c_str(), &known);
+        if (known) v.menu_language = language;
+        else std::printf("Settings: unknown menu_language '%s' (expected en, ru, es, fr, pt, de or it)\n", value.c_str());
     } else if (key == "upscaler") {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (value == UpscalerName(u)) {
@@ -118,6 +127,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "volume") {
         v.volume = std::clamp(i, 0, 200);
     } else if (key == "menu_pos") {
+        if (value.empty()) v.menu_x = v.menu_y = -1.0f;
         float x = -1.0f, y = -1.0f;
         if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
             y <= 1.0f) {
@@ -153,11 +163,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "fsr3_sharpness") {
         v.fsr3_sharpness = Clamp(f, 0.0f, 1.0f);
     } else if (key == "render_res") {
+        if (value.empty()) v.render_res = -1;
         for (int r = 0; r < RenderResCount; ++r) {
             if (i == RenderResHeights[r]) v.render_res = r;
         }
     } else if (key == "ultrawide") {
-        v.ultrawide = i != 0 ? 1 : 0;
+        v.ultrawide = value.empty() ? -1 : i != 0 ? 1 : 0;
     } else if (key == "aspect_ratio") {
         v.aspect_ratio = Aspect16x9;
         for (int a = 0; a < AspectRatioCount; ++a) {
@@ -179,6 +190,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "ultrawide_ask") {
         v.ultrawide_ask = i != 0;
     } else if (key == "ultrawide_size") {
+        if (value.empty()) v.ultrawide_w = v.ultrawide_h = 0;
         int w = 0, h = 0;
         if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 16384 &&
             h <= 8640) {
@@ -209,6 +221,30 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     }
 }
 
+using SettingsMap = std::map<std::string, std::string>;
+std::mutex sync_mutex;
+SettingsMap file_values, baseline;
+std::filesystem::file_time_type file_time{};
+std::string file_path;
+std::chrono::steady_clock::time_point checked;
+
+bool ReadSettings(SettingsMap& values) {
+    std::ifstream file(PreferencesPath());
+    if (!file) return false;
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto start = line.find_first_not_of(" \t\r");
+        const auto eq = line.find('=');
+        if (start == std::string::npos || line[start] == '#' || line[start] == ';' || eq == std::string::npos) continue;
+        std::string key = line.substr(start, eq - start), value = line.substr(eq + 1);
+        key.erase(key.find_last_not_of(" \t\r") + 1);
+        value.erase(0, value.find_first_not_of(" \t\r"));
+        value.erase(value.find_last_not_of(" \t\r") + 1);
+        values[key] = value;
+    }
+    return !file.bad();
+}
+
 } // namespace
 
 std::mutex& PortsMutex() { static std::mutex m; return m; }
@@ -222,11 +258,56 @@ const char* MenuText(const char* english, const char* russian) {
     switch (Get().menu_language.load()) {
     case MenuLanguage::Russian: return russian;
     case MenuLanguage::Spanish: return Spanish(english);
+    case MenuLanguage::French: return MoreLanguages(english, 0);
+    case MenuLanguage::Portuguese: return MoreLanguages(english, 1);
+    case MenuLanguage::German: return MoreLanguages(english, 2);
+    case MenuLanguage::Italian: return MoreLanguages(english, 3);
     default: return english;
     }
 }
 
+namespace {
+constexpr struct { MenuLanguage language; const char* code; } kMenuLanguageCodes[] = {
+    {MenuLanguage::English, "en"}, {MenuLanguage::Russian, "ru"}, {MenuLanguage::Spanish, "es"},
+    {MenuLanguage::French, "fr"}, {MenuLanguage::Portuguese, "pt"}, {MenuLanguage::German, "de"},
+    {MenuLanguage::Italian, "it"},
+};
+} // namespace
+
+const char* MenuLanguageCode(MenuLanguage language) {
+    for (const auto& entry : kMenuLanguageCodes) {
+        if (entry.language == language) return entry.code;
+    }
+    return "en";
+}
+
+MenuLanguage MenuLanguageOf(const char* code, bool* ok) {
+    for (const auto& entry : kMenuLanguageCodes) {
+        if (code && !std::strcmp(code, entry.code)) {
+            if (ok) *ok = true;
+            return entry.language;
+        }
+    }
+    if (ok) *ok = false;
+    return MenuLanguage::English;
+}
+
+static std::vector<std::pair<std::string, std::string>> Snapshot(const Values& v);
+static SettingsMap CurrentSettings() {
+    const auto values = Snapshot(Get());
+    return {values.begin(), values.end()};
+}
+static void RememberSettings() {
+    file_values.clear();
+    ReadSettings(file_values);
+    baseline = CurrentSettings();
+    std::error_code error;
+    file_time = std::filesystem::last_write_time(PreferencesPath(), error);
+    file_path = PreferencesPath();
+}
+
 void Load() {
+    std::scoped_lock lock{sync_mutex};
     auto& v = Get();
     v.aspect_ratio = Aspect16x9;
     v.aspect_w = v.aspect_h = 0;
@@ -249,7 +330,26 @@ void Load() {
         auto is = [&](char a, char b) {
             return lang && (lang[0] == a || lang[0] == a - 32) && (lang[1] == b || lang[1] == b - 32);
         };
-        v.menu_language = is('r', 'u') ? MenuLanguage::Russian : is('e', 's') ? MenuLanguage::Spanish : MenuLanguage::English;
+        v.menu_language = is('r', 'u')   ? MenuLanguage::Russian
+                          : is('e', 's') ? MenuLanguage::Spanish
+                          : is('f', 'r') ? MenuLanguage::French
+                          : is('p', 't') ? MenuLanguage::Portuguese
+                          : is('d', 'e') ? MenuLanguage::German
+                          : is('i', 't') ? MenuLanguage::Italian
+                                         : MenuLanguage::English;
+        // The launcher's own languages are English and Spanish: with English there and the game in
+        // French, Portuguese, German or Italian (BB_LANGUAGE, PS4 language ids), the menu follows the
+        // game until a language is chosen in the menu (menu_language in bbport.ini).
+        if (v.menu_language == MenuLanguage::English) {
+            if (const char* game = std::getenv("BB_LANGUAGE"); game && *game) {
+                const int id = std::atoi(game);
+                v.menu_language = (id == 2 || id == 22) ? MenuLanguage::French
+                                  : (id == 17 || id == 7) ? MenuLanguage::Portuguese
+                                  : id == 4             ? MenuLanguage::German
+                                  : id == 5             ? MenuLanguage::Italian
+                                                        : MenuLanguage::English;
+            }
+        }
     }
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
@@ -264,13 +364,6 @@ void Load() {
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
-    }
-    // v0.4: the launcher's language (BB_MENU_LANGUAGE) wins over the saved one: the launcher is
-    // where the player picks it.
-    if (const char* lang = std::getenv("BB_MENU_LANGUAGE"); lang && *lang) {
-        if (!std::strncmp(lang, "es", 2)) v.menu_language = MenuLanguage::Spanish;
-        else if (!std::strncmp(lang, "ru", 2)) v.menu_language = MenuLanguage::Russian;
-        else if (!std::strncmp(lang, "en", 2)) v.menu_language = MenuLanguage::English;
     }
     // SacredFire: bbport's temporal upscalers and object motion vectors read the scene of the game
     // bbport was built for (its render targets, constants and vertex streams), not this one; they
@@ -334,6 +427,7 @@ void Load() {
     v.startup_dlss_output = v.dlss_output;
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
+    RememberSettings();
 }
 
 bool RenderSizeNeedsRestart() {
@@ -417,8 +511,7 @@ bool ResolutionNeedsRestart() {
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
 }
 
-void Save() {
-    const auto& v = Get();
+static std::vector<std::pair<std::string, std::string>> Snapshot(const Values& v) {
     // The keys the menu writes, in this order; the rest of the file stays as it is: the
     // launcher's controls (key.* / pad.*) and its other keys, comments.
     std::vector<std::pair<std::string, std::string>> keys;
@@ -436,9 +529,7 @@ void Save() {
         }
     }
     put("split_auto", flag(v.split_auto));
-    put("menu_language", v.menu_language == MenuLanguage::Russian   ? "ru"
-                         : v.menu_language == MenuLanguage::Spanish ? "es"
-                                                                    : "en");
+    put("menu_language", MenuLanguageCode(v.menu_language));
     put("upscaler", UpscalerName(v.upscaler));
     put("preset", std::to_string(v.preset.load()));
     put("sharpen", flag(v.sharpen));
@@ -519,10 +610,63 @@ void Save() {
         put("menu_pos", fixed(v.menu_x, 4) + "," + fixed(v.menu_y, 4));
     }
 
+    return keys;
+}
+
+static bool RefreshLocked(bool force) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - checked < std::chrono::milliseconds(250)) return false;
+    checked = now;
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(PreferencesPath(), error);
+    if (error || (!force && file_path == PreferencesPath() && stamp == file_time)) return false;
+    SettingsMap disk;
+    if (!ReadSettings(disk)) return false;
+    const auto before = CurrentSettings();
+    auto& values = Get();
+    const int old_resolution = values.render_res;
+    auto changes = disk;
+    Values defaults;
+    for (int e = 0; e < EffectCount; ++e) defaults.effects[e] = Effects[e].default_on;
+    const auto default_keys = Snapshot(defaults);
+    const SettingsMap default_values(default_keys.begin(), default_keys.end());
+    for (const auto& [key, value] : file_values) {
+        if (!disk.contains(key)) {
+            const auto found = default_values.find(key);
+            changes[key] = found == default_values.end() ? "" : found->second;
+        }
+    }
+    for (const auto& [key, value] : changes) {
+        const auto old = file_values.find(key);
+        const auto local = before.find(key);
+        const auto saved = baseline.find(key);
+        if ((old == file_values.end() || old->second != value || !disk.contains(key)) &&
+            (local == before.end() || (saved != baseline.end() && local->second == saved->second)))
+            Set(values, key, value);
+    }
+    // The legacy upscaler reads another game's buffers; keep the same guard as Load().
+    if (!std::getenv("BB_UPSCALER")) values.upscaler = UpscalerOff;
+    if (!std::getenv("BB_OBJECT_MOTION")) values.object_motion = false;
+    const auto after = CurrentSettings();
+    if (values.LiveGraphics() && values.render_res != old_resolution)
+        values.native_resolution_requested = true;
+    for (const auto& [key, value] : after) {
+        const auto local = before.find(key);
+        const auto saved = baseline.find(key);
+        if (local == before.end() || (saved != baseline.end() && local->second == saved->second)) baseline[key] = value;
+    }
+    file_values = std::move(disk);
+    file_time = stamp;
+    file_path = PreferencesPath();
+    return before != after;
+}
+
+static bool WriteSettings(const char* path,
+                          const std::vector<std::pair<std::string, std::string>>& keys) {
     std::string out;
     bool had_lines = false;
     std::vector<bool> written(keys.size());
-    if (FILE* file = std::fopen(Path(), "r")) {
+    if (FILE* file = std::fopen(path, "r")) {
         char line[512];
         while (std::fgets(line, sizeof(line), file)) {
             had_lines = true;
@@ -554,24 +698,64 @@ void Save() {
         }
     }
     // Replaced whole: a crash while writing leaves the old file.
-    const std::string temporary = std::string(Path()) + ".tmp";
+    const std::string temporary = std::string(path) + ".tmp";
     FILE* file = std::fopen(temporary.c_str(), "w");
     bool ok = file && std::fwrite(out.data(), 1, out.size(), file) == out.size();
     ok = file && std::fclose(file) == 0 && ok;
     // std::filesystem::rename replaces an existing file on Windows too (std::rename does not).
     std::error_code error;
     if (ok) {
-        std::filesystem::rename(temporary, Path(), error);
+        std::filesystem::rename(temporary, path, error);
     }
     if (!ok || error) {
-        std::printf("Settings: cannot write %s (%s)\n", Path(), error ? error.message().c_str() : "write failed");
-    } else {
-        std::printf("Settings: saved %s (", Path());
-        for (int g = 0; g < GamePatchCount; ++g) {
-            std::printf("%s%s=%d", g ? ", " : "", GamePatches[g].key, int(v.game_patches[g]));
-        }
-        std::printf(")\n");
+        std::printf("Settings: cannot write %s (%s)\n", path, error ? error.message().c_str() : "write failed");
+        return false;
     }
+    return true;
+}
+
+bool Refresh(bool force) {
+    std::scoped_lock lock{sync_mutex};
+    const bool changed = RefreshLocked(force);
+    if (changed && std::strcmp(Path(), PreferencesPath()) != 0) {
+        // Runtime readers and Windows restarts still use the mod session's effective settings.
+        SettingsLock session_lock(Path());
+        if (session_lock) WriteSettings(Path(), Snapshot(Get()));
+        else std::printf("Settings: cannot lock %s\n", Path());
+    }
+    return changed;
+}
+
+void Save() {
+    std::scoped_lock lock{sync_mutex};
+    const char* preferences = PreferencesPath();
+    SettingsLock file_lock(preferences);
+    if (!file_lock) { std::printf("Settings: cannot lock %s\n", preferences); return; }
+    RefreshLocked(true);
+    const auto& v = Get();
+    const auto snapshot = Snapshot(v);
+    auto keys = snapshot;
+    const bool session = std::strcmp(Path(), preferences) != 0;
+    if (session) {
+        // Persist user edits, not the mod's initial overrides or generated defaults.
+        std::erase_if(keys, [](const auto& entry) {
+            const auto saved = baseline.find(entry.first);
+            return saved != baseline.end() && saved->second == entry.second;
+        });
+    }
+    if (!keys.empty() && !WriteSettings(preferences, keys)) return;
+    if (session) {
+        SettingsLock session_lock(Path());
+        if (!session_lock) { std::printf("Settings: cannot lock %s\n", Path()); return; }
+        if (!WriteSettings(Path(), snapshot)) return;
+    }
+    RememberSettings();
+    baseline = SettingsMap(snapshot.begin(), snapshot.end());
+    std::printf("Settings: saved %s (", preferences);
+    for (int g = 0; g < GamePatchCount; ++g) {
+        std::printf("%s%s=%d", g ? ", " : "", GamePatches[g].key, int(v.game_patches[g]));
+    }
+    std::printf(")\n");
 }
 
 float PresetScale(int preset) {

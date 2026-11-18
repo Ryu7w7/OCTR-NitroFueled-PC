@@ -102,7 +102,7 @@ struct PadStatus {
 std::mutex pad_status_mutex;
 PadStatus pad_status[4];
 bool l3_down = false, r3_down = false;
-bool dirty = false; // settings changed while open: saved on close
+bool dirty = false; // Autosaved during editing, with a final flush on close.
 float base_scale = 1.0f;
 
 // The game's text dialog (ImeDialog, the character name), typed on the keyboard: drawn while it
@@ -2150,15 +2150,12 @@ void Menu() {
     }
     {
         // Always readable, whatever the menu's language.
-        static const char* languages[] = {"English", "Русский", "Español"};
-        int language = s.menu_language == BbSettings::MenuLanguage::Russian   ? 1
-                       : s.menu_language == BbSettings::MenuLanguage::Spanish ? 2
-                                                                              : 0;
+        static const char* languages[] = {"English", "Русский", "Español", "Français", "Português", "Deutsch",
+                                          "Italiano"};
+        int language = int(s.menu_language.load());
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-        if (ImGui::Combo("Language / Idioma", &language, languages, 3)) {
-            s.menu_language = language == 1   ? BbSettings::MenuLanguage::Russian
-                              : language == 2 ? BbSettings::MenuLanguage::Spanish
-                                              : BbSettings::MenuLanguage::English;
+        if (ImGui::Combo("Language / Idioma", &language, languages, int(std::size(languages)))) {
+            s.menu_language = BbSettings::MenuLanguage(std::clamp(language, 0, int(std::size(languages)) - 1));
             BbSettings::Save();
         }
     }
@@ -2933,7 +2930,16 @@ void NoticeBox(const Notice& n, float age) {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - icon - pad * 2.0f - 14.0f * s);
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.85f);
     std::string header = n.title;
-    if (kind >= 1 && kind <= 4) header += std::string("  ·  ") + (spanish ? grade_es[kind] : grade_en[kind]);
+    if (kind >= 1 && kind <= 4) {
+        // Trophy grades in the menu's language (Logro: an OCTR trophy, named in Spanish)
+        static const char* const grade_more[4][5] = {{"", "Bronze", "Argent", "Or", "Platine"},
+                                                     {"", "Bronze", "Prata", "Ouro", "Platina"},
+                                                     {"", "Bronze", "Silber", "Gold", "Platin"},
+                                                     {"", "Bronzo", "Argento", "Oro", "Platino"}};
+        const int more = int(BbSettings::Get().menu_language.load()) - int(BbSettings::MenuLanguage::French);
+        header += std::string("  ·  ") + (spanish ? grade_es[kind] : more >= 0 && more < 4 ? grade_more[more][kind]
+                                                                                           : grade_en[kind]);
+    }
     ImGui::TextColored(color, "%s", header.c_str());
     ImGui::PopFont();
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.3f);
@@ -3410,6 +3416,14 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     AnnouncementBanner();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
+    }
+    static auto saved_at = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (dirty && (!ImGui::IsAnyItemActive() || now - saved_at >= std::chrono::milliseconds(150))) {
+        BbSettings::Save();
+        BbGraphicsTab::RequestRefresh();
+        dirty = false;
+        saved_at = now;
     }
     ImGui::Render();
 }

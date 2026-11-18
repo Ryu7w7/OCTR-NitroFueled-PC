@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 
 void *camera_position_entry, *camera_pitch_entry;
 uint64_t camera_register_failures;

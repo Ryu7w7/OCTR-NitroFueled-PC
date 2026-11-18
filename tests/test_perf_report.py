@@ -109,7 +109,7 @@ class PerfReportTests(unittest.TestCase):
             self.assertNotIn(private, abort['reason'])
         self.assertEqual(perf_report.fault_of('Fault: exception 0x20474343 at 00007ffabcdef012 (thread 1)'),
                          {'kind': 'exception 0x20474343', 'where': 'unknown'})
-        self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan (experimental)'))
+        self.assertIsNone(perf_report.fault_of('Graphics engine: native Vulkan'))
         self.assertNotIn('fault', self.collector().report({}))
 
     def test_a_lost_gpu_device_says_why_without_addresses(self):
@@ -166,6 +166,14 @@ class PerfReportTests(unittest.TestCase):
         self.assertEqual(heap['callers'], ['0x14a290d', '0x1518e5a'])
         c.feed('Fault: write access to 0000000000000020 at guest offset 0x1490000 (thread 7)\n')
         self.assertEqual(c.report({})['fault']['heap'], heap)
+
+    def test_the_games_out_of_memory_stop_says_which_pool(self):
+        c = perf_report.Collector()
+        c.feed('OOM [3]{12,Default}->1048576 \n'
+               'Fault: write access to 0000000000000013 at guest offset 0xa95757 (thread 7)\n')
+        fault = c.report({})['fault']
+        self.assertEqual(fault['where'], 'guest offset 0xa95757')
+        self.assertEqual(fault['oom'], {'pool': 3, 'id': 12, 'name': 'Default', 'bytes': 1048576})
 
     def test_a_crash_names_its_callers_and_thread(self):
         c = perf_report.Collector()

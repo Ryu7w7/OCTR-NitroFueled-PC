@@ -29,19 +29,21 @@ def newest(folder):
 
 def adopt_mod_profile(state,user):
     """Up to v0.7.5 a mod session played on its own copy of the saves (mod-state/user), so
-    progress made with mods was gone with them off. Once: the newer of the two saves becomes the
-    player's (user/savedata); the other is kept in mod-state/save-backups. Returns messages."""
+    progress made with mods was gone with them off. Once: the player's own save is kept (the mod
+    save becomes it only when there is none); the mod save is kept in mod-state/save-backups."""
     state=Path(state);user=Path(user);old=state/'user'
     if not old.exists():return []
     backups=state/'save-backups';backups.mkdir(parents=True,exist_ok=True)
     stamp=time.strftime('%Y%m%d-%H%M%S')
     messages=[]
-    if newest(old/'savedata')>newest(user/'savedata'):
-        previous=sync_saves(old/'savedata',user/'savedata',backups)
-        messages.append('the save made with mods was newer: it is now your save'+
-                        (' (the previous one is in '+str(previous)+')' if previous else ''))
+    # The player's own save is never replaced: a newer file time is not more progress (an old mod
+    # profile touched once could take a whole save's place). The mod save is used only when the
+    # player has none; otherwise it is kept beside the backups, to restore by hand.
+    if newest(user/'savedata')==0 and newest(old/'savedata')>0:
+        sync_saves(old/'savedata',user/'savedata',backups)
+        messages.append('you had no save: the one made with mods is now your save')
     else:
-        messages.append('your save is the newer one and is kept')
+        messages.append('your save is kept')
     old.rename(backups/('mod-profile-'+stamp))
     messages.append('mods now play on your own save; the old mod save is in '+str(backups/('mod-profile-'+stamp)))
     return messages

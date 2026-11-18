@@ -31,7 +31,7 @@ public:
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
     /// Keyboard text entry for the system IME dialog; typed text shows in the title bar.
-    /// sacredfire: the window icon from a PNG file (the game's sce_sys/icon0.png); 8-bit RGB/RGBA.
+    /// sacredfire: the shared window icon from a PNG file; 8-bit RGB/RGBA.
     void SetIcon(const char* png_path);
     void BeginTextInput(const std::string& initial, const std::string& prompt);
     /// 0 while typing, 1 confirmed (Enter), 2 cancelled (Escape); text is UTF-8.

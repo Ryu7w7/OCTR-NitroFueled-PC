@@ -42,7 +42,10 @@ void Log(int warning, const char* format, Args... args) {
     if (!state.log)
         return;
     std::array<char, 1024> text{};
-    std::snprintf(text.data(), text.size(), format, args...);
+    if constexpr (sizeof...(Args) == 0)
+        std::snprintf(text.data(), text.size(), "%s", format);
+    else
+        std::snprintf(text.data(), text.size(), format, args...);
     state.log(warning, text.data());
 }
 
@@ -250,6 +253,11 @@ const ShadDlssApi api{SHADPS4_DLSS_BRIDGE_ABI,
 
 } // namespace
 
-extern "C" __declspec(dllexport) const ShadDlssApi* ShadDlssGetApi() {
+#ifdef _WIN32
+#define DLSS_EXPORT __declspec(dllexport)
+#else
+#define DLSS_EXPORT __attribute__((visibility("default")))
+#endif
+extern "C" DLSS_EXPORT const ShadDlssApi* ShadDlssGetApi() {
     return &api;
 }

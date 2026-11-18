@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include "../src/runtime_race_options.c"
+#include "../src/runtime_text.c"
 static const char *fixture_path;
 static unsigned char clock_data[0x40];
 static void *clock_pointer=clock_data;
