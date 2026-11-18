@@ -307,6 +307,16 @@ static void notice(const char *message) {
     if (native_notice) native_notice(runtime_text(message), NULL);
 }
 
+/* Ranked needs a nickname linked to Discord or Steam (runtime_ranked_account, the server's
+ * ranked_account.go): said before the Ranked lobby opens. The server's admission check refuses a
+ * search without one anyway, with this same text (translated by it: scripts/octr_texts.py). */
+#define RANKED_ACCOUNT_NOTICE "Ranked needs a Discord or Steam account linked to every player. Link yours in the launcher and try again."
+static int ranked_account_allowed(void) {
+    if (runtime_ranked_account() != 0) return 1;
+    notice(RANKED_ACCOUNT_NOTICE);
+    return 0;
+}
+
 static int ranked_party_size(void) {
     unsigned char *party=party_manager ? *party_manager : NULL;
     void *roster=party ? *(void **)(party+0x30) : NULL;
@@ -800,6 +810,11 @@ int runtime_private_party_update(void) {
         else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
+    if (pending_private.ranked && runtime_ranked_account() == 0) {
+        clear_private_pending();
+        (void)ranked_account_allowed();     /* the notice */
+        return 0;
+    }
     struct PendingPrivate ready=pending_private;
     memset(&pending_private,0,sizeof pending_private);
     const char *previous=dispatch_approved_party;
@@ -878,7 +893,9 @@ static void ranked_gate_walk(void *node, int ranked, int state, int depth) {
 }
 
 void runtime_ranked_gate_update(void *root, int ranked) {
-    ranked_gate_walk(root, ranked, ranked ? runtime_ranked_status(0) : 1, 0);
+    int state = ranked ? runtime_ranked_status(0) : 1;
+    if (ranked && state == 1 && runtime_ranked_account() == 0) state = 0;   /* no linked account: dimmed */
+    ranked_gate_walk(root, ranked, state, 0);
 }
 
 /* BB_GUI_DUMP=1: print the whole placeable tree above the ranked button: children tables and
@@ -1160,6 +1177,7 @@ static void ABI placeable_event(void *self, void *event) {
                         pending_private.ranked = pending_private.target != NULL;
                     }
                     if (state != 1) return;
+                    if (!ranked_account_allowed()) return;
                 }
                 if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");

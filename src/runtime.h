@@ -150,6 +150,7 @@ int runtime_ranked_active(void);
 int runtime_ranked_selected(void);
 /* -1 checking, 0 closed/unavailable, 1 open; fresh rechecks before entry. */
 int runtime_ranked_status(int fresh);
+int runtime_ranked_account(void); /* 1 may enter Ranked, 0 must link Discord or Steam first, -1 not known yet */
 void runtime_ranked_gate_update(void *root, int ranked);
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode);

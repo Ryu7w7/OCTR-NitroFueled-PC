@@ -309,6 +309,18 @@ TEXTS = (
      'des Systems.',
      "Impossibile verificare questo dispositivo per la Classificata. Controlla l'accesso all'identificativo "
      'del dispositivo del sistema.'),
+    # the server's ranked_account.go sends this same text when it refuses a search
+    ('Ranked needs a Discord or Steam account linked to every player. Link yours in the launcher and try again.',
+     'La Clasificatoria necesita una cuenta de Discord o Steam vinculada a cada jugador. Vincula la tuya en el '
+     'launcher y vuelve a intentarlo.', S,
+     'Le mode Classé nécessite un compte Discord ou Steam lié pour chaque joueur. Lie le tien dans le launcher '
+     'et réessaie.',
+     'A Ranqueada precisa de uma conta do Discord ou da Steam vinculada a cada jogador. Vincule a sua no '
+     'launcher e tente novamente.',
+     'Die Rangliste braucht für jeden Spieler ein verknüpftes Discord- oder Steam-Konto. Verknüpfe deins im '
+     'Launcher und versuche es erneut.',
+     'La Classificata richiede un account Discord o Steam collegato per ogni giocatore. Collega il tuo nel '
+     'launcher e riprova.'),
     ('Your party has %d players. Ranked supports at most 4, regardless of device. Reduce the party or choose '
      'Public Matchmaking (up to 8).',
      'Tu grupo tiene %d jugadores. La Clasificatoria admite como máximo 4, sin importar el dispositivo. '

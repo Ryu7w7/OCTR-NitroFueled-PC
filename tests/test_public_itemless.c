@@ -21,6 +21,8 @@ static int hof_input_handled, hof_input_signal;
 int runtime_hof_input(void *placeable, unsigned signal) { (void)placeable; hof_input_signal = signal; return hof_input_handled; }
 static int ranked_status_state = 1;
 int runtime_ranked_status(int fresh) { (void)fresh; return ranked_status_state; }
+static int ranked_account_state = 1;
+int runtime_ranked_account(void) { return ranked_account_state; }
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
 int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
@@ -535,6 +537,12 @@ static void test_native_return_focus(void) {
     for (unsigned off = 0x90; off <= 0xb8; off += 8) release_handle((void **)(fields + off));
     assert(handles == 0);
 }
+static int account_notices;
+static void ABI account_notice(const char *body, void *options) {
+    assert(options == NULL && strstr(body, "Discord or Steam"));
+    ++account_notices;
+}
+
 static void test_ranked_season_gate(void) {
     native_placeable_event = forward_event;
     native_make_handle = make_test_handle;
@@ -573,6 +581,28 @@ static void test_ranked_season_gate(void) {
         runtime_ranked_gate_update(button, 1);
         memcpy(&alpha, button + 0xe0, 4);
         assert(alpha == 1.0f);
+    }
+    /* No Discord or Steam account linked: Ranked is open, but Go to Lobby tells the player and
+     * stays (dimmed), directly and after a deferred status check. */
+    {
+        Notice saved_notice = native_notice;
+        native_notice = account_notice;
+        ranked_account_state = 0;
+        ranked_status_state = 1;
+        int before = forwarded, shown = account_notices;
+        placeable_event(button, event);
+        assert(forwarded == before && account_notices == shown + 1 && !pending_private.target);
+        runtime_ranked_gate_update(button, 1);
+        float alpha; memcpy(&alpha, button + 0xe0, 4);
+        assert(alpha == 0.45f);
+        ranked_status_state = -1;
+        placeable_event(button, event);
+        assert(forwarded == before && pending_private.ranked);
+        ranked_status_state = 1;
+        assert(!runtime_private_party_update());
+        assert(forwarded == before && account_notices == shown + 2 && !pending_private.target && handles == 0);
+        ranked_account_state = 1;
+        native_notice = saved_notice;
     }
     /* Back cancels the deferred entry even when status later opens. */
     ranked_status_state = -1;
