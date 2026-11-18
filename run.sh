@@ -282,14 +282,15 @@ fi
 # keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
 # in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-# Contributor testing against a LOCAL RyuNET checkout: BB_AUTH_KEY names that server's
-# ctr_ps4.key, and the data folder's patch replaces the bundled Demonware key with it (the
-# bundled file is never touched, so production play keeps the production key). Without it,
-# a local server's signed auth is refused by the game and it retries for ever (code=700).
-if [[ ${BB_ONLINE:-0} == 1 && -n ${BB_AUTH_KEY:-} ]]; then
-    startup_python scripts/online_key_local.py --data "$data" --key "$BB_AUTH_KEY" || exit 1
-elif [[ ${BB_ONLINE:-0} == 1 && ${BB_ONLINE_SERVER:-} == 127.0.0.1 ]] && [[ -z ${BB_AUTH_KEY:-} ]]; then
-    echo "Online: a localhost server signs auth with its own key; set BB_AUTH_KEY=<RyuNET checkout>/ctr_ps4.key or the game refuses every auth reply." >&2
+# Contributor testing against a LOCAL RyuNET checkout or any other private server: the game only
+# accepts auth signed by a key it trusts, so a server that is not the production one needs its
+# ctr_ps4 key in $data/ryunet_keys/<host>.pub (or BB_AUTH_KEY=<path>). The data folder is shared
+# with the packaged game, so the patch is removed again on every run that does not need it.
+if [[ ${BB_ONLINE:-0} == 1 ]]; then
+    startup_python scripts/online_key_local.py --data "$data" --server "${BB_ONLINE_SERVER:-}" \
+        ${BB_AUTH_KEY:+--key "$BB_AUTH_KEY"} || exit 1
+else
+    startup_python scripts/online_key_local.py --data "$data" --restore
 fi
 startup_python scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
     "${layout_patches[@]}" "${strict_overlap[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
