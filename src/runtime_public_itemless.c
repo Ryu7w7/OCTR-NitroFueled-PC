@@ -1245,6 +1245,7 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
      * private lobby (map selector) while the host waits for opponents (2026-11-17). */
     clear_room_private(party_manager ? *party_manager : NULL);
     if (ranked_selected) {
+        if (!ranked_entry_allowed()) { *result = NULL; return result; }
         if (runtime_ranked_status(0) != 1) { *result = NULL; return result; }
         int ready = ranked_party_check(raw);
         if (ready != 1) {

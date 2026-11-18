@@ -3,7 +3,7 @@
 #include "../src/runtime_text.c"
 #include <assert.h>
 #include <unistd.h>
-static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room;
+static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room, ranked_notices;
 static int private_speed, private_cup, private_teams, modified_difficulty, selector_left_calls;
 static int party_guest=1;
 int runtime_room_mode_following(void) { return party_guest; }
@@ -90,6 +90,7 @@ static void ABI show(const char *body, void *options) {
     assert(options==NULL); /* Exactly the offline Online-entry notice configuration. */
     snprintf(message,sizeof message,"%s",body); ++dialogs;
 }
+static void ABI count_notice(const char *body, void *options) { assert(body && !options); ++ranked_notices; }
 
 static void *ABI send_search(void **out, void *self, const char *doc, unsigned n, void *result) {
     (void)self;(void)result; assert(strlen(doc)<n);
@@ -1112,6 +1113,14 @@ static void test_ranked_device_and_search_clock(void) {
     *(int *)(roster+12)=3;assert(ranked_party_size()==4);
     *(int *)(roster+12)=4;assert(ranked_party_size()==5);
     assert(!ranked_entry_allowed());
+    void *result=(void *)1;
+    runtime_public_itemless_reset();
+    int sent_before=sent,notices_before=ranked_notices;
+    Notice saved_notice=native_notice;native_notice=count_notice;
+    ranked_selected=1;
+    start_search(&result,NULL,"{\"members\":[1,2,3,4,5]}",25,NULL);
+    assert(!result && sent==sent_before && ranked_notices==notices_before+1 && !matchmaking_search);
+    native_notice=saved_notice;
     matchmaking_search=ranked_selected=1;
     runtime_public_itemless_update();
     assert(!matchmaking_search && !rejection[0]);
