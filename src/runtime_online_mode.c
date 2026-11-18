@@ -2128,7 +2128,7 @@ static void ABI place_cup_racers(unsigned char *self) {
     if (private_cup_race_active && current_cup_index() > 0) {
         unsigned char *manager = racer_manager ? *racer_manager : NULL;
         unsigned char *list = manager ? pointer_at(manager, 0x10) : NULL;
-        int count = 0, matched = 0, previous[8] = {0};
+        int count = 0, restored = 0;
         if (list) memcpy(&count, list + 12, 4);
         void **items = list ? pointer_at(list, 0x20) : NULL;
         for (int i = 0; items && i < count && i < 8; ++i) {
@@ -2138,27 +2138,16 @@ static void ABI place_cup_racers(unsigned char *self) {
             for (int j = 0; j < cup_total_count; ++j) {
                 const struct CupTotal *saved = cup_totals + j;
                 if (!same_cup_racer(&key, saved)) continue;
-                previous[i] = saved->finish_position;
-                ++matched;
+                /* Racers arrive incrementally. Keep absolute previous rank; do not compact a partial list. */
+                if (saved->finish_position > 0 && saved->finish_position <= 8) {
+                    memcpy(racer + 0x60, &saved->finish_position, 4);
+                    ++restored;
+                }
                 restore_cup_total(racer);
                 break;
             }
         }
-        unsigned occupied = 0;
-        for (int i = 0; matched == count && i < count; ++i) {
-            if (previous[i] < 1 || previous[i] > 8 || (occupied & (1u << previous[i]))) {
-                matched = 0;
-                break;
-            }
-            occupied |= 1u << previous[i];
-        }
-        /* Native later-track placement reads last finish. Compact gaps left by disconnects. */
-        for (int i = 0; matched == count && i < count; ++i) {
-            int position = 1;
-            for (int j = 0; j < count; ++j) position += previous[j] < previous[i];
-            memcpy((unsigned char *)items[i] + 0x60, &position, 4);
-        }
-        printf("Native private CUP: restored previous finish grid %d/%d before placement\n", matched, count);
+        printf("Native private CUP: restored previous finish grid %d/%d before placement\n", restored, count);
     }
     original_place_racers(self);
     snapshot_private_grid();
