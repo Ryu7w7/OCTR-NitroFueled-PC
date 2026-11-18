@@ -1,5 +1,4 @@
-/* Host handoff research (staff builds): can the host of a private room change while the room's
- * lobby stays on screen?
+/* Host handoff: the host of a room goes away and its party lives on.
  *
  * The game has no way to hand a party over: a host is whoever created the party. 0xa56fb0
  * (CPartyManager, [0x2acf700]) starts a new party session when this player is not its host; when
@@ -7,17 +6,20 @@
  * the roster (+0x30, without emptying it), posts CGuiEventLobbyBecomeHost to the menus and
  * registers the host's messages (0x28, 0x29 leaving, 0x2a, 0x2f).
  *
- * Experiment 1 (2026-11-16): a guest calling it in the lobby became host with the lobby kept (START
- * GAME showed), but the old party was dropped while still connected (a corrupt free followed), the
- * roster kept the old members plus a second copy of the local player, and the old host was left
- * alone. Experiment 2, in a lobby:
- *   Ctrl+F9        leave the old party the game's way first (0xa9ffd0: tells its host, message
- *                  0x29, and resets the party), empty the roster, then make the new party;
+ * Automatic handover applies when a host connection disappears. Private matches also hand over
+ * after a manual host exit; public matchmaking and Ranked do not when the host announced return.
+ * The sequence is the one that worked in a two-player lobby (experiment 1, 2026-11-16): leave the
+ * old party the game's way (0xa9ffd0: tells its host, message 0x29, and resets the party), empty
+ * the roster (0xa57350 appends), then create the party. A corrupt free used to follow; the
+ * allocator recovery in probe.c now keeps the process alive.
+ *
+ * Keys, only with BB_HOST_EXPERIMENT=1 (staff builds): in a lobby,
+ *   Ctrl+F9        leave the old party the game's way first, empty the roster, then make the new
+ *                  party;
  *   Ctrl+Shift+F9  only close the old party's connection (0x409700) before the same;
  *   Ctrl+F10       join the other player's room (the old host following the new one): the
  *                  Friends tab's Join (runtime_invite_join).
  * For 30 s after each, every change of the party is written to the log with the roster's names.
- * Off unless BB_HOST_EXPERIMENT=1: the keys do nothing in players' builds.
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "runtime.h"
 #include "runtime_np_online.h"
@@ -37,6 +39,10 @@ static uint64_t (ABI *party_create)(void *);            /* 0xa56fb0 */
 static void (ABI *party_leave)(void *);                 /* 0xa9ffd0 (traced in runtime_public_itemless.c) */
 static void (ABI *connection_close)(void *, int);       /* 0x409700 */
 static int request;
+static int keys; /* BB_HOST_EXPERIMENT=1: the research keys are live */
+static int automatic; /* BB_HOST_TAKEOVER=0 turns the automatic handover off */
+static int takeover_pending;
+static uint64_t takeover_after, takeover_until;
 static uint64_t watch_until, next_look;
 
 static uint64_t now_ms(void) {
@@ -49,7 +55,9 @@ static void *at(const void *p, size_t offset) { return p ? *(void *const *)((con
 
 int runtime_party_experiment_start(unsigned char *base, size_t size) {
     const char *on = getenv("BB_HOST_EXPERIMENT");
-    if (!on || strcmp(on, "1")) return 1; /* off: nothing installed, the keys are ignored */
+    const char *off = getenv("BB_HOST_TAKEOVER");
+    keys = on && !strcmp(on, "1");
+    automatic = !(off && !strcmp(off, "0"));
     static const unsigned char create[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54};
     if (size < 0x2acf708 || memcmp(base + 0xa56fb0, create, sizeof create) || base[0x409700] != 0x55)
         return 0;
@@ -62,9 +70,21 @@ int runtime_party_experiment_start(unsigned char *base, size_t size) {
 }
 
 void runtime_party_experiment_request(int kind) {
-    if (!image) return;
+    if (!image || !keys) return;
     fprintf(stderr, "Host experiment: key %d pressed\n", kind);
     __atomic_store_n(&request, kind, __ATOMIC_RELEASE);
+}
+
+/* The game tore the party down (0xa18210, runtime_public_itemless.c): the room's host is gone. A
+ * guest that followed the room's host makes the party again, so the room lives on with this player
+ * as its host. The work waits for the lobby frame (runtime_party_experiment_tick): the teardown is
+ * still running inside the party's own update here. */
+void runtime_party_host_lost(int role, int private_match, int announced_return) {
+    if (!image || !automatic || role != 2 || (!private_match && announced_return)) return;
+    if (!runtime_room_mode_following() || runtime_room_mode_race_frozen()) return;
+    takeover_after = now_ms() + 250;
+    takeover_until = takeover_after + 5000;
+    __atomic_store_n(&takeover_pending, 1, __ATOMIC_RELEASE);
 }
 
 static int party_role(void) {
@@ -78,6 +98,7 @@ static int party_role(void) {
 int runtime_party_hosting(void) { return image && party_role() == 1; }
 
 struct Look {
+    unsigned char *party;
     void *pending, *session, *connection;
     int state, role, peers, roster;
     char names[160];
@@ -86,6 +107,7 @@ struct Look {
 static void look(struct Look *l) {
     memset(l, 0, sizeof *l);
     unsigned char *party = party_manager ? *party_manager : NULL;
+    l->party = party;
     if (!party) return;
     l->pending = at(party, 0x10);
     l->session = at(party, 0x18);
@@ -124,21 +146,21 @@ static const char *other_player(void) {
 
 static void become_host(unsigned char *party, int kind) {
     if (party_role() == 1) {
-        fprintf(stderr, "Host experiment: already a party host; nothing to do\n");
+        fprintf(stderr, "Host takeover: already a party host; nothing to do\n");
         return;
     }
     if (kind == 1) {
-        fprintf(stderr, "Host experiment: leaving the old party (0xa9ffd0)\n");
+        fprintf(stderr, "Host takeover: leaving the old party (0xa9ffd0)\n");
         party_leave(party);
     } else {
         void *connection = at(at(party, 0x18), 0x10);
-        fprintf(stderr, "Host experiment: closing the old party's connection %p (0x409700)\n", connection);
+        fprintf(stderr, "Host takeover: closing the old party's connection %p (0x409700)\n", connection);
         if (connection) connection_close(connection, 1);
     }
     void *roster = at(party, 0x30);
     if (roster) *(int *)((char *)roster + 12) = 0; /* 0xa57350 appends; its entries are left alive */
     const uint64_t result = party_create(party);
-    fprintf(stderr, "Host experiment: 0xa56fb0 returned %" PRIu64 " (1: a party session was already being made)\n", result);
+    fprintf(stderr, "Host takeover: 0xa56fb0 returned %" PRIu64 " (1: a party session was already being made)\n", result);
 }
 
 /* The game's thread, every frame of an online lobby (runtime_online_mode.c lobby_update). */
@@ -167,6 +189,23 @@ void runtime_party_experiment_tick(void) {
         watch_until = now + 30000;
         next_look = now + 250;
         return;
+    }
+    /* The room's host went away (runtime_party_host_lost): this guest keeps the party alive as its
+     * host. The party is already torn down, so the create finds the slots empty. */
+    if (__atomic_load_n(&takeover_pending, __ATOMIC_ACQUIRE)) {
+        unsigned char *party = party_manager ? *party_manager : NULL;
+        void *session = at(party, 0x18);
+        if (!runtime_online_mode_lobby_open() || now >= takeover_until) {
+            __atomic_store_n(&takeover_pending, 0, __ATOMIC_RELEASE);
+        } else if (now >= takeover_after && party && !session && automatic &&
+                   !runtime_room_mode_race_frozen()) {
+            __atomic_store_n(&takeover_pending, 0, __ATOMIC_RELEASE);
+            void *roster = at(party, 0x30);
+            if (roster) *(int *)((char *)roster + 12) = 0; /* 0xa57350 appends; the entries leak */
+            const uint64_t result = party_create(party);
+            fprintf(stderr, "Host takeover: the room's host is gone; this player takes the party over"
+                            " (0xa56fb0 returned %" PRIu64 ")\n", result);
+        }
     }
     if (!watch_until || now < next_look) return;
     next_look = now + 250;

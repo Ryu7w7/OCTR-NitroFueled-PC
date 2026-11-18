@@ -78,19 +78,13 @@ static int party_at_entry = 1;
 /* That session is a private room: leaving it never brings anyone along, not even a party that
  * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
 static int entry_private;
-/* This player went into a private room's lobby (the mode screen's way in). Back on the mode
- * screen as its host, the room's players are still its party (the game keeps a private room's
- * players grouped with its host): the party is disbanded there (leave_private_party). */
-static int private_lobby_entered;
 static void (ABI *native_party_quit_trace)(void *);
 static int ranked_party_size(void);
-static void leave_private_party(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
 static void arm_party_return(void) {
     if (__atomic_exchange_n(&menu_party_returned,0,__ATOMIC_SEQ_CST)) {
         __atomic_store_n(&party_at_entry,ranked_party_size(),__ATOMIC_SEQ_CST);
         __atomic_store_n(&entry_private,0,__ATOMIC_SEQ_CST);
-        __atomic_store_n(&private_lobby_entered,0,__ATOMIC_SEQ_CST);
     }
 }
 static void arm_private_room(void) {
@@ -207,6 +201,9 @@ void runtime_public_itemless_party_ready(void) {
     allow_party = registration_nonce != 0;
     pthread_mutex_unlock(&mode_lock);
 }
+/* The host is back in the online menus: the room's private flag must not follow it into the
+ * next mode (2026-11-17: matchmaking with a party opened the private lobby's map selector). */
+static void clear_room_private(unsigned char *party) { if (party) party[0x6c] = 0; }
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
@@ -215,6 +212,7 @@ void runtime_public_itemless_menu_return(void) {
     if (!notify) return;
     if (network_manager && *network_manager) native_stop_matchmaking(*network_manager);
     unsigned char *party = party_manager ? *party_manager : NULL;
+    clear_room_private(party);
     unsigned char *session = party ? *(void **)(party + 0x18) : NULL;
     unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
     int role = 0;
@@ -225,7 +223,10 @@ void runtime_public_itemless_menu_return(void) {
      * private, public or Ranked room everyone stayed grouped with its host). */
     const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
     if (role == 1 && __atomic_load_n(&entry_private, __ATOMIC_SEQ_CST)) {
-        puts("Online party: left a private room; nobody is brought along");
+        /* Leave this party without the Quit With Party return message. Guests see the connection
+         * close and recreate the private party under a remaining member. */
+        if (native_party_quit_trace) native_party_quit_trace(party);
+        puts("Online party: host left private room alone; remaining member takes host");
     } else if (role == 1 && native_party_return && before > 1) {
         native_party_return(party);
         printf("Online party: return notification queued; members=%d (party of %d before the room)\n",
@@ -314,23 +315,6 @@ static int ranked_party_size(void) {
     for (int i=0;i<count;++i)
         if (items[i] && !*((unsigned char *)items[i]+0x2c)) ++total;
     return total;
-}
-
-/* Back on the mode screen from a private room's lobby, as the host with players still in its
- * party: the game's own Leave Party (0xa9ffd0, as when leaving the online menus) tells them the
- * party is over (message 0x2c) and takes them out of it (0xaa02d0). Once per room. */
-static void leave_private_party(void) {
-    if (!__atomic_exchange_n(&private_lobby_entered,0,__ATOMIC_SEQ_CST)) return;
-    unsigned char *party=party_manager ? *party_manager : NULL;
-    unsigned char *session=party ? *(void **)(party+0x18) : NULL;
-    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
-    int role=0;
-    if (connection) memcpy(&role,connection+0x118,sizeof role);
-    const int members=ranked_party_size();
-    if (role!=1 || members<2 || !native_party_quit_trace) return;
-    printf("Online party: left a private room as its host: its party of %d is disbanded\n",members);
-    fflush(stdout);
-    native_party_quit_trace(party);
 }
 
 int runtime_online_party_active(void) {
@@ -1035,12 +1019,15 @@ static void native_return_focus(void *node, int ancestors) {
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
-                leave_private_party();
+                if (__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) return;
+                /* Initial ModeSelect focus is entry, not Back from a live private lobby. */
+                if (__atomic_load_n(&entry_private,__ATOMIC_SEQ_CST) &&
+                    !runtime_private_match_active()) return;
                 runtime_public_itemless_menu_return();
                 return;
             }
             if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_Main_Root")) continue;
-            if (!ancestors) {
+            if (!ancestors && !__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) {
                 runtime_public_itemless_menu_return();
             }
             typedef void *(ABI *GetType)(void *);
@@ -1155,12 +1142,9 @@ static void ABI placeable_event(void *self, void *event) {
                     if (confirm) { ranked_selected = 0; arm_private_room(); }
                     if (gain) runtime_online_mode_selector_left();
                 }
-                /* Back into the private room from the mode screen (after leaving it): the party is
-                 * the one this player has now, before anyone joins the room. */
                 if (confirm && private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     arm_private_room();
-                    __atomic_store_n(&private_lobby_entered,1,__ATOMIC_SEQ_CST);
                 }
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
@@ -1235,6 +1219,9 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
 }
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
     if (rejection[0]) { *result = NULL; return result; }
+    /* A matchmaking search is never a private room: the party's room flag must not open the
+     * private lobby (map selector) while the host waits for opponents (2026-11-17). */
+    clear_room_private(party_manager ? *party_manager : NULL);
     if (ranked_selected) {
         if (runtime_ranked_status(0) != 1) { *result = NULL; return result; }
         int ready = ranked_party_check(raw);
@@ -1428,7 +1415,15 @@ static void party_trace(const char *action, void *self, void *caller) {
 }
 static void ABI traced_party_reset(void *self) {
     party_trace("reset",self,__builtin_return_address(0));
+    const int private_match=runtime_private_match_active();
+    const int announced_return=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST);
+    unsigned char *party=self;
+    unsigned char *session=party ? *(void **)(party+0x18) : NULL;
+    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
+    int role=0;
+    if (connection) memcpy(&role,connection+0x118,sizeof role);
     native_party_reset_trace(self);
+    runtime_party_host_lost(role,private_match,announced_return);
 }
 static void ABI traced_party_quit(void *self) {
     party_trace("quit",self,__builtin_return_address(0));
@@ -1494,9 +1489,9 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     }
     for (int i=0;i<6;++i) if (ptr(image,slots[i])!=image+targets[i]) return 0;
 #ifdef _WIN32
-    unsigned char *stubs=VirtualAlloc(NULL,384,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    unsigned char *stubs=VirtualAlloc(NULL,512,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
 #else
-    unsigned char *stubs=mmap(NULL,384,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    unsigned char *stubs=mmap(NULL,512,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (stubs==MAP_FAILED) stubs=NULL;
 #endif
     if (!stubs) return 0;
@@ -1507,7 +1502,7 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     memcpy(stubs+192,image+0xa18210,13);
     memcpy(stubs+205,"\x75\x0e",2);
     jump(stubs+207,image+0xa182b6);
-    jump(stubs+221,image+0xa18223);
+    jump(stubs+221,stubs+416);
     memcpy(stubs+256,image+0xa9ffd0,17);
     jump(stubs+273,image+0xa9ffe1);
     native_party_reset_trace=(void (ABI *)(void *))(stubs+192);
@@ -1519,6 +1514,29 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     memcpy(stubs+341,"\x4d\x8b\x36",3);
     jump(stubs+344,image+0xa5b692);
     native_party_return_trace=(unsigned char (ABI *)(void *,void *,void *))(stubs+320);
+    /* A guest whose host went away can hold a session the game already freed: its virtual stop
+     * (vtable +0xb8) then jumps into garbage. Call it only when it is a function of this image. */
+    {
+        unsigned char *guard=stubs+416;
+        const uintptr_t code=(uintptr_t)image, end=code+size;
+        memcpy(guard,   "\x48\x8b\x7b\x18",4);            /* mov 0x18(%rbx),%rdi */
+        memcpy(guard+4, "\x48\x85\xff",3);                /* test %rdi,%rdi */
+        memcpy(guard+7, "\x74\x40",2);                    /* je skip */
+        memcpy(guard+9, "\x48\x8b\x07",3);                /* mov (%rdi),%rax */
+        memcpy(guard+12,"\x48\x85\xc0",3);                /* test %rax,%rax */
+        memcpy(guard+15,"\x74\x38",2);                    /* je skip */
+        memcpy(guard+17,"\x48\x8b\x80\xb8\x00\x00\x00",7); /* mov 0xb8(%rax),%rax */
+        memcpy(guard+24,"\x48\xb9",2); memcpy(guard+26,&code,8);
+        memcpy(guard+34,"\x48\x39\xc8",3);                /* cmp %rcx,%rax */
+        memcpy(guard+37,"\x72\x22",2);                    /* jb skip */
+        memcpy(guard+39,"\x48\xb9",2); memcpy(guard+41,&end,8);
+        memcpy(guard+49,"\x48\x39\xc8",3);                /* cmp %rcx,%rax */
+        memcpy(guard+52,"\x73\x13",2);                    /* jae skip */
+        memcpy(guard+54,"\x80\x38\x55",3);                /* cmpb $0x55,(%rax) */
+        memcpy(guard+57,"\x75\x0e",2);                    /* jne skip */
+        jump(guard+59,image+0xa18223);
+        jump(guard+73,image+0xa1824b);                    /* skip: leave the session alone */
+    }
     party_trace_image=image;
     jump(image+0xa18210,(void *)traced_party_reset);
     jump(image+0xa9ffd0,(void *)traced_party_quit);

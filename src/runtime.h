@@ -278,6 +278,7 @@ void runtime_text_set_language(int id);
 int runtime_party_experiment_start(unsigned char *image, size_t size);
 void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 close+host, 3 join */
 int runtime_party_hosting(void);                 /* this player hosts its party */
+void runtime_party_host_lost(int role, int private_match, int announced_return); /* old host connection was torn down */
 void runtime_party_experiment_tick(void);          /* the game's thread, in an online lobby */
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);
