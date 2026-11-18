@@ -176,6 +176,36 @@ class ButtonPromptTests(unittest.TestCase):
                                                       glyph[2][middle + 3])))
             self.assertIsNone(bp.with_speaker(made, glyph))   # only once
 
+    def test_xbox_controls_leaves_other_files_alone(self):
+        self.assertIsNone(bp.xbox_controls(b'not an igz'))
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'needs the game (BB_TEST_GAME)')
+    def test_every_options_script_goes_to_the_xbox_diagram(self):
+        """Issue #256: the Options page's script skips the controller type check for its XB1
+        output (the one assigning AnimationTag_XB1_ControlScheme); nothing else changes"""
+        from archive_reader import Archive
+        from igz_file import Igz
+        seen = 0
+        for name in bp.CONTROLS_ARCHIVES:
+            path = Path(os.environ['BB_TEST_GAME']) / 'archives' / name
+            if not path.is_file():
+                continue
+            files = {f['path'].replace('\\', '/').lower(): f for f in Archive(path).files}
+            blob = bytes(Archive(path).extract(files[bp.CONTROLS_SCRIPT.lower()]))
+            igz = Igz(blob)
+            check, xb1_ref, before = bp._controls_check(igz)
+            made = bp.xbox_controls(blob)
+            self.assertIsNotNone(made, name)
+            changed = [i for i in range(len(blob)) if blob[i] != made[i]]
+            data = igz.sections[1][1]
+            self.assertTrue(changed and all(data + before[0] + 0x28 <= i < data + before[0] + 0x30 for i in changed))
+            after = Igz(made)
+            self.assertEqual(after.u64(before[0] + 0x28), igz.u64(xb1_ref))       # straight to XB1
+            self.assertEqual(igz.u64(before[0] + 0x28) & 0x7FFFFFF, check)        # was the check
+            self.assertIsNone(bp._controls_check(after))                         # nothing leads to it now
+            seen += 1
+        self.assertTrue(seen)
+
     def test_chosen_style(self):
         with tempfile.TemporaryDirectory() as tmp:
             ini = Path(tmp) / 'bbport.ini'
