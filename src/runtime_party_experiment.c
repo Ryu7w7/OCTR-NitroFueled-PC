@@ -43,6 +43,8 @@ static int keys; /* BB_HOST_EXPERIMENT=1: the research keys are live */
 static int automatic; /* BB_HOST_TAKEOVER=0 turns the automatic handover off */
 static int takeover_pending;
 static uint64_t takeover_after, takeover_until;
+static int takeover_local;
+static char takeover_successor[24];
 static uint64_t watch_until, next_look;
 
 static uint64_t now_ms(void) {
@@ -75,14 +77,39 @@ void runtime_party_experiment_request(int kind) {
     __atomic_store_n(&request, kind, __ATOMIC_RELEASE);
 }
 
-/* The game tore the party down (0xa18210, runtime_public_itemless.c): the room's host is gone. A
- * guest that followed the room's host makes the party again, so the room lives on with this player
- * as its host. The work waits for the lobby frame (runtime_party_experiment_tick): the teardown is
- * still running inside the party's own update here. */
+/* Every guest sees the same roster. The alphabetically first remaining name becomes host; the
+ * others join it after its new party has had time to publish. This works for the full eight slots. */
+static int elect_successor(char out[24]) {
+    unsigned char *party = party_manager ? *party_manager : NULL;
+    void *roster = at(party, 0x30);
+    int count = roster ? *(int *)((char *)roster + 12) : 0;
+    void **items = roster ? at(roster, 0x20) : NULL;
+    if (!items || count < 2 || count > 8) return -1;
+    char host[24];
+    runtime_room_mode_host_name(host);
+    const char *best = NULL;
+    int local = 0;
+    for (int i = 0; i < count; ++i) {
+        unsigned char *item = items[i];
+        const char *name = item ? at(item, 0x10) : NULL;
+        if (!name || !*name || !strcmp(name, host)) continue;
+        if (!best || strcmp(name, best) < 0) {
+            best = name;
+            local = item[0x2c] != 0;
+        }
+    }
+    if (!best) return -1;
+    snprintf(out, 24, "%.23s", best);
+    return local;
+}
+
+/* The work waits for the lobby frame: teardown still runs inside the party update here. */
 void runtime_party_host_lost(int role, int private_match, int announced_return) {
     if (!image || !automatic || role != 2 || (!private_match && announced_return)) return;
     if (!runtime_room_mode_following() || runtime_room_mode_race_frozen()) return;
-    takeover_after = now_ms() + 250;
+    takeover_local = elect_successor(takeover_successor);
+    if (takeover_local < 0) return;
+    takeover_after = now_ms() + (takeover_local ? 250 : 1250);
     takeover_until = takeover_after + 5000;
     __atomic_store_n(&takeover_pending, 1, __ATOMIC_RELEASE);
 }
@@ -200,11 +227,17 @@ void runtime_party_experiment_tick(void) {
         } else if (now >= takeover_after && party && !session && automatic &&
                    !runtime_room_mode_race_frozen()) {
             __atomic_store_n(&takeover_pending, 0, __ATOMIC_RELEASE);
-            void *roster = at(party, 0x30);
-            if (roster) *(int *)((char *)roster + 12) = 0; /* 0xa57350 appends; the entries leak */
-            const uint64_t result = party_create(party);
-            fprintf(stderr, "Host takeover: the room's host is gone; this player takes the party over"
-                            " (0xa56fb0 returned %" PRIu64 ")\n", result);
+            if (takeover_local) {
+                void *roster = at(party, 0x30);
+                if (roster) *(int *)((char *)roster + 12) = 0; /* 0xa57350 appends; entries leak */
+                const uint64_t result = party_create(party);
+                fprintf(stderr, "Host takeover: %s elected from the remaining party"
+                                " (0xa56fb0 returned %" PRIu64 ")\n",
+                                takeover_successor, result);
+            } else {
+                fprintf(stderr, "Host takeover: joining elected member %s\n", takeover_successor);
+                runtime_invite_join(takeover_successor);
+            }
         }
     }
     if (!watch_until || now < next_look) return;

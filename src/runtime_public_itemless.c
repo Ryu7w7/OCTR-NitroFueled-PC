@@ -1142,7 +1142,7 @@ static void ABI placeable_event(void *self, void *event) {
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
-                    if (confirm) { ranked_selected = 0; arm_private_room(); }
+                    if (confirm) ranked_selected = 0;
                     if (gain) runtime_online_mode_selector_left();
                 }
                 if (confirm && private_room && name &&
@@ -1426,8 +1426,8 @@ static void ABI traced_party_reset(void *self) {
     unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
     int role=0;
     if (connection) memcpy(&role,connection+0x118,sizeof role);
-    native_party_reset_trace(self);
     runtime_party_host_lost(role,private_match,announced_return);
+    native_party_reset_trace(self);
 }
 static void ABI traced_party_quit(void *self) {
     party_trace("quit",self,__builtin_return_address(0));

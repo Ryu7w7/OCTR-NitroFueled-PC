@@ -504,6 +504,7 @@ static void test_native_return_focus(void) {
         online_return_button = selection;
         int before = forwarded;
         matchmaking_search=searching=1;
+        menu_party_returned=0;
         const int saved_mode=selected,saved_ranked=ranked_selected;
         placeable_event(root, event);
         assert(!matchmaking_search && !searching && selected==saved_mode && ranked_selected==saved_ranked);
@@ -584,8 +585,15 @@ static void test_ranked_season_gate(void) {
     assert(forwarded == before && handles == 0);
     ranked_selected = 0;
     selected = 0;
-    /* Into the private room from the mode screen: the party is counted there, before anyone joins. */
+    /* Opening mode selection is not entering a private lobby; keep current party intact. */
+    graph_meta[2] = "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton";
     event[3] = (void *)8;
+    private_room = 0;
+    menu_party_returned = 1;
+    placeable_event(button, event);
+    assert(menu_party_returned && !entry_private);
+    /* Into the private room from the mode screen: the party is counted there, before anyone joins. */
+    graph_meta[2] = "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton";
     private_room = 1;
     menu_party_returned = 1; party_at_entry = 5;
     placeable_event(button, event);
