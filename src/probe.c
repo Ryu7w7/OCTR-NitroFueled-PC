@@ -717,6 +717,30 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+    /* A stale lobby-player object reaches FUN_014a1fa0 with a vtable pointer of
+     * image+0x1490000. Its virtual calls (+0x158/+0x168/+0x268) land on that page
+     * start, whose first instruction writes through RAX and faults in read-only
+     * code. The call returns no value the loop needs, so skip that one call. */
+    if (sig == SIGSEGV && image && info &&
+        (uintptr_t)info->si_addr == (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] &&
+        (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] - (uintptr_t)image == 0x1490000) {
+        greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
+        uintptr_t ret = 0;
+        const uintptr_t at = (uintptr_t)g[REG_RSP];
+        if (read_self_memory(&ret, at, sizeof ret) == (ssize_t)sizeof ret &&
+            ret - (uintptr_t)image >= 0x14a1fa0 && ret - (uintptr_t)image <= 0x14a235b) {
+            static int warned;
+            if (!warned++) {
+                const char msg[] = "Runtime: skipped stale lobby-player vtable call (image+0x1490000)\n";
+                ssize_t n = write(2, msg, sizeof msg - 1);
+                (void)n;
+            }
+            g[REG_RIP] = (greg_t)ret;
+            g[REG_RSP] = (greg_t)(at + sizeof ret);
+            g[REG_RAX] = 0;
+            return;
+        }
+    }
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
