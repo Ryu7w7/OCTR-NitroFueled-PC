@@ -516,7 +516,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
                 if (!count) heap_summary(c, wrapper ? c->R15 : c->Rsi);
                 if (count < 4) dump_corrupt_block(c, wrapper ? c->R15 : c->Rsi);
                 ++count;
-                c->Rip = (uintptr_t)image + (tlsf ? 0x15910f8 : 0x14af709) - (uintptr_t)shift;
+                c->Rip = (uintptr_t)image + (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift;
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
@@ -749,7 +749,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
                 if (n > 0) { ssize_t written_=write(2, line, (size_t)n); (void)written_; }
             }
             g[REG_RIP] = (greg_t)((uintptr_t)image +
-                                  (tlsf ? 0x15910f8 : 0x14af709) - (uintptr_t)shift);
+                                  (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift);
             return;
         }
     }
