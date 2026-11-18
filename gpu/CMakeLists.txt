@@ -380,7 +380,7 @@ add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bb
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
 add_executable(aspect-settings-test EXCLUDE_FROM_ALL ../tests/test_aspect_settings.cpp
-    shim/bbport_settings.cpp shim/bbport_menu_es.cpp)
+    shim/bbport_settings.cpp shim/bbport_menu_es.cpp shim/bbport_menu_more.cpp)
 target_compile_options(aspect-settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(aspect-settings-test PRIVATE .. shim)
 
@@ -408,7 +408,7 @@ add_dependencies(camera-motion-test host_shaders)
 
 # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
-    shim/bbport_settings.cpp)
+    shim/bbport_settings.cpp shim/bbport_menu_es.cpp shim/bbport_menu_more.cpp)
 target_include_directories(upscaler-support-test PRIVATE shim)
 target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
 
