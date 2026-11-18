@@ -69,6 +69,7 @@ int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
+void runtime_public_itemless_guest_room(int inside) { (void)inside; }
 void runtime_public_itemless_update(void) {}
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }

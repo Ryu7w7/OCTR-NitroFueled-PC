@@ -1077,22 +1077,58 @@ static void test_guest_main_menu_leaves_party(void) {
     const int saved_guest=party_guest,saved_quits=party_quits,saved_return=online_return_button;
     party_manager=&party_value;native_party_quit_trace=quit_party_mock;native_meta_field=missing_field;
     party_guest=1;guest_room_open=0;guest_quit_at=0;menu_party_returned=1;online_return_button=1;
-    native_return_focus(root,0);assert(guest_room_open); /* PrivateGame_Root: in the room */
+    /* ModeSelect is the setup screen before the room: not a room, no party leave. */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    native_return_focus(root,0);assert(!guest_room_open && party_quits==saved_quits);
+    /* The room itself (host: START GAME, guest: READY) marks the guest as in it. */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
+    native_return_focus(root,0);assert(guest_room_open && party_quits==saved_quits);
+    /* Back out lands on the room's setup screen: the guest leaves the party there. */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    native_return_focus(root,0);assert(party_quits==saved_quits+1 && !guest_room_open);
+    /* In the room again and out within 5 s: the native leave already ran once. */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
+    native_return_focus(root,0);assert(guest_room_open);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    native_return_focus(root,0);assert(party_quits==saved_quits+1 && !guest_room_open);
+    /* Straight to the main menu instead: same leave, the second visit counts. */
+    guest_quit_at=0;
+    root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
+    native_return_focus(root,0);assert(guest_room_open);
     root_meta[2]="Scripts.Graph.Octane_Lobby_Main_Root";
     native_return_focus(root,0);
-    assert(party_quits==saved_quits+1 && !guest_room_open);
+    assert(party_quits==saved_quits+2 && !guest_room_open);
     /* In the room again and out within 5 s: the native leave already ran once. */
-    guest_room_open=1;
-    native_return_focus(root,0);assert(party_quits==saved_quits+1 && !guest_room_open);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_PrivateGame_Root";
+    native_return_focus(root,0);assert(guest_room_open);
+    root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
+    native_return_focus(root,0);assert(party_quits==saved_quits+2 && !guest_room_open);
+    /* "Waiting on host..." is not the room: it must not trigger a leave by itself. */
+    root_meta[2]="Scripts.Graph.Octane_Lobby_WaitingRoom_Root";
+    native_return_focus(root,0);assert(!guest_room_open && party_quits==saved_quits+2);
     /* Leaving the host's session the game's own way means the same party leave; our own
      * session's delete (closing a room we host) does not. */
     guest_quit_at=0;
     runtime_public_itemless_guest_left("cusa13795-session-LocalHost");
-    assert(party_quits==saved_quits+1);
-    runtime_public_itemless_guest_left("cusa13795-session-HostPlayer");
     assert(party_quits==saved_quits+2);
     runtime_public_itemless_guest_left("cusa13795-session-HostPlayer");
-    assert(party_quits==saved_quits+2);
+    assert(party_quits==saved_quits+3);
+    runtime_public_itemless_guest_left("cusa13795-session-HostPlayer");
+    assert(party_quits==saved_quits+3);
+    /* The Lobby Members rows of a private room say the guest is inside it whatever screen has
+     * focus: out of the room leaves the party once, and a leave with no room open does nothing. */
+    guest_quit_at=0;
+    runtime_public_itemless_guest_room(0);
+    assert(party_quits==saved_quits+3 && !guest_room_open);
+    runtime_public_itemless_guest_room(1);
+    assert(guest_room_open && party_quits==saved_quits+3);
+    guest_quit_at=0;
+    runtime_public_itemless_guest_room(0);
+    assert(!guest_room_open && party_quits==saved_quits+4);
+    /* In the room again and out within 5 s: the native leave already ran once. */
+    runtime_public_itemless_guest_room(1);
+    runtime_public_itemless_guest_room(0);
+    assert(!guest_room_open && party_quits==saved_quits+4);
     party_manager=saved_party;native_party_quit_trace=saved_quit;party_guest=saved_guest;
     party_quits=saved_quits;online_return_button=saved_return;guest_room_open=0;
     guest_quit_at=0;

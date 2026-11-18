@@ -178,6 +178,7 @@ void runtime_public_itemless_reset(void);
 void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_menu_return(void);
 void runtime_public_itemless_guest_left(const char *session_id);
+void runtime_public_itemless_guest_room(int inside);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
 int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);

@@ -3398,6 +3398,8 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         if (ranked_mode_select_root(owner)) runtime_public_itemless_menu_return();
         fprintf(stderr, "ModeSelect selector: ranked=%d private=%d\n",
             runtime_ranked_selected(), is_private());
+        /* Mode Select is where the room's Back lands: out of the room, party leave included. */
+        runtime_public_itemless_guest_room(0);
         unsigned char *available, *items;
         memcpy(&available, self + 0x1b0, sizeof available);
         memcpy(&items, available + 0x20, sizeof items);
@@ -3944,12 +3946,16 @@ static void ranked_member_icons(unsigned char *self) {
 
 static void ABI member_event(unsigned char *self, void *event, void *owner) {
     original_member_event(self, event, owner);
+    /* Lobby Members rows only exist inside a room; in a private one this guest is in the host's
+     * room, and leaving it must also leave the host's party (runtime_public_itemless.c). */
+    if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
 }
 
 static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
     original_member_update(self, owner, dt);
+    if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
 }

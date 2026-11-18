@@ -235,6 +235,15 @@ void runtime_public_itemless_guest_left(const char *sid) {
     if (!strncmp(sid, mine, strlen(mine))) return; /* its own session, not a host's room */
     leave_party_as_guest();
 }
+/* Inside the host's private room (its Lobby Members rows are up while the game's private flag is
+ * set) and out of it again: the guest leaves the host's party, the game's own way. This does not
+ * depend on which screen is focused, so every way out of the room reaches it. */
+void runtime_public_itemless_guest_room(int inside) {
+    if (inside) { guest_room_open = 1; return; }
+    if (!guest_room_open) return;
+    guest_room_open = 0;
+    leave_party_as_guest();
+}
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
@@ -1052,6 +1061,25 @@ static void *return_button_in(void *node, const char *name, int depth) {
     }
     return return_button_in(runtime_online_mode_content(node), name, depth + 1);
 }
+/* Each online lobby screen this player focuses, once per name, so the next run shows the screens
+ * the guest really visited next to the room decision below (2026-11-18). */
+static void note_room_screen(const char *name) {
+    static char seen[12][48];
+    static int count;
+    if (!name || strncmp(name, "Scripts.Graph.", 14)) return;
+    for (int i = 0; i < count; ++i)
+        if (!strcmp(seen[i], name)) return;
+    if (count >= 12) return;
+    snprintf(seen[count++], sizeof seen[0], "%s", name);
+    printf("Online party: focus graph %.48s following=%d\n", name, runtime_room_mode_following());
+}
+/* The room's screen: the dump's Octane_Lobby_PrivateGame_en.lng labels this graph's two buttons
+ * "Start Game" (host) and "Ready" (guest), so this graph is the room both roles sit in
+ * (2026-11-18). Octane_Lobby_WaitingRoom is "Waiting on host..." and ModeSelect is the setup
+ * screen before the room, which is where Back from the room lands. */
+static int room_screen(const char *name) {
+    return name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root");
+}
 static void native_return_focus(void *node, int ancestors) {
     for (int depth = 0; node && depth < 16; ++depth) {
         void *list = *(void **)((char *)node + 0xe8);
@@ -1059,26 +1087,27 @@ static void native_return_focus(void *node, int ancestors) {
         void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
         for (int i = 0; items && i < count; ++i) {
             const char *name = vsc_graph_name(items[i]);
-            /* A public search's lobby. Not the private room's: focus comes back to it when a dialog
-             * inside closes, with the room's players already in, who then counted as a party that
-             * came in together (2026-11-16: leaving a private room took them all along). The
-             * private room is armed on entering it (the online menu's Private Match button, or
-             * the mode screen's way into the lobby). */
-            if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root")) {
-                if (runtime_room_mode_following() && !guest_room_open) {
-                    guest_room_open = 1; /* this guest is in the room */
-                    puts("Online party: guest in the host's room");
-                }
-                return;
+            const int was_in_room = guest_room_open;
+            if (!ancestors) note_room_screen(name);
+            /* The room itself (host: "Start Game", guest: "Ready"). Focus inside it also comes
+             * back to it when its quit dialog closes: that visit changes nothing. */
+            if (!ancestors && !guest_room_open && room_screen(name)) {
+                printf("Online party: in the room screen %.40s\n", name);
+                runtime_public_itemless_guest_room(1);
             }
             if (!ancestors && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Matchmaking_Root")) {
                 arm_party_return();
                 return;
             }
+            if (!ancestors && name && was_in_room &&
+                !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root")) {
+                /* Back out of the room lands on its setup screen; native leaves the session only,
+                 * so the party (and the host's Lobby Members row) stays behind (2026-11-18). */
+                runtime_public_itemless_guest_room(0);
+                return;
+            }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
                                       !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root"))) {
-                if (runtime_room_mode_following() &&
-                    !strcmp(name, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root")) guest_room_open = 1;
                 if (__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST)) return;
                 /* ModeSelect appears before PrivateGame while entering, and after it on Back. */
                 if (__atomic_load_n(&entry_private,__ATOMIC_SEQ_CST) &&
@@ -1093,10 +1122,7 @@ static void native_return_focus(void *node, int ancestors) {
             }
             /* Back to the menus from the room without going through its screens: the guest still
              * has to leave the host's party (its Lobby Members row and the host's notice). */
-            if (!ancestors && guest_room_open) {
-                guest_room_open = 0;
-                leave_party_as_guest();
-            }
+            if (!ancestors) runtime_public_itemless_guest_room(0);
             typedef void *(ABI *GetType)(void *);
             void *meta = (*(GetType **)items[i])[0](items[i]);
             const char *names[] = {"Gui_Placeable_id_gto91nsu",
