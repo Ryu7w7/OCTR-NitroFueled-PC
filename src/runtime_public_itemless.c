@@ -1536,8 +1536,8 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     memcpy(stubs+341,"\x4d\x8b\x36",3);
     jump(stubs+344,image+0xa5b692);
     native_party_return_trace=(unsigned char (ABI *)(void *,void *,void *))(stubs+320);
-    /* A guest whose host went away can hold a session the game already freed: its virtual stop
-     * (vtable +0xb8) then jumps into garbage. Call it only when it is a function of this image. */
+    /* A guest whose host went away can hold a session with a dead vtable. Skip its virtual stop,
+     * but still clear and release the session exactly as the native reset does. */
     {
         unsigned char *guard=stubs+416;
         const uintptr_t code=(uintptr_t)image, end=code+size;
@@ -1554,10 +1554,9 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         memcpy(guard+39,"\x48\xb9",2); memcpy(guard+41,&end,8);
         memcpy(guard+49,"\x48\x39\xc8",3);                /* cmp %rcx,%rax */
         memcpy(guard+52,"\x73\x13",2);                    /* jae skip */
-        memcpy(guard+54,"\x80\x38\x55",3);                /* cmpb $0x55,(%rax) */
-        memcpy(guard+57,"\x75\x0e",2);                    /* jne skip */
+        memcpy(guard+54,"\x90\x90\x90\x90\x90",5);      /* any function inside the image is valid */
         jump(guard+59,image+0xa18223);
-        jump(guard+73,image+0xa1824b);                    /* skip: leave the session alone */
+        jump(guard+73,image+0xa18235);                    /* skip stop; clear +0x18 and release */
     }
     party_trace_image=image;
     jump(image+0xa18210,(void *)traced_party_reset);

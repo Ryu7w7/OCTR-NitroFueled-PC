@@ -133,12 +133,14 @@ static void test_full_lobby_confirmation(void) {
     snprintf(doc+n, sizeof doc-n, ",%016" PRIx64 "\"}", (uint64_t)17);
     assert(!confirmation(doc,42,1));
 }
-static int native_party_teardowns, native_keep_party, native_race_resets, native_lobby_closes;
+static int native_party_teardowns, native_keep_party, native_race_resets, native_lobby_closes, native_session_releases, native_session_stops;
 static void ABI native_close_lobby(int start_again) { assert(!start_again && native_keep_party==1 && native_race_resets);++native_lobby_closes; }
 static void ABI native_reset_session(void *self) { (void)self;assert(native_keep_party==1);++native_race_resets; }
 static void ABI native_stop_part(void *self) { (void)self; }
 static void ABI native_stop_party(void *self) { (void)self; ++native_party_teardowns; }
 static void ABI native_stop_session(void *self, int keep_party) { (void)self; native_keep_party=keep_party; }
+static void ABI native_release_session(void *self) { assert(self); ++native_session_releases; }
+static void ABI native_stop_session_object(void *self) { assert(self); ++native_session_stops; }
 static void test_installed_hooks(const char *region) {
     size_t size=0x2af3000;
     unsigned char *im=mmap(NULL,size,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
@@ -165,9 +167,13 @@ static void test_installed_hooks(const char *region) {
     memcpy(im+0xa5b692,"\x48\x83\xc4\x30\x5b\x41\x5e\x5d\xb0\x01\xc3",11);
     memcpy(im+0xa18210,"\x55\x48\x89\xe5\x53\x50\x48\x89\xfb\x83\x7b\x54\x0a\x0f\x84\x93\x00\x00\x00",19);
     /* Both reset branches unwind the stolen prologue; quit does the same. */
-    memcpy(im+0xa18223,"\x58\x5b\x5d\xc3",4);
+    memcpy(im+0xa18223,"\x48\x8b\x7b\x18\x48\x85\xff\x74\x1f\x48\x8b\x07\xff\x90\xb8\x00\x00\x00",18);
     memcpy(im+0xa182b6,"\x58\x5b\x5d\xc3",4);
-    memcpy(im+0xa1824b,"\x58\x5b\x5d\xc3",4); /* the dead-session skip path unwinds here */
+    memcpy(im+0xa18235,"\x48\x8b\x7b\x18\x48\xc7\x43\x18\x00\x00\x00\x00\x48\x85\xff\x74\x05\xe8",18);
+    int32_t release_relative=(int32_t)(0x149d260-0xa1824b);
+    memcpy(im+0xa18247,&release_relative,4);
+    memcpy(im+0xa1824b,"\x58\x5b\x5d\xc3",4);
+    jump(im+0x149d260,(void *)native_release_session);
     memcpy(im+0xa9ffd0,prefix,16);im[0xa9ffe0]=0x28;
     memcpy(im+0xa9ffe1,"\x48\x83\xc4\x28\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d\xc3",15);
     memcpy(im+0xaa06a0,"\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x48\x83\xec\x18",13);
@@ -194,6 +200,19 @@ static void test_installed_hooks(const char *region) {
     assert(!memcmp(im+0xa97a00,stop_native,sizeof stop_native));
     unsigned char trace_party[0x80]={0};
     ((void (ABI *)(void *))(im+0xa18210))(trace_party);
+    unsigned char dead_session[0x120]={0};
+    *(void **)(trace_party+0x18)=dead_session;
+    int releases=native_session_releases;
+    ((void (ABI *)(void *))(im+0xa18210))(trace_party);
+    assert(!*(void **)(trace_party+0x18) && native_session_releases==releases+1);
+    void *live_vtable[24]={0};
+    jump(im+0x100000,(void *)native_stop_session_object);
+    live_vtable[23]=im+0x100000;
+    *(void **)dead_session=live_vtable;
+    *(void **)(trace_party+0x18)=dead_session;
+    int stops=native_session_stops;
+    ((void (ABI *)(void *))(im+0xa18210))(trace_party);
+    assert(!*(void **)(trace_party+0x18) && native_session_stops==stops+1 && native_session_releases==releases+2);
     *(int *)(trace_party+0x54)=10;
     ((void (ABI *)(void *))(im+0xa18210))(trace_party);
     ((void (ABI *)(void *))(im+0xa9ffd0))(trace_party);
