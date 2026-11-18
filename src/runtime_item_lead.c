@@ -50,6 +50,20 @@
 #define KART_GAP 150.0f    /* a missile chasing this kart stops this far behind it (game units: cm) */
 #define RECENT 8
 #define THROWERS 8
+/* Bombs (players' report 2026-11-17: "the bomb lags online, the missile is fine"): they were led like
+ * missiles, by the thrower's missile calibration (300-500 ms, plus up to 200 ms of a stale network
+ * position) along a velocity capped only at 6400 while a bomb rolls at ~4000, and logs showed the
+ * estimate pinned at that cap: drawn 20-34 m ahead, jumping by half that whenever the estimate
+ * moved. Now a bomb rolls at its own speed (CSpawnedLargeBowlingBombComponent +0x8c, set from its
+ * data +0x48 at 0xf1c9cc; negative when thrown backwards), along a direction taken over a longer
+ * stretch, by the round trip + BOMB_EXTRA_MS (no missile calibration), and the drawn offset follows
+ * smoothly. BB_ITEM_LEAD_BOMB=0 draws bombs where the network has them (tests: compare). */
+#define BOMB_MAX_LEAD 0.35f    /* seconds */
+#define BOMB_EXTRA_MS 50
+#define BOMB_STALE 0.1         /* seconds: no further on a network position older than this */
+#define BOMB_WINDOW 0.2        /* seconds of network positions its direction is taken over */
+#define BOMB_SMOOTH 0.08       /* seconds: how quickly the drawn offset follows a new one */
+#define BOMB_FALLBACK_CAP 5200.0f   /* a bomb's speed unknown: no faster than this (juiced ~4600) */
 
 typedef void ABI update_fn(void *component, void *a, void *b, void *c);
 static update_fn *original_missile, *original_bomb;
@@ -69,13 +83,16 @@ typedef struct {
     float rtt;                  /* ms, -1 unknown */
     float speed;                /* its usual speed (units/s), 0 not known yet */
     float cap;                  /* a missile's top speed from its data (x1.6, juiced), 0 none */
+    float rolls;                /* a bomb's own speed (+0x8c), 0 not known */
+    float shown[3];             /* a bomb's drawn offset, following the wanted one smoothly */
+    int has_shown;
     char owner[PING_NAME];
     int updates, moves, checks, kept, chasing, jumps;
     float lead_ms, farthest;
 } Tracked;
 
 static Tracked items[TRACKED];
-static struct { int on, fixed_ms, extra_ms; } cfg = {-1, -1, 100};
+static struct { int on, fixed_ms, extra_ms, bombs; } cfg = {-1, -1, 100, 1};
 
 /* items just gone (a hit often removes the missile in the frame its damage shows up) */
 static struct { char owner[PING_NAME]; int kind; float base[3], speed, cap, lead_ms; double last_seen; } recent[RECENT];
@@ -137,9 +154,12 @@ static long long wall_ms(void) {
 static int enabled(void) {
     if (cfg.on < 0) {
         const char *off = getenv("BB_ITEM_LEAD"), *fixed = getenv("BB_ITEM_LEAD_MS"), *extra = getenv("BB_ITEM_LEAD_EXTRA");
+        const char *bombs = getenv("BB_ITEM_LEAD_BOMB");
         cfg.on = !(off && *off == '0');
+        cfg.bombs = !(bombs && *bombs == '0');
         if (fixed && *fixed) cfg.fixed_ms = atoi(fixed);
         if (extra && *extra) cfg.extra_ms = atoi(extra);
+        if (cfg.on && !cfg.bombs) puts("Item lead: bombs drawn where the network has them (BB_ITEM_LEAD_BOMB=0)");
         if (cfg.on && cfg.fixed_ms >= 0) printf("Item lead: other players' missiles and bombs drawn %d ms ahead (BB_ITEM_LEAD_MS)\n", cfg.fixed_ms);
         else if (cfg.on) printf("Item lead: other players' missiles and bombs drawn ahead by the round trip + %d ms\n", cfg.extra_ms);
         else puts("Item lead: off (BB_ITEM_LEAD=0)");
@@ -209,6 +229,9 @@ static void finish(Tracked *t, const char *why) {
                KIND[t->kind], t->owner[0] ? t->owner : "?", why, t->last_seen - t->first, t->rtt, t->lead_ms, t->speed,
                t->updates, t->moves, t->jumps, t->kept, t->checks, t->chasing ? "chased this kart" : "not at this kart",
                t->farthest);
+    if (t->updates > 1 && t->kind == BOMB)
+        printf("Item lead: that bomb rolled at %.0f (its own speed%s)\n", t->rolls > 0.0f ? t->rolls : t->cap,
+               t->rolls > 0.0f ? "" : " unknown: capped");
     if (t->has_base && t->speed > 0.0f) {
         __typeof__(recent[0]) *r = &recent[recent_next++ % RECENT];
         memcpy(r->owner, t->owner, sizeof r->owner);
@@ -242,8 +265,15 @@ static Tracked *track(void *component, void *entity, int kind, double now) {
     /* a tracking missile's speed is its data's +0x14 (the thrower's update moves it by that, 0xf2a200) */
     void *data = RR_AT(component, 0x10, void *);
     const float speed = kind == MISSILE && data ? RR_AT(data, 0x14, float) : 0.0f;
-    t->cap = speed > 1000.0f && speed < 20000.0f ? speed * 1.6f : 6400.0f;   /* bombs: 4000 at most, x1.6 */
+    t->cap = speed > 1000.0f && speed < 20000.0f ? speed * 1.6f : 6400.0f;
+    if (kind == BOMB) t->cap = BOMB_FALLBACK_CAP;   /* until its own speed is read (bomb_speed) */
     return t;
+}
+
+/* A bomb's own rolling speed (+0x8c, units/s; negative thrown backwards), 0 not a plausible one */
+static float bomb_speed(void *component) {
+    const float speed = fabsf(RR_AT(component, 0x8c, float));
+    return speed > 500.0f && speed < 20000.0f ? speed : 0.0f;
 }
 
 static float norm(const float *v) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
@@ -259,7 +289,10 @@ static void sample(Tracked *t, const float *at, double now) {
         if (dt < 1.0 / 30.0) dt = 1.0 / 30.0;
         float d[3];
         for (int c = 0; c < 3; c++) d[c] = at[c] - t->sample[last].p[c];
-        if (norm(d) > t->cap * 2.0f * (float)dt + 300.0f) {
+        /* a bomb's cap is its own speed (x1.15), too tight here: the network's bursts would count as
+         * jumps (13-16 a bomb at 200 ms in tests); a spawn or removal teleport is far longer anyway */
+        const float limit = t->kind == BOMB && t->cap < 6400.0f ? 6400.0f : t->cap;
+        if (norm(d) > limit * 2.0f * (float)dt + 300.0f) {
             t->samples = 0;
             t->jumps++;
         }
@@ -271,9 +304,9 @@ static void sample(Tracked *t, const float *at, double now) {
 
 static int same(const float *a, const float *b) { return !memcmp(a, b, 3 * sizeof(float)); }
 
-/* its velocity (units per second) over the network's positions of the last ~0.1 s, and how old the newest
- * of them is (s); 0 not known yet */
-static int velocity(const Tracked *t, double now, float v[3], double *age) {
+/* its velocity (units per second) over the network's positions of the last `window` s (~0.1 s missiles,
+ * longer bombs), and how old the newest of them is (s); 0 not known yet */
+static int velocity(const Tracked *t, double now, double window, float v[3], double *age) {
     if (t->samples < 2) return 0;
     const int newest = (t->samples - 1) % SAMPLES, oldest = t->samples > SAMPLES ? t->samples - SAMPLES : 0;
     int pick = -1;
@@ -281,7 +314,7 @@ static int velocity(const Tracked *t, double now, float v[3], double *age) {
         const double dt = t->sample[newest].t - t->sample[k % SAMPLES].t;
         if (dt > 0.5) break;
         pick = k % SAMPLES;
-        if (dt >= 0.08) break;
+        if (dt >= window) break;
     }
     const double dt = pick >= 0 ? t->sample[newest].t - t->sample[pick].t : 0.0;
     if (dt < 0.03) return 0;
@@ -314,25 +347,62 @@ static void lead_item(void *component, int kind) {
     t->written = 0;
     if (!t->has_base) return;
     memcpy(at, t->base, sizeof t->base);    /* drawn where the network has it, unless led below */
+    const int bomb = kind == BOMB;
+    if (bomb && !cfg.bombs) return;
+    if (bomb) {
+        const float rolls = bomb_speed(component);
+        if (rolls > 0.0f) t->rolls = rolls, t->cap = rolls * 1.15f;
+    }
     float v[3];
     double stale = 0.0;
-    if (!velocity(t, now, v, &stale)) return;
+    if (!velocity(t, now, bomb ? BOMB_WINDOW : 0.08, v, &stale)) {
+        /* no velocity this frame (its samples started again): a bomb keeps the offset it was drawn
+         * at for a moment instead of falling back onto the network's position and jumping ahead again */
+        if (bomb && t->has_shown && now - t->first > EASE_IN) {
+            for (int c = 0; c < 3; c++) t->lead[c] = t->base[c] + t->shown[c];
+            memcpy(at, t->lead, sizeof t->lead);
+            t->written = 1;
+        }
+        return;
+    }
+    /* a rolling bomb goes at its own speed: the network's steps give only the direction (a slowing or
+     * stopped one, about to go off, keeps what they show) */
+    const float moving = norm(v);
+    if (bomb && t->rolls > 0.0f && moving > t->rolls * 0.3f)
+        for (int c = 0; c < 3; c++) v[c] *= t->rolls / moving;
     /* Preserve the 30 FPS response when item updates arrive more often. */
     const float blend = dt >= 0.0 && dt < 1.0 / 30.0 ? (float)(1.0 - pow(0.8, dt * 30.0)) : 0.2f;
     t->speed = t->speed > 0.0f ? t->speed + (norm(v) - t->speed) * blend : norm(v);
     if (now - t->rtt_at > 0.5) t->rtt = round_trip(t->owner), t->rtt_at = now;
-    const float measured = calibrated(t->owner);
+    const float measured = bomb ? 0.0f : calibrated(t->owner);   /* missile hits measure missiles only */
+    const int extra_ms = bomb ? BOMB_EXTRA_MS : cfg.extra_ms;
     float lead = cfg.fixed_ms >= 0 ? cfg.fixed_ms / 1000.0f
                : measured > 0.0f ? measured
-               : t->rtt > 0.0f ? (t->rtt + cfg.extra_ms) / 1000.0f : 0.0f;
-    if (lead > MAX_LEAD) lead = MAX_LEAD;
+               : t->rtt > 0.0f ? (t->rtt + extra_ms) / 1000.0f : 0.0f;
+    const float most = bomb ? BOMB_MAX_LEAD : MAX_LEAD;
+    if (lead > most) lead = most;
     if (lead <= 0.0f) return;
     t->lead_ms = lead * 1000.0f;
     const double age = now - t->first;
     if (age < EASE_IN) lead *= (float)(age / EASE_IN);
+    if (bomb && stale > BOMB_STALE) stale = BOMB_STALE;
     lead += (float)stale;               /* the network's newest position is that old already */
     float off[3], length = 0.0f;
-    for (int c = 0; c < 3; c++) off[c] = v[c] * lead, length += off[c] * off[c];
+    for (int c = 0; c < 3; c++) off[c] = v[c] * lead;
+    if (bomb) {
+        /* the drawn offset follows the wanted one over ~BOMB_SMOOTH s: a network correction or a turn
+         * bends the bomb's path instead of moving it at once */
+        if (!t->has_shown) {
+            memcpy(t->shown, off, sizeof t->shown);
+            t->has_shown = 1;
+        } else {
+            const double step = dt > 0.0 ? (dt < 0.1 ? dt : 0.1) : 0.0;
+            const float follow = (float)(1.0 - exp(-step / BOMB_SMOOTH));
+            for (int c = 0; c < 3; c++) t->shown[c] += (off[c] - t->shown[c]) * follow;
+        }
+        memcpy(off, t->shown, sizeof off);
+    }
+    for (int c = 0; c < 3; c++) length += off[c] * off[c];
     length = sqrtf(length);
     /* a missile after this PC's kart (the tracking missile's target, +0xb0) goes at it and waits just behind */
     void *target = kind == MISSILE ? rr_handle_object(&RR_AT(component, 0xb0, void *)) : 0;
