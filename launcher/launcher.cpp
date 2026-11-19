@@ -1835,10 +1835,15 @@ bool RankedLinkRequest(const std::string& link) {
     const std::string text = Lower(link);
     if (text.rfind("sacredfire://ranked", 0) != 0) return false;  // another link: just the launcher
     const int mode = text.find("mode=1") != std::string::npos ? 1 : 0;
+    // room=<id>: the announced room, which the game asks the server for (none for a mode's queue)
+    unsigned long long room = 0;
+    if (const auto at = text.find("room="); at != std::string::npos)
+        room = std::strtoull(text.c_str() + at + 5, nullptr, 10);
     const fs::path file = GameIni().parent_path() / L"ryunet_ranked.txt";
     {
         std::ofstream out(file, std::ios::binary | std::ios::trunc);
         out << "mode=" << mode << "\ntime=" << int64_t(std::time(nullptr)) << "\n";
+        if (room) out << "room=" << room << "\n";
     }
     for (int i = 0; i < 25; ++i) {  // a running game polls it once a second
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

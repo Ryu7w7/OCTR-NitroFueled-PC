@@ -1307,6 +1307,9 @@ static int online_return_button;
  * player confirms, and the server puts them in the room that waits. Kept for 10 minutes. */
 static int ranked_request_mode = -1, ranked_request_notice, ranked_request_pending;
 static uint64_t ranked_request_until;
+/* The announced room ("room=<id>", 0 for a mode's queue): sent with the next Ranked search of that
+ * mode as octr_ranked.room, which the server places first (ranked_lfg.go, ctr_async.go place). */
+static uint64_t ranked_request_room;
 
 void runtime_public_itemless_poll_ranked_request(void) {
     static uint64_t next_check;
@@ -1326,10 +1329,12 @@ void runtime_public_itemless_poll_ranked_request(void) {
     char line[128];
     int mode = -1;
     long long written = 0;
+    unsigned long long room = 0;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (!strncmp(line, "mode=", 5)) mode = atoi(line + 5);
         else if (!strncmp(line, "time=", 5)) written = atoll(line + 5);
+        else if (!strncmp(line, "room=", 5)) room = strtoull(line + 5, NULL, 10);
     }
     fclose(f);
     remove(path);
@@ -1343,8 +1348,9 @@ void runtime_public_itemless_poll_ranked_request(void) {
     __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&ranked_request_notice, 1, __ATOMIC_SEQ_CST);
     ranked_request_until = now + 600000;
+    __atomic_store_n(&ranked_request_room, (uint64_t)room, __ATOMIC_SEQ_CST);
     online_return_button = 1;   /* the online menu opens with Ranked focused */
-    printf("Ranked join: Discord asks for Ranked %s\n", mode ? "Itemless" : "Normal");
+    printf("Ranked join: Discord asks for Ranked %s (room %llu)\n", mode ? "Itemless" : "Normal", room);
 }
 
 /* Mode Select (runtime_online_mode.c), Ranked chosen: the mode the Discord join asked for, once; -1 none. */
@@ -1641,7 +1647,16 @@ static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, i
     char *out = malloc(n + 480);
     if (out) {
         size_t used = 0;
-        if (ranked) used = (size_t)snprintf(out, n + 480,
+        /* Joined from a Discord announcement: that room, once, for a search of its mode in time. */
+        uint64_t room = 0;
+        if (ranked && __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST) == mode &&
+            check_clock() <= ranked_request_until)
+            room = __atomic_exchange_n(&ranked_request_room, 0, __ATOMIC_SEQ_CST);
+        if (room) fprintf(stderr, "Ranked join: searching for the announced room %llu\n", (unsigned long long)room);
+        if (ranked && room) used = (size_t)snprintf(out, n + 480,
+            "{\"octr_ranked\":{\"version\":2,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\",\"room\":%llu},",
+            mode, token, (unsigned long long)room);
+        else if (ranked) used = (size_t)snprintf(out, n + 480,
             "{\"octr_ranked\":{\"version\":2,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\"},",
             mode, token);
         else { out[0] = '{'; out[1] = 0; used = 1; }
