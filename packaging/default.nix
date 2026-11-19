@@ -9,7 +9,7 @@
 let
   lib = pkgs.lib;
   root = ./..;
-  assetDirs = [ "scripts" "patches" "launcher" "art" "shaders" "third_party/gcn2hlsl" "packaging/windows/steamgrid" "out/dlss" ];
+  assetDirs = [ "scripts" "lang" "patches" "launcher" "art" "shaders" "third_party/gcn2hlsl" "packaging/windows/steamgrid" "out/dlss" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
@@ -117,7 +117,7 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $d/bin $out/bin
     cp run.sh run.py $d/   # run.py: scripts/online_config.py reuses its online setup
     cp out/VERSION $d/VERSION   # the build's source revision (build.sh); run.sh and the launcher show it
-    cp -r scripts patches launcher art $d/
+    cp -r scripts lang patches launcher art $d/   # lang/: translations scripts/octr_texts.py reads
     cp -r packaging/windows/steamgrid $d/art/steamgrid
     # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
     if [ -d shaders ]; then cp -r shaders $d/; fi

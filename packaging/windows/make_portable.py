@@ -301,6 +301,8 @@ def main():
     # game files (scripts/tacho_pack.py)
     for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts', 'assets', 'tacho_pack'):
         shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
+    # lang/: the port's translations, read by scripts/octr_texts.py at start-up (online_mode.py, tacho_pack.py)
+    shutil.copytree(ROOT / 'lang', folder / 'lang', dirs_exist_ok=True)
     shutil.copy2(ROOT / 'tools' / 'gen_import_names.py', folder / 'tools')
     # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its
     # driver script and DXC. Only dxc.exe and dxcompiler.dll: SPIR-V needs no dxil.dll.
