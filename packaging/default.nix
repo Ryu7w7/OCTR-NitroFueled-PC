@@ -13,7 +13,7 @@ let
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
-    "out/launcher" "out/launcher/sacredfire-launcher" "out/VERSION" "tools" "tools/gen_import_names.py"
+    "out/launcher" "out/launcher/sacredfire-launcher" "out/VERSION" "tools" "tools/gen_import_names.py" "tools/make_online_key_patch.py"
     # the native Vulkan engine's shaders are built on the player's PC (scripts/native_shaders.py)
     "tools/shaders" "tools/shaders/build_spirv.py" "third_party" "packaging" "packaging/windows"
     "out/eosbridge" "out/eosbridge/ryunet-bridge" "out/eosbridge/libEOSSDK-Linux-Shipping.so"
@@ -123,6 +123,8 @@ pkgs.stdenv.mkDerivation {
     if [ -d shaders ]; then cp -r shaders $d/; fi
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
     install -Dm755 tools/gen_import_names.py $d/tools/gen_import_names.py
+    # run.sh runs scripts/online_key_local.py (a non-production server's auth key), which imports it.
+    install -Dm644 tools/make_online_key_patch.py $d/tools/make_online_key_patch.py
     # The native Vulkan engine's shader build: its translator and driver script (DXC: BB_DXC below).
     install -Dm644 tools/shaders/build_spirv.py $d/tools/shaders/build_spirv.py
     mkdir -p $d/third_party && cp -r third_party/gcn2hlsl $d/third_party/
