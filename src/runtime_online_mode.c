@@ -159,6 +159,15 @@ static void open_team_score(void);
 static void *team_leaders_project;
 static int private_single_race_active;
 static int private_team_selector_active;
+static int team_preview;            /* the team screen opened from the room (R1), to pick only */
+static uint64_t private_lobby_ms;   /* the private room's own menu (its tag OCTR_PRIVATE_LOBBY) updated just now */
+static int private_lobby_last = -1; /* the lobby menu last updated was the private room's (1) or another (0) */
+static int team_preview_closing;    /* confirm / back pressed on it: closed once no button is held */
+static void unmute_other_screens(void);
+static void *closed_selectors[4];   /* selectors of team screens opened from the room and closed: no more presses */
+static void *team_preview_manager;  /* the GUI manager the room's screens open with */
+static unsigned char team_preview_options[0x28];   /* their open options, copied */
+static int team_preview_player = -2;               /* -2: not seen yet */
 static void *active_team_selector_project;
 static void **team_confirm_type, **team_unconfirm_type;
 static ProjectEvent original_gui_broadcast;
@@ -196,6 +205,13 @@ static LookupHero lookup_hero;
 static BehaviorUpdate original_leader_update;
 static void **marker_initialize_type;
 static const char *team_names[] = {"BLUE", "RED", "GREEN", "YELLOW"};
+static int points_lines = 1;   /* the results' team points list: its lines (a team each) */
+/* The room's team points, race after race (the lobby's list shows them): each race's totals added to the sum it
+ * started with; reset with a new room or when the room is left. */
+static int room_points[4], room_points_base[4], room_points_teams;
+static int team_language(void);
+static const char *const team_wins_format[6];
+static unsigned char *find_placeable(unsigned char *placeable, const char *name, int depth);
 typedef int (ABI *RacerFaction)(void *);
 static RacerFaction racer_faction;
 static NativeEvent original_race_setup;
@@ -1128,6 +1144,9 @@ static void ABI open_race_project(void **result, void *manager, const char *name
         }
         if (!allowed) clear_team_selector();
         private_team_selector_active = allowed;
+        if (team_preview) unmute_other_screens();
+        team_preview = team_preview_closing = 0;   /* the game's own: the match starts from it */
+        memset(closed_selectors, 0, sizeof closed_selectors);
         printf("Native private TEAM: opening selector mode=%d private=%d\n", mode, private_team_selector_active);
     }
     const char *requested = name;
@@ -1147,6 +1166,14 @@ static void ABI open_race_project(void **result, void *manager, const char *name
                name, project, root, flags, (double)alpha);
     }
     if (name && !strcasecmp(name, "Octane_LobbyMembers")) {
+        team_preview_manager = manager;
+        if (options) {   /* the open options (0x986170 reads +0x00..+0x21): the team screen opens with the same */
+            memcpy(team_preview_options, options, sizeof team_preview_options);
+            team_preview_player = player;
+            const unsigned char *o = options;
+            printf("Team lobby: room screen options %02x%02x%02x%02x%02x%02x%02x%02x layer %d player %d\n", o[7], o[6], o[5],
+                   o[4], o[3], o[2], o[1], o[0], *(const int *)(o + 0x18), player);
+        }
         assign_handle((unsigned char *)&lobby_members_project, result ? *result : NULL);
     }
     if (runtime_ranked_active() && name && !strcasecmp(name, "Octane_Race_Ranking")) {
@@ -1180,6 +1207,7 @@ static void ABI race_ui(unsigned char *self) {
     assign_handle((unsigned char *)&team_ranking_project, NULL);
     assign_handle((unsigned char *)&team_leaders_project, NULL);
     team_result_count = team_results_pending = 0;
+    memcpy(room_points_base, room_points, sizeof room_points);   /* this race's points go on top of these */
     int mode = 0, teams = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd4c, 4);
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
@@ -1707,6 +1735,9 @@ static void apply_team_results(unsigned char *event) {
     printf("Native private TEAM: winner=%s points=%d head_to_head=%d\n",
            team_winner >= 0 ? team_names[team_winner] : "NONE", maximum, team_tiebreak);
     memcpy(team_totals, totals, sizeof totals);
+    for (int t = 0; t < 4; ++t) room_points[t] = room_points_base[t] + totals[t];
+    printf("Team lobby: the room's points now %d / %d / %d / %d\n", room_points[0], room_points[1], room_points[2],
+           room_points[3]);
     memcpy(team_results, results, sizeof results);
     team_result_count = count;
     team_finished_mask = finished_mask;
@@ -1888,7 +1919,8 @@ static void team_result_rows(unsigned char *row, int depth) {
         /* Carry the clip with the list; leave space below the points heading. */
         unsigned char *parent = pointer_at(row, 0x40);
         if (parent) {
-            const float parent_y = 260.0f;
+            /* under the points list: a line a team (the old single line fit in the native gap) */
+            const float parent_y = 260.0f + (float)(points_lines > 1 ? points_lines - 1 : 0) * 45.0f;
             memcpy(parent + 0x64, &parent_y, 4);
             unsigned parent_flags;
             memcpy(&parent_flags, parent + 12, 4); parent_flags |= 0x1000;
@@ -1914,16 +1946,86 @@ static void team_result_rows(unsigned char *row, int depth) {
             y = -19.0f;
             /* Keep the native text material's gradient, without team tint. */
         } else if (!strcmp(own_name, "OCTR_TEAM_POINTS")) {
-            snprintf(title, sizeof title, runtime_text("%d POINTS%s"), best >= 0 ? team_totals[best] : 0,
-                     team_tiebreak ? runtime_text(" (H2H)") : "");
-            y = 9.0f;
-            const float scale[] = {0.08081815f, 0.11369143f, 1.0f};
+            /* every team's points, the most first: "VERDE 14 / ROJO 12" (the room's colors) */
+            int teams = 2;
+            if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+            if (teams < 2 || teams > 4) teams = 2;
+            int order[4] = {0, 1, 2, 3};
+            for (int i = 1; i < teams; ++i)
+                for (int j = i; j > 0 && team_totals[order[j]] > team_totals[order[j - 1]]; --j) {
+                    const int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+                }
+            if (best >= 0)   /* the winner first, also on a tie decided head to head */
+                for (int i = 0; i < teams; ++i)
+                    if (order[i] == best) { for (int j = i; j > 0; --j) order[j] = order[j - 1]; order[0] = best; break; }
+            /* a list, a team a line: "AMARILLO 14" */
+            size_t used = 0, longest = 0;
+            title[0] = 0;
+            for (int i = 0; i < teams && used < sizeof title; ++i) {
+                char color_name[24], line[48];
+                runtime_online_team_color(order[i], NULL, color_name, sizeof color_name);
+                snprintf(line, sizeof line, "%s %d%s", color_name, team_totals[order[i]], i == 0 && team_tiebreak ? " (H2H)" : "");
+                if (strlen(line) > longest) longest = strlen(line);
+                used += (size_t)snprintf(title + used, sizeof title - used, "%s%s", i ? " / " : "", line);
+            }
+            (void)longest;
+            /* one line ("\n" is no line break in igGuiText): the text shrinks to fit its box (+0x90 width), made for
+             * "14 POINTS": the box grows with the line so the letters keep their size */
+            const float shrink = 1.0f;
+            y = 6.0f;
+            static unsigned char *points_row;
+            static float points_width, points_height, points_x;
+            float width, height, x;
+            memcpy(&width, row + 0x90, 4);
+            memcpy(&height, row + 0x94, 4);
+            memcpy(&x, row + 0x60, 4);
+            if (points_row != row) { points_row = row; points_width = width; points_height = height; points_x = x; }
+            const size_t letters = strlen(title);
+            float grow = letters > 9 ? (float)letters / 9.0f : 1.0f;
+            if (grow > 2.4f) grow = 2.4f;   /* 4 teams: the letters get a little smaller to stay in the panel */
+            const float wanted_w = points_width * grow, wanted_h = points_height;
+            if (points_width > 0 && width != wanted_w) memcpy(row + 0x90, &wanted_w, 4);
+            if (points_height > 0 && height != wanted_h) memcpy(row + 0x94, &wanted_h, 4);
+            const float left = points_x - 5.0f;   /* under the title, about the native place */
+            if (x != left) memcpy(row + 0x60, &left, 4);
+            points_lines = 1;
+            /* the letters of "WINS" / "LOSE" (its font and the native gradient: igGuiText _font, _colorMode,
+             * _modifierColorA/B), found next to this line; plain orange when it is not there */
+            unsigned char *wins = NULL;
+            for (unsigned char *up = pointer_at(row, 0x40); up && !wins && up != row; up = NULL) {
+                unsigned char *grand = pointer_at(up, 0x40);
+                wins = find_placeable(grand ? grand : up, "[WinsText]", 0);
+            }
+            /* a text placeable's look (font, size, gradient) is its igGuiText asset, behind the handle at +0x38
+             * (0x24c720): this line takes the one of "WINS" */
+            void *wins_look = wins ? pointer_at(wins, 0x38) : NULL;
+            static int told;
+            if (!told++) printf("Team results: points in the WINS letters (WINS %p, its look %p)\n", (void *)wins, wins_look);
+            if (wins_look && (uintptr_t)wins_look > 0x10000) {
+                if (pointer_at(row, 0x38) != wins_look) {
+                    assign_handle(row + 0x38, wins_look);
+                    unsigned flags;
+                    memcpy(&flags, row + 12, 4);
+                    flags |= 0x1000;
+                    memcpy(row + 12, &flags, 4);
+                }
+                const float white[] = {1.0f, 1.0f, 1.0f, 1.0f};
+                memcpy(row + 0xc0, white, sizeof white);
+            } else {
+                const float orange[] = {1.0f, 0.58f, 0.12f, 1.0f};
+                memcpy(row + 0xc0, orange, sizeof orange);
+            }
+            const float scale[] = {0.08081815f * shrink, 0.11369143f * shrink, 1.0f};
             memcpy(row + 0x84, scale, sizeof scale);
             hide_placeable(row, 0);
         } else {
             if (best < 0) snprintf(title, sizeof title, "NO FINISHERS");
-            else snprintf(title, sizeof title, "%s TEAM WINS", team_names[best]); /* a key: set_text translates */
-            y = -4.0f;
+            else {   /* the team by the color picked in the room (blue, red, green, yellow when nobody picked) */
+                char color_name[24];
+                runtime_online_team_color(best, NULL, color_name, sizeof color_name);
+                snprintf(title, sizeof title, team_wins_format[team_language()], color_name);
+            }
+            y = -9.0f;   /* up, closer to WINS: room for the points list under it */
             const float white[] = {1, 1, 1, 1};
             memcpy(row + 0xc0, white, sizeof white);
         }
@@ -2044,9 +2146,15 @@ static void team_color(unsigned char *placeable, int team) {
         {0.1f, 0.55f, 1.0f, 1.0f}, {1.0f, 0.15f, 0.12f, 1.0f},
         {0.15f, 1.0f, 0.3f, 1.0f}, {1.0f, 0.85f, 0.1f, 1.0f}
     };
+    /* the room's team colors (picked on the team screen); the game's four when nobody picked */
+    unsigned char rgb[3];
+    const int picked = runtime_online_team_color(team, rgb, NULL, 0);
+    float color[4];
+    if (picked == team) memcpy(color, colors[team], sizeof color);
+    else color[0] = rgb[0] / 255.0f, color[1] = rgb[1] / 255.0f, color[2] = rgb[2] / 255.0f, color[3] = 1.0f;
     /* igGuiPlaceable::_color, matching native 252c10's float conversion. */
-    if (memcmp(placeable + 0xc0, colors[team], sizeof colors[team])) {
-        memcpy(placeable + 0xc0, colors[team], sizeof colors[team]);
+    if (memcmp(placeable + 0xc0, color, sizeof color)) {
+        memcpy(placeable + 0xc0, color, sizeof color);
         unsigned flags;
         memcpy(&flags, placeable + 12, 4);
         flags |= 0x1000;
@@ -2766,7 +2874,9 @@ static void refresh_ranked_score(void) {
     update_score_card(root, &result, shown, ready, tier, animation, 0);
 }
 
+static void team_lobby_frame(void);
 void runtime_online_mode_note_frame(void) {
+    team_lobby_frame();
     startup_update();
     apply_pending_online_reset();
     refresh_ranked_score();
@@ -2795,8 +2905,671 @@ int runtime_online_mode_lobby_open(void) {
     return at && monotonic_ms() - at < 1000;
 }
 
+/* ---- The room's members by team ----------------------------------------------------------------
+ * In a private room set to 2 or 4 teams the game's "Lobby members" list (ui/Octane_LobbyMembers:
+ * Root_placeable > List_MemberList) is one flat list: the team shows only on the team screen. While
+ * the list is on screen, it is hidden and the overlay draws the members grouped by team in its
+ * place (runtime_online_team_lobby). Read on the game's thread every frame; the overlay reads a
+ * copy under a sequence counter. CPlayer: +0x68 name, +0xe4 _arenaTeamIndex, +0xe9 _isLobbyReady. */
+static unsigned char *meta_image;   /* the game's image, for igGuiPlaceable's field offsets */
+static TeamLobbyMember team_lobby_rows[8];
+static int team_lobby_count, team_lobby_teams;
+static unsigned team_lobby_seq;      /* odd while written */
+#define MEMBER_ROWS 16
+static struct { unsigned char *row; uint64_t seen; int clear; } member_rows[MEMBER_ROWS];   /* the game's rows */
+static uint64_t member_rows_shown_ms;   /* a row was on screen (its list and screen shown) */
+static int member_rows_clear;           /* the list by team is drawn: the game's rows see-through */
+
+/* igGuiPlaceable::_alpha's offset, from the game's own field metadata: in the igMetaField objects the
+ * offset sits where _position's says 0x60 and _color's 0xc0. 0 when not found (alpha then not read). */
+static int placeable_alpha_offset(void) {
+    static int offset = -1;
+    if (offset >= 0) return offset;
+    offset = 0;
+    if (!meta_image) return 0;
+    unsigned char *position = pointer_at(meta_image, 0x2a20b88), *color = pointer_at(meta_image, 0x2a20c18),
+                  *alpha = pointer_at(meta_image, 0x2a20c28);
+    if (!position || !color || !alpha) { offset = -1; return 0; }   /* not registered yet: ask again later */
+    for (int at = 8; at < 64; at += 2) {
+        uint16_t p, c, a;
+        memcpy(&p, position + at, 2); memcpy(&c, color + at, 2); memcpy(&a, alpha + at, 2);
+        if (p == 0x60 && c == 0xc0 && a > 0x60 && a < 0x200) { offset = a; break; }
+    }
+    printf("Team lobby: igGuiPlaceable _alpha at +0x%x\n", offset);
+    return offset;
+}
+
+static unsigned char *find_placeable(unsigned char *placeable, const char *name, int depth) {
+    if (!placeable || depth > 12) return NULL;
+    const char *own = pointer_at(placeable, 0x28);
+    if (own && (uintptr_t)own > 0x10000 && !strcmp(own, name)) return placeable;
+    void *handle = pointer_at(placeable, 0x38);
+    if ((uintptr_t)handle >= 0x10000) {
+        unsigned flags;
+        memcpy(&flags, handle, 4);
+        unsigned char *composition = flags & 0x30000000 ? NULL : pointer_at(handle, 0x28);
+        if (composition && pointer_at(composition, 0) == composition_vtable) {
+            unsigned char *found = find_placeable(pointer_at(composition, 0x20), name, depth + 1);
+            if (found) return found;
+        }
+    }
+    unsigned char *list = pointer_at(placeable, 0x48);
+    if (!list) return NULL;
+    uint32_t count;
+    memcpy(&count, list + 0x0c, 4);
+    unsigned char **items = (unsigned char **)pointer_at(list, 0x20);
+    for (uint32_t i = 0; items && count <= 256 && i < count; ++i) {
+        unsigned char *found = find_placeable(items[i], name, depth + 1);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+/* On screen: no hidden bit and some alpha, from the list's parent up (the list itself is hidden here). */
+static int placeable_shown(unsigned char *placeable, unsigned char *top) {
+    const int alpha_at = placeable_alpha_offset();
+    float alpha = 1.0f;
+    for (int depth = 0; placeable && depth < 16; ++depth) {
+        unsigned flags;
+        memcpy(&flags, placeable + 12, 4);
+        if (flags & 0x400) return 0;
+        if (alpha_at) {
+            float own;
+            memcpy(&own, placeable + alpha_at, 4);
+            if (own >= 0.0f && own <= 1.0f) alpha *= own;
+        }
+        if (placeable == top) break;
+        placeable = pointer_at(placeable, 0x40);
+    }
+    if (top) {
+        unsigned flags;
+        memcpy(&flags, top + 12, 4);
+        if (flags & 0x400) return 0;
+    }
+    return alpha > 0.05f;
+}
+
+/* member_update, every frame for each of the game's member rows: self +0x10 the name, its parent the row. */
+static void team_lobby_row(unsigned char *self) {
+    unsigned char *name = self ? pointer_at(self, 0x10) : NULL;
+    unsigned char *row = name ? pointer_at(name, 0x40) : NULL;
+    if (!row) return;
+    const uint64_t now = monotonic_ms();
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < MEMBER_ROWS; ++i) {
+        if (member_rows[i].row == row) slot = i;
+        else if (!member_rows[i].row && free_slot < 0) free_slot = i;
+    }
+    if (slot < 0) {
+        if (free_slot < 0) return;
+        slot = free_slot;
+        member_rows[slot].row = row;
+        member_rows[slot].clear = 0;
+    }
+    member_rows[slot].seen = now;
+    if (placeable_shown(pointer_at(row, 0x40), NULL)) member_rows_shown_ms = now;
+    /* see-through while the list by team is drawn, back when not: only here, while the game updates this row (a row
+     * of a list rebuilt when a player joins is freed at once; written later, its memory may be another object's) */
+    const int alpha_at = placeable_alpha_offset();
+    if (member_rows_clear) {
+        if (alpha_at) {
+            float a;
+            memcpy(&a, row + alpha_at, 4);
+            if (a != 0.0f) { const float zero = 0.0f; memcpy(row + alpha_at, &zero, 4); }
+        } else if (!member_rows[slot].clear) {
+            hide_placeable(row, 1);
+        }
+        member_rows[slot].clear = 1;
+    } else if (member_rows[slot].clear) {
+        if (alpha_at) { const float one = 1.0f; memcpy(row + alpha_at, &one, 4); }
+        else hide_placeable(row, 0);
+        member_rows[slot].clear = 0;
+    }
+}
+
+static void team_lobby_publish(const TeamLobbyMember *rows, int count, int teams) {
+    __atomic_add_fetch(&team_lobby_seq, 1, __ATOMIC_SEQ_CST);
+    memcpy(team_lobby_rows, rows, sizeof team_lobby_rows);
+    team_lobby_count = count;
+    team_lobby_teams = teams;
+    __atomic_add_fetch(&team_lobby_seq, 1, __ATOMIC_SEQ_CST);
+}
+
+/* ---- The local player's team, picked in the room (the in-game menu's Room tab) -----------------
+ * The game sets a team only on the host: 0xbf36c0(player, team) writes CPlayer +0xe4 and tells the
+ * others. A guest asks for it the way the team screen does (9c4780 -> 9c4cc0): its own +0xe4 set,
+ * then a message (0x16) with the team and a cap the host checks (9c5790). The host deals out the
+ * teams again when the team count changes (0xbf32d0, round robin): the pick is asked for again
+ * while the room lasts, until the team screen opens (there the player changes it). */
+typedef void *(ABI *NoArgPointer)(void);
+typedef void (ABI *SetTeam)(void *, int);
+typedef void (ABI *AskTeam)(void *, void *);
+static NoArgPointer net_session_info;  /* 0x3e2430: +0x28 -> +0xc 1 on the host */
+static SetTeam set_player_team;        /* 0xbf36c0 */
+static AskTeam ask_player_team;        /* 0x9c4cc0 (selector: only its +0x80 cap is read, player) */
+static void **online_session;          /* 0x2acc7b0, NULL offline */
+typedef void (ABI *CloseGuiProject)(void *, const char *, int, void *);
+static CloseGuiProject close_gui_project;   /* 0x97e200(manager, name, 0, project): the game closing a screen */
+static int team_wanted = -1;           /* from the menu (any thread) */
+static int team_asked = -1, team_asks;
+static uint64_t team_asked_ms;
+
+void runtime_online_team_request(int team) {
+    __atomic_store_n(&team_wanted, team, __ATOMIC_RELAXED);
+    printf("Team lobby: the player picks team %d\n", team);
+}
+int runtime_online_team_requested(void) { return __atomic_load_n(&team_wanted, __ATOMIC_RELAXED); }
+
+/* In a private room now: its own menu (OCTR_PRIVATE_LOBBY, lobby_update) on screen lately, or its team screen. The
+ * online menus after leaving keep the game's session, its private flag and the members list, so none of them says it. */
+static int in_online_room(void) {
+    /* the private room's menu was the last lobby menu updated, and a lobby menu is on screen (its update is not every
+     * frame: a time window alone lost the room now and then) */
+    const uint64_t menu_at = private_lobby_ms;
+    const int on = private_team_selector_active || (private_lobby_last == 1 && runtime_online_mode_lobby_open()) ||
+                   (menu_at && monotonic_ms() - menu_at < 1500);
+    static int seen = -1;
+    if (on != seen) {
+        seen = on;
+        printf("Team lobby: online session %s\n", on ? "on" : "off (no teams list)");
+    }
+    return on;
+}
+
+static int room_host(void) {
+    if (!online_session || !*online_session) return 1;
+    unsigned char *info = net_session_info ? net_session_info() : NULL;
+    unsigned char *state = info ? pointer_at(info, 0x28) : NULL;
+    return state && state[0xc];
+}
+
+static void apply_team_pick(int teams) {
+    int wanted = __atomic_load_n(&team_wanted, __ATOMIC_RELAXED);
+    if (wanted < 0 || !set_player_team || !ask_player_team) return;
+    if (wanted >= teams) {   /* fewer teams now */
+        __atomic_store_n(&team_wanted, -1, __ATOMIC_RELAXED);
+        team_asked = -1;
+        return;
+    }
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    unsigned char *player = list ? find_player(list, controller_player(1)) : NULL;
+    if (!player) return;
+    int team;
+    memcpy(&team, player + 0xe4, 4);
+    /* the team screen opened: the pick once more if the start dealt the teams again, then the screen is in charge */
+    const int last = private_team_selector_active;
+    if (last) {
+        __atomic_store_n(&team_wanted, -1, __ATOMIC_RELAXED);
+        team_asked = -1;
+        if (team == wanted) return;
+        printf("Team lobby: the team screen opened with the player in team %d, picked %d: asked once more\n", team, wanted);
+    }
+    if (team == wanted) { team_asks = 0; return; }   /* kept, to be asked again after a new deal */
+    const uint64_t now = monotonic_ms();
+    if (!last && team_asked == wanted && now - team_asked_ms < 1500) return;
+    if (team_asked != wanted) team_asks = 0;
+    if (++team_asks > 4) {   /* the host keeps saying no (that team is full) */
+        printf("Team lobby: team %d refused, the player stays in team %d\n", wanted, team);
+        __atomic_store_n(&team_wanted, -1, __ATOMIC_RELAXED);
+        team_asked = -1;
+        return;
+    }
+    team_asked = wanted;
+    team_asked_ms = now;
+    if (room_host()) {
+        printf("Team lobby: host, player team %d -> %d\n", team, wanted);
+        set_player_team(player, wanted);
+    } else if (!getenv("BB_TEAM_GUEST_ASK")) {
+        /* a guest's pick is the team screen's own request (its timer asks the host); asking again from here with a
+         * stand-in screen was the one thing only guests did when their game stopped: off */
+        __atomic_store_n(&team_wanted, -1, __ATOMIC_RELAXED);
+        team_asked = -1;
+        return;
+    } else {
+        unsigned char selector[0x100];
+        memset(selector, 0, sizeof selector);
+        const int cap = 9 - teams;   /* as the team screen's cap here: any team the others leave a member in */
+        memcpy(selector + 0x80, &cap, 4);
+        printf("Team lobby: guest, asking the host for team %d (now %d)\n", wanted, team);
+        memcpy(player + 0xe4, &wanted, 4);
+        ask_player_team(selector, player);
+    }
+}
+
+/* ---- Team colors, picked on the team screen ------------------------------------------------------
+ * Each team has a color from this palette (by default blue, red, green, yellow, as the game). On the
+ * team screen, up / down changes the color of the player's own team. The pick travels in the player's
+ * replicated CPlayer _mapVoteIndex (+0x70: private rooms have no map vote; in a race the leaders
+ * list's item routine uses it, so it is written only in the room): -(0x10000 + seq * 16 + color).
+ * A team's color is its members' pick with the highest seq (a new pick is one more than the team's),
+ * the lower color on a tie; a color two teams want stays with the first, the other takes its own
+ * default or the first free one. Resolved the same way on every machine, kept for the race. */
+static const unsigned char team_palette[16][3] = {
+    {26, 140, 255}, {235, 40, 32}, {40, 200, 80}, {245, 205, 30}, {255, 135, 20}, {140, 60, 220},
+    {255, 90, 170}, {30, 220, 230}, {240, 240, 240}, {40, 40, 48}, {130, 80, 40}, {170, 240, 40},
+    {130, 20, 50}, {215, 170, 40}, {165, 175, 190}, {20, 160, 140}};
+static const char *const team_palette_es[16] = {"AZUL", "ROJO", "VERDE", "AMARILLO", "NARANJA", "MORADO", "ROSA", "CIAN",
+                                                 "BLANCO", "NEGRO", "CAF\xc3\x89", "LIMA", "VINO", "DORADO", "PLATA", "TURQUESA"};
+static const char *const team_palette_en[16] = {"BLUE", "RED", "GREEN", "YELLOW", "ORANGE", "PURPLE", "PINK", "CYAN",
+                                                 "WHITE", "BLACK", "BROWN", "LIME", "WINE", "GOLD", "SILVER", "TEAL"};
+static int team_colors[4] = {0, 1, 2, 3};   /* the resolved color of each team */
+
+/* The team texts follow the game's language (BB_LANGUAGE: the PS4 language id the launcher passes), not the
+ * launcher's menu: 0 English, 1 Spanish, 2 French, 3 German, 4 Italian, 5 Portuguese. */
+static int team_language(void) {
+    const char *v = getenv("BB_LANGUAGE");
+    switch (v ? atoi(v) : 1) {
+    case 3: case 20: return 1;
+    case 2: case 22: return 2;
+    case 4: return 3;
+    case 5: return 4;
+    case 7: case 17: return 5;
+    default: return 0;
+    }
+}
+
+/* The four colors' names as they go with "team" in each language, then "<team> wins" and the room's hint. */
+static const char *const team_color_words[6][4] = {
+    {"BLUE", "RED", "GREEN", "YELLOW"},
+    {"AZUL", "ROJO", "VERDE", "AMARILLO"},
+    {"BLEUE", "ROUGE", "VERTE", "JAUNE"},
+    {"BLAU", "ROT", "GR\xc3\x9cN", "GELB"},
+    {"BLU", "ROSSA", "VERDE", "GIALLA"},
+    {"AZUL", "VERMELHA", "VERDE", "AMARELA"}};
+static const char *const team_title_format[6] = {"%s TEAM", "EQUIPO %s", "\xc3\x89QUIPE %s", "TEAM %s", "SQUADRA %s",
+                                                  "EQUIPE %s"};
+static const char *const team_wins_format[6] = {"%s TEAM WINS", "GANA EL EQUIPO %s", "L'\xc3\x89QUIPE %s GAGNE",
+                                                 "TEAM %s GEWINNT", "VINCE LA SQUADRA %s", "A EQUIPE %s VENCE"};
+static const char *const team_hint_text[6] = {"R1  Pick your team", "R1  Elegir equipo", "R1  Choisir l'\xc3\xa9quipe",
+                                               "R1  Team w\xc3\xa4hlen", "R1  Scegli la squadra", "R1  Escolher equipe"};
+
+/* For the overlay and the race UI (any thread): team `team`'s color, its name; the palette index. */
+int runtime_online_team_color(int team, unsigned char rgb[3], char *name, size_t size) {
+    const int color = team >= 0 && team < 4 ? __atomic_load_n(&team_colors[team], __ATOMIC_RELAXED) : 0;
+    const int c = color >= 0 && color < 16 ? color : 0;
+    if (rgb) memcpy(rgb, team_palette[c], 3);
+    if (name && size) {
+        const int lang = team_language();
+        if (c < 4) snprintf(name, size, "%s", team_color_words[lang][c]);
+        else snprintf(name, size, "%s", (lang == 1 ? team_palette_es : team_palette_en)[c]);
+    }
+    return c;
+}
+
+/* For the overlay (any thread): 0 the team's title ("EQUIPO AZUL"), 1 the room's hint ("R1  Elegir equipo"). */
+void runtime_online_team_text(int which, int team, char *out, size_t size) {
+    if (!out || !size) return;
+    const int lang = team_language();
+    if (which == 1) { snprintf(out, size, "%s", team_hint_text[lang]); return; }
+    char color[24];
+    runtime_online_team_color(team, NULL, color, sizeof color);
+    snprintf(out, size, team_title_format[lang], color);
+}
+
+/* The team screen's columns were drawn by the overlay while a team had a color of its own: colors are the game's
+ * four again (the picks did not always reach everyone), so there is nothing to draw. */
+int runtime_online_team_screen(float rects[4][4]) {
+    (void)rects;
+    return 0;
+}
+
+int runtime_replay_signal_pressed(int signal);   /* runtime_replay_play.c */
+int runtime_replay_buttons_held(void);
+
+/* R1 in the room (team mode on): the game's team screen, to pick a team and its color before the start. */
+static void open_team_preview(void) {
+    void *manager = team_preview_manager;
+    if (!manager || !open_project || team_preview_player == -2) {
+        puts("Team lobby: R1, but the room's screen options were not seen yet: no team screen");
+        return;
+    }
+    unsigned char context[0x10] = {0};
+    unsigned char options[sizeof team_preview_options];
+    memcpy(options, team_preview_options, sizeof options);
+    void *result = NULL;
+    team_preview = 1;
+    puts("Team lobby: R1, the team screen opened to pick a team and color");
+    open_project(&result, manager, "Octane_TeamSelect", options, team_preview_player, context, 0.0f);
+    finish_project_context(context);
+    assign_handle(context + 8, NULL);
+    assign_handle(context, NULL);
+    assign_handle((unsigned char *)&result, NULL);
+}
+
+/* While the team screen opened from the room is up, the room's own screens would take the same presses (X = Start
+ * match): every other screen in the GUI manager's layers (manager +0x30..+0x50, each with its screens at +0x58: count
+ * +0xc, list +0x20) loses its input bit (+0x34 0x20) until the team screen closes, then gets it back the game's way
+ * (0x24ac80). Held by handle meanwhile. */
+#define MUTED_SCREENS 24
+static void *muted_screens[MUTED_SCREENS];
+
+static void mute_other_screens(void) {
+    unsigned char *mine = handle_object(&active_team_selector_project);
+    unsigned char *manager = gui_manager ? *gui_manager : NULL;
+    if (!mine || !manager) return;
+    for (int l = 0; l < 5; ++l) {
+        unsigned char *layer = pointer_at(manager, 0x30 + 8 * l);
+        unsigned char *list = layer ? pointer_at(layer, 0x58) : NULL;
+        int count = 0;
+        if (list) memcpy(&count, list + 12, 4);
+        unsigned char **items = list ? pointer_at(list, 0x20) : NULL;
+        for (int i = 0; items && count > 0 && count <= 64 && i < count; ++i) {
+            unsigned char *screen = items[i];
+            if (!screen || screen == mine || pointer_at(screen, 0x98) == mine) continue;
+            if (!(screen[0x34] & 0x20)) continue;
+            int slot = -1, known = 0;
+            for (int k = 0; k < MUTED_SCREENS; ++k) {
+                if (muted_screens[k] && handle_object(&muted_screens[k]) == screen) known = 1;
+                if (!muted_screens[k] && slot < 0) slot = k;
+            }
+            if (!known) {
+                if (slot < 0) continue;
+                make_handle(&muted_screens[slot], screen);
+                printf("Team lobby: the room's screen %p takes no presses while the team screen is up\n", (void *)screen);
+            }
+            screen[0x34] &= ~0x20;
+        }
+    }
+}
+
+static void unmute_other_screens(void) {
+    for (int k = 0; k < MUTED_SCREENS; ++k) {
+        if (!muted_screens[k]) continue;
+        unsigned char *screen = handle_object(&muted_screens[k]);
+        if (screen && activate_project_input) activate_project_input(screen);
+        assign_handle((unsigned char *)&muted_screens[k], NULL);
+    }
+}
+
+/* Closed as the game closes a screen (0x97e200(manager, NULL, 0, project): out of its layers, so it takes no
+ * more presses), then forgotten here. */
+static void close_team_preview(void) {
+    unsigned char *project = handle_object(&active_team_selector_project);
+    void *keep = NULL;
+    if (project) make_handle(&keep, project);   /* alive until the game is done with it */
+    team_preview = 0;
+    clear_team_selector();
+    if (project && close_gui_project && gui_manager && *gui_manager) {
+        close_gui_project(*gui_manager, NULL, 0, project);
+        puts("Team lobby: the team screen closed, back to the room");
+    } else {
+        puts("Team lobby: the team screen hidden (no close function), back to the room");
+    }
+    assign_handle((unsigned char *)&keep, NULL);
+    unmute_other_screens();
+    /* the team the player stays in is kept: if the game deals the teams again, it is asked for again */
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    unsigned char *me = list ? find_player(list, controller_player(1)) : NULL;
+    int team = -1, teams = 1;
+    if (me) memcpy(&team, me + 0xe4, 4);
+    if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+    if (team >= 0 && team < teams) {
+        __atomic_store_n(&team_wanted, team, __ATOMIC_RELAXED);
+        team_asked = -1;
+        team_asks = 0;
+        printf("Team lobby: the player's team %d kept\n", team);
+    }
+}
+
+int runtime_rooms_created(void);   /* runtime_services.c */
+
+/* For the overlay (any thread): team `team`'s points in this room so far. */
+int runtime_online_team_points(int team) {
+    return team >= 0 && team < 4 && room_points_teams >= 2 ? __atomic_load_n(&room_points[team], __ATOMIC_RELAXED) : -1;
+}
+
+/* The teams of a race, kept by player name: back in the room the game deals the teams out again, and the host puts
+ * every player back in the team it raced in (0xbf36c0 tells the others), for a few seconds after coming back. */
+#define KEPT_TEAMS 8
+static char kept_names[KEPT_TEAMS][40];
+static int kept_teams[KEPT_TEAMS], kept_count, kept_pending, kept_team_count;
+static uint64_t kept_since, kept_asked;
+typedef void (ABI *SetTeamCount)(void *, int);
+static SetTeamCount set_team_count;   /* 0xbf32d0(race settings, count): the host's team count, teams dealt again */
+
+static void keep_race_teams(void) {
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, (unsigned char *)list + 12, 4);
+    unsigned char **players = list ? pointer_at(list, 0x20) : NULL;
+    if (!players || count < 1 || count > 16) return;
+    int n = 0;
+    for (int i = 0; i < count && n < KEPT_TEAMS; ++i) {
+        const char *name = players[i] ? pointer_at(players[i], 0x68) : NULL;
+        if (!name || (uintptr_t)name < 0x10000 || !*name) continue;
+        snprintf(kept_names[n], sizeof kept_names[n], "%s", name);
+        memcpy(&kept_teams[n], players[i] + 0xe4, 4);
+        ++n;
+    }
+    if (n) {
+        kept_count = n;
+        kept_pending = 1;
+        kept_since = 0;
+        if (race_settings && *race_settings) memcpy(&kept_team_count, *race_settings + 0x28, 4);
+    }
+}
+
+static void restore_race_teams(int teams) {
+    const uint64_t now = monotonic_ms();
+    if (!kept_since) {
+        kept_since = now;
+        printf("Team lobby: back in the room (%d teams now, %d in the race), %d players' teams from the race kept\n", teams,
+               kept_team_count, kept_count);
+    }
+    if (now - kept_since > 5000) { kept_pending = 0; return; }
+    if (!room_host() || !set_player_team || now - kept_asked < 400) return;
+    kept_asked = now;
+    /* the room comes back from a race without teams: the host turns them on again with the race's count */
+    if (teams != kept_team_count && (kept_team_count == 2 || kept_team_count == 4) && set_team_count && race_settings &&
+        *race_settings) {
+        printf("Team lobby: the room came back with %d team(s): %d again\n", teams, kept_team_count);
+        set_team_count(*race_settings, kept_team_count);
+        unsigned char *settings = race_manager && *race_manager ? pointer_at(*race_manager, 0xde8) : NULL;
+        int there = 0;
+        if (settings) memcpy(&there, settings + 0x28, 4);
+        if (settings && there >= 1 && there <= 4) memcpy(settings + 0x28, &kept_team_count, 4);   /* a team count there only */
+        teams = kept_team_count;
+    }
+    /* and tells the guests, as a change in the room's settings does (0xc2ed20 sends the race settings): about once a
+     * second while back, so a guest still loading the room gets it too */
+    static uint64_t told_guests;
+    if ((kept_team_count == 2 || kept_team_count == 4) && teams == kept_team_count && broadcast_race_settings &&
+        race_settings && *race_settings && now - told_guests > 1000) {
+        told_guests = now;
+        broadcast_race_settings(*race_settings);
+        printf("Team lobby: the room's settings (%d teams) sent to the guests\n", teams);
+    }
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    int count = 0;
+    if (list) memcpy(&count, (unsigned char *)list + 12, 4);
+    unsigned char **players = list ? pointer_at(list, 0x20) : NULL;
+    for (int i = 0; players && count <= 16 && i < count; ++i) {
+        const char *name = players[i] ? pointer_at(players[i], 0x68) : NULL;
+        if (!name || (uintptr_t)name < 0x10000) continue;
+        for (int k = 0; k < kept_count; ++k) {
+            if (strcmp(kept_names[k], name) || kept_teams[k] < 0 || kept_teams[k] >= teams) continue;
+            int team;
+            memcpy(&team, players[i] + 0xe4, 4);
+            if (team != kept_teams[k]) {
+                printf("Team lobby: %s back to team %d (the game dealt %d)\n", name, kept_teams[k], team);
+                set_player_team(players[i], kept_teams[k]);
+            }
+        }
+    }
+}
+
+static void team_lobby_frame(void) {
+    {   /* a room just created starts without teams (the game keeps the last room's choice) */
+        static int rooms_seen = -1;
+        static uint64_t new_room_until;
+        const int rooms = runtime_rooms_created();
+        const uint64_t now = monotonic_ms();
+        if (rooms_seen >= 0 && rooms != rooms_seen) {
+            new_room_until = now + 4000;   /* the game sets the room up after its session: off for a few seconds */
+            memset(room_points, 0, sizeof room_points);
+            memset(room_points_base, 0, sizeof room_points_base);
+            kept_count = kept_pending = 0;
+        }
+        rooms_seen = rooms;
+        if (new_room_until && now < new_room_until) {
+            /* only a value that is a team count (2..4) is put back to 1: while the room is set up the settings
+             * behind race_manager +0xde8 are not always that object (it read 65 and 0 there just before a corrupt
+             * free, 19/11 13:52) */
+            const int one = 1;
+            int teams = 1, kept = 1;
+            if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+            unsigned char *settings = race_manager && *race_manager ? pointer_at(*race_manager, 0xde8) : NULL;
+            if (settings) memcpy(&kept, settings + 0x28, 4);
+            if (teams >= 2 && teams <= 4) memcpy(*race_settings + 0x28, &one, 4);
+            if (settings && kept >= 2 && kept <= 4) memcpy(settings + 0x28, &one, 4);
+            if ((teams >= 2 && teams <= 4) || (kept >= 2 && kept <= 4))
+                printf("Team lobby: a new room, teams off (the last room had %d)\n", teams >= 2 && teams <= 4 ? teams : kept);
+        } else {
+            new_room_until = 0;
+        }
+    }
+    {   /* the room's points and kept teams: per room and team count; dropped after a while away from the room */
+        int teams = 1;
+        if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+        static uint64_t away_since;
+        const int racing = private_single_race_active;
+        const int here = in_online_room() || racing || private_team_selector_active;
+        const uint64_t now = monotonic_ms();
+        if (here) away_since = 0;
+        else if (!away_since) away_since = now;
+        const int gone = away_since && now - away_since > 20000;
+        /* 2 <-> 4 teams starts again; "no teams" for a moment does not (the game passes through it on its way back
+         * from a race: the log of 19/11 13:01 lost the points and teams there) */
+        if ((teams != room_points_teams && (teams == 2 || teams == 4) && room_points_teams != 0) || gone) {
+            if (room_points_teams >= 2 || kept_count)
+                printf("Team lobby: the room's team points start again (%s)\n", gone ? "left the room" : "team count changed");
+            memset(room_points, 0, sizeof room_points);
+            memset(room_points_base, 0, sizeof room_points_base);
+            kept_count = kept_pending = 0;
+            room_points_teams = gone ? 0 : teams;
+            if (gone) away_since = now;   /* once */
+        }
+        if (room_points_teams == 0 && (teams == 2 || teams == 4)) room_points_teams = teams;   /* first teams in this room */
+        if (racing && private_team_race()) keep_race_teams();
+        else if (kept_pending && in_online_room()) restore_race_teams(teams);   /* teams may be off: it turns them on */
+    }
+    {
+        int room_teams = 1;
+        if (race_settings && *race_settings) memcpy(&room_teams, *race_settings + 0x28, 4);
+        const int team_room = (room_teams == 2 || room_teams == 4) && in_online_room() && !runtime_public_match_active() &&
+                              is_private() && !battle_selected() && !runtime_online_mode_private_cup();
+        if (team_preview && !private_team_selector_active) {   /* closed some other way */
+            team_preview = team_preview_closing = 0;
+            unmute_other_screens();
+        }
+        if (team_preview) mute_other_screens();
+        if (team_preview && team_preview_closing) {   /* closed once the X / circle is let go, a few frames on */
+            static int free_frames;
+            free_frames = runtime_replay_buttons_held() ? 0 : free_frames + 1;
+            if (free_frames >= 3) {
+                free_frames = 0;
+                team_preview_closing = 0;
+                close_team_preview();
+            }
+        }
+        /* R1 in the room: the team screen */
+        const int r1 = runtime_replay_signal_pressed(10);
+        if (team_room && r1 && runtime_online_mode_lobby_open() && !private_team_selector_active && !team_preview)
+            open_team_preview();
+        if (team_room)
+            apply_team_pick(room_teams);
+        else if (!runtime_online_mode_in_private()) {   /* out of the room: no pick, the game's colors */
+            if (__atomic_load_n(&team_wanted, __ATOMIC_RELAXED) >= 0) __atomic_store_n(&team_wanted, -1, __ATOMIC_RELAXED);
+            team_asked = -1;
+        }
+    }
+    /* The game's rows (each a CGuiBehaviorOctaneLobbyMemberItem, updated every frame while its list
+     * lives: member_update -> team_lobby_row) are made see-through while the list by team is drawn.
+     * A row not updated lately may be gone: it is never touched again. */
+    int teams = 1;
+    if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
+    const uint64_t now = monotonic_ms();
+    const int rows_on = member_rows_shown_ms && now - member_rows_shown_ms < 300;
+    const int wanted = rows_on && (teams == 2 || teams == 4) && runtime_online_mode_lobby_open() && in_online_room() &&
+                       !runtime_public_match_active() && is_private() && !battle_selected() &&
+                       !runtime_online_mode_private_cup() && !private_team_selector_active;
+    const int alpha_at = placeable_alpha_offset();
+    /* the rows themselves are only touched in their own update (team_lobby_row); here only forgotten when gone */
+    member_rows_clear = wanted;
+    for (int i = 0; i < MEMBER_ROWS; ++i)
+        if (member_rows[i].row && now - member_rows[i].seen > 300) member_rows[i].row = NULL;
+    {   /* once per room: what was found */
+        static int told;
+        const int room = (teams == 2 || teams == 4) && runtime_online_mode_lobby_open() && is_private();
+        if (room && !told) {
+            told = 1;
+            int rows = 0;
+            for (int i = 0; i < MEMBER_ROWS; ++i) rows += member_rows[i].row != NULL;
+            printf("Team lobby: in a room with %d teams, %d member rows on screen, alpha at +0x%x -> list by team %s\n", teams,
+                   rows, alpha_at, wanted ? "on" : "off");
+        }
+        if (!room) told = 0;
+    }
+    if (!wanted) {
+        if (team_lobby_teams) {
+            TeamLobbyMember none[8];
+            memset(none, 0, sizeof none);
+            team_lobby_publish(none, 0, 0);
+        }
+        return;
+    }
+    if (!team_lobby_teams) printf("Team lobby: the members list by team (%d teams)\n", teams);
+    TeamLobbyMember rows[8];
+    memset(rows, 0, sizeof rows);
+    int count = 0, players_count = 0;
+    void *players_list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    if (players_list) memcpy(&players_count, (unsigned char *)players_list + 12, 4);
+    unsigned char **players = players_list ? pointer_at(players_list, 0x20) : NULL;
+    unsigned char *locals[4] = {0};
+    for (int c = 0; players_list && c < 4; ++c) locals[c] = find_player(players_list, controller_player(c + 1));
+    for (int i = 0; players && players_count > 0 && players_count <= 16 && i < players_count && count < 8; ++i) {
+        unsigned char *player = players[i];
+        if (!player) continue;
+        const char *name = pointer_at(player, 0x68);
+        TeamLobbyMember *row = rows + count++;
+        snprintf(row->name, sizeof row->name, "%s", name && (uintptr_t)name > 0x10000 ? name : "?");
+        memcpy(&row->team, player + 0xe4, 4);
+        row->ready = player[0xe9] != 0;
+        for (int c = 0; c < 4; ++c) row->local |= locals[c] == player;
+    }
+    team_lobby_publish(rows, count, teams);
+}
+
+/* For the overlay (any thread): the members (their count) and the team count; -1 = the game's own list is shown. */
+int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams) {
+    for (int tries = 0; tries < 8; ++tries) {
+        const unsigned before = __atomic_load_n(&team_lobby_seq, __ATOMIC_SEQ_CST);
+        if (before & 1) continue;
+        TeamLobbyMember copy[8];
+        memcpy(copy, team_lobby_rows, sizeof copy);
+        const int count = team_lobby_count, shown_teams = team_lobby_teams;
+        if (__atomic_load_n(&team_lobby_seq, __ATOMIC_SEQ_CST) != before) continue;
+        const int n = count < max ? count : max;
+        if (out && n > 0) memcpy(out, copy, (size_t)n * sizeof *out);
+        if (teams) *teams = shown_teams;
+        return shown_teams >= 2 ? n : -1;
+    }
+    return -1;
+}
+
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
     __atomic_store_n(&lobby_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
+    const char *tag = owner ? pointer_at(owner, 0x28) : NULL;
+    if (tag && (uintptr_t)tag < 0x10000) tag = NULL;
+    {   /* the menus this behavior runs in, by their tag: the private room's own (OCTR_PRIVATE_LOBBY) or any other,
+         * untagged too (the online menus after leaving it); the last one seen says where the player is */
+        const int private_menu = tag && !strcmp(tag, "OCTR_PRIVATE_LOBBY");
+        if (private_menu) private_lobby_ms = monotonic_ms();
+        if (private_lobby_last != private_menu) {
+            private_lobby_last = private_menu;
+            printf("Team lobby: lobby menu \"%.40s\" (%s)\n", tag ? tag : "(no tag)", private_menu ? "the private room" : "not the room");
+        }
+    }
     if (runtime_hof_active() && owner) {
         /* Native update receives a behavior context, whose +0x20 is the project. */
         unsigned char *project = pointer_at(owner, 0x20);
@@ -4009,6 +4782,7 @@ static void ABI member_event(unsigned char *self, void *event, void *owner) {
 static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
     original_member_update(self, owner, dt);
     if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
+    team_lobby_row(self);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
 }
@@ -4226,8 +5000,36 @@ static void ABI team_selector_event(unsigned char *self, void *event, void *owne
         if (controller > 0) team_legend_controller = controller;
         memcpy(&teams, self + 0x7c, 4);
         memcpy(&capacity, self + 0x80, 4);
-        printf("Native private TEAM input: signal=%d controller=%d player=%d found=%d ready=%d team=%d teams=%d capacity=%d\n",
-               signal, controller, id, found, ready, team, teams, capacity);
+        /* The native move (9c4780) skips a team at its cap (+0x80: 8 / teams): in a full room the
+         * team the game put a player in is the only one left. Any team can be joined while the
+         * others keep a member each; the native ready check still refuses an empty team. */
+        if (teams >= 2 && teams <= 4 && capacity >= 1 && capacity < 9 - teams) {
+            const int open = 9 - teams;
+            printf("Native private TEAM: team cap %d -> %d (any team can be joined)\n", capacity, open);
+            capacity = open;
+            memcpy(self + 0x80, &capacity, 4);
+        }
+        printf("Native private TEAM input: signal=%d controller=%d player=%d found=%d ready=%d team=%d teams=%d capacity=%d%s\n",
+               signal, controller, id, found, ready, team, teams, capacity, team_preview ? " (from the room)" : "");
+        /* a screen opened from the room and closed: whatever is left of it takes no more presses */
+        int closed = 0;
+        for (int k = 0; k < 4; ++k) closed |= closed_selectors[k] == self;
+        if ((!team_preview && closed) || (team_preview && team_preview_closing)) {
+            printf("Team lobby: a press (%d) for the closed team screen, ignored\n", signal);
+            return;
+        }
+        /* opened from the room: no ready and no start; confirm or back close it the game's way (9c3bf0: back while
+         * not ready sends CGuiEventCloseTeamSelect), as in a local match */
+        if (team_preview && (signal == 8 || signal == 9)) {
+            const char *back = pointer_at(self, 0x70);
+            printf("Team lobby: closing the team screen once the button is let go (back to \"%s\")\n",
+                   back && (uintptr_t)back > 0x10000 ? back : "");
+            for (int k = 0; k < 4; ++k)
+                if (!closed_selectors[k] || closed_selectors[k] == self) { closed_selectors[k] = self; break; }
+            /* not now: the room would take the same press (X = Start match) */
+            team_preview_closing = 1;
+            return;
+        }
         if (signal == 2 || signal == 3 || signal == 6 || signal == 7) {
             if (!player || ready != 0 || teams < 2 || teams > 4 ||
                 team < 0 || team >= teams || capacity < 1 || capacity > 8) return;
@@ -4253,6 +5055,7 @@ static void ABI team_selector_event(unsigned char *self, void *event, void *owne
     }
     original_team_selector_event(self, event, owner);
     if (kind == *gui_uninitialize_type) {
+        for (int k = 0; k < 4; ++k) if (closed_selectors[k] == self) closed_selectors[k] = NULL;
         team_legend_state = -1; team_legend_controller = 1;
         private_team_selector_active = 0;
         assign_handle((unsigned char *)&active_team_selector_project, NULL);
@@ -4767,6 +5570,29 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     private_lobby_close_type = (void **)(image + 0x2ae3190);
     gui_uninitialize_type = (void **)(image + 0x2a21ef0);
     player_manager = (unsigned char **)(image + 0x2ad1160);
+    meta_image = image;
+    {   /* the team pick in the room (USA 1.21 code; any other build: off) */
+        static const unsigned char info_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x83,0xec,0x20};
+        static const unsigned char set_code[] = {0x41,0x89,0xf7,0x48,0x89,0xfb};       /* +0x18 */
+        static const unsigned char ask_code[] = {0x49,0x89,0xfe};                      /* +0x1f */
+        static const unsigned char saved[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
+        if (!memcmp(image + 0x3e2430, info_code, sizeof info_code) && !memcmp(image + 0xbf36c0, saved, sizeof saved) &&
+            !memcmp(image + 0xbf36d8, set_code, sizeof set_code) && !memcmp(image + 0x9c4cc0, saved, sizeof saved) &&
+            !memcmp(image + 0x9c4cdf, ask_code, sizeof ask_code)) {
+            net_session_info = (NoArgPointer)(image + 0x3e2430);
+            set_player_team = (SetTeam)(image + 0xbf36c0);
+            ask_player_team = (AskTeam)(image + 0x9c4cc0);
+            online_session = (void **)(image + 0x2acc7b0);
+            static const unsigned char close_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+                                                       0x50,0x49,0x89,0xcd,0x41,0x89,0xd6,0x49,0x89,0xff};
+            if (!memcmp(image + 0x97e200, close_code, sizeof close_code)) close_gui_project = (CloseGuiProject)(image + 0x97e200);
+            static const unsigned char count_code[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x49,0x89,0xfe,
+                                                       0x41,0x89,0x76,0x28};
+            if (!memcmp(image + 0xbf32d0, count_code, sizeof count_code)) set_team_count = (SetTeamCount)(image + 0xbf32d0);
+        } else {
+            puts("Team lobby: team pick in the room off (unknown game build)");
+        }
+    }
     controller_player = (ControllerPlayer)(image + 0x97f160);
     find_player = (FindPlayer)(image + 0xc02600);
     ready_find = (ReadyFind)(image + 0x9c32c0);

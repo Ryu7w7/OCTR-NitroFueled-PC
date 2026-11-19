@@ -848,6 +848,25 @@ static void unghost(float dt) {
 
 enum { S_UP = 0, S_DOWN = 1, S_LEFT = 2, S_RIGHT = 3, S_SQUARE = 5, S_TRIANGLE = 6, S_L1 = 8, S_L2 = 9, S_R1 = 10, S_R2 = 11 };
 
+/* The local controller's button for a game signal (S_R1 = 10 ...) pressed since the last call for that signal. */
+int runtime_replay_signal_pressed(int signal) {
+    static uint64_t seen[64];
+    void *ctrl = local_controller(NULL);
+    if (!ctrl || signal < 0 || signal >= 64) return 0;
+    const int bit = bit_of(ctrl, signal);
+    if (bit < 0) return 0;
+    const uint64_t now = RR_AT(ctrl, 0xe8, uint64_t);
+    const int pressed = (now & ~seen[signal]) >> bit & 1;
+    seen[signal] = now;
+    return pressed;
+}
+
+/* Any button of the local controller held now. */
+int runtime_replay_buttons_held(void) {
+    void *ctrl = local_controller(NULL);
+    return ctrl && RR_AT(ctrl, 0xe8, uint64_t) != 0;
+}
+
 static void lap_skip(int step) {
     const float now = P.time + 0.05f;
     float current = 0.0f, target = step < 0 ? 0.0f : -1.0f;

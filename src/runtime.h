@@ -113,6 +113,13 @@ int runtime_online_mode_in_private(void);
 int runtime_online_mode_lobby_open(void);        /* an online lobby is on screen */
 void runtime_online_mode_selector_left(void);
 void runtime_online_mode_note_frame(void);       /* the game's thread, every frame */
+/* A private room's member, for the overlay's members list by team (bbport_overlay.cpp mirrors it). */
+typedef struct { char name[40]; int team, ready, local; } TeamLobbyMember;
+int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams);   /* any thread; -1 none */
+void runtime_online_team_request(int team);      /* the local player's team, picked in the room (any thread) */
+int runtime_online_team_requested(void);         /* that pick, -1 none */
+int runtime_online_team_color(int team, unsigned char rgb[3], char *name, size_t size);  /* palette index */
+int runtime_online_team_screen(float rects[4][4]);   /* team screen columns to draw (x, y, w on the 1080p canvas); 0 none */
 int runtime_online_mode_room_on(void);           /* in_private as of the last frame, for any thread */
 int runtime_online_mode_public_on(void);         /* a public match's lobby as of the last frame */
 void runtime_load_guard_note(const void *buffer, size_t size); /* the game's stdout/stderr writes: a level load that cannot finish restarts the game (runtime_load_guard.c) */
@@ -200,6 +207,7 @@ int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
 void runtime_race_options_map_loading(const char *map);
 int runtime_race_options_start(unsigned char *image, size_t size);
+int runtime_profile_item_guard_start(unsigned char *image, size_t size); /* runtime_profile_guard.c */
 void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
 int runtime_itemless_collisions_disabled(void);

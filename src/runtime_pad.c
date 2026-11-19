@@ -905,7 +905,18 @@ static void sample_host_from(PadData *d, int p) {
     *d=s.data;
     d->connected_count=count ? count : 1;
     d->timestamp=now;
-    if (bbgpu_overlay_captures_input()) { pad_neutral(d); d->connected_count=count ? count : 1; d->timestamp=now; return; }
+    static int overlay_had[8];
+    if (bbgpu_overlay_captures_input()) {
+        if (p>=0 && p<8) overlay_had[p]=1;
+        pad_neutral(d); d->connected_count=count ? count : 1; d->timestamp=now; return;
+    }
+    if (p>=0 && p<8 && overlay_had[p]) {
+        /* the menu just closed: what is still held (the press that picked something in it) waits to be let go,
+         * or the game would take it too */
+        overlay_had[p]=0;
+        rearm_buttons[p]|=d->buttons;
+        d->buttons&=~rearm_buttons[p];
+    }
     const bool *k=s.keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (k) {
         /* Mouse buttons count, like keys, only while the game window has the focus. */
