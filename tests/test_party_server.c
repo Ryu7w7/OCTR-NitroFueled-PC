@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Stubs the module links against. Declare before including the module. */
 static int g_frozen;
@@ -36,6 +37,18 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
 void runtime_public_itemless_abort_queue(void) { /* no matchmaking in this test */ }
 #include "../src/runtime_party_server.c"
 
+/* The members poll runs on its own thread: wait for it to finish. */
+static void wait_poll(void) {
+    for (int i = 0; i < 2000; ++i) {
+        pthread_mutex_lock(&lock);
+        const int busy = poll_busy;
+        pthread_mutex_unlock(&lock);
+        if (!busy) return;
+        usleep(1000);
+    }
+    assert(!"members poll never finished");
+}
+
 static void reset(void) {
     g_frozen = 0; g_requests = 0;
     g_last_request[0] = 0; g_reply[0] = 0;
@@ -58,8 +71,14 @@ int main(void) {
 
     /* Still racing on the next tick: poll may happen (read-only) but no promote yet. */
     runtime_party_server_tick();
+    wait_poll();
     assert(strstr(g_last_request, "GET") == g_last_request); /* only the read-only poll */
     assert(!strstr(g_last_request, "party-promote"));
+    /* Lobby frames within the poll interval start no other request (it once ran every frame, blocking). */
+    const int polls = g_requests;
+    for (int frame = 0; frame < 50; ++frame) runtime_party_server_tick();
+    wait_poll();
+    assert(g_requests == polls);
 
     /* Race ends: tick applies the deferred promote. */
     g_frozen = 0;

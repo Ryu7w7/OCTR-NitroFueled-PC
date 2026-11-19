@@ -4749,6 +4749,16 @@ static void ranked_member_icons(unsigned char *self) {
             const int crown_hidden = !is_private() || !runtime_online_mode_lobby_open() ||
                                      !nick || !runtime_room_host_is(nick);
             if (!!(crown_flags & 0x400) != crown_hidden) hide_placeable(icon, crown_hidden);
+            if (!crown_hidden) {
+                /* Left of the name, first in the row (the user's pick, 19/11; scripts/online_mode.py places it at
+                 * x 410, the row's right end): before the rank icon (centred at 62, 32 wide) and the name (from 82).
+                 * Icons are placed by their centre (36 wide), the shadow 2 px right; it may cover the ready tick. */
+                float x = 26.0f;
+                if (background) x += 2.0f;
+                float now_x;
+                memcpy(&now_x, icon + 0x60, sizeof now_x);
+                if (now_x != x) memcpy(icon + 0x60, &x, sizeof x);
+            }
             continue;
         }
         if (icon_mode < 0 || icon_mode > 1 || icon_tier < 0 || icon_tier > 7) continue;

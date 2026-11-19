@@ -39,6 +39,34 @@ static char deferred_successor[24]; /* host: successor to promote once the race 
 static int matchmaking_mode;           /* this session backs a matchmaking queue, not a private room */
 static int matchmaking_host_lost_done; /* requeue once when the queue's host disappears */
 
+/* The members poll runs on a thread of its own. runtime_party_server_tick is called on every lobby frame on the
+ * game's thread (runtime_public_itemless_update), and a blocking request there, up to the socket's 8 s timeout,
+ * froze the room (log of 19/11 19:22: a few frames in 5 s). At most one poll every 2 s; the tick reads the latest
+ * reply, and what it does with it stays on the game's thread. */
+#define POLL_INTERVAL_NS 2000000000ull
+static int poll_busy, poll_ready;
+static uint64_t poll_next;
+static char poll_target[512], poll_reply[2048];
+
+static void *poll_members(void *unused) {
+    (void)unused;
+    char target[sizeof poll_target], body[sizeof poll_reply];
+    pthread_mutex_lock(&lock);
+    snprintf(target, sizeof target, "%s", poll_target);
+    pthread_mutex_unlock(&lock);
+    body[0] = 0;
+    const int status = runtime_ryunet_request("GET", target, body, sizeof body);
+    pthread_mutex_lock(&lock);
+    if (status == 200) {
+        memcpy(poll_reply, body, sizeof poll_reply);
+        poll_reply[sizeof poll_reply - 1] = 0;
+        poll_ready = 1;
+    }
+    poll_busy = 0;
+    pthread_mutex_unlock(&lock);
+    return NULL;
+}
+
 int runtime_party_server_enabled(void) { return enabled; }
 
 void runtime_party_server_init(void) {
@@ -235,9 +263,35 @@ void runtime_party_server_tick(void) {
     if (!sid[0] || !me[0]) return;
 
     /* Poll is read-only HTTP: safe even during a race. Only the role flip below is gated. */
-    char target[512], body[2048];
+    char target[512], body[sizeof poll_reply];
     snprintf(target, sizeof target, "/v1/sessions/%s/members?name=%s", sid, me);
-    if (runtime_ryunet_request("GET", target, body, sizeof body) != 200) return;
+    const uint64_t now = runtime_wait_clock();
+    pthread_mutex_lock(&lock);
+    const int start = !poll_busy && now >= poll_next;
+    if (start) {
+        poll_busy = 1;
+        poll_next = now + POLL_INTERVAL_NS;
+        snprintf(poll_target, sizeof poll_target, "%s", target);
+    }
+    const int ready = poll_ready;
+    if (ready) {
+        memcpy(body, poll_reply, sizeof body);
+        poll_ready = 0;
+    }
+    pthread_mutex_unlock(&lock);
+    if (start) {
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attr, poll_members, NULL)) {
+            pthread_mutex_lock(&lock);
+            poll_busy = 0;
+            pthread_mutex_unlock(&lock);
+        }
+        pthread_attr_destroy(&attr);
+    }
+    if (!ready) return;
 
     const char *owner = runtime_json_field(body, "owner");
     const char *gen = runtime_json_field(body, "generation");
