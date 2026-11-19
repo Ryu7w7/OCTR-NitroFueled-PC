@@ -1,4 +1,5 @@
-"""Writes src/runtime_texts.inc (the runtime's copy of the in-game text table) from scripts/octr_texts.py.
+"""Writes src/runtime_texts.inc (the runtime's copy of the in-game text table) from
+lang/*.json, via scripts/octr_texts.py.
 Usage: python tools/gen_octr_texts.py
 SPDX-License-Identifier: GPL-2.0-or-later
 """

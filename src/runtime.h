@@ -137,6 +137,8 @@ int runtime_public_itemless_announce(void);
 int runtime_public_itemless_active(void);
 int runtime_public_itemless_lobby_mode(void);
 int runtime_public_match_active(void);
+int runtime_public_found_room(void);
+int runtime_public_ranked_short(void);
 int runtime_private_match_active(void);
 int runtime_online_party_active(void);
 /* 1 accepted, 0 rejected, -1 asynchronous check pending. */
@@ -146,6 +148,9 @@ int runtime_private_party_update(void);
 void runtime_private_party_cancel(void);
 int runtime_private_difficulty_modified(void);
 int runtime_public_itemless_selected(void);
+int runtime_public_itemless_match_active(void);
+void runtime_public_itemless_party_left_notice(void);
+void runtime_public_itemless_abort_queue(void);
 void runtime_public_itemless_select(int enabled);
 int runtime_ranked_active(void);
 int runtime_ranked_selected(void);
@@ -187,6 +192,8 @@ int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked
 void runtime_online_mode_matchmaking_update(unsigned char *root);
 int runtime_online_mode_matchmaking_timeout(void);
 int runtime_online_mode_matchmaking_cancel(int route); /* 0 search, 1 room leave, 2 host-closed/Waiting Room */
+void runtime_online_mode_set_return_mode(int index); /* 0 Casual, 1 Itemless, 2 Ranked */
+int runtime_online_mode_return_mode(void);
 int runtime_speed_mode_enabled(void);
 int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
@@ -285,6 +292,16 @@ void runtime_party_experiment_request(int kind); /* any thread: 1 leave+host, 2 
 int runtime_party_hosting(void);                 /* this player hosts its party */
 void runtime_party_host_lost(int role, int private_match, int announced_return); /* old host connection was torn down */
 void runtime_party_experiment_tick(void);          /* the game's thread, in an online lobby */
+/* Server-backed private-room parties (opt-in BB_PARTY_SERVER=1, runtime_party_server.c). */
+void runtime_party_server_init(void);
+int runtime_party_server_enabled(void);
+int runtime_party_server_create(const char *sid);         /* host: create on server */
+int runtime_party_server_join(const char *sid);           /* guest: join on server */
+int runtime_party_server_promote(const char *successor);  /* host: promote before quit */
+void runtime_party_server_tick(void);                     /* guest: poll for host change */
+void runtime_party_server_defer_promote(const char *successor); /* host: promote after a race ends */
+void runtime_party_server_matchmaking(int i_am_host, const char *host_name); /* shared session for a queue */
+void runtime_party_server_matchmaking_leave(void); /* queue quit: DELETE me from the shared session */
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */

@@ -717,6 +717,30 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+    /* A stale lobby-player object left in a native list by host takeover keeps a vtable
+     * pointer of image+0x1490000. Any virtual call through it lands on that page start,
+     * whose first instruction writes through RAX and faults in read-only code. The call
+     * returns no value the caller uses, so pop it and continue. */
+    if (sig == SIGSEGV && image && info &&
+        (uintptr_t)info->si_addr == (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] &&
+        (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] - (uintptr_t)image == 0x1490000) {
+        greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
+        uintptr_t ret = 0;
+        const uintptr_t at = (uintptr_t)g[REG_RSP];
+        if (read_self_memory(&ret, at, sizeof ret) == (ssize_t)sizeof ret &&
+            ret - (uintptr_t)image < 0x10000000) {
+            static int warned;
+            if (!warned++) {
+                const char msg[] = "Runtime: skipped stale lobby-player vtable call (image+0x1490000)\n";
+                ssize_t n = write(2, msg, sizeof msg - 1);
+                (void)n;
+            }
+            g[REG_RIP] = (greg_t)ret;
+            g[REG_RSP] = (greg_t)(at + sizeof ret);
+            g[REG_RAX] = 0;
+            return;
+        }
+    }
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -1397,6 +1421,7 @@ int main(int argc, char **argv) {
     runtime_replay_start(image, size); /* spectator build: native race recording (BB_REPLAY=0 off) */
     runtime_reserves_bar_start(image, size);
     if (!runtime_party_experiment_start(image, size)) puts("Host experiment: not available in this executable");
+    runtime_party_server_init(); /* opt-in BB_PARTY_SERVER=1: server-backed private parties */
     /* After the replays: N.Sane chains through their item-box hook (runtime_nsane.c). */
     if (!runtime_nsane_start(image, size)) fail("native N.Sane item callbacks could not be installed");
     if (!runtime_hero_guard_start(image, size)) fail("start screen racer guard could not be installed");

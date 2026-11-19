@@ -44,6 +44,8 @@ void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
 static int timeout_attempts, timeout_ready=1, timeout_route;
 int runtime_online_mode_matchmaking_cancel(int leave_room) { timeout_route=leave_room;++timeout_attempts;return timeout_ready; }
 int runtime_online_mode_matchmaking_timeout(void) { return runtime_online_mode_matchmaking_cancel(0); }
+static int return_mode;
+void runtime_online_mode_set_return_mode(int index) { return_mode = index; }
 static int new_sessions, hosted_sessions;
 void runtime_online_mode_new_session(void) { ++new_sessions; runtime_public_itemless_new_session(); }
 void runtime_room_mode_hosting(void) { ++hosted_sessions; }
@@ -68,6 +70,11 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
         snprintf(body,size,"%s",reply); return status;
     }
     if (strstr(target,"/ryunet/matchmaking-status?")) { snprintf(body,size,"%s",reply); return status; }
+    /* Found-room / party-leave notifications (issue 0042): the client tells RyuNET the instant
+     * a player exits a found room, and polls whether a found room is still alive. */
+    if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-left")) { snprintf(body,size,"ok"); return 200; }
+    if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-short")) { snprintf(body,size,"ok"); return 200; }
+    if (!strcmp(method,"GET") && strstr(target,"/ryunet/room-alive")) { snprintf(body,size,"{\"players\":\"6\"}"); return 200; }
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
@@ -363,6 +370,30 @@ selected = 1;
     status = 200;
     ranked_selected = 0;
     runtime_public_itemless_select(0);
+}
+/* A guest learns Ranked from the host's confirmation, then the host leaving fires a takeover:
+ * new_session wipes ranked_selected before takeover_host, so the sticky mode must restore it. */
+static void test_takeover_keeps_ranked(void) {
+    unsigned char owner[0x960] = {0};
+    uint64_t room = 777;
+    char confirmation[160];
+    int saved_ranked = ranked_selected, saved_joined = joined_ranked;
+    int saved_search_ranked = search_is_ranked;
+    ranked_selected = 0; joined_ranked = 0;
+    runtime_public_itemless_reset();
+    if (!registration_nonce) registration_nonce = 0x1111222233334444ULL;
+    request_nonce = registration_nonce; searching = 1; /* a ranked search owns this room */
+    matchmaking_room = room; matchmaking_owner = owner;
+    snprintf(confirmation, sizeof confirmation,
+             "{\"octr_ranked_v1\":\"2/%" PRIu64 "/0/%016" PRIx64 "\"}", room, request_nonce);
+    assert(accept(owner, room, confirmation, (unsigned)strlen(confirmation)));
+    assert(joined_ranked);
+    runtime_public_itemless_new_session();
+    assert(!ranked_selected && joined_ranked); /* the auto reset must not lose the sticky mode */
+    runtime_public_itemless_takeover_host();
+    assert(ranked_selected && search_is_ranked); /* re-search starts Ranked, not Casual */
+    runtime_public_itemless_reset();
+    ranked_selected = saved_ranked; joined_ranked = saved_joined; search_is_ranked = saved_search_ranked;
 }
 static void test_ranked_button_event(void) {
     native_placeable_event = forward_event;
@@ -1444,6 +1475,7 @@ int main(void) {
     test_early_gate();
     test_full_lobby_confirmation();
     test_ranked();
+    test_takeover_keeps_ranked();
     test_ranked_button_event();
     test_native_return_focus();
     test_timeout_preserves_party_and_mode();

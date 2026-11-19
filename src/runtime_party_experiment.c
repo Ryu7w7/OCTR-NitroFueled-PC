@@ -91,7 +91,10 @@ static int elect_successor(char out[24]) {
 
 /* The work waits for the lobby frame: teardown still runs inside the party update here. */
 void runtime_party_host_lost(int role, int private_match, int announced_return) {
-    (void)private_match;
+    /* Matchmaking/Ranked never uses native takeover: it teardown+recreates the party, wipes the
+     * mode flags and sends the survivor back to Casual Normal. Queue/found-room host loss is
+     * handled by the shared party session + queue abort back to ModeSelect. */
+    if (!private_match) return;
     /* Quit With Party owns this transition. Migrating here fights the host's return message. */
     if (announced_return) {
         __atomic_store_n(&takeover_pending, 0, __ATOMIC_RELEASE);
@@ -119,6 +122,9 @@ int runtime_party_hosting(void) { return image && party_role() == 1; }
 struct Look {
     unsigned char *party;
     void *pending, *session, *connection;
+    void *conn_session;   /* connection+0x110: the session the native role-setter swaps */
+    void *conn_vtable;    /* *(connection) : vtable, +0xb0 is the role-set method */
+    void *conn_setrole;   /* conn_vtable[0xb0] : the native set-role entry */
     int state, role, peers, roster;
     char names[160];
 };
@@ -135,6 +141,9 @@ static void look(struct Look *l) {
     if (l->connection) {
         memcpy(&l->role, (char *)l->connection + 0x118, sizeof l->role);
         memcpy(&l->peers, (char *)l->connection + 0x30, sizeof l->peers);
+        l->conn_session = at(l->connection, 0x110);
+        l->conn_vtable = at(l->connection, 0);
+        if (l->conn_vtable) l->conn_setrole = at(l->conn_vtable, 0xb0);
     }
     void *roster = at(party, 0x30);
     int count = roster ? *(int *)((char *)roster + 12) : 0;
@@ -153,6 +162,10 @@ static void look(struct Look *l) {
 static void print_look(const char *when, const struct Look *l) {
     fprintf(stderr, "Party state: %s state=%d role=%d peers=%d roster=%d [%s] pending=%p session=%p connection=%p\n",
             when, l->state, l->role, l->peers, l->roster, l->names, l->pending, l->session, l->connection);
+    if (l->connection)
+        fprintf(stderr, "Party role probe: conn_session=%p conn_vtable=%p setrole=%p (image+%lx)\n",
+                l->conn_session, l->conn_vtable, l->conn_setrole,
+                image ? (unsigned long)((unsigned char *)l->conn_setrole - image) : 0ul);
 }
 
 /* The other player of a two-instance test: BB_HOST_EXPERIMENT_JOIN, or Ryu7w7 <-> Ryu7w7_test. */
@@ -215,6 +228,16 @@ void runtime_party_experiment_tick(void) {
     next_look = now + 250;
     struct Look l;
     look(&l);
+    /* A guest leaving shrinks the host's roster. During matchmaking (including a found match)
+     * tell the remaining host instead of letting the search/queue continue silently. */
+    if (l.role == 1 && last.role == 1 && l.roster < last.roster &&
+        runtime_public_itemless_match_active())
+        runtime_public_itemless_party_left_notice();
+    /* The leader quitting a queue leaves the guest in the found-room UI. Do NOT send it back to
+     * the menus: the survivor keeps queueing in the same mode. The server dissolves the room and
+     * pushes every player (see ctr_foundroom.go), so the game re-issues start_search on its own.
+     * Only the host-side short-roster notice below applies; a guest that was left alone is not
+     * told to leave. */
     if (l.pending != last.pending || l.session != last.session || l.connection != last.connection ||
         l.state != last.state || l.role != last.role || l.peers != last.peers || l.roster != last.roster ||
         strcmp(l.names, last.names))

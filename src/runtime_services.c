@@ -1278,6 +1278,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         char sid[96];
         path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
         if (sid[0]) {
+            runtime_party_server_join(sid); /* opt-in: mirror the join on the RyuNET server */
             record_session_member(sid);
             private_room_active(1);
             runtime_room_mode_joined(sid); /* the host's mode (Speed) from RyuNET */
@@ -1318,6 +1319,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         const char *my_name = runtime_np_get_online_name();
         char sid[128];
         snprintf(sid, sizeof(sid), "cusa13795-session-%s", (my_name && *my_name) ? my_name : "host");
+        runtime_party_server_create(sid); /* opt-in: mirror the party on the RyuNET server */
         write_active_session(sid);
         private_room_active(1);
         runtime_room_mode_hosting(); /* the room's mode to RyuNET for the players who join */

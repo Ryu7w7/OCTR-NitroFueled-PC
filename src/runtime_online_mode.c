@@ -46,6 +46,13 @@ void runtime_online_mode_selector_left(void) {
     mode_select_active = 0;
     __atomic_store_n(&mode_select_updated_ms, 0, __ATOMIC_RELAXED);
 }
+/* Pin the ModeSelect entry we return to after a matchmaking search/room ends. The native
+ * party-return path cancels with route 2, which otherwise leaves this at -1 and falls back to
+ * Casual Normal even when the party was in Ranked/Itemless. */
+void runtime_online_mode_set_return_mode(int index) {
+    if (index >= 0 && index < 3) matchmaking_return_mode = index;
+}
+int runtime_online_mode_return_mode(void) { return matchmaking_return_mode; }
 static int private_cup_selected;
 static int remote_cup_selected = -1;
 static int private_settings_rejected;
@@ -107,6 +114,7 @@ typedef void (ABI *RunGraphNode)(void *, void *);
 static RunGraphNode run_graph_node;
 static NativeEvent finish_project_context;
 typedef void (ABI *ProjectEvent)(void *, void *);
+static void update_found_room_back_legend(unsigned char *owner);
 typedef void (ABI *OpenProject)(void **, void *, const char *, void *, int, void *, float);
 static ProjectEvent original_project_event;
 static OpenProject open_project;
@@ -2786,6 +2794,7 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     refresh_lobby_card(owner);
     refresh_lobby_members_visibility();
     runtime_public_itemless_update();
+    update_found_room_back_legend(owner);
     runtime_party_experiment_tick();
     if (runtime_private_party_update()) return;
     resume_private_map();
@@ -3557,6 +3566,22 @@ static void ABI lobby_countdown(unsigned char *self) {
     if (mode == 1 && !runtime_online_mode_private_cup() && (teams == 2 || teams == 4) &&
         is_private() && remaining > 0 && threshold >= 0)
         memcpy(self + 0x2c, &remaining, 4);
+    /* Ranked: when the countdown reaches 10s, verify the server still has 6 live players.
+     * Below 6, cancel instead of letting the race start short-handed (which makes the server
+     * dissolve the room mid-load and the game "exit by itself"). The found room otherwise keeps
+     * accepting players right up to this point. */
+    static int ranked_countdown_checked;
+    if (!runtime_public_found_room()) ranked_countdown_checked = 0; /* new room: re-check */
+    if (!ranked_countdown_checked && !is_private() && remaining <= 10.f && remaining > 0.f &&
+        runtime_public_found_room()) {
+        ranked_countdown_checked = 1;
+        if (runtime_public_ranked_short()) {
+            printf("Ranked countdown: fewer than 6 live players, cancelling room\n");
+            native_notice(runtime_text("Not enough players to start Ranked. Back to queue."), NULL);
+            runtime_online_mode_matchmaking_cancel(1);
+            return; /* do not advance the countdown / start the race */
+        }
+    }
     /* Never rewrite replicated remaining time or the native all-ready shortcut. */
     original_lobby_countdown(self);
 }
@@ -3921,7 +3946,7 @@ static void ranked_member_icons(unsigned char *self) {
             /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
             unsigned crown_flags;
             memcpy(&crown_flags, icon + 12, sizeof crown_flags);
-            const int crown_hidden = !runtime_online_mode_in_private() || !runtime_online_mode_lobby_open() ||
+            const int crown_hidden = !is_private() || !runtime_online_mode_lobby_open() ||
                                      !nick || !runtime_room_host_is(nick);
             if (!!(crown_flags & 0x400) != crown_hidden) hide_placeable(icon, crown_hidden);
             continue;
@@ -4103,6 +4128,29 @@ void runtime_online_mode_hof_legend(void *project) {
                           "To Parameters" : "To Leaderboard");
     add_legend(project, list_button, &label, 1);
     if (label) drop_string(*string_pool, label - 16);
+}
+
+/* Hide the native BACK (O/B) legend + icon while a matchmaking room is found, so players cannot
+ * quit mid-match; restore it once the room is gone (still queueing / back in the lobby). */
+static int back_legend_hidden;
+static void update_found_room_back_legend(unsigned char *owner) {
+    const int found = runtime_public_found_room();
+    if (found == back_legend_hidden) return; /* no transition */
+    unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
+    unsigned char *remove = gui_manager && *gui_manager ? pointer_at(*gui_manager, 0xf0) : NULL;
+    if (!project || !remove) return;
+    ProjectEvent dispatch = (ProjectEvent)pointer_at(pointer_at(project, 0), 0xb0);
+    if (!dispatch) return;
+    int button = 3; /* O/B legend, same button the Hall of Fame uses */
+    memcpy(remove + 0x18, &button, 4);
+    dispatch(project, remove);
+    back_legend_hidden = found;
+    if (!found) {
+        char *label = intern_string(*string_pool, runtime_text("BACK"));
+        add_legend(project, button, &label, 1);
+        if (label) drop_string(*string_pool, label - 16);
+    }
+    fprintf(stderr, "Found-room BACK legend hidden=%d\n", found);
 }
 
 static void refresh_team_legend(unsigned char *self) {

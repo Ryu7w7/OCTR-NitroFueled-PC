@@ -133,8 +133,10 @@ if [[ ${1:-} == --test ]]; then
     out/tt-reference-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_itemless.c -o out/itemless-test
     out/itemless-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_public_itemless.c -o out/public-itemless-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_public_itemless.c src/runtime_party_server.c -o out/public-itemless-test
     out/public-itemless-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_party_server.c -o out/party-server-test
+    out/party-server-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_room_mode.c -o out/room-mode-test
     out/room-mode-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_chat.c -o out/chat-test
