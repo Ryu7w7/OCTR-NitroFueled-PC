@@ -140,5 +140,9 @@ int main(void) {
     follow_update(&peer, 1); /* A response from the old room cannot alter the new one. */
     assert(active_speed == 0 && !runtime_room_mode_following() && !race_frozen);
     assert(requested_leave>0 && requested_fresh==0); /* Native cleanup is queued, not run on the worker. */
+    strcpy(followed_host, "TestGuestRoom");
+    const int leaves = requested_leave;
+    runtime_room_mode_takeover();
+    assert(!runtime_room_mode_following() && requested_leave == leaves);
     puts("Room mode: verified loading, frozen CUP rules, stale responses and room leave passed");
 }

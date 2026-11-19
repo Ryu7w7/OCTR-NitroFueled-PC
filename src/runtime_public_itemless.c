@@ -79,6 +79,8 @@ static int party_at_entry = 1;
  * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
 static int entry_private;
 static int private_lobby_open;
+static int guest_room_open; /* this player is on the room's own screens */
+static int queue_return_pending, party_return_received;
 static void (ABI *native_party_quit_trace)(void *);
 static int ranked_party_size(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
@@ -206,11 +208,19 @@ void runtime_public_itemless_party_ready(void) {
 /* The host is back in the online menus: the room's private flag must not follow it into the
  * next mode (2026-11-17: matchmaking with a party opened the private lobby's map selector). */
 static void clear_room_private(unsigned char *party) { if (party) party[0x6c] = 0; }
+/* Takeover stays inside the same room. Reset only party-exit bookkeeping; a full online-session
+ * reset destroys lobby-player state while the native room still references it. */
+void runtime_public_itemless_takeover_host(void) {
+    __atomic_store_n(&party_at_entry, ranked_party_size(), __ATOMIC_SEQ_CST);
+    __atomic_store_n(&entry_private, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&queue_return_pending, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&party_return_received, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&menu_party_returned, 0, __ATOMIC_SEQ_CST);
+}
 /* A guest back in the menus has left the host's room for good, but nothing leaves the party:
  * both sides keep it in their Lobby Members list and the host never hears about it (2026-11-18).
  * Leave it the game's way: 0xa9ffd0 tells the host (message 0x29) and empties the roster. */
 static uint64_t guest_quit_at;
-static int guest_room_open; /* this guest is on the room's own screens */
 static int leave_party_as_guest(void) {
     if (guest_quit_at && check_clock() - guest_quit_at < 5000) return 0;
     unsigned char *party = party_manager ? *party_manager : NULL;
@@ -247,6 +257,8 @@ void runtime_public_itemless_guest_room(int inside) {
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
+    const int queue_return = __atomic_exchange_n(&queue_return_pending,0,__ATOMIC_SEQ_CST);
+    const int received_return = __atomic_exchange_n(&party_return_received,0,__ATOMIC_SEQ_CST);
     runtime_public_itemless_reset();
     if (runtime_room_mode_following()) runtime_public_itemless_party_ready();
     if (!notify) return;
@@ -264,18 +276,14 @@ void runtime_public_itemless_menu_return(void) {
      * private, public or Ranked room everyone stayed grouped with its host). */
     const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
     printf("Online party: menu return role=%d private=%d before=%d\n", role, private_room, before);
-    if (role == 1 && __atomic_load_n(&entry_private, __ATOMIC_SEQ_CST)) {
-        /* Leave this party without the Quit With Party return message. Guests see the connection
-         * close and recreate the private party under a remaining member. */
-        if (native_party_quit_trace) native_party_quit_trace(party);
-        puts("Online party: host left private room alone; remaining member takes host");
-    } else if (role == 1 && native_party_return && before > 1) {
+    if (role == 1 && queue_return && native_party_return && before > 1) {
         native_party_return(party);
-        printf("Online party: return notification queued; members=%d (party of %d before the room)\n",
+        printf("Online party: queue timeout returns party together; members=%d before=%d\n",
                ranked_party_size(), before);
     } else if (role == 1) {
-        printf("Online party: no party before the room; its players are not brought along\n");
-    } else if (private_room) {
+        if (native_party_quit_trace) native_party_quit_trace(party);
+        puts("Online party: host left alone; remaining members elect a new host");
+    } else if (!received_return && private_room) {
         leave_party_as_guest();
     }
 }
@@ -356,6 +364,17 @@ static void notice(const char *message) {
 static int ranked_account_allowed(void) {
     if (runtime_ranked_account() != 0) return 1;
     notice(RANKED_ACCOUNT_NOTICE);
+    return 0;
+}
+
+/* Public matchmaking and Ranked take the game's own files and character mods only; any other mod or
+ * executable patch is for private rooms (scripts/online_content.py, runtime_online_content). */
+#define PUBLIC_CONTENT_NOTICE "Public matchmaking and Ranked allow only character, sound and HUD mods. Your game has other mods or patches: play them in private rooms."
+/* A public search refused for its content: 1 the notice is up, 2 its Continue was pressed (go back) */
+static int content_return;
+static int public_content_allowed(void) {
+    if (strcmp(runtime_online_content(), "modified")) return 1;
+    notice(PUBLIC_CONTENT_NOTICE);
     return 0;
 }
 
@@ -520,6 +539,16 @@ int runtime_room_members(char out[][24], int max) {
 void runtime_public_itemless_update(void) {
     members_tick();
     update_search_clock();
+    /* the content notice was dismissed: out of the refused search, back to the lobby (start_search) */
+    if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 2) {
+        __atomic_store_n(&content_return, 0, __ATOMIC_SEQ_CST);
+        fprintf(stderr, "Public ITEMLESS: content notice dismissed: back to the lobby\n");
+        if (network_manager && *network_manager) {
+            native_stop_matchmaking(*network_manager);
+            native_return_to_lobby();
+        }
+        return;
+    }
     pthread_mutex_lock(&mode_lock);
     const int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
     const int leave_room=confirmed_ranked!=0;
@@ -533,11 +562,15 @@ void runtime_public_itemless_update(void) {
     if (cancelled) {
         /* Followers wait for the host's native party notification instead of leaving independently. */
         if (runtime_room_mode_following()) return;
+        const int timeout_return = cancelled == 1;
+        if (timeout_return) __atomic_store_n(&queue_return_pending,1,__ATOMIC_SEQ_CST);
         if (runtime_online_mode_matchmaking_cancel(leave_room)) {
             runtime_public_itemless_reset();
             runtime_public_itemless_party_ready();
             if (cancelled==2 && !runtime_room_mode_following())
                 notice("Ranked supports at most 4 party members. Ranked was cancelled because another player joined. Your party stays together; use Public Matchmaking for up to 8.");
+        } else if (timeout_return) {
+            __atomic_store_n(&queue_return_pending,0,__ATOMIC_SEQ_CST);
         }
         return;
     }
@@ -852,9 +885,9 @@ int runtime_private_party_update(void) {
         else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
-    if (pending_private.ranked && runtime_ranked_account() == 0) {
+    if (pending_private.ranked && (runtime_ranked_account() == 0 || !strcmp(runtime_online_content(), "modified"))) {
         clear_private_pending();
-        (void)ranked_account_allowed();     /* the notice */
+        if (ranked_account_allowed()) (void)public_content_allowed();     /* the notice */
         return 0;
     }
     struct PendingPrivate ready=pending_private;
@@ -1101,9 +1134,10 @@ static void native_return_focus(void *node, int ancestors) {
             }
             if (!ancestors && name && was_in_room &&
                 !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root")) {
-                /* Back out of the room lands on its setup screen; native leaves the session only,
-                 * so the party (and the host's Lobby Members row) stays behind (2026-11-18). */
+                /* Back out of the room lands on its setup screen. Complete the same party return
+                 * as every other room exit before this early return. */
                 runtime_public_itemless_guest_room(0);
+                runtime_public_itemless_menu_return();
                 return;
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
@@ -1183,6 +1217,13 @@ static void ABI placeable_event(void *self, void *event) {
                                   !strcmp(type, "igGuiEventPlaceableGainFocus"));
         if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
         if (gain) native_return_focus(self, 0);
+        /* the content notice's Continue (Confirm 8) or Back (9): leave the refused search */
+        if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 1 && type &&
+            (!strcmp(type, "igGuiEventFocusInputPressed") || !strcmp(type, "igGuiEventProjectInputPressed"))) {
+            int pressed = 0;
+            memcpy(&pressed, (char *)event + 0x18, sizeof pressed);
+            if (pressed == 8 || pressed == 9) __atomic_store_n(&content_return, 2, __ATOMIC_SEQ_CST);
+        }
         int signal = 0;
         if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
             memcpy(&signal, (char *)event + 0x18, sizeof signal);
@@ -1250,7 +1291,7 @@ static void ABI placeable_event(void *self, void *event) {
                         pending_private.ranked = pending_private.target != NULL;
                     }
                     if (state != 1) return;
-                    if (!ranked_account_allowed()) return;
+                    if (!ranked_account_allowed() || !public_content_allowed()) return;
                 }
                 if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
@@ -1314,6 +1355,16 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
 }
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
     if (rejection[0]) { *result = NULL; return result; }
+    /* any public search (Normal, Itemless, Ranked): character mods only (private rooms never search).
+     * The notice first; its Continue (or Back) stops the search and goes back to the lobby
+     * (placeable_event, then runtime_public_itemless_update). */
+    if (!strcmp(runtime_online_content(), "modified")) {
+        fprintf(stderr, "Public ITEMLESS: search refused: online content is modified (private rooms only)\n");
+        notice(PUBLIC_CONTENT_NOTICE);
+        __atomic_store_n(&content_return, 1, __ATOMIC_SEQ_CST);
+        *result = NULL;
+        return result;
+    }
     /* A matchmaking search is never a private room: the party's room flag must not open the
      * private lobby (map selector) while the host waits for opponents (2026-11-17). */
     clear_room_private(party_manager ? *party_manager : NULL);
@@ -1493,7 +1544,6 @@ static void ABI kicked(void *self, uint64_t room) {
     retire(self, room);
     native_kicked(self, room);
 }
-
 static unsigned char *party_trace_image;
 static void (ABI *native_party_reset_trace)(void *);
 static unsigned char (ABI *native_party_return_trace)(void *,void *,void *);
@@ -1512,7 +1562,7 @@ static void party_trace(const char *action, void *self, void *caller) {
 static void ABI traced_party_reset(void *self) {
     party_trace("reset",self,__builtin_return_address(0));
     const int private_match=runtime_private_match_active();
-    const int announced_return=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST);
+    const int announced_return=__atomic_load_n(&party_return_received,__ATOMIC_SEQ_CST);
     unsigned char *party=self;
     unsigned char *session=party ? *(void **)(party+0x18) : NULL;
     unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
@@ -1529,6 +1579,7 @@ static void ABI traced_party_quit(void *self) {
 static unsigned char ABI received_party_return(void *sender,void *message,void *context) {
     party_trace("receive-return",party_manager ? *party_manager : NULL,__builtin_return_address(0));
     if (!runtime_room_mode_race_frozen()) {
+        __atomic_store_n(&party_return_received,1,__ATOMIC_SEQ_CST);
         unsigned char *party=party_manager ? *party_manager : NULL;
         const int already_returned=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST) &&
             (!party || !party[0x6c]);

@@ -113,15 +113,16 @@ TEXTS = (
     ('PLACEMENT RACES', 'CARRERAS DE POSICIONAMIENTO', S, 'COURSES DE PLACEMENT', 'CORRIDAS DE POSICIONAMENTO',
      'PLATZIERUNGSRENNEN', 'GARE DI PIAZZAMENTO'),
     ('UNRANKED', 'SIN RANGO', S, 'NON CLASSÉ', 'SEM RANQUE', 'OHNE RANG', 'SENZA GRADO'),
-    ('Bronze Wumpa', 'Wumpa de Bronce', S, 'Wumpa de bronze', 'Wumpa de Bronze', 'Bronze-Wumpa', 'Wumpa di bronzo'),
-    ('Silver Nitro', 'Nitro de Plata', S, "Nitro d'argent", 'Nitro de Prata', 'Silber-Nitro', "Nitro d'argento"),
-    ('Gold Mask', 'Máscara de Oro', S, "Masque d'or", 'Máscara de Ouro', 'Gold-Maske', "Maschera d'oro"),
-    ('Platinum Trophy', 'Trofeo de Platino', S, 'Trophée de platine', 'Troféu de Platina', 'Platin-Trophäe',
-     'Trofeo di platino'),
-    ('Aku Master', 'Maestro Aku', S, 'Maître Aku', 'Mestre Aku', 'Aku-Meister', 'Maestro Aku'),
-    ('Uka Legend', 'Leyenda Uka', S, 'Légende Uka', 'Lenda Uka', 'Uka-Legende', 'Leggenda Uka'),
-    ('Chaos Grand Prix', 'Gran Premio del Caos', S, 'Grand Prix du Chaos', 'Grande Prêmio do Caos',
-     'Chaos-Grand-Prix', 'Gran Premio del Caos'),
+    # Normal (FFA) tiers since 2026-11-18 (icons and names by S_97)
+    ('Bronze', 'Bronce', S, 'Bronze', 'Bronze', 'Bronze', 'Bronzo'),
+    ('Silver', 'Plata', S, 'Argent', 'Prata', 'Silber', 'Argento'),
+    ('Golden Wumpa', 'Wumpa Dorada', S, 'Wumpa doré', 'Wumpa Dourada', 'Goldene Wumpa', "Wumpa d'oro"),
+    ('Power Crystal', 'Cristal de Poder', S, 'Cristal de pouvoir', 'Cristal de Poder', 'Kraftkristall',
+     'Cristallo del potere'),
+    ('Mythic Gem', 'Gema Mítica', S, 'Gemme mythique', 'Gema Mítica', 'Mythisches Juwel', 'Gemma mitica'),
+    ("Uka's Chosen", 'Elegido de Uka', S, "Élu d'Uka", 'Escolhido de Uka', 'Ukas Auserwählter', 'Prescelto di Uka'),
+    ('Ancient Spirit', 'Espíritu Ancestral', S, 'Esprit ancestral', 'Espírito Ancestral', 'Uralter Geist',
+     'Spirito ancestrale'),
     ('Sapphire Relic', 'Reliquia de Zafiro', S, 'Relique de saphir', 'Relíquia de Safira', 'Saphir-Relikt',
      'Reliquia di zaffiro'),
     ('Gold Relic', 'Reliquia de Oro', S, "Relique d'or", 'Relíquia de Ouro', 'Gold-Relikt', "Reliquia d'oro"),
@@ -309,6 +310,20 @@ TEXTS = (
      'des Systems.',
      "Impossibile verificare questo dispositivo per la Classificata. Controlla l'accesso all'identificativo "
      'del dispositivo del sistema.'),
+    # scripts/online_content.py: a game with other mods or patches than character mods (RyuNET's
+    # online_content.go sends this same text when it refuses a search)
+    ('Public matchmaking and Ranked allow only character, sound and HUD mods. Your game has other mods or '
+     'patches: play them in private rooms.',
+     'Las partidas públicas y la Clasificatoria solo permiten mods de personajes, sonidos y HUD personalizados. '
+     'Tu juego tiene otros mods o parches: úsalos en salas privadas.', S,
+     "Les parties publiques et le mode Classé n'acceptent que les mods de personnages, de sons et de HUD. Ton "
+     "jeu a d'autres mods ou patchs : utilise-les dans les salons privés.",
+     'As partidas públicas e a Ranqueada só permitem mods de personagens, sons e HUD personalizados. Seu jogo '
+     'tem outros mods ou patches: use-os em salas privadas.',
+     'Öffentliche Spiele und die Rangliste erlauben nur Charakter-, Sound- und HUD-Mods. Dein Spiel hat andere '
+     'Mods oder Patches: nutze sie in privaten Räumen.',
+     'Le partite pubbliche e la Classificata consentono solo mod di personaggi, suoni e HUD personalizzati. Il '
+     'tuo gioco ha altre mod o patch: usale nelle stanze private.'),
     # the server's ranked_account.go sends this same text when it refuses a search
     ('Ranked needs a Discord or Steam account linked to every player. Link yours in the launcher and try again.',
      'La Clasificatoria necesita una cuenta de Discord o Steam vinculada a cada jugador. Vincula la tuya en el '

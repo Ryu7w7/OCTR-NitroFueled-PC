@@ -74,6 +74,7 @@ fi
 # read-only link tree of the merged CTR dump (update 1.21 over the base game).
 game=${BB_GAME_DIR:-orig/CUSA13795}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
+source_game=$game   # the game's own files, before any mod (scripts/online_content.py)
 # The game check (scripts/game_check.py) compares the executable image with the supported one
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$(startup_python scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
@@ -296,6 +297,25 @@ startup_python scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --p
     "${layout_patches[@]}" "${strict_overlap[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
     --app-version "$app_version" --title-id "$title_id" --out "$out" --boot-dir "$boot" --settings "$settings"
 patch_args=(--patches "$out/patches.bin")
+# What this launch plays online with (scripts/online_content.py, as run.py): public matchmaking and
+# Ranked take the game's own files and character mods only, private rooms anything.
+unset BB_ONLINE_CONTENT
+if [[ ${BB_ONLINE:-0} == 1 ]]; then
+    content_args=(--game "$source_game" --view "$game" --out "$out" --patches-dir "${BB_PATCHES_DIR:-patches}"
+                  --patches-dir "$data/patches" --app-version "$app_version" --title-id "$title_id")
+    if [[ -n ${BB_MOD_FILE_MAP:-} ]]; then content_args+=(--file-map "$BB_MOD_FILE_MAP"); fi
+    if [[ -n ${BB_MOD_ARCHIVE_PLAN:-} ]]; then content_args+=(--archive-plan "$BB_MOD_ARCHIVE_PLAN"); fi
+    if [[ -n ${layout_patches[1]:-} ]]; then content_args+=(--layout-dir "${layout_patches[1]}"); fi
+    content=unknown
+    while IFS= read -r line; do
+        case $line in
+            class=*) content=${line#class=} ;;
+            ?*) echo "  $line" ;;
+        esac
+    done < <(startup_python scripts/online_content.py "${content_args[@]}" || true)
+    export BB_ONLINE_CONTENT=$content
+    echo "Online content: $content"
+fi
 # bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
 # above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
 read -r plan_pro plan_heap plan_label < <(startup_python scripts/patches.py --print-plan --settings "$settings") || true

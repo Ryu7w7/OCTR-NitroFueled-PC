@@ -119,6 +119,7 @@ void runtime_load_guard_note(const void *buffer, size_t size); /* the game's std
 void runtime_presence_tick(void);                /* the game's thread, every frame: Discord presence facts (runtime_presence.c) */
 int runtime_online_mode_private_cup_race(void); /* a race of a private room's CUP is loading or running */
 void runtime_room_mode_hosting(void);
+void runtime_room_mode_takeover(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
 int runtime_room_mode_following(void);
@@ -179,6 +180,7 @@ void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_menu_return(void);
 void runtime_public_itemless_guest_left(const char *session_id);
 void runtime_public_itemless_guest_room(int inside);
+void runtime_public_itemless_takeover_host(void);
 void runtime_public_itemless_party_ready(void);
 void runtime_public_itemless_update(void);
 int runtime_matchmaking_view(int *elapsed, int *timeout, int *range, int *ranked);

@@ -50,6 +50,9 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
  * GET /ryunet/items/live): logins say it (X-RyuNET-Items) instead of the startup's BB_ITEM_RULES_ID. */
 void runtime_items_id_set(const char *id);
 int runtime_items_id(char *out, size_t size);
+/* What this launch plays online with: "clean", "characters", "modified" or "unknown"
+ * (scripts/online_content.py; logins say it, X-RyuNET-Content). */
+const char *runtime_online_content(void);
 /* A signed request to the RyuNET server with a binary body (size bytes of data, may be 0) and a
  * binary answer of up to max_reply bytes, malloc'd in *reply (free it; NULL when none). The HTTP
  * status, 0 when the server could not be reached. */

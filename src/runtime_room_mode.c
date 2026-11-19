@@ -280,6 +280,20 @@ void runtime_room_mode_left(void) {
     runtime_online_mode_request_leave(0);
 }
 
+/* Host migration keeps an active Public/Ranked search; only follower ownership changes. */
+void runtime_room_mode_takeover(void) {
+    pthread_mutex_lock(&follow_lock);
+    followed_host[0] = 0;
+    race_frozen = 0; verify_done = 0;
+    __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
+    runtime_speed_mode_set(runtime_online_mode_private_speed());
+    runtime_nsane_mode_set(runtime_online_mode_private_nsane());
+    pthread_mutex_unlock(&follow_lock);
+    runtime_race_options_leave_room();
+    publish_mode(!runtime_online_mode_in_private() ? 0 : runtime_online_mode_private_speed() ? 1 :
+                 runtime_online_mode_private_nsane() ? 2 : 0);
+}
+
 void runtime_room_mode_host_name(char out[24]) {
     pthread_mutex_lock(&follow_lock);
     const char *host=followed_host[0] ? followed_host : runtime_np_get_online_name();

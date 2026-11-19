@@ -14,10 +14,10 @@
  * The server scores the race when the room's own host reports (the same
  * authority the game already uses) and answers every reporter with its own
  * outcome: {"status":"resolved","race":7,"season":1,"delta":45,"mmr":1045,
- * "placements":4,"tier":"Gold Mask"}. Guests that reported a moment before the
+ * "placements":4,"tier":"Golden Wumpa"}. Guests that reported a moment before the
  * host get "pending" and retry; once the race is resolved a retry carries
  * their delta, which then joins the lobby card:
- * RANKED - NORMAL  +45 (1045 Gold Mask).
+ * RANKED - NORMAL  +45 (1045 Golden Wumpa).
  * The Python launcher stays out of it: the mod talks to RyuNET itself, exactly
  * like chat, spectate and name colors do.
  */
@@ -213,14 +213,19 @@ static int same_nick(const char *a, const char *b) {
     return !*a && !*b;
 }
 
+/* As RyuNET names them (its ranked_mmr.go rankedTierNames). Normal (FFA) since 2026-11-18, by S_97:
+ * Bronze, Silver, Golden Wumpa, Power Crystal, Mythic Gem, Uka's Chosen, Ancient Spirit. */
 static const char *const tier_names[2][7] = {
-    {"Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"},
+    {"Bronze", "Silver", "Golden Wumpa", "Power Crystal", "Mythic Gem", "Uka's Chosen", "Ancient Spirit"},
     {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Oxide Overlord"},
 };
+/* the Normal tiers' names before that, as an older server still says them */
+static const char *const old_normal_tier_names[7] = {
+    "Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"};
 
 static int tier_index(const char *name, int mode) {
     for (int i = 0; i < 7; ++i)
-        if (!strcmp(name, tier_names[mode][i])) return i + 1;
+        if (!strcmp(name, tier_names[mode][i]) || (!mode && !strcmp(name, old_normal_tier_names[i]))) return i + 1;
     return 0;
 }
 
