@@ -72,6 +72,7 @@ void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_guest_room(int inside) { (void)inside; }
 void runtime_public_itemless_update(void) {}
 int runtime_public_found_room(void) { return 0; }
+uint64_t runtime_public_room(void) { return 0; }
 int runtime_public_ranked_short(void) { return 0; }
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }

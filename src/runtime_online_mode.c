@@ -108,6 +108,7 @@ static NativeEvent original_reset_racer_pool;
 static NativeEvent original_spawn_cup_ai;
 static NativeEvent original_place_racers;
 static NativeEvent original_race_ui, original_lobby_countdown, original_lobby_start, original_countdown_init;
+static NativeEvent original_map_vote_finished;
 typedef unsigned char (ABI *NetworkQuery)(void);
 static NetworkQuery in_network_game;
 typedef void (ABI *RunGraphNode)(void *, void *);
@@ -251,6 +252,8 @@ static int pending_private_reason;
 typedef void (ABI *NoArgument)(void);
 static NoArgument assign_ai_teams;
 static NoArgument return_to_lobby;
+typedef void (ABI *QuitToMainMenu)(void *, int, int, int, int);
+static QuitToMainMenu quit_to_main_menu;
 static NativeEvent next_cup_map, original_guest_return_timer;
 typedef void (ABI *ReturnDeadline)(void);
 typedef void (ABI *ScheduleReturn)(void *, ReturnDeadline, void *);
@@ -2449,6 +2452,16 @@ static void ABI private_race_timer_done(void) {
             fputs("Native private CUP: current track zone is missing\n", stderr);
         }
     }
+    if (runtime_ranked_active()) {
+        printf("Ranked: race countdown reached 0, quitting to main menu with party\n");
+        const int ret_mode = runtime_public_itemless_lobby_mode() ? 1 : 0;
+        runtime_online_mode_set_return_mode(ret_mode);
+        runtime_public_itemless_menu_return();
+        if (quit_to_main_menu && race_manager && *race_manager) {
+            quit_to_main_menu(*race_manager, 0, 0, 1, 0);
+            return;
+        }
+    }
     return_to_lobby();
 }
 
@@ -3566,24 +3579,38 @@ static void ABI lobby_countdown(unsigned char *self) {
     if (mode == 1 && !runtime_online_mode_private_cup() && (teams == 2 || teams == 4) &&
         is_private() && remaining > 0 && threshold >= 0)
         memcpy(self + 0x2c, &remaining, 4);
-    /* Ranked: when the countdown reaches 10s, verify the server still has 6 live players.
-     * Below 6, cancel instead of letting the race start short-handed (which makes the server
-     * dissolve the room mid-load and the game "exit by itself"). The found room otherwise keeps
-     * accepting players right up to this point. */
-    static int ranked_countdown_checked;
-    if (!runtime_public_found_room()) ranked_countdown_checked = 0; /* new room: re-check */
-    if (!ranked_countdown_checked && !is_private() && remaining <= 10.f && remaining > 0.f &&
-        runtime_public_found_room()) {
-        ranked_countdown_checked = 1;
-        if (runtime_public_ranked_short()) {
-            printf("Ranked countdown: fewer than 6 live players, cancelling room\n");
-            native_notice(runtime_text("Not enough players to start Ranked. Back to queue."), NULL);
-            runtime_online_mode_matchmaking_cancel(1);
-            return; /* do not advance the countdown / start the race */
-        }
-    }
     /* Never rewrite replicated remaining time or the native all-ready shortcut. */
     original_lobby_countdown(self);
+}
+
+/* Ranked: the exact native map-selection moment. COctaneLobbyTimerComponent posts
+ * CLobbyMapVoteFinishedMessage (sender image+0x120f740, called from image+0xeb7ee0), and the
+ * lobby subscribes this handler (image+0xebcd40) to that message. Every client runs it once per
+ * match, whatever the lobby timer marks look like, so it is the reliable "map picked" trigger.
+ * Below the server's min_players, show the notice and cancel before the native handler selects
+ * the map. */
+static void ABI ranked_map_vote_finished(unsigned char *self) {
+    if (!is_private() && runtime_public_found_room()) {
+        static uint64_t handled_room;
+        /* Status codes, not booleans: -1 means the room is already dissolved, so it must not be
+         * fed to a truthiness test that would cancel a second time. */
+        const int st = runtime_public_ranked_short();
+        if (st == 1 || st == -1) {
+            /* This handler can run more than once while a room dissolves; notice and cancel
+             * once per room instead. */
+            const uint64_t room = runtime_public_room();
+            if (room && handled_room != room) {
+                handled_room = room;
+                printf("Ranked: map vote finished, room %llu short or dissolved, cancelling room\n",
+                       (unsigned long long)room);
+                native_notice(runtime_text("Not enough players to start Ranked. Back to queue."), NULL);
+                runtime_online_mode_matchmaking_cancel(1);
+            }
+            return; /* do not let the native handler select the map / start the race */
+        }
+        handled_room = 0;
+    }
+    original_map_vote_finished(self);
 }
 
 typedef void (ABI *DisableControlsNode)(void *, unsigned char *);
@@ -4133,6 +4160,7 @@ void runtime_online_mode_hof_legend(void *project) {
 /* Hide the native BACK (O/B) legend + icon while a matchmaking room is found, so players cannot
  * quit mid-match; restore it once the room is gone (still queueing / back in the lobby). */
 static int back_legend_hidden;
+static int back_legend_button;
 static void update_found_room_back_legend(unsigned char *owner) {
     const int found = runtime_public_found_room();
     if (found == back_legend_hidden) return; /* no transition */
@@ -4141,16 +4169,18 @@ static void update_found_room_back_legend(unsigned char *owner) {
     if (!project || !remove) return;
     ProjectEvent dispatch = (ProjectEvent)pointer_at(pointer_at(project, 0), 0xb0);
     if (!dispatch) return;
-    int button = 3; /* O/B legend, same button the Hall of Fame uses */
+    /* Try button 2 first (HOF uses 1 and 3, so BACK is likely 2). */
+    int button = 2;
     memcpy(remove + 0x18, &button, 4);
     dispatch(project, remove);
     back_legend_hidden = found;
-    if (!found) {
+    back_legend_button = button;
+    if (!found && back_legend_button) {
         char *label = intern_string(*string_pool, runtime_text("BACK"));
-        add_legend(project, button, &label, 1);
+        add_legend(project, back_legend_button, &label, 1);
         if (label) drop_string(*string_pool, label - 16);
     }
-    fprintf(stderr, "Found-room BACK legend hidden=%d\n", found);
+    fprintf(stderr, "Found-room BACK legend hidden=%d button=%d\n", found, back_legend_button);
 }
 
 static void refresh_team_legend(unsigned char *self) {
@@ -4359,6 +4389,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         memcmp(image + (0xf382f0 - shift), confetti_prefix, sizeof confetti_prefix)) return 0;
     const unsigned char countdown_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x53,0x50,0x48,0x89,0xfb,0x48,0x8b,0x43,0x18};
+    const unsigned char map_vote_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38};
     const unsigned char legend_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
     const unsigned char disable_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
@@ -4369,6 +4401,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
         0x48,0x89,0xd3,0x49,0x89,0xfe,0xe8,0xbe,0x63,0x93,0xff};
     network_branch[14] += (unsigned char)shift;
     if (memcmp(image + (0xeb7950 - shift), countdown_prefix, sizeof countdown_prefix) ||
+        memcmp(image + (0xebcd40 - shift), map_vote_prefix, sizeof map_vote_prefix) ||
         memcmp(image + (0x115a740 - shift), network_branch, sizeof network_branch)) return 0;
     if (pointer_at(image, 0x2778150) != image + (0x1293030 - shift)) return 0;
     if (pointer_at(image, 0x2544140) != image + 0x9c60b0) return 0;
@@ -4708,6 +4741,13 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
             image + 0x119d8d0 - shift + sizeof set_laps_prefix);
     original_set_laps = (LapSetter)(trampoline + 2688);
     stub_end = 2718;
+    /* The map-vote handler is a native function we replace, so its saved entry comes from a
+     * trampoline: pointing at the patched address would jump straight back into the hook. */
+    memcpy(trampoline + 2752, map_vote_prefix, sizeof map_vote_prefix);
+    jump_to(trampoline + 2752 + sizeof map_vote_prefix,
+            image + (0xebcd40 - shift) + sizeof map_vote_prefix);
+    original_map_vote_finished = (NativeEvent)(trampoline + 2752);
+    stub_end = 2752 + sizeof map_vote_prefix + 14;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -4779,6 +4819,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     network_state = (NetworkState)(image + 0x94efa0);
     network_race = (NetworkRace)(image + 0x9fa130);
     return_to_lobby = (NoArgument)(image + 0xa9cbe0);
+    quit_to_main_menu = (QuitToMainMenu)(image + (0xfe6320 - shift));
     receive_private_settings = (NativeEvent)(trampoline + 192);
     publish_private_track = (NativeEvent)(image + (0xf4f7c0 - shift));
     broadcast_race_settings = (NativeEvent)(trampoline + 2560);
@@ -4927,6 +4968,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + 0xe330e0, jump, sizeof jump)) return 0;
     jump_to(jump, lobby_countdown);
     if (!write_code(image + (0xeb7950 - shift), jump, sizeof jump)) return 0;
+    jump_to(jump, ranked_map_vote_finished);
+    if (!write_code(image + (0xebcd40 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, team_selector_disable_node);
     if (!write_code(image + (0x110b9c0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, ranking_network_branch);

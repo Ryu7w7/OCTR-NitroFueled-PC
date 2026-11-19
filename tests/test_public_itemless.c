@@ -1382,6 +1382,17 @@ int main(void) {
     setenv("BB_PUBLIC_ITEMLESS","1",1);
     snprintf(reply,sizeof reply,"ok"); status=200; requests=0;
 
+    /* The native map-vote handler is dispatched repeatedly for one match: one room-alive
+     * request per room, and no repeat once the answer is known. */
+    matchmaking_room=77; joined_ranked=1;
+    int before_short=requests;
+    assert(runtime_public_ranked_short()==0);
+    assert(requests==before_short+1);
+    assert(runtime_public_ranked_short()==0);
+    assert(requests==before_short+1);
+    matchmaking_room=0; joined_ranked=0;
+    assert(runtime_public_ranked_short()==0);
+
     native_search=send_search; native_register=send_info; native_notice=show;
     network_manager=&test_network; native_stop_matchmaking=stop_matchmaking;
     native_return_to_lobby=return_to_lobby;

@@ -138,6 +138,7 @@ int runtime_public_itemless_active(void);
 int runtime_public_itemless_lobby_mode(void);
 int runtime_public_match_active(void);
 int runtime_public_found_room(void);
+uint64_t runtime_public_room(void);
 int runtime_public_ranked_short(void);
 int runtime_private_match_active(void);
 int runtime_online_party_active(void);

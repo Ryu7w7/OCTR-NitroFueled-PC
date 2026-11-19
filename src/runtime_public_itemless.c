@@ -383,6 +383,13 @@ int runtime_ranked_active(void) {
     return active;
 }
 
+/* Room id whose room-short POST was already sent (0 none). */
+static uint64_t short_sent_room;
+/* Room whose room-alive answer was fetched (0 none) and that answer. The native map-vote
+ * handler is dispatched more than once for one match, so one request per room is enough. */
+static uint64_t checked_room;
+static int checked_status;
+
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode) {
     pthread_mutex_lock(&mode_lock);
@@ -414,34 +421,91 @@ int runtime_public_found_room(void) {
     pthread_mutex_unlock(&mode_lock);
     return found;
 }
-/* Ranked needs 6 live players. At the countdown, ask the server how many are really in the
- * room. If below 6, tell the server to dissolve it (room-short) so the short-handed race cannot
- * start; the server pushes every player back to the queue. Returns 1 when it reported short. */
+/* The found room this client is in, 0 in the queue. Callers need the id to act once per room. */
+uint64_t runtime_public_room(void) {
+    pthread_mutex_lock(&mode_lock);
+    const uint64_t room = matchmaking_room;
+    pthread_mutex_unlock(&mode_lock);
+    return room;
+}
+
+/* Ranked needs enough live players. At the countdown, ask the server how many are really in the
+ * room. If below the server's min_players, tell the server to dissolve it (room-short) so the
+ * short-handed race cannot start; the server pushes every player back to the queue.
+ *
+ * min_players is the server's rule and is used as-is (there is no client-side copy of it).
+ *
+ * Returns:
+ *   1  this client saw fewer than min_players live players, posted room-short -> caller shows
+ *      the notice.
+ *   0  room still raceable (>= min_players live players) -> countdown proceeds normally.
+ *  -1  room already dissolved (another client triggered room-short) -> caller still shows the
+ *      notice and cancels, so every player in the room gets the same native notice instead of
+ *      only whoever polled first.
+ *
+ * The returned values are status codes, not booleans: -1 is truthy in C, so callers must compare
+ * against 1 and -1 explicitly. */
 int runtime_public_ranked_short(void) {
     uint64_t room;
+    int checked, cached;
     pthread_mutex_lock(&mode_lock);
     room = matchmaking_room;
     const int ranked = confirmed_ranked || joined_ranked || search_is_ranked;
+    checked = checked_room == room;
+    cached = checked_status;
     pthread_mutex_unlock(&mode_lock);
-    if (!room || !ranked) return 0;
+    if (!room) {
+        /* New room, new short report. */
+        __atomic_store_n(&short_sent_room, 0, __ATOMIC_SEQ_CST);
+        pthread_mutex_lock(&mode_lock);
+        checked_room = 0;
+        pthread_mutex_unlock(&mode_lock);
+        return 0;
+    }
+    if (!ranked) return 0;
+    if (checked) return cached;
     const char *me = runtime_np_get_online_name();
     if (!me || !*me) return 0;
     char target[512], body[256];
     snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu",
              me, (unsigned long long)room);
     if (runtime_ryunet_request("GET", target, body, sizeof body) != 200) return 0;
-    const char *players = runtime_json_field(body, "players");
-    if (!players || !*players) return 0;
-    const int n = (int)strtol(players, NULL, 10);
-    fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s)\n",
-            (unsigned long long)room, n);
-    if (n > 0 && n < 6) {
-        snprintf(target, sizeof target, "/ryunet/room-short?name=%s&room=%llu",
-                 me, (unsigned long long)room);
-        runtime_ryunet_request("POST", target, body, sizeof body);
-        return 1;
+    int status_code = 0, cache = 1;
+    const char *alive = runtime_json_field(body, "alive");
+    if (alive && strncmp(alive, "false", 5) == 0) {
+        /* The server already dissolved this room (another client's room-short). Report it so
+         * every remaining client shows the same notice and backs out to the queue. */
+        status_code = -1;
+    } else {
+        const char *players = runtime_json_field(body, "players");
+        if (players && *players) {
+            const int n = (int)strtol(players, NULL, 10);
+            const char *min_str = runtime_json_field(body, "min_players");
+            const int min_required = (min_str && *min_str) ? (int)strtol(min_str, NULL, 10) : 6;
+            fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d)\n",
+                    (unsigned long long)room, n, min_required);
+            if (n > 0 && n < min_required) {
+                /* Post once per room: this runs on every countdown tick, and repeating the POST just
+                 * repeats the same server-side dissolve. Retry only while the POST itself fails. */
+                if (__atomic_load_n(&short_sent_room, __ATOMIC_SEQ_CST) != room) {
+                    snprintf(target, sizeof target, "/ryunet/room-short?name=%s&room=%llu",
+                             me, (unsigned long long)room);
+                    if (runtime_ryunet_request("POST", target, body, sizeof body) == 200)
+                        __atomic_store_n(&short_sent_room, room, __ATOMIC_SEQ_CST);
+                    else
+                        cache = 0; /* a failed POST must be retried on the next dispatch */
+                }
+                status_code = 1;
+            }
+        }
     }
-    return 0;
+    if (cache) {
+        pthread_mutex_lock(&mode_lock);
+        checked_room = room;
+        checked_status = status_code;
+        pthread_mutex_unlock(&mode_lock);
+    }
+    return status_code;
 }
 
 static void notice(const char *message) {
@@ -673,6 +737,14 @@ static void check_found_room_alive(void) {
     if (runtime_ryunet_request("GET", target, body, sizeof body) != 200) return;
     const char *alive = runtime_json_field(body, "alive");
     if (!alive || strncmp(alive, "false", 5)) return;
+    /* The server dissolved this found room (short-handed / room-short from another player).
+     * Tell every client still in the found room before dumping them back to ModeSelect, so no
+     * player is left confused on the unranked screen without a notice. Ranked only: classic
+     * rooms dissolve for other reasons and keep their own flow. */
+    pthread_mutex_lock(&mode_lock);
+    const int ranked = confirmed_ranked || joined_ranked || search_is_ranked;
+    pthread_mutex_unlock(&mode_lock);
+    if (ranked) notice("Not enough players to start Ranked. Back to queue.");
     fprintf(stderr, "Public matchmaking: found room %llu gone, returning to ModeSelect\n",
             (unsigned long long)room);
     runtime_public_itemless_abort_queue();

@@ -129,5 +129,6 @@
   "Checking Ranked compatibility. Please press Play again shortly.": "Ranglisten-Kompatibilität wird geprüft. Wähle gleich erneut Spielen.",
   "Matchmaking lobby confirmation failed. Please search again.": "Die Matchmaking-Lobby konnte nicht bestätigt werden. Suche erneut.",
   "Cannot prepare matchmaking search.": "Die Spielersuche konnte nicht vorbereitet werden.",
-  "A player left your party during matchmaking. Leave and search again.": "Ein Spieler hat deine Gruppe während der Suche verlassen. Verlasse die Suche und starte sie erneut."
+  "A player left your party during matchmaking. Leave and search again.": "Ein Spieler hat deine Gruppe während der Suche verlassen. Verlasse die Suche und starte sie erneut.",
+  "Not enough players to start Ranked. Back to queue.": "Nicht genügend Spieler für Rangliste. Zurück zur Warteschlange."
 }

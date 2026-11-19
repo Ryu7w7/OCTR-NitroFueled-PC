@@ -129,5 +129,6 @@
   "Checking Ranked compatibility. Please press Play again shortly.": "Vérification de la compatibilité du mode Classé. Appuie de nouveau sur Jouer dans un instant.",
   "Matchmaking lobby confirmation failed. Please search again.": "La confirmation du salon de matchmaking a échoué. Relance la recherche.",
   "Cannot prepare matchmaking search.": "Impossible de préparer la recherche de partie.",
-  "A player left your party during matchmaking. Leave and search again.": "Un joueur a quitté votre groupe pendant la recherche. Quittez et relancez la recherche."
+  "A player left your party during matchmaking. Leave and search again.": "Un joueur a quitté votre groupe pendant la recherche. Quittez et relancez la recherche.",
+  "Not enough players to start Ranked. Back to queue.": "Pas assez de joueurs pour démarrer le mode Classé. Retour à la file d'attente."
 }
