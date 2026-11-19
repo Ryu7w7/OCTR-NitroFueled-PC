@@ -1964,7 +1964,7 @@ static void team_result_rows(unsigned char *row, int depth) {
             for (int i = 0; i < teams && used < sizeof title; ++i) {
                 char color_name[24], line[48];
                 runtime_online_team_color(order[i], NULL, color_name, sizeof color_name);
-                snprintf(line, sizeof line, "%s %d%s", color_name, team_totals[order[i]], i == 0 && team_tiebreak ? " (H2H)" : "");
+                snprintf(line, sizeof line, "%s %d%s", color_name, team_totals[order[i]], i == 0 && team_tiebreak ? runtime_text(" (H2H)") : "");
                 if (strlen(line) > longest) longest = strlen(line);
                 used += (size_t)snprintf(title + used, sizeof title - used, "%s%s", i ? " / " : "", line);
             }

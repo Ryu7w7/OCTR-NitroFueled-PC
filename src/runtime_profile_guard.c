@@ -32,13 +32,17 @@ static int writable(void *address, size_t length) {
  * +0x10) is read for its name (+0x58) without a check. With a save whose item is not in this installation (a DLC or
  * mod missing) the handle resolves to nothing and the game stops on entering a room (read at 0x58). The read gets the
  * check: no item, no name.
- *   0xfdeec0: mov rbx,[r12+0x58]; test rbx,rbx; jz +4; lock inc dword [rbx-8]; mov rsi,[r13+0x50]  (18 bytes) */
+ *   0xfdeec0 (EU 0xfdeeb0): mov rbx,[r12+0x58]; test rbx,rbx; jz +4; lock inc dword [rbx-8]; mov rsi,[r13+0x50]  (18 bytes) */
 int runtime_profile_item_guard_start(unsigned char *image, size_t size) {
     static const unsigned char code[] = {0x49,0x8b,0x5c,0x24,0x58,0x48,0x85,0xdb,0x74,0x04,0xf0,0xff,0x43,0xf8,
                                          0x49,0x8b,0x75,0x50};
-    unsigned char *at = image + 0xfdeec0;
-    if (size < 0xfdef00 || memcmp(at, code, sizeof code)) {
-        puts("Profile item guard: unexpected code at 0xfdeec0, not installed");
+    /* USA (CUSA13795) 1.21 at 0xfdeec0; the EU build (CUSA14876) 1.21 has the same function 16 bytes earlier. */
+    static const size_t places[] = {0xfdeec0, 0xfdeeb0};
+    unsigned char *at = NULL;
+    for (size_t i = 0; i < sizeof places / sizeof *places && !at; ++i)
+        if (size >= places[i] + sizeof code && !memcmp(image + places[i], code, sizeof code)) at = image + places[i];
+    if (!at) {
+        puts("Profile item guard: unexpected code at 0xfdeec0 (USA) and 0xfdeeb0 (EU), not installed");
         return 1;
     }
 #ifdef _WIN32
@@ -61,7 +65,8 @@ int runtime_profile_item_guard_start(unsigned char *image, size_t size) {
     jump(stub + sizeof guarded, at + sizeof code);
     jump(at, stub);
     memset(at + 14, 0x90, sizeof code - 14);
-    puts("Profile item guard: installed (a missing equipped item no longer stops the game in a room)");
+    printf("Profile item guard: installed at image+%#lx (a missing equipped item no longer stops the game in a room)\n",
+           (unsigned long)(at - image));
     return 1;
 }
 
