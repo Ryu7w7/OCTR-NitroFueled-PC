@@ -9,9 +9,11 @@ static int party_guest=1;
 int runtime_room_mode_following(void) { return party_guest; }
 static int frozen_race;
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
+static int host_lost_return;
 void runtime_party_host_lost(int role,int private_match,int announced_return) {
-    (void)role;(void)private_match;(void)announced_return;
+    (void)role;(void)private_match;host_lost_return=announced_return;
 }
+static void ABI reset_mock(void *party) { (void)party; }
 static void *focus_test_button;
 static unsigned synthetic_signal;
 static int hof_opens;
@@ -994,7 +996,7 @@ static void test_native_party_menu_return(void) {
     root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
     placeable_event(root,event);
     native_placeable_event=saved_event;
-    assert(party_returns==old_returns+1 && stopped==old_stops+1);
+    assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
     assert(*party_manager==party && !party[0x6c] && selected && ranked_selected);
     assert(!search_mark && !matchmaking_search && !search_server_active && !matchmaking_room);
     strcpy(reply,"{\"state\":\"searching\",\"elapsed\":99,\"timeout\":180,\"range\":400,\"ranked\":true}");
@@ -1003,42 +1005,61 @@ static void test_native_party_menu_return(void) {
     (void)runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
     int polls=requests;update_search_clock();
     assert(requests==polls && !search_poll_running);
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+1 && stopped==old_stops+1);
-    /* A new lobby can notify again; a follower never broadcasts a host return. */
-    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
+    /* A new manual host exit leaves alone; a follower never broadcasts a host return. */
+    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     *(int *)(connection+0x118)=2;party_guest=1;menu_party_returned=0;
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
     int attempts=timeout_attempts;runtime_public_itemless_update();
     assert(timeout_attempts==attempts && search_timeout_pending);
-    /* A host who came alone (no party before the room): leaving brings none of the room's
-     * players along; a party that came together goes back together. */
+    /* Every manual host exit leaves alone. Only queue timeout returns the party together. */
     *(int *)(connection+0x118)=1;party_guest=0;
     {
         const int returns=party_returns;
         menu_party_returned=0;party_at_entry=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns);
+        assert(party_returns==returns && party_quits==3);
         menu_party_returned=0;party_at_entry=2;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1);
-        /* A private room: nobody comes along, not even a party that came in together. */
+        assert(party_returns==returns && party_quits==4);
+        /* Private match follows the same host-migration rule. */
         menu_party_returned=0;party_at_entry=2;entry_private=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1 && party_quits==1);
+        assert(party_returns==returns && party_quits==5);
+        menu_party_returned=0;queue_return_pending=1;entry_private=0;
+        runtime_public_itemless_menu_return();
+        assert(party_returns==returns+1 && party_quits==5);
         /* A guest of that room leaves the party on the way out: the host's notification
          * (message 0x29) and the roster reset are the game's way out. */
+        const int saved_installed=installed;installed=1;
         menu_party_returned=0;party_at_entry=2;entry_private=0;
         *(int *)(connection+0x118)=2;party[0x6c]=1;
         unsigned char roster[0x28]={0},peer[0x30]={0};
         void *items[1]={peer};
         *(int *)(roster+12)=1;*(void ***)(roster+0x20)=items;
         *(void **)(party+0x30)=roster;
-        const int saved_installed=installed;installed=1;
         runtime_public_itemless_menu_return();
         installed=saved_installed;
-        assert(party_quits==2 && party_returns==returns+1 && !party[0x6c]);
+        assert(party_quits==6 && party_returns==returns+1 && !party[0x6c]);
         *(int *)(connection+0x118)=1;
+        native_party_reset_trace=reset_mock;
+        menu_party_returned=1;party_return_received=0;host_lost_return=-1;
+        traced_party_reset(party);assert(host_lost_return==0);
+        party_return_received=1;
+        traced_party_reset(party);assert(host_lost_return==1);
+        const int sessions=new_sessions;
+        entry_private=1;menu_party_returned=1;queue_return_pending=party_return_received=1;
+        runtime_public_itemless_takeover_host();
+        assert(new_sessions==sessions && !entry_private && !menu_party_returned &&
+               !queue_return_pending && !party_return_received);
+        runtime_public_itemless_menu_return();
+        assert(party_quits==7);
+        runtime_public_itemless_takeover_host();
+        assert(new_sessions==sessions && !menu_party_returned);
+        runtime_public_itemless_menu_return();
+        assert(party_quits==8);
+        new_sessions=sessions;
         /* The next search is not a private room any more. */
         arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;

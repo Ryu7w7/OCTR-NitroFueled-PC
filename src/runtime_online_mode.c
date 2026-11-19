@@ -3921,7 +3921,7 @@ static void ranked_member_icons(unsigned char *self) {
             /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
             unsigned crown_flags;
             memcpy(&crown_flags, icon + 12, sizeof crown_flags);
-            const int crown_hidden = !nick || !runtime_room_host_is(nick);
+            const int crown_hidden = !runtime_online_mode_in_private() || !nick || !runtime_room_host_is(nick);
             if (!!(crown_flags & 0x400) != crown_hidden) hide_placeable(icon, crown_hidden);
             continue;
         }
