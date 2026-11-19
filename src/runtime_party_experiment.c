@@ -196,7 +196,7 @@ void runtime_party_experiment_tick(void) {
         void *session = at(party, 0x18);
         if (takeover_local && party && session && party_role() == 1) {
             __atomic_store_n(&takeover_pending, 0, __ATOMIC_RELEASE);
-            runtime_room_mode_hosting();
+            runtime_room_mode_takeover();
             runtime_public_itemless_takeover_host();
             fprintf(stderr, "Host takeover: %s became host through native party recreation\n",
                             takeover_successor);

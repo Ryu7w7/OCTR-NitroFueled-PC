@@ -119,6 +119,7 @@ void runtime_load_guard_note(const void *buffer, size_t size); /* the game's std
 void runtime_presence_tick(void);                /* the game's thread, every frame: Discord presence facts (runtime_presence.c) */
 int runtime_online_mode_private_cup_race(void); /* a race of a private room's CUP is loading or running */
 void runtime_room_mode_hosting(void);
+void runtime_room_mode_takeover(void);
 void runtime_room_mode_joined(const char *session_id);
 void runtime_room_mode_left(void);
 int runtime_room_mode_following(void);
