@@ -1746,6 +1746,11 @@ void UpdateDiscord() {
 /// Written on every start, so a portable folder that moved points at its new place.
 void RegisterDiscordLaunch(const std::string& app_id);
 
+/// The sacredfire:// URL protocol for the current user: the Join button of RyuNET's Discord
+/// announcements of Ranked rooms still filling (the server's ranked_lfg.go) opens it, which starts
+/// this launcher with the link (RankedLinkRequest). Written on every start, as the Discord one.
+void RegisterRankedLink();
+
 /// What the PLAY button does: online without a usable nickname asks for one first (NickPopup).
 void PressPlay() {
     RefreshGameSettings(true);
@@ -1817,6 +1822,37 @@ void AcceptDiscordJoin(const std::string& server, const std::string& nick) {
                       nick, nick);
     BringLauncherToFront();
     a.pending_play = true;  // PollJobs presses PLAY as soon as the game folder is checked
+}
+
+/// A sacredfire://ranked?mode=<0 Normal|1 Itemless> link (the Join button of a Discord announcement
+/// of a Ranked room still filling). The request goes to the game as ryunet_ranked.txt next to
+/// bbport.ini, as invites do (ryunet_join.txt): the game takes it within a second and removes it,
+/// then its online menu opens on Ranked and that mode (src/runtime_public_itemless.c). Returns true
+/// when a running game took it: this launcher, started only for the link, can close. Otherwise the
+/// game starts (online) and takes it then.
+bool RankedLinkRequest(const std::string& link) {
+    App& a = g_app;
+    const std::string text = Lower(link);
+    if (text.rfind("sacredfire://ranked", 0) != 0) return false;  // another link: just the launcher
+    const int mode = text.find("mode=1") != std::string::npos ? 1 : 0;
+    const fs::path file = GameIni().parent_path() / L"ryunet_ranked.txt";
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << "mode=" << mode << "\ntime=" << int64_t(std::time(nullptr)) << "\n";
+    }
+    for (int i = 0; i < 25; ++i) {  // a running game polls it once a second
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::error_code ec;
+        if (!fs::exists(file, ec)) return true;
+    }
+    a.game.Set("online", "1");  // Ranked is online
+    SaveGameIni();
+    a.notice = mode ? T("Sala Ranked Sin objetos: el juego se abre y, en Online, Ranked ya estará elegido.",
+                        "Ranked Itemless room: the game starts and, in Online, Ranked is already chosen.")
+                    : T("Sala Ranked Normal: el juego se abre y, en Online, Ranked ya estará elegido.",
+                        "Ranked Normal room: the game starts and, in Online, Ranked is already chosen.");
+    a.pending_play = true;  // PollJobs presses PLAY as soon as the game folder is checked
+    return false;
 }
 
 /// A join secret from Discord: "ctr1|<server>|<nickname>", written by UpdateDiscord.

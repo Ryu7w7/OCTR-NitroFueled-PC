@@ -87,6 +87,8 @@ static int team_points_first(const char *line, int points, int h2h) {
 }
 
 int runtime_rooms_created(void) { return 0; }
+void runtime_public_itemless_poll_ranked_request(void) {}
+int runtime_public_itemless_ranked_request_take(void) { return -1; }
 int runtime_replay_signal_pressed(int signal) { (void)signal; return 0; }
 int runtime_replay_buttons_held(void) { return 0; }
 void runtime_public_itemless_update(void) {}

@@ -345,8 +345,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
     bool direct_launch = false, updated = false;
+    std::string ranked_link;  // sacredfire://ranked?mode=N: a Discord announcement's Join (RankedLinkRequest)
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsnicmp(cmd_argv[i], L"sacredfire:", 11) == 0) ranked_link = Narrow(cmd_argv[i]);
             if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
@@ -360,6 +362,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     LoadState();
     MigrateOldLauncher();
+    RegisterRankedLink();
+    if (!ranked_link.empty() && RankedLinkRequest(ranked_link)) {
+        // A running game took the request: this launcher was only started for the link.
+        if (g_app.worker.joinable()) g_app.worker.join();
+        if (g_app.probe.joinable()) g_app.probe.join();
+        CoUninitialize();
+        return 0;
+    }
     if (!direct_launch) {
         CleanupUpdate();
         if (updated) {

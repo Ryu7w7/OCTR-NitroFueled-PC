@@ -2877,6 +2877,7 @@ static void refresh_ranked_score(void) {
 static void team_lobby_frame(void);
 void runtime_online_mode_note_frame(void) {
     team_lobby_frame();
+    runtime_public_itemless_poll_ranked_request();
     startup_update();
     apply_pending_online_reset();
     refresh_ranked_score();
@@ -4214,6 +4215,10 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         if (!private && matchmaking_return_mode>=0) {
             if (matchmaking_return_mode<3 && items[matchmaking_return_mode]) index=matchmaking_return_mode;
             matchmaking_return_mode=-1;
+        }
+        if (!private && runtime_ranked_selected()) {   /* joined from a Discord announcement: its mode */
+            const int requested = runtime_public_itemless_ranked_request_take();
+            if (requested >= 0 && requested < 2 && items[requested]) index = requested;
         }
         if (!private || index == 2) {
             clear_team_selector();

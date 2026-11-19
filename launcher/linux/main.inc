@@ -94,8 +94,10 @@ int main(int argc, char** argv) {
     signal(SIGINT, HandleTermination);
     signal(SIGTERM, HandleTermination);
     bool direct = false;
+    std::string ranked_link;  // sacredfire://ranked?mode=N: a Discord announcement's Join (RankedLinkRequest)
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
+        if (Lower(arg).rfind("sacredfire:", 0) == 0) ranked_link = arg;
         if (arg == "--help") { std::puts("SacredFire launcher: --play starts the saved game without a window."); return 0; }
         if (arg == "--play" || arg == "--launch" || arg == "--direct" || arg == "-play" || arg == "-launch") direct = true;
     }
@@ -106,6 +108,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (g_app.launcher.Flag("discord_rpc", true)) RegisterDiscordLaunch(DiscordAppId());
+    RegisterRankedLink();
+    if (!ranked_link.empty() && RankedLinkRequest(ranked_link)) {
+        FinishWorkers();  // a running game took the request: this launcher was only started for the link
+        return 0;
+    }
     if (direct) {
         if (g_app.worker.joinable()) g_app.worker.join();
         if (g_app.probe.joinable()) g_app.probe.join();

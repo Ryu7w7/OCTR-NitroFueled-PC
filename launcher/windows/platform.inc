@@ -418,6 +418,26 @@ void RegisterDiscordLaunch(const std::string& app_id) {
     set(base + L"\\shell\\open\\command", nullptr, L"\"" + path + L"\"");
 }
 
+void RegisterRankedLink() {
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    const std::wstring path(exe, n);
+    const std::wstring base = L"Software\\Classes\\sacredfire";
+    const auto set = [](const std::wstring& key, const wchar_t* name, const std::wstring& value) {
+        HKEY h = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS)
+            return;
+        RegSetValueExW(h, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       DWORD((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(h);
+    };
+    set(base, nullptr, L"URL:SacredFire");
+    set(base, L"URL Protocol", L"");
+    set(base + L"\\DefaultIcon", nullptr, path + L",0");
+    set(base + L"\\shell\\open\\command", nullptr, L"\"" + path + L"\" \"%1\"");
+}
+
 void BringLauncherToFront() {
     ShowWindow(g_app.hwnd, SW_RESTORE);
     SetForegroundWindow(g_app.hwnd);

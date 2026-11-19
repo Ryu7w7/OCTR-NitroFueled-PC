@@ -159,6 +159,8 @@ int runtime_public_itemless_selected(void);
 int runtime_public_itemless_match_active(void);
 void runtime_public_itemless_party_left_notice(void);
 void runtime_public_itemless_abort_queue(void);
+void runtime_public_itemless_poll_ranked_request(void); /* the game's thread: ryunet_ranked.txt (Discord Join) */
+int runtime_public_itemless_ranked_request_take(void);   /* Mode Select: the requested Ranked mode once, -1 none */
 void runtime_public_itemless_select(int enabled);
 int runtime_ranked_active(void);
 int runtime_ranked_selected(void);

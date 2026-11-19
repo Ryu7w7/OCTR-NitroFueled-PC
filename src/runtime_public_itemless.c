@@ -1298,6 +1298,63 @@ void runtime_hof_native_ready(void *project) {
 
 /* MainMenu_Base_ButtonIndex remains 0 for clones; preserve their native focus target. */
 static int online_return_button;
+
+/* ---- Join from Discord: a Ranked room still filling (the server's ranked_lfg.go) -----------------
+ * Its "Join" button opens sacredfire://ranked?mode=N; the launcher writes ryunet_ranked.txt
+ * ("mode=N", "time=<unix>") next to bbport.ini, as ryunet_join.txt for invites. Picked up here at
+ * most once a second, on the game's thread, and removed. Then the online menu's focus lands on
+ * Ranked with a notice once, and its Mode Select opens on that mode (0 Normal, 1 Itemless): the
+ * player confirms, and the server puts them in the room that waits. Kept for 10 minutes. */
+static int ranked_request_mode = -1, ranked_request_notice, ranked_request_pending;
+static uint64_t ranked_request_until;
+
+void runtime_public_itemless_poll_ranked_request(void) {
+    static uint64_t next_check;
+    const uint64_t now = check_clock();
+    if (now < next_check) return;
+    next_check = now + 1000;
+    char path[600];
+    const char *cfg = getenv("BB_LAUNCHER_CONFIG");   /* mod sessions redirect BB_CONFIG */
+    if (!cfg || !*cfg) cfg = getenv("BB_CONFIG");
+    const char *slash = cfg ? strrchr(cfg, '/') : NULL;
+    const char *bslash = cfg ? strrchr(cfg, '\\') : NULL;
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash) snprintf(path, sizeof path, "%.*s/ryunet_ranked.txt", (int)(slash - cfg), cfg);
+    else snprintf(path, sizeof path, "ryunet_ranked.txt");
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[128];
+    int mode = -1;
+    long long written = 0;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "mode=", 5)) mode = atoi(line + 5);
+        else if (!strncmp(line, "time=", 5)) written = atoll(line + 5);
+    }
+    fclose(f);
+    remove(path);
+    const long long wall = (long long)time(NULL);
+    /* A stale file (a game that never started) must not steer the menus much later. */
+    if ((mode != 0 && mode != 1) || written < wall - 300 || written > wall + 60) {
+        printf("Ranked join: ignored a request file (mode=%d age=%llds)\n", mode, wall - written);
+        return;
+    }
+    __atomic_store_n(&ranked_request_mode, mode, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_notice, 1, __ATOMIC_SEQ_CST);
+    ranked_request_until = now + 600000;
+    online_return_button = 1;   /* the online menu opens with Ranked focused */
+    printf("Ranked join: Discord asks for Ranked %s\n", mode ? "Itemless" : "Normal");
+}
+
+/* Mode Select (runtime_online_mode.c), Ranked chosen: the mode the Discord join asked for, once; -1 none. */
+int runtime_public_itemless_ranked_request_take(void) {
+    if (!__atomic_exchange_n(&ranked_request_pending, 0, __ATOMIC_SEQ_CST)) return -1;
+    if (check_clock() > ranked_request_until) return -1;
+    __atomic_store_n(&ranked_request_notice, 0, __ATOMIC_SEQ_CST);
+    return __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST);
+}
+
 static void *return_button_in(void *node, const char *name, int depth) {
     if (!node || depth > 8) return NULL;
     const char *tag = *(const char **)((char *)node + 0x28);
@@ -1455,6 +1512,12 @@ static void ABI placeable_event(void *self, void *event) {
                                   !strcmp(type, "igGuiEventPlaceableGainFocus"));
         if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
         if (gain) native_return_focus(self, 0);
+        /* The Discord announcement's Join (ryunet_ranked.txt): once, where the focus was put on Ranked. */
+        if (gain && ranked_button && __atomic_exchange_n(&ranked_request_notice, 0, __ATOMIC_SEQ_CST)) {
+            const int mode = __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST);
+            notice(mode == 1 ? "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it."
+                             : "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.");
+        }
         /* the content notice's Continue (Confirm 8) or Back (9): leave the refused search */
         if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 1 && type &&
             (!strcmp(type, "igGuiEventFocusInputPressed") || !strcmp(type, "igGuiEventProjectInputPressed"))) {

@@ -164,23 +164,31 @@ def desktop_arg(text):
 
 
 def discord_register(app_id, data):
-    import steam_shortcuts
-    from host_environment import host_environment
     if not app_id or any(c not in "0123456789" for c in app_id):
         raise ValueError("Invalid Discord application ID")
+    return url_register(f"discord-{app_id}", data)
+
+
+def url_register(scheme, data):
+    """Opens <scheme>:// links with this launcher (the link as its argument): discord-<app id> for
+    Discord invites, sacredfire for the Join button of RyuNET's Ranked announcements."""
+    import steam_shortcuts
+    from host_environment import host_environment
+    if not scheme or any(not (c.isascii() and (c.isalnum() or c == "-")) for c in scheme):
+        raise ValueError("Invalid URL scheme")
     exe, cwd, _ = steam_shortcuts.launcher_command()
     paths = {k: v for k, v in host_environment(for_restart=True).items() if k.startswith("BB_")}
     paths["BB_DATA_DIR"] = str(Path(data).resolve())
     command = " ".join(desktop_arg(arg) for arg in ["env", *(f"{k}={v}" for k, v in paths.items()), exe])
-    scheme = f"x-scheme-handler/discord-{app_id}"
+    mime = f"x-scheme-handler/{scheme}"
     directory = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "applications"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"discord-{app_id}.desktop"
+    path = directory / f"{scheme}.desktop"
     path.write_text(f"[Desktop Entry]\nType=Application\nName=SacredFire\nNoDisplay=true\n"
-                    f"Exec={command} %u\nPath={desktop_value(cwd)}\nMimeType={scheme};\n")
-    result = subprocess.run(["gio", "mime", scheme, path.name], capture_output=True, text=True)
+                    f"Exec={command} %u\nPath={desktop_value(cwd)}\nMimeType={mime};\n")
+    result = subprocess.run(["gio", "mime", mime, path.name], capture_output=True, text=True)
     if result.returncode:
-        raise OSError(result.stderr.strip() or "Could not register Discord invite launch")
+        raise OSError(result.stderr.strip() or f"Could not register {scheme}:// links")
     return {"ok": True}
 
 
@@ -231,6 +239,8 @@ def dispatch(request):
         return desktop()
     if operation == "discord_register":
         return discord_register(request["app_id"], data)
+    if operation == "url_register":
+        return url_register(request["scheme"], data)
     if operation == "restart":
         from host_environment import host_environment
         executable = Path(request["executable"])

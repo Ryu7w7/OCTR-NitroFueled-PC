@@ -212,6 +212,11 @@ void RegisterDiscordLaunch(const std::string& app_id) {
                                    "\",\"app_id\":\"" + JsonEscape(app_id) + "\"}");
     if (!JsonBool(answer, "ok")) AddLog("Could not register Discord invite launch: " + JsonText(answer, "error"));
 }
+void RegisterRankedLink() {
+    const auto answer = RunService("{\"op\":\"url_register\",\"data\":\"" + JsonEscape(PathText(g_app.data)) +
+                                   "\",\"scheme\":\"sacredfire\"}");
+    if (!JsonBool(answer, "ok")) AddLog("Could not register sacredfire:// links: " + JsonText(answer, "error"));
+}
 void BringLauncherToFront() {
     if (!g_app.hwnd) return;
     SDL_Event event{}; event.type = SDL_EVENT_USER; event.user.code = 3; SDL_PushEvent(&event);
