@@ -63,7 +63,7 @@
 {"Sacred Fire", "Fuego Sagrado", "Fuego Sagrado", "Feu sacr\303\251", "Fogo Sagrado", "Heiliges Feuer", "Fuoco Sacro"},
 {"Ultimate Sacred Fire", "Fuego Sagrado Supremo", "Fuego Sagrado Supremo", "Feu sacr\303\251 ultime", "Fogo Sagrado Supremo", "Ultimatives Heiliges Feuer", "Fuoco Sacro Supremo"},
 {"Time Crusher", "Triturador del Tiempo", "Triturador del Tiempo", "Broyeur de temps", "Esmagador do Tempo", "Zeitbrecher", "Frantumatempo"},
-{"Oxide Overlord", "Soberano Oxide", "Soberano Oxide", "Suzerain Oxide", "Soberano Oxide", "Oxide-Oberherr", "Sovrano Oxide"},
+{"Master Driver", "Piloto Maestro", "Piloto Maestro", "Pilote ma\303\256tre", "Piloto Mestre", "Meisterfahrer", "Pilota maestro"},
 {"SEASON", "TEMPORADA", "TEMPORADA", "SAISON", "TEMPORADA", "SAISON", "STAGIONE"},
 {"SEASON %d", "TEMPORADA %d", "TEMPORADA %d", "SAISON %d", "TEMPORADA %d", "SAISON %d", "STAGIONE %d"},
 {"POPULATION", "JUGADORES", "JUGADORES", "JOUEURS", "JOGADORES", "SPIELER", "GIOCATORI"},
