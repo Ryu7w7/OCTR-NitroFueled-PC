@@ -133,8 +133,7 @@ TEXTS = (
      'Ultimatives Heiliges Feuer', 'Fuoco Sacro Supremo'),
     ('Time Crusher', 'Triturador del Tiempo', S, 'Broyeur de temps', 'Esmagador do Tempo', 'Zeitbrecher',
      'Frantumatempo'),
-    ('Oxide Overlord', 'Soberano Oxide', S, 'Suzerain Oxide', 'Soberano Oxide', 'Oxide-Oberherr',
-     'Sovrano Oxide'),
+    ('Master Driver', 'Piloto Maestro', S, 'Pilote maître', 'Piloto Mestre', 'Meisterfahrer', 'Pilota maestro'),
     # ---- Hall of Fame
     ('SEASON', 'TEMPORADA', S, 'SAISON', 'TEMPORADA', 'SAISON', 'STAGIONE'),
     ('SEASON %d', 'TEMPORADA %d', S, 'SAISON %d', 'TEMPORADA %d', 'SAISON %d', 'STAGIONE %d'),

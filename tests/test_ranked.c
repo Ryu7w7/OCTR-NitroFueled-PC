@@ -66,7 +66,7 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
         const char *body = updated
             ? (itemless ? "{\"tiers\":{\"hostracer\":\"Sacred Fire\"},\"mmr\":{\"hostracer\":1600}}"
                         : "{\"tiers\":{\"hostracer\":\"Ancient Spirit\"},\"mmr\":{\"hostracer\":3100}}")
-            : (itemless ? "{\"tiers\":{\"hostracer\":\"Oxide Overlord\"},\"mmr\":{\"hostracer\":3000}}"
+            : (itemless ? "{\"tiers\":{\"hostracer\":\"Master Driver\"},\"mmr\":{\"hostracer\":3000}}"
                         : "{\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}");
         *reply = strdup(body);
         assert(*reply);
@@ -112,6 +112,9 @@ static void test_status_contract(void) {
     assert(tier_index("Bronze", 0) == 1 && tier_index("Golden Wumpa", 0) == 3 && tier_index("Uka's Chosen", 0) == 6);
     assert(tier_index("Ancient Spirit", 0) == 7 && tier_index("Gold Mask", 0) == 3 && tier_index("Chaos Grand Prix", 0) == 7);
     assert(tier_index("Gold Mask", 1) == 0 && tier_index("Platinum Relic", 1) == 3 && tier_index("Bronze", 1) == 0);
+    /* Itemless's top tier, Master Driver since 2026-11-19, and Oxide Overlord from an older server */
+    assert(tier_index("Master Driver", 1) == 7 && tier_index("Oxide Overlord", 1) == 7);
+    assert(tier_index("Master Driver", 0) == 0 && tier_index("Oxide Overlord", 0) == 0);
     status_state = 0;
     status_until = monotonic_ms() + 895000;
     assert(runtime_ranked_status(1) == 0 && !status_pending);

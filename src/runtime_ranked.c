@@ -214,19 +214,20 @@ static int same_nick(const char *a, const char *b) {
 }
 
 /* As RyuNET names them (its ranked_mmr.go rankedTierNames). Normal (FFA) since 2026-11-18, by S_97:
- * Bronze, Silver, Golden Wumpa, Power Crystal, Mythic Gem, Uka's Chosen, Ancient Spirit. */
+ * Bronze, Silver, Golden Wumpa, Power Crystal, Mythic Gem, Uka's Chosen, Ancient Spirit. Itemless's
+ * badges by ESDRONIX; its top tier is Master Driver since 2026-11-19. */
 static const char *const tier_names[2][7] = {
     {"Bronze", "Silver", "Golden Wumpa", "Power Crystal", "Mythic Gem", "Uka's Chosen", "Ancient Spirit"},
-    {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Oxide Overlord"},
+    {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Master Driver"},
 };
-/* the Normal tiers' names before that, as an older server still says them */
+/* the names before that, as an older server still says them */
 static const char *const old_normal_tier_names[7] = {
     "Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"};
 
 static int tier_index(const char *name, int mode) {
     for (int i = 0; i < 7; ++i)
         if (!strcmp(name, tier_names[mode][i]) || (!mode && !strcmp(name, old_normal_tier_names[i]))) return i + 1;
-    return 0;
+    return mode && !strcmp(name, "Oxide Overlord") ? 7 : 0;
 }
 
 static int ranked_best_mode(int normal_tier, int normal_mmr, int itemless_tier, int itemless_mmr) {
