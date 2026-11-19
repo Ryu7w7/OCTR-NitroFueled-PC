@@ -73,7 +73,7 @@ if(BUILD_TESTING)
     target_compile_options(launcher-process-test PRIVATE -UNDEBUG)
     add_test(NAME launcher-process COMMAND launcher-process-test)
     add_executable(launcher-ui-test ../tests/test_launcher_ui.cpp ${LAUNCHER_SOURCES}
-        ../gpu/shim/bbport_settings.cpp ../gpu/shim/bbport_menu_es.cpp)
+        ../gpu/shim/bbport_settings.cpp ../gpu/shim/bbport_menu_es.cpp ../gpu/shim/bbport_menu_more.cpp)
     target_compile_features(launcher-ui-test PRIVATE cxx_std_20)
     target_compile_definitions(launcher-ui-test PRIVATE _GNU_SOURCE)
     target_compile_options(launcher-ui-test PRIVATE -UNDEBUG -O0)

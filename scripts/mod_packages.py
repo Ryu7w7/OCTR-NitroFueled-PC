@@ -7,6 +7,7 @@ from mod_components import copy_tree,save_json,apply_shader,under
 from mod_library import scan,PREFIX
 from mod_session import launch_lock,adopt_mod_profile
 ACTIVE=None
+UC,ART='battle-point-limit-selector','extra-cups-art'  # built-in mods (scripts/builtin_mods)
 
 @lru_cache(maxsize=8)
 def engine_features(executable,digest):
@@ -96,12 +97,16 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     supported=title_id in ('CUSA13795','CUSA14876') and app_version=='01.21'
     state=root.parent/'mod-state'
     lock=launch_lock(state);lock.__enter__()
+    (state/'builtin-status.txt').unlink(missing_ok=True)  # this launch's, written below
     try:
         # BB_MOD_LIBRARY_DIR: where the library's patch file goes (run.sh: the data folder's
         # patches/, as the Linux package's own folder is read-only); the bundled patches/ otherwise.
         library=Path(environment.get('BB_MOD_LIBRARY_DIR') or Path(port)/'patches')
         catalog=scan(root,library)
         for message in catalog['messages']:log('OCTR mods: '+message)
+        import track_editor
+        installed=track_editor.notice(game)  # a game changed by a track editor's install
+        if installed:log('OCTR mods: '+installed)
         selection=Path(environment.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
         if not supported:
             # Every package ships a mods folder: a game the packages cannot target (EU 1.00, no
@@ -118,6 +123,15 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             found+=[p for p in external_patches(library,app_version,title_id) if p[0].startswith(PREFIX)]
         selected=external_selection(found,selection,read_settings(Path(config)))
         names=[key.removeprefix(PREFIX) for key,_,_ in selected if key.startswith(PREFIX)]
+        # The Copas Adicionales' pictures (built-in extra-cups-art) replace the Space Cup's texture:
+        # only with Ultimate Customizer's Copas Adicionales on.
+        uc_cups=UC in names and catalog['entries'].get(UC,{}).get('option_values',{}).get('extra-cups',False)
+        if uc_cups and ART not in catalog['entries']:
+            raise ValueError('Copas Adicionales need their pictures: press Prepare on Ultimate Customizer, or turn Copas Adicionales off')
+        if uc_cups and ART not in names:
+            raise ValueError('Copas Adicionales need their pictures: turn their pictures on, or turn Copas Adicionales off')
+        if ART in names and not uc_cups:
+            names.remove(ART);log('OCTR mods: '+ART+' is used only with Copas Adicionales on')
         # The performance report's mods (scripts/perf_report.py): BB_MODS_ENABLED=0 below only
         # keeps loose mods out, so the packages in use are named here.
         if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)
@@ -125,10 +139,23 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         if catalog['messages'] and any(key.startswith(PREFIX) and key.removeprefix(PREFIX) not in catalog['entries'] for key in original.get('enabled',[])):
             raise ValueError('An enabled mod could not be validated; check the OCTR mod messages')
         if catalog['entries'] or catalog['messages']:environment['BB_MODS_ENABLED']='0'  # own validated selection
-        if not names:lock.__exit__(None,None,None);return Path(game),str(config)
+        # External content (scripts/content_package.py) goes through the same prepared session.
+        import content_package
+        content_root=Path(environment.get('BB_CONTENT_DIR',root.parent/content_package.FOLDER))
+        has_content=content_package.selection(content_root)['enabled'] and content_root.is_dir() and             any(p.suffix.casefold()=='.zip' or p.is_dir() for p in content_root.iterdir())
+        if not names and not has_content:lock.__exit__(None,None,None);return Path(game),str(config)
         shutil.copy2(config,state/'bbport.ini')
         prefs=state/'selection.json';save_json(prefs,{'disabled':[n for n in catalog['entries'] if n not in names]})
-        plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log)
+        plan=nx.prepare(port,state,game,root,prefs,state/'bbport.ini',environment,log=log,
+            external=[item for item in selected if not item[0].startswith(PREFIX)])
+        # Built-ins a community mod made step aside (scripts/builtin_coexist.py): the launcher
+        # shows it on their cards.
+        coexist=plan['coexist']
+        import builtin_coexist
+        builtin_coexist.write_status(state/'builtin-status.txt',coexist)
+        names=[n for n in names if n not in coexist['frozen']]
+        if names:environment['BB_MOD_PACKAGES_USED']=','.join(names)
+        else:environment.pop('BB_MOD_PACKAGES_USED',None)
         import struct
         file_count,=struct.unpack_from('<I',plan['file_map'].read_bytes(),8)
         if file_count and engine_features(nx.engine(port),plan['engine']).get('file_overlays')!=1:
@@ -158,7 +185,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))
             for op,folder in plan['operations']:
                 if op['kind'].startswith('shader_'):apply_shader(under(user,op['target']),op,folder)
-        save_json(session/'launch.json',{'packages':names,'variants':plan['variants'],'writes':writes,
+        save_json(session/'launch.json',{'packages':names,'frozen':coexist['frozen'],'yielded':coexist['yielded'],'merged':coexist['merged'],'content':plan['content'],'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
         # Discord invites are written by the launcher beside its original config,
@@ -166,7 +193,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
         environment['BB_LAUNCHER_CONFIG']=str(Path(config).resolve())
         environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PROGRESS_DIR=str(progress),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))
         mod_file_paths.configure(environment)
-        log('OCTR mod session: '+', '.join(names)+' at '+str(plan['selection_settings'].get('output_res')))
+        log('OCTR mod session: '+', '.join(names+[c+' (external content)' for c in plan['content']] or ['no mods'])+' at '+str(plan['selection_settings'].get('output_res')))
         log('Mod session (settings, logs, shader cache): '+str(session)+'; saves and trophies: '+str(progress))
         ACTIVE=(session,state);atexit.register(lock.__exit__,None,None,None)
         return plan['game'],str(ini)

@@ -1,0 +1,1 @@
+{"format":"copy-delta-v1","source_bytes":14684,"result_bytes":14684,"operations":[["copy",0,9212],["bytes","08080000"],["copy",9216,684],["bytes","c00c0000"],["copy",9280,36],["copy",9940,4744]]}

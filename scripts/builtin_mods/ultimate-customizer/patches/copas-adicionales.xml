@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Race and battle options: the executable side of three-digit lap counts and long races.
+     The lap menu and the HUD lap counter print their numbers with the game's own three-digit
+     string builder (0x9bf710) instead of its one- and two-digit twins (0x9b5b70, 0xb39870),
+     which are the same code with less room; nothing else that uses those twins changes.
+     The race clock already switches to MM:SS:CC past ten minutes in races of 7 laps or more;
+     here it does so for any lap count and goes on to 999:59:99, with room for the third digit.
+     A race's achievement events are sent 512 at most, so races of hours do not run the
+     MP_NETWORK pool out at the finish. The cup menu finds a cup by its first track among cup
+     starts only, so added cups keep their own tracks. The added cups keep their stars in
+     /savedata0/rbo_cups.bin, and Square on the cup menu picks a random cup. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Copas Adicionales"
+              Note="The 25 new Arcade cups: their stars (rbo_cups.bin) and the cup menu. Kyouko8 (Ultimate Customizer)."
+              Author="Kyouko8"
+              PatchVer="5.1.0"
+              AppVer="01.21"
+              AppElf="eboot.bin"
+              isEnabled="true">
+        <PatchList>
+            <!-- Cup menu: find a cup by its first track among cup starts only (4 zones per cup) -->
+            <Line Type="bytes" Address="0x167e750" Value="83C304"
+                  Signature="45 d0 48 8b 05 9f f7 84 01 4c 8b b8 78 0d 00 00 41 83 7f 0c 00 0f 8e 76 01 00 00 31 db 48 8d 75 c8 66 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00 49 8b 47 20 4c 8b 2c d8 4d 85 ed 4c 89 6d c8 74 5f f0 41 ff 45 00 41 8b 45 00 a9 00 00 00 10 0f 85 e9 00 00 00 a9 00 00 00 20 75 65 4d 8b 65 28 b8 ff ff ff ff b9 02 00 00 00 f0 41 0f c1 45 00 a9 00 00 00 90 0f 85 b9 00 00 00 0f b7 c0 39 c8 0f 84 8c 00 00 00 48 c7 45 c8 00 00 00 00 4d 39 f4 75 19 e9 fb 00 00 00 0f 1f 84 00 00 00 00 00 45 31 e4 4d 39 f4 0f 84 e7 00 00 00 49 63 47 0c 48 ff c3 48 39 c3 0f 8c 74 ff ff"
+                  SignatureOffset="0xb0"/>
+            <!-- Cup stars: an added cup reads its own table -->
+            <Line Type="bytes" Address="0x13de1ac" Value="E94F9E3501"
+                  Signature="2a 43 8d 04 64 44 01 f0 83 f8 20 77 1e 48 8b 0d 90 fc ae 01 83"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: winning an added cup marks its own table -->
+            <Line Type="bytes" Address="0x159e075" Value="E9C39F190190909090909090"
+                  Signature="b9 02 00 00 00 0f 4c c8 8d 04 5b 83 f8 1e 0f 8f 78 fe ff ff 89 ca 83 c0 2f be ff ff"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first -->
+            <Line Type="bytes" Address="0x18d14c1" Value="CE6BE600"
+                  Signature="00 00 75 08 48 89 df e8 c3 94 71 00 48 8b bc 24 90 00 00 00"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first -->
+            <Line Type="bytes" Address="0x18d1598" Value="F76AE600"
+                  Signature="8d bc c4 b8 00 00 00 e8 ec 93 71 00 41 f6 46 53 78 0f 85 f7"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first -->
+            <Line Type="bytes" Address="0x18d19ef" Value="A066E600"
+                  Signature="8d bc c1 b8 00 00 00 e8 95 8f 71 00 e9 b5 fe ff ff 4c 89 ef"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first -->
+            <Line Type="bytes" Address="0x18d1d53" Value="3C63E600"
+                  Signature="8d bc dd b8 00 00 00 e8 31 8c 71 00 be 02 00 00 00 85 c0 75"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first -->
+            <Line Type="bytes" Address="0x18d2925" Value="6A57E600"
+                  Signature="00 00 75 08 4c 89 e7 e8 5f 80 71 00 48 8b bd c0 fd ff ff 48"
+                  SignatureOffset="0x8"/>
+            <!-- Cup stars: winning an added cup saves its table at once -->
+            <Line Type="bytes" Address="0x2738800" Value="554889E55051525657415041514152415353415441554883E4F04883EC50488D1DDB5E8B00F703020000000F8402010000F703010000000F859E000000488D3DB9FBFFFF31F631D2E82B238BFF4189C44585E40F88820000004489E74889E6BA4800000031C9E84D1F8BFF4189C54489E7E8C2218BFF4183FD48755F488B054CFBFFFF48390424754F488D0D805E8B00488B44240848094108488B44241048094110488B44241848094118488B44242048094120488B44242848094128488B44243048094130488B44243848094138488B44244048094140830B01488B05EDFAFFFF488D0D275E8B00488901488D3D0AFBFFFFBE01060000BAB6010000E876228BFF4189C44585E478294489E7488D35FC5D8B00BA4800000031C9E8481F8BFF83F84875068323FD830B014489E7E805218BFF488D65A0415D415C5B415B415A415941585F5E5A59585DE9AA55E6FE"
+                  ExpectedSHA256="6a76052ed5c726e1f3216a74bb2b3a8e030e821884b3775c083712e158502aac"/>
+            <!-- Cup stars: the save data unmount reads and writes the table first (after saving) -->
+            <Line Type="bytes" Address="0x18d1ad1" Value="BE65E600"
+                  Signature="08 5b 41 5e 41 5f 5d e9 b3 8e 71 00 be 02 00 00 00 48 89 c7"
+                  SignatureOffset="0x8"/>
+        </PatchList>
+    </Metadata>
+</Patch>

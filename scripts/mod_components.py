@@ -89,6 +89,11 @@ def payload_bytes(op, folder, original):
         raise ValueError('Original content checksum mismatch')
     if 'payload' in op:
         result = under(folder, op['payload']).read_bytes()
+        if op['payload'].endswith('.delta.json'):
+            # The built-in packages (scripts/builtin_mods) carry only their own bytes: the asset
+            # is rebuilt from the player's game file, as the built-in widescreen layouts are.
+            from nitro_components import copy_delta
+            result = copy_delta(original, json.loads(result))
     else:
         result = bytearray(original)
         for offset, old, new in op['runs']:

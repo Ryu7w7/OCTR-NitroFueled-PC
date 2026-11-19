@@ -8,6 +8,21 @@ import mod_format as fmt
 from mod_components import save_json,sha,under,regular_tree,copy_tree,long_path,plain_path
 
 FILENAME='OCTR-Mod-Library.xml'
+# Built-in mods (tools/make_builtin_mods.py): folders shipped with the launcher, on by default.
+# One wins over a copy of the same mod ID in the mods folder; they cannot be removed.
+BUILTIN=Path(__file__).resolve().parent/'builtin_mods'
+BUILTIN_PREFIX='builtin:'
+# Ultimate Customizer's Copas Adicionales option needs the pictures made by "Prepare" (scripts/cup_art.py).
+EXTRA_CUPS=('battle-point-limit-selector','extra-cups','extra-cups-art')
+def generated_builtin(root):
+    """Built-in mods made on this PC from the game's files (scripts/cup_art.py: extra-cups-art)."""
+    return storage(root)/'builtin'
+def builtin_sources(directory=None):
+    # BB_BUILTIN_MODS: another folder, or empty for none (the tests' default: tests/paths.py).
+    directory=directory or os.environ.get('BB_BUILTIN_MODS',str(BUILTIN))
+    if not directory:return []
+    directory=Path(directory)
+    return sorted((p for p in directory.iterdir() if p.is_dir() and (p/'mod.json').is_file()),key=lambda p:p.name) if directory.is_dir() else []
 PREFIX=FILENAME+'/Mod: '
 MAX_EXPANDED=12*1024**3
 
@@ -134,8 +149,13 @@ def scan(root,patchdir):
     root=Path(root);root.mkdir(parents=True,exist_ok=True);patchdir=Path(patchdir)
     cache=storage(root)/'packages';cache.mkdir(parents=True,exist_ok=True)
     found={};messages=sync_xml(root,patchdir);candidates={}
-    for source in sorted(root.iterdir(),key=lambda p:p.name.casefold()):
+    present=set()  # the unpacked copies of the mods here, read or not
+    builtins=set(builtin_sources())
+    if os.environ.get('BB_BUILTIN_MODS','x'):builtins|=set(builtin_sources(generated_builtin(root)))
+    unsure=False  # a mod failed before its copy was known: nothing is removed this time
+    for source in sorted(root.iterdir(),key=lambda p:p.name.casefold())+sorted(builtins):
         if not source.is_dir() and source.suffix.lower() not in ('.zip','.pak'):continue
+        digest=None
         try:
             if source.is_symlink() or (hasattr(source,'is_junction') and source.is_junction()):raise ValueError('Linked mod inputs unsupported')
             if source.is_file() and source.stat().st_size>4*1024**3:raise ValueError('Mod exceeds4GB')
@@ -148,6 +168,7 @@ def scan(root,patchdir):
                 if source.suffix.lower()=='.zip':
                     inspected=fmt.inspect_zip(source)
                     if inspected:manifest,_=inspected
+            present.add(digest)
             ident=manifest['id'] if manifest else ident_for(source)
             dest=cache/digest/ident
             if not dest.exists():
@@ -172,7 +193,7 @@ def scan(root,patchdir):
                 if actual!=expected:raise ValueError('Cached mod assets changed')
                 legacy_files(dest)
             if source.is_file() and sha(source)!=digest:raise ValueError('Mod changed while scanning')
-            item=dict(source=source.name,sha256=digest,name=manifest['name'] if manifest else source.stem,
+            item=dict(source=(BUILTIN_PREFIX if source in builtins else '')+source.name,sha256=digest,builtin=source in builtins,name=manifest['name'] if manifest else source.stem,
                 version=manifest['version'] if manifest else '1.0.0',author=manifest['author'] if manifest else 'Local asset mod',
                 description=manifest['description'] if manifest else '',kind='package' if manifest else 'assets')
             if manifest and manifest.get('configuration'):
@@ -182,7 +203,13 @@ def scan(root,patchdir):
             candidates.setdefault(ident,[]).append(item)
         except (ValueError,OSError,KeyError,TypeError,zipfile.BadZipFile,RuntimeError,AssertionError,struct.error,IndexError) as error:
             messages.append(source.name+': '+str(error))
+            if digest is None:unsure=True
     for ident,items in candidates.items():
+        builtin=[i for i in items if i['builtin']]
+        if builtin:
+            item=builtin[0];others=[i for i in items if not i['builtin']]
+            item['version_notice']=('Built into the launcher; not loaded from: '+', '.join(i['source']+' ('+i['version']+')' for i in others)) if others else ''
+            found[ident]=item;continue
         usable=items
         latest=max(fmt.version(i['version']) for i in usable)
         top=[i for i in usable if fmt.version(i['version'])==latest]
@@ -195,6 +222,10 @@ def scan(root,patchdir):
             item['version_notice']='Using '+item['version']+'. Other copies retained: '+', '.join(i['source']+' ('+i['version']+')' for i in items if i is not item)
         found[ident]=item
     result={'entries':found,'messages':messages};save_json(storage(root)/'library.json',result)
+    # Unpacked copies of mods no longer here (an older version, a removed mod). Every caller
+    # holds the launch lock (scripts/state_cleanup.py).
+    import state_cleanup
+    if not unsure:state_cleanup.unpacked(cache,present,'Mod library')
     # Display-only catalog: native UI records only the first TitleID and would
     # hide a multi-ID catalog on the other edition. Executable XML is checked separately.
     xml=ET.Element('Patch')
@@ -202,6 +233,7 @@ def scan(root,patchdir):
         meta=ET.SubElement(xml,'Metadata',Title='Crash Team Racing Nitro-Fueled',Name='Mod: '+ident,
             Author=item['author'],PatchVer=item['version'],AppVer='01.21',AppElf='eboot.bin',isEnabled='false',
             ModName=item['name'],ModHash=item['sha256'],ModSource=item['source'],ModDescription=item['description'],Note='OCTR mod: assets and any logic patches switch together. Relaunch after changes.')
+        if item.get('builtin'):meta.set('isEnabled','true');meta.set('ModBuiltin','1')
         meta.set('ModVersions',item['version_notice'])
         for key,rule in item.get('configuration',{}).items():
             node=ET.SubElement(meta,'ModOption',Id=key,Type=rule['type'],Label=rule['label'],Description=rule.get('description',''),Advanced='true' if rule.get('advanced',False) else 'false',
@@ -223,6 +255,7 @@ def remove(root,patchdir,ident,expected_sha256):
     with launch_lock(storage(root)):
         catalog=scan(root,patchdir);item=catalog['entries'].get(ident)
         if item is None or item['sha256']!=expected_sha256:raise ValueError('Mod changed; Reload before removing')
+        if item.get('builtin'):raise ValueError('Built-in mods cannot be removed; turn them off instead')
         source=under(root,item['source']);config=root.parent/'patches.json'
         previous=json.loads(config.read_text()) if config.exists() else {};settings=dict(previous);key=PREFIX+ident
         if not isinstance(previous,dict) or any(not isinstance(previous.get(k,[]),list) or not all(isinstance(v,str) for v in previous.get(k,[])) for k in ('enabled','disabled')):
@@ -263,5 +296,7 @@ def configure(root,patchdir,ident,expected_sha256,values):
         settings=read_ini(ini) if ini.is_file() else {}
         settings.setdefault('widescreen_layout','off')
         fmt.resolve(manifest,settings,converted)
+        if ident==EXTRA_CUPS[0] and converted.get(EXTRA_CUPS[1]) and EXTRA_CUPS[2] not in catalog['entries']:
+            raise ValueError('Prepare the Copas Adicionales pictures first (Ultimate Customizer: Prepare)')
         save(storage(root)/'options.json',ident,manifest,converted)
         return scan(root,patchdir)

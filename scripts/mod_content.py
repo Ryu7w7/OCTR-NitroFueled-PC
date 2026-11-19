@@ -6,7 +6,7 @@ import json,os,shutil,tempfile,time
 import xml.etree.ElementTree as ET
 import mods
 import mod_format as fmt
-from mod_library import folder as package_folder,entries as zip_entries
+from mod_library import folder as package_folder,entries as zip_entries,read as library
 from mod_components import sha,sha_bytes,under,regular_tree,snapshot,read_ini,save_json
 
 def engine(root):
@@ -75,14 +75,39 @@ def claims(folder,settings=None,options=None):
         else:keys=[op['target']]
         items.extend((key.casefold(),folder/'mod.json') for key in keys)
     return list(dict(items).items()) if settings is None else items
+def registers_tracks(update3):
+    """Whether a mod's whole update3.pak registers tracks (it has the game's track list,
+    track_registry.GUI): a track mod, which the external content tab can convert."""
+    import track_registry
+    from archive_reader import Archive
+    try:return any(f['path'].casefold()==track_registry.GUI.casefold() for f in Archive(str(update3)).files)
+    except Exception:return False  # unreadable: not shown as a track mod
+def whole_update3_message(names,update3):
+    """Why mods that ship a whole update3.pak stop a launch with external content: track mods
+    can be converted to external content; the others (karts, racers, ...) cannot."""
+    tracks=[n for n in names if n in update3 and registers_tracks(update3[n])]
+    others=[n for n in names if n not in tracks]
+    parts=[]
+    if tracks:parts.append(', '.join(tracks)+' ships a whole update3.pak: turn it off, or convert it to external content (External content tab: Convert track mod), to use external content')
+    if others:parts.append(', '.join(others)+' ships a whole update3.pak, which cannot be used with external content: turn it off, or turn external content off')
+    return '; '.join(parts)
 def mod_files(folder):return [(Path(key),source) for key,source in claims(folder)]
+def builtin_names(root):
+    """The built-in mods of the library (scripts/builtin_mods): what they share with a community
+    mod is merged or they step aside (scripts/builtin_coexist.py), never a conflict."""
+    return {n for n,item in library(root)['entries'].items() if item.get('builtin')}
 def conflicts(root,config,settings=None,options=None):
     from mod_options import load as load_options
     saved_options=options if options is not None else load_options(Path(root).parent/'mod-state/options.json')
     names=selected(root,config);owners=[];problems=[];installed={n:metadata(package_folder(root,n)) for n in names}
+    builtins=builtin_names(root)
+    def apart(a,b):return (a in builtins)!=(b in builtins)
     for name in names:
         for key,source in claims(package_folder(root,name),settings,saved_options.get(name)):
             for prior,owner in owners:
+                if apart(owner,name):continue
+                # Two built-ins changing one archive entry are merged (builtin_coexist.merge_builtins).
+                if owner in builtins and name in builtins and key.startswith('archives/'):continue
                 if key==prior or key.startswith(prior+'::') or prior.startswith(key+'::'):
                     problems.append(key+': '+owner+' / '+name)
             owners.append((key,name))
@@ -93,7 +118,7 @@ def conflicts(root,config,settings=None,options=None):
                 if dep is None:problems.append(name+': enable dependency '+r['id'])
                 elif not fmt.matches(dep.get('version',''),r['version']):problems.append(name+': dependency '+r['id']+' needs '+r['version'])
             for other in m.get('conflicts',[]):
-                if other in installed:problems.append(name+': incompatible with '+other)
+                if other in installed and not apart(name,other):problems.append(name+': incompatible with '+other)
     visiting=set();visited=set()
     def visit(name):
         if name in visiting:
@@ -108,7 +133,9 @@ def conflicts(root,config,settings=None,options=None):
 
 def has_extended(root,config):return any((n in zip_entries(root) or extended(package_folder(root,n))) for n in selected(root,config))
 
-def prepare(root,state,game,mod_root,selection,base_config,environment,log=print):
+def prepare(root,state,game,mod_root,selection,base_config,environment,log=print,external=()):
+    """external: [(key, path, metadata)] of the other selected executable patches (not packages'),
+    which a built-in mod steps aside for (scripts/builtin_coexist.py)."""
     root=Path(root).resolve();state=Path(state).resolve();game=Path(game).resolve();mod_root=Path(mod_root)
     from prepare import sfo
     game_info=sfo((game/'sce_sys/param.sfo').read_bytes())
@@ -126,10 +153,27 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     base,automatic_settings=choose([metadata(package_folder(mod_root,n)) for n in names],base)
     problems=conflicts(mod_root,selection,base,saved_options)
     if problems:raise ValueError('Mod conflicts: '+'; '.join(problems))
+    # Built-ins next to community mods: incompatible ones and executable clashes freeze the
+    # built-in now; game files are merged while preparing (scripts/builtin_coexist.py).
+    import builtin_coexist
+    coexist=builtin_coexist.Plan()
+    builtins=[n for n in names if n in builtin_names(mod_root)]
+    if builtins and (len(builtins)<len(names) or external):
+        resolved={}
+        for n in names:
+            raw=metadata(package_folder(mod_root,n))
+            resolved[n]=fmt.resolve(raw,base,effective_options(raw,saved_options.get(n)))[1] if 'schemaVersion' in raw else {}
+        builtin_coexist.declared(coexist,builtins,resolved)
+        builtin_coexist.code(coexist,game,[b for b in builtins if b not in coexist.frozen],
+            {n:[under(package_folder(mod_root,n),p) for p in resolved[n].get('patches',[])] for n in names if n not in coexist.frozen},list(external))
+    frozen_before=dict(coexist.frozen)
+    names=[n for n in names if n not in frozen_before]
     packages=[];operations=[];settings={};overrides={};patches=[];whole=[]
     runtime=sha(engine(root))
     effective=base.copy();source_state=snapshot(game);chosen_variants={}
     added={}  # mod -> the archives it adds (whole files, new or replaced game files)
+    update3={}  # mod -> the whole update3.pak it ships
+    owned={}  # mod -> its resolved operations
     for name in names:
         folder=package_folder(mod_root,name)
         if extended(folder):
@@ -148,6 +192,7 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     if key in target and target[key]!=value:raise ValueError('Conflicting '+field+': '+key)
                     target[key]=value
             operations.extend((op,folder) for op in m.get('operations',[]))
+            owned[name]=[(op,folder) for op in m.get('operations',[])]
             for patch_name in m.get('patches',[]):
                 patch_path=under(folder,patch_name)
                 patch_xml=ET.parse(patch_path).getroot()
@@ -156,14 +201,25 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     raise ValueError(name+': executable patch targets a different game edition/version')
                 patches.append((patch_path,name))
             whole.extend((under(folder,r['file']),r['file']) for r in m['files'] if r['file'].startswith('archives/'))
+            update3.update({name:under(folder,r['file']) for r in m['files'] if r['file'].casefold()=='archives/update3.pak'})
             added[name]=[r['file'] for r in m['files'] if r['file'].startswith('archives/')]+\
                 [op['target'] for op in m.get('operations',[]) if op['kind']=='game_file']
             packages.append({'id':name,'manifest':sha(folder/'mod.json'),'variant':variant,'options':option_values})
         else:
             files=list(mods.mod_files(folder));whole.extend((source,path.as_posix()) for path,source in files)
             added[name]=[path.as_posix() for path,_ in files]
+            update3.update({name:source for path,source in files if path.as_posix().casefold()=='archives/update3.pak'})
             packages.append({'id':name,'files':[[p.as_posix(),sha(s)] for p,s in files]})
     effective.update(settings)
+    # External content (scripts/content_package.py): tracks added to the game, in an update
+    # archive the launcher builds (scripts/content_build.py).
+    import content_package
+    content_root=Path(environment.get('BB_CONTENT_DIR',Path(mod_root).parent/content_package.FOLDER))
+    online=environment.get('BB_ONLINE',effective.get('online','0'))=='1'
+    content=content_package.selected(content_root,online,log)
+    if content:
+        whole3=[name for name in names for target in added.get(name,[]) if target.casefold()=='archives/update3.pak']
+        if whole3:raise ValueError(whole_update3_message(whole3,update3))
     for name in names:
         raw=metadata(package_folder(mod_root,name))
         m=fmt.resolve(raw,base,saved_options.get(name))[1] if 'schemaVersion' in raw else raw
@@ -172,10 +228,13 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
     identity={'game':str(game),'target':[title_id,app_version],'target_policy':1,'source_files':source_state,'packages':packages,'settings':effective,
         'environment':overrides,'engine':runtime,'run':sha(root/'run.py'),
         'patch_compiler':sha(root/'scripts/patches.py'),'racer_registry':sha(Path(__file__).with_name('racer_registry.py')),
+        'content':[[m['id'],m['version'],content_package.manifest_digest(m)] for m,_ in content]+([content_package.selection(content_root)['page'],online] if content else []),
+        'content_code':{n:sha(Path(__file__).with_name(n)) for n in ('content_build.py','content_package.py','track_registry.py','igz_merge.py','graphics_tab.py','online_mode.py')} if content else None,
         'generators':{name:sha(Path(__file__).with_name(name)) for name in (
             'mod_content.py','mod_components.py','mod_format.py','mod_overlays.py',
             'nitro_components.py','nitro_format.py','mod_file_paths.py')},
-        'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')}}
+        'base_patches':{p.name:sha(p) for p in (root/'patches').glob('*.xml')},
+        'coexist':[frozen_before,{n:sha(Path(__file__).with_name(n)) for n in ('builtin_coexist.py','igz_rebase.py','igz_merge.py')}] if builtins else None}
     key=sha_bytes(json.dumps(identity,sort_keys=True).encode())[:24]
     # New namespace: old full-game profiles must never be reused by this loader.
     cache=state/'extensions/overlays'/key;ready=cache/'ready.json'
@@ -212,6 +271,35 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
                     sources.append((name,target,staged if staged.is_file() else whole_sources[target.casefold()],added[name]))
             merged=racer_registry.prepare(game,staging/'files',sources,log)
             if merged:save_json(staging/'registry.json',{'target':merged})
+            if builtins:
+                # Built-ins changing one archive entry: one merged operation of the first.
+                swap,gone=builtin_coexist.merge_builtins(state/'extensions/merged',game,
+                    [(n,owned.get(n,[])) for n in builtins if n in names],log)
+                if swap or gone:
+                    operations=[swap.get(id(op),(op,f)) for op,f in operations if id(op) not in gone]
+                    owned={n:[swap.get(id(op),(op,f)) for op,f in ops if id(op) not in gone] for n,ops in owned.items()}
+                # What a built-in shares with a community mod: merged, else it steps aside.
+                community=[(n,op,f) for n in names if n not in builtins for op,f in owned.get(n,[])
+                    if op['kind'] in ('archive_asset','localized_strings')]
+                loads={}
+                for source,target in whole:
+                    if target.casefold().startswith('archives/') and target.casefold().endswith('.pak'):
+                        staged=under(staging/'files',target);loads[target]=staged if staged.is_file() else source
+                owner={target:n for n in names for target in added.get(n,[])}
+                builtin_coexist.merge_entries(coexist,state/'extensions/merged',game,
+                    {n:owned.get(n,[]) for n in builtins if n in names},community,
+                    [(owner.get(t,'a mod'),t,p) for t,p in loads.items()],log)
+                builtin_coexist.write_archives(coexist,staging/'files',loads)
+                operations=[(op,f) for op,f in operations if id(op) not in coexist.drop and
+                    not any(op is o for n in coexist.frozen for o,_ in owned.get(n,[]))]+coexist.add
+                patches=[(p,n) for p,n in patches if n not in coexist.frozen]
+            save_json(staging/'coexist.json',coexist.report())
+            if content:
+                if under(staging/'files','archives/update3.pak').exists():raise ValueError('Racer mods and external content both need update3.pak')
+                import content_build
+                own=content_build.build(game,content_package.state(content_root),staging,content,operations,effective,log,
+                    own_page=content_package.selection(content_root)['page']=='own',online=online)
+                save_json(staging/'content.json',{'archives':[[t.as_posix(),str(s)] for t,s in own]})
             records=[{'operation':op,'folder':str(folder)} for op,folder in operations if op['kind'] in ('archive_asset','localized_strings')]
             save_json(staging/'archive-plan.json',records)
             from mod_overlays import compose
@@ -230,15 +318,23 @@ def prepare(root,state,game,mod_root,selection,base_config,environment,log=print
             publish_profile(staging,cache,log)
         except BaseException:
             log('Incomplete preparation preserved at '+str(staging));raise
-    from cache_cleanup import prune
-    prune(cache, 'ready.json', r'[0-9a-f]{24}', log)
+    # The prepared sessions kept: this one and the latest others (scripts/state_cleanup.py).
+    os.utime(cache/'ready.json')
+    import state_cleanup
+    state_cleanup.sessions(cache.parent,cache,log)
     # Full PAKs/loose files are read directly from mod storage by the engine.
-    registry=json.loads((cache/'registry.json').read_text())['target'].casefold() if (cache/'registry.json').exists() else None
-    replacements=[(Path(target),source) for source,target in whole if target.casefold()!=registry]
+    # A whole file the profile has its own copy of (a merged racer registration, an archive with
+    # a built-in's change merged in) is read from the profile.
+    own={p.relative_to(cache/'files').as_posix().casefold() for p in regular_tree(cache/'files')}
+    replacements=[(Path(target),source) for source,target in whole if target.casefold() not in own]
     replacements.extend((p.relative_to(cache/'files'),p) for p in regular_tree(cache/'files'))
+    if (cache/'content.json').exists():
+        replacements.extend((Path(t),Path(s)) for t,s in json.loads((cache/'content.json').read_text())['archives'])
     from mod_overlays import file_map
     file_map(game,cache/'file-map.bin',cache/'directories',replacements)
-    return {'profile':cache,'game':game,'archive_plan':cache/'archive-plan.json','file_map':cache/'file-map.bin','file_dirs':cache/'directories','settings':effective,'environment':overrides,'operations':operations,
-            'engine':runtime,'packages':names,'variants':chosen_variants,
+    report=json.loads((cache/'coexist.json').read_text()) if (cache/'coexist.json').exists() else {'frozen':{},'yielded':{},'merged':[]}
+    report['frozen']={**frozen_before,**report['frozen']}
+    return {'profile':cache,'game':game,'coexist':report,'archive_plan':cache/'archive-plan.json','file_map':cache/'file-map.bin','file_dirs':cache/'directories','settings':effective,'environment':overrides,'operations':operations,
+            'engine':runtime,'packages':[n for n in names if n not in report['frozen']],'variants':chosen_variants,'content':[m['id'] for m,_ in content],
             'selection_settings':base,'automatic_settings':automatic_settings,
             'has_shaders':any(op['kind'].startswith('shader_') for op,_ in operations)}
