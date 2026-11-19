@@ -848,6 +848,8 @@ static void test_region(size_t shift) {
     direct_stub(image + (0x110b9db - shift), disable_node_mock);
     memcpy(image + (0xeb7950 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x89\xfb\x48\x8b\x43\x18", 17);
     memcpy(image + (0xeb7961 - shift), "\x58\x5b\x41\x5e\x41\x5f\x5d\xc3", 8);
+    memcpy(image + (0xebcd40 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0xebcd51 - shift), "\xc3", 1);
     memcpy(image + (0x115a740 - shift), "\x55\x48\x89\xe5\x41\x56\x53\x48\x89\xd3\x49\x89\xfe\xe8\xbe\x63\x93\xff", 18);
     image[0x115a74e - shift] += (unsigned char)shift;
     direct_stub(image + 0xa90b10, network_query_mock);
