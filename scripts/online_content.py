@@ -84,6 +84,10 @@ APPROVED_MOD_PATCHES = {
     '54f024bf4952': 'Input Display 1.0.1 (Onur): draws the pressed buttons, USA 1.21',
     # the same code for EU 1.21 (tools/port_patch_eu.py; its one call into the game moves 0x149fca0 -> 0x149fc90)
     'dc2025aa9102': 'Input Display 1.0.1 (Onur): draws the pressed buttons, EU 1.21',
+    # 1.0.2: reads Ghost Viewer's watched kart at 0x2bee678 (1.0.1 read 0x2beef78, now in Pack Tacho's
+    # item table) and no longer reads Replay Mode's old pointer 0x2beea78; same drawing code otherwise
+    'e8beeebbbb1e': 'Input Display 1.0.2 (Onur): draws the pressed buttons, USA 1.21',
+    '360168595f23': 'Input Display 1.0.2 (Onur): draws the pressed buttons, EU 1.21',
 }
 
 
