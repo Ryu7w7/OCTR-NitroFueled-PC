@@ -916,8 +916,18 @@ void ChatBox() {
     const ImGuiIO& io = ImGui::GetIO();
     const float em = ImGui::GetFontSize();
     const bool typing = chat_typing;
+    // After 30 s with no new line and no typing only the "T: write" hint stays, without a background;
+    // a new line or T brings the box back (user, 20/11).
+    static unsigned box_seen = 0;
+    static auto last_activity = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (chat_seen != box_seen || typing) {
+        box_seen = chat_seen;
+        last_activity = now;
+    }
+    const bool idle = now - last_activity > std::chrono::seconds(30);
     ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : racing ? 0.22f : 0.40f);
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : idle ? 0.0f : racing ? 0.22f : 0.40f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
     if (!typing) {
@@ -925,7 +935,7 @@ void ChatBox() {
     }
     ImGui::Begin("##chat", nullptr, flags);
     ImGui::PushTextWrapPos(em * 26.0f);
-    for (int i = std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
+    for (int i = idle ? chat_line_count : std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
         ChatLine(chat_lines[i]);
     }
     ImGui::PopTextWrapPos();
