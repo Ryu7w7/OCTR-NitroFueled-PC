@@ -96,6 +96,7 @@ int runtime_public_found_room(void) { return 0; }
 uint64_t runtime_public_room(void) { return 0; }
 int runtime_public_ranked_short(void) { return 0; }
 int runtime_public_ranked_min_players(void) { return 6; }
+int runtime_public_ranked_clock(int64_t *since_ms, int *players) { (void)since_ms; (void)players; return 0; } /* no server clock here */
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;

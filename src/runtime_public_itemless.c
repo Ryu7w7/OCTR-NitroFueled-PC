@@ -733,6 +733,29 @@ static int ranked_min_seen = 6;    /* the server's RYUNET_RANKED_MIN_PLAYERS, fr
 
 /* Players a Ranked room needs to start, as the server last said (6 until it answered). */
 int runtime_public_ranked_min_players(void) { return __atomic_load_n(&ranked_min_seen, __ATOMIC_SEQ_CST); }
+
+/* The server's countdown clock for a Ranked room (room-alive's ready_ms, ctr_foundroom.go): -1 short of
+ * its minimum, else the milliseconds since the room reached it; with the server's count of its players.
+ * Every client sets its map countdown from it, so all of them start together (runtime_online_mode.c). */
+static pthread_mutex_t ranked_clock_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ranked_clock_room, ranked_clock_at;
+static int64_t ranked_clock_ready;
+static int ranked_clock_players;
+
+int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
+    pthread_mutex_lock(&mode_lock);
+    const uint64_t room = matchmaking_room;
+    pthread_mutex_unlock(&mode_lock);
+    const uint64_t now = check_clock();
+    pthread_mutex_lock(&ranked_clock_lock);
+    const int fresh = room && ranked_clock_room == room && ranked_clock_at && now - ranked_clock_at < 3000;
+    if (fresh) {
+        if (since_ms) *since_ms = ranked_clock_ready < 0 ? -1 : ranked_clock_ready + (int64_t)(now - ranked_clock_at);
+        if (players) *players = ranked_clock_players;
+    }
+    pthread_mutex_unlock(&ranked_clock_lock);
+    return fresh;
+}
 static void *room_alive_worker(void *arg) {
     const uint64_t room = (uint64_t)(uintptr_t)arg;
     const char *me = runtime_np_get_online_name();
@@ -745,6 +768,15 @@ static void *room_alive_worker(void *arg) {
             const char *min_str = runtime_json_field(body, "min_players");
             const int min_players = min_str && *min_str ? (int)strtol(min_str, NULL, 10) : 0;
             if (min_players >= 1 && min_players <= 8) __atomic_store_n(&ranked_min_seen, min_players, __ATOMIC_SEQ_CST);
+            const char *ready = runtime_json_field(body, "ready_ms"), *players = runtime_json_field(body, "players");
+            if (ready && *ready && players && *players) {
+                pthread_mutex_lock(&ranked_clock_lock);
+                ranked_clock_room = room;
+                ranked_clock_ready = strtoll(ready, NULL, 10);
+                ranked_clock_players = (int)strtol(players, NULL, 10);
+                ranked_clock_at = check_clock();
+                pthread_mutex_unlock(&ranked_clock_lock);
+            }
         }
     }
     __atomic_store_n(&room_alive_busy, 0, __ATOMIC_SEQ_CST);

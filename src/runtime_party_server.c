@@ -157,15 +157,23 @@ int runtime_party_server_create(const char *sid) {
     /* The native POST /v1/sessions interception fires again on every takeover recreation.
      * Do not replace an active session: that resets the server generation and desyncs every
      * guest (the "loading on rejoin" bug). Skip when we already track a session. */
+    const char *me = runtime_np_get_online_name();
+    if (!me || !*me) return 0;
+    /* Only our own session counts as active: the one kept from joining someone else's room
+     * (cusa13795-session-TachoGHC) made every later room of ours report to it, so the host's team
+     * points went to a session it did not own and the guests polled the wrong one (20/11). */
+    char own[96];
+    snprintf(own, sizeof own, "cusa13795-session-%s", me);
     pthread_mutex_lock(&lock);
-    const int have = session_id[0] != 0;
+    const int have = session_id[0] != 0 && !strcasecmp(session_id, own);
+    char stale[96];
+    snprintf(stale, sizeof stale, "%s", session_id);
     pthread_mutex_unlock(&lock);
     if (have) {
         fprintf(stderr, "Party server: create skipped, session already active\n");
         return 1;
     }
-    const char *me = runtime_np_get_online_name();
-    if (!me || !*me) return 0;
+    if (stale[0]) fprintf(stderr, "Party server: leaving the joined session %s for our own room\n", stale);
     char target[256], body[512];
     snprintf(target, sizeof target, "/v1/sessions?name=%s", me);
     if (runtime_ryunet_request("POST", target, body, sizeof body) != 200) {

@@ -148,6 +148,7 @@ int runtime_public_found_room(void);
 uint64_t runtime_public_room(void);
 int runtime_public_ranked_short(void);
 int runtime_public_ranked_min_players(void); /* players a Ranked room needs, as the server said (6 until then) */
+int runtime_public_ranked_clock(int64_t *since_ms, int *players); /* 1: the server's Ranked countdown clock is fresh; since_ms -1 = short of players */
 int runtime_online_mode_room_players(void);   /* players in the online room (the game's list) */
 int runtime_online_mode_ranked_waiting(void);  /* a Ranked room short of players: countdown held, "WAITING 2/3" shown */
 int runtime_private_match_active(void);

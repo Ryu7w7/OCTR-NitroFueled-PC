@@ -3648,6 +3648,7 @@ static int lobby_timer_texts(unsigned char **desc, unsigned char **value) {
  * is there it is the countdown again, from its full time and the same for everyone (every game held
  * it at full); a player leaving below the minimum brings the waiting text back. Set every frame
  * (set_text does nothing when the text is already that one): the timer's script may write them. */
+static int ranked_waiting_players(void);
 static void ranked_waiting_timer(void) {
     static int shown;
     static char saved_desc[96];
@@ -3668,7 +3669,7 @@ static void ranked_waiting_timer(void) {
          * out of the box: the 20/11 test). The timer draws its seconds by itself (its text field only
          * ever holds "1:00"), so the time is hidden instead of rewritten. */
         char text[64];
-        snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), runtime_online_mode_room_players(),
+        snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), ranked_waiting_players(),
                  runtime_public_ranked_min_players());
         set_text(desc, text);
         if (hide_placeable) hide_placeable(value, 1);
@@ -4520,10 +4521,26 @@ int runtime_online_mode_room_players(void) {
  * timer reads "WAITING 2/3" (ranked_waiting_timer). */
 int runtime_online_mode_ranked_waiting(void) {
     if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
+    int64_t since = 0;
+    if (runtime_public_ranked_clock(&since, NULL)) return since < 0;   /* the server's word first */
     const int players = runtime_online_mode_room_players();
     return players > 0 && players < runtime_public_ranked_min_players();
 }
 
+/* The players shown in "WAITING x/y": the server's count when it has one (it counts a guest still
+ * joining through the relay), else the game's own list. */
+static int ranked_waiting_players(void) {
+    int players = 0;
+    int64_t since;
+    if (runtime_public_ranked_clock(&since, &players) && players > 0) return players;
+    return runtime_online_mode_room_players();
+}
+
+/* Every game sets its map countdown from the server's clock (runtime_public_ranked_clock, room-alive
+ * every second): held at full while the room is short of its minimum, and full minus the time since
+ * the room reached it afterwards, corrected when it is more than half a second off. All the screens
+ * count from the same moment, a player joining late included (20/11: 23 on one screen, 00 on another
+ * when only the host held it). Without a fresh answer from the server the host alone holds it. */
 static void ranked_hold_countdown(unsigned char *self) {
     static unsigned char *timer;
     static float full;
@@ -4532,18 +4549,29 @@ static void ranked_hold_countdown(unsigned char *self) {
     memcpy(&remaining, self + 0x28, 4);
     if (self != timer) { timer = self; full = 0; held = -1; }
     if (remaining > full) full = remaining;   /* its full time: the highest it showed */
-    if (!runtime_ranked_active() || !runtime_public_match_active() || !room_host()) return;
-    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
-    int players = 0;
-    if (list) memcpy(&players, (unsigned char *)list + 0x0c, 4);
+    if (!runtime_ranked_active() || !runtime_public_match_active() || full <= 0) return;
+    int64_t since = 0;
+    int players = 0, state;   /* 1 held at full, 2 the server's time, 0 left alone */
     const int needed = runtime_public_ranked_min_players();
-    const int hold = players > 0 && players < needed && full > 0;
-    if (hold != held) {
-        held = hold;
-        printf("Ranked lobby: %d/%d players, map countdown %s (%s)\n", players, needed, hold ? "held at full" : "running",
-               room_host() ? "host" : "guest");
+    if (runtime_public_ranked_clock(&since, &players)) {
+        state = since < 0 ? 1 : 2;
+    } else {
+        if (!room_host()) return;
+        players = runtime_online_mode_room_players();
+        state = players > 0 && players < needed;
     }
-    if (hold && remaining < full) memcpy(self + 0x28, &full, 4);
+    if (state != held) {
+        held = state;
+        printf("Ranked lobby: %d/%d players, map countdown %s (%s)\n", players, needed,
+               state == 1 ? "held at full" : state == 2 ? "on the server's clock" : "running", room_host() ? "host" : "guest");
+    }
+    if (state == 1 && remaining < full) {
+        memcpy(self + 0x28, &full, 4);
+    } else if (state == 2) {
+        float target = full - (float)since / 1000.0f;
+        if (target < 0.0f) target = 0.0f;
+        if (remaining - target > 0.5f || target - remaining > 0.5f) memcpy(self + 0x28, &target, 4);
+    }
 }
 
 static void ABI lobby_countdown(unsigned char *self) {

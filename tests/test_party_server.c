@@ -161,6 +161,19 @@ int main(void) {
     assert(strstr(g_points_request, "teams=2&points=15,3,0,0"));
     assert(g_adopted_teams == 0);   /* the host never takes points from the server */
 
+    /* Hosting a room after joining someone else's: our own session is created, not the joined one kept
+     * (the host's points went to a session it did not own, 20/11). */
+    g_frozen = 0;
+    runtime_party_server_join("cusa13795-session-TachoGHC");
+    g_requests = 0;
+    strcpy(g_reply, "{\"sessionId\":\"cusa13795-session-hosta\"}");
+    assert(runtime_party_server_create("cusa13795-session-HostA") == 1);
+    assert(g_requests == 1 && strstr(g_last_request, "POST /v1/sessions?name=HostA"));
+    assert(!strcmp(session_id, "cusa13795-session-hosta"));
+    g_requests = 0;
+    assert(runtime_party_server_create("cusa13795-session-HostA") == 1);   /* our own: kept */
+    assert(g_requests == 0);
+
     unsetenv("BB_PARTY_SERVER");
     puts("Party server: race-safety tests passed");
     return 0;
