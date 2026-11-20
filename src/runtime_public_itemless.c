@@ -756,12 +756,15 @@ int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
     pthread_mutex_lock(&ranked_clock_lock);
     const int fresh = room && ranked_clock_room == room && ranked_clock_at && now - ranked_clock_at < 3000;
     if (fresh) {
-        int64_t since = -1;
-        if (ranked_clock_ready >= 0)
+        /* -1 short of players, -2 the lobby closed (the map vote ended, a race), else the time since */
+        int64_t since = ranked_clock_ready < 0 ? ranked_clock_ready : 0;
+        if (ranked_clock_ready >= 0) {
             since = ranked_clock_synced && ranked_clock_ready_at > 0
                         ? (int64_t)now + ranked_clock_offset - ranked_clock_ready_at   /* every frame, on our clock */
                         : ranked_clock_ready + (int64_t)(now - ranked_clock_at);       /* an older server */
-        if (since_ms) *since_ms = since < -1 ? 0 : since;
+            if (since < 0) since = 0;
+        }
+        if (since_ms) *since_ms = since;
         if (players) *players = ranked_clock_players;
     }
     pthread_mutex_unlock(&ranked_clock_lock);

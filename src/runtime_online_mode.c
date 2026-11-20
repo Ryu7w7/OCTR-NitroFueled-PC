@@ -4579,7 +4579,8 @@ int runtime_online_mode_room_players(void) {
 int runtime_online_mode_ranked_waiting(void) {
     if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
     int64_t since = 0;
-    if (runtime_public_ranked_clock(&since, NULL)) return since < 0;   /* the server's word first */
+    /* the server's word first: -1 short of players; -2 (the lobby closed: the vote ended) is not waiting */
+    if (runtime_public_ranked_clock(&since, NULL)) return since == -1;
     const int players = runtime_online_mode_room_players();
     return players > 0 && players < runtime_public_ranked_min_players();
 }
@@ -4617,7 +4618,7 @@ static void ranked_hold_countdown(unsigned char *self) {
     int players = 0, state;   /* 1 held at full, 2 the server's time, 0 left alone */
     const int needed = runtime_public_ranked_min_players();
     if (runtime_public_ranked_clock(&since, &players)) {
-        state = since < 0 ? 1 : 2;
+        state = since == -1 ? 1 : since < 0 ? 0 : 2;   /* -2: the lobby closed, the game's own countdown goes on */
     } else {
         if (!room_host()) return;
         players = runtime_online_mode_room_players();
