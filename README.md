@@ -398,6 +398,9 @@ Import names from shadPS4's aerolib list.
 
 ## Recent releases
 
+- [v0.9.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.2): some saves no
+  longer stop the game before the main menu; no "cup-files.map" error when a start is tried again;
+  race results ordered by finish times; Pack Tacho's Yes/No in the game's language.
 - [v0.9.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.1): hotfix: the
   European game no longer crashes in the Ranked timer's last seconds or the Hall of Fame; another
   SacredFire left open in the background is named instead of a file error.
