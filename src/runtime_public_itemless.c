@@ -741,6 +741,12 @@ static pthread_mutex_t ranked_clock_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t ranked_clock_room, ranked_clock_at;
 static int64_t ranked_clock_ready;
 static int ranked_clock_players;
+/* The server's clock placed on ours, NTP style: its now_ms against the middle of our request, from the
+ * quickest round trip of the last half minute (the least room for a one-way delay). ready_at_ms is the
+ * moment the room reached its minimum on that clock, 0 while it is short. */
+static int64_t ranked_clock_offset, ranked_clock_ready_at;
+static uint64_t ranked_clock_rtt, ranked_clock_rtt_at;
+static int ranked_clock_synced;
 
 int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
     pthread_mutex_lock(&mode_lock);
@@ -750,7 +756,12 @@ int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
     pthread_mutex_lock(&ranked_clock_lock);
     const int fresh = room && ranked_clock_room == room && ranked_clock_at && now - ranked_clock_at < 3000;
     if (fresh) {
-        if (since_ms) *since_ms = ranked_clock_ready < 0 ? -1 : ranked_clock_ready + (int64_t)(now - ranked_clock_at);
+        int64_t since = -1;
+        if (ranked_clock_ready >= 0)
+            since = ranked_clock_synced && ranked_clock_ready_at > 0
+                        ? (int64_t)now + ranked_clock_offset - ranked_clock_ready_at   /* every frame, on our clock */
+                        : ranked_clock_ready + (int64_t)(now - ranked_clock_at);       /* an older server */
+        if (since_ms) *since_ms = since < -1 ? 0 : since;
         if (players) *players = ranked_clock_players;
     }
     pthread_mutex_unlock(&ranked_clock_lock);
@@ -762,19 +773,35 @@ static void *room_alive_worker(void *arg) {
     char target[512], body[256];
     if (me && *me) {
         snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu", me, (unsigned long long)room);
-        if (runtime_ryunet_request("GET", target, body, sizeof body) == 200) {
+        const uint64_t sent = check_clock();
+        const int status = runtime_ryunet_request("GET", target, body, sizeof body);
+        const uint64_t answered = check_clock();
+        if (status == 200) {
             const char *alive = runtime_json_field(body, "alive");
             if (alive && !strncmp(alive, "false", 5)) __atomic_store_n(&room_alive_gone, room, __ATOMIC_SEQ_CST);
             const char *min_str = runtime_json_field(body, "min_players");
             const int min_players = min_str && *min_str ? (int)strtol(min_str, NULL, 10) : 0;
             if (min_players >= 1 && min_players <= 8) __atomic_store_n(&ranked_min_seen, min_players, __ATOMIC_SEQ_CST);
             const char *ready = runtime_json_field(body, "ready_ms"), *players = runtime_json_field(body, "players");
+            const char *server_now = runtime_json_field(body, "now_ms"), *ready_at = runtime_json_field(body, "ready_at_ms");
             if (ready && *ready && players && *players) {
                 pthread_mutex_lock(&ranked_clock_lock);
+                if (ranked_clock_room != room) ranked_clock_synced = 0;
                 ranked_clock_room = room;
                 ranked_clock_ready = strtoll(ready, NULL, 10);
                 ranked_clock_players = (int)strtol(players, NULL, 10);
-                ranked_clock_at = check_clock();
+                ranked_clock_at = answered;
+                if (server_now && *server_now && ready_at && *ready_at) {
+                    const uint64_t rtt = answered - sent;
+                    const int64_t offset = strtoll(server_now, NULL, 10) - (int64_t)(sent + rtt / 2);
+                    if (!ranked_clock_synced || rtt <= ranked_clock_rtt || answered - ranked_clock_rtt_at > 30000) {
+                        ranked_clock_offset = offset;
+                        ranked_clock_rtt = rtt;
+                        ranked_clock_rtt_at = answered;
+                        ranked_clock_synced = 1;
+                    }
+                    ranked_clock_ready_at = strtoll(ready_at, NULL, 10);
+                }
                 pthread_mutex_unlock(&ranked_clock_lock);
             }
         }

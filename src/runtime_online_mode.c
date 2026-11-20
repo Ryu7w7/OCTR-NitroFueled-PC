@@ -4472,8 +4472,19 @@ static int loopback_queue_start(unsigned char *image) {
     return write_code(image + 0x2423cc8, slots, sizeof slots);
 }
 
-/* Initialize before the native timer creates its UI and replication state. */
+/* The lobby timer the game last started and the time it started it with (ranked_hold_countdown's full
+ * time: the same on every game, a late joiner included). */
+static unsigned char *countdown_started_timer;
+static float countdown_started_full;
+static void countdown_init_native(unsigned char *self);
 static void ABI countdown_init(unsigned char *self) {
+    countdown_init_native(self);
+    countdown_started_timer = self;
+    memcpy(&countdown_started_full, self + 0x28, sizeof countdown_started_full);
+}
+
+/* Initialize before the native timer creates its UI and replication state. */
+static void countdown_init_native(unsigned char *self) {
     int mode = 0, teams = 1;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
@@ -4538,7 +4549,8 @@ static int ranked_waiting_players(void) {
 
 /* Every game sets its map countdown from the server's clock (runtime_public_ranked_clock, room-alive
  * every second): held at full while the room is short of its minimum, and full minus the time since
- * the room reached it afterwards, corrected when it is more than half a second off. All the screens
+ * the room reached it afterwards, on the server's clock placed on ours (runtime_public_ranked_clock),
+ * corrected every frame when a tenth of a second off. All the screens
  * count from the same moment, a player joining late included (20/11: 23 on one screen, 00 on another
  * when only the host held it). Without a fresh answer from the server the host alone holds it. */
 static void ranked_hold_countdown(unsigned char *self) {
@@ -4549,6 +4561,10 @@ static void ranked_hold_countdown(unsigned char *self) {
     memcpy(&remaining, self + 0x28, 4);
     if (self != timer) { timer = self; full = 0; held = -1; }
     if (remaining > full) full = remaining;   /* its full time: the highest it showed */
+    /* The time the game started this timer with (countdown_init), the same on every game: the highest
+     * value seen is wrong for a player joining a countdown already running (it would take 37 for the
+     * full time and count from there). */
+    if (self == countdown_started_timer && countdown_started_full > 0.0f) full = countdown_started_full;
     if (!runtime_ranked_active() || !runtime_public_match_active() || full <= 0) return;
     int64_t since = 0;
     int players = 0, state;   /* 1 held at full, 2 the server's time, 0 left alone */
@@ -4570,7 +4586,7 @@ static void ranked_hold_countdown(unsigned char *self) {
     } else if (state == 2) {
         float target = full - (float)since / 1000.0f;
         if (target < 0.0f) target = 0.0f;
-        if (remaining - target > 0.5f || target - remaining > 0.5f) memcpy(self + 0x28, &target, 4);
+        if (remaining - target > 0.1f || target - remaining > 0.1f) memcpy(self + 0x28, &target, 4);
     }
 }
 
