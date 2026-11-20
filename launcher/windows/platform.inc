@@ -1024,6 +1024,7 @@ bool OpenUrl(const std::string& url) {
     return INT_PTR(ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 constexpr UINT kTrayMessage = WM_APP + 20, kMinimizeToTray = WM_APP + 21, kToggleLauncher = WM_APP + 22;
+constexpr UINT kShowLauncher = WM_APP + 23;   // another start of this install's launcher: come back to the front
 bool LauncherVisible() { return g_app.hwnd && IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd); }
 void ToggleLauncher() { PostMessageW(g_app.hwnd, kToggleLauncher, 0, 0); }
 NOTIFYICONDATAW g_tray{};

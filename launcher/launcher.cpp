@@ -2035,6 +2035,9 @@ void PollJobs() {
     } else if (finished == Job::Play) {
         ReleaseGameProcess();
         a.game_running = false;
+        // Back from the tray where Play put it: a launcher left hidden there was missed and a second
+        // one opened (20/11).
+        if (!LauncherVisible()) BringLauncherToFront();
         a.show_exit = true;
         RefreshGameSettings(true);
         SyncOnlineBuffers();
