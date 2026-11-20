@@ -110,6 +110,8 @@
   "Reserves bar": null,
   "Yes: shows your boost reserves under the boost bar. No: hides it.": null,
   "Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.": "Sí: lista de 8 con nombre, wumpas y objeto. No: solo los 4 primeros, sin extras.",
+  "Yes": null,
+  "No": null,
   "Failed to initialize network, try again later": null,
   "Connection timed out. Please try Online again.": null,
   "Cannot synchronize the host's cup. Return to the lobby and retry.": null,

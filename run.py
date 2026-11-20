@@ -1235,9 +1235,20 @@ def launch(args, restarted=False):
         # path and the patches read its settings (the player's, with the ones it was made for),
         # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
         layout_saved = {}
+        mod_file_map = {}   # 'mods': BB_MOD_FILE_MAP before the first pass (None: no map)
 
         def apply_layout():
             env.pop('BB_SPEED_MODE', None)
+            # Every pass starts from the mods' file map (or none), as the first one did: online mode
+            # below replaces BB_MOD_FILE_MAP with its own map (the mods' files and its own), and a
+            # second pass (a restart from the menu, a start that stopped and is tried again) read that
+            # one as its input: online mode then rebuilt, removed its old map and read it next
+            # ("[WinError 2] ... out/online-mode/cup-files.map", 20/11).
+            first_map = mod_file_map.setdefault('mods', env.get('BB_MOD_FILE_MAP'))
+            if first_map is None:
+                env.pop('BB_MOD_FILE_MAP', None)
+            else:
+                env['BB_MOD_FILE_MAP'] = first_map
             for key, value in layout_saved.items():
                 if value is None:
                     env.pop(key, None)

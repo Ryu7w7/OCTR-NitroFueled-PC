@@ -118,6 +118,8 @@ OPTION_TEXTS = {
         'Yes: shows your boost reserves under the boost bar. No: hides it.',
     'Sí: lista de 8 con nombre, wumpas e ítem. No: solo los 4 primeros, sin extras.':
         'Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.',
+    'Sí': 'Yes',   # the options' own values (20/11: "Some of the Yes options come up in Spanish")
+    'No': 'No',
 }
 
 

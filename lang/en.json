@@ -110,6 +110,8 @@
   "Reserves bar": "Reserves bar",
   "Yes: shows your boost reserves under the boost bar. No: hides it.": "Yes: shows your boost reserves under the boost bar. No: hides it.",
   "Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.": "Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.",
+  "Yes": "Yes",
+  "No": "No",
   "Failed to initialize network, try again later": "Failed to initialize network, try again later",
   "Connection timed out. Please try Online again.": "Connection timed out. Please try Online again.",
   "Cannot synchronize the host's cup. Return to the lobby and retry.": "Cannot synchronize the host's cup. Return to the lobby and retry.",

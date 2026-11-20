@@ -110,6 +110,8 @@
   "Reserves bar": "Barra delle riserve",
   "Yes: shows your boost reserves under the boost bar. No: hides it.": "Sì: mostra le tue riserve di turbo sotto la barra del turbo. No: la nasconde.",
   "Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.": "Sì: lista di 8 con nome, wumpa e oggetto. No: solo i primi 4, senza extra.",
+  "Yes": "Sì",
+  "No": "No",
   "Failed to initialize network, try again later": "Impossibile avviare la rete. Riprova più tardi.",
   "Connection timed out. Please try Online again.": "Connessione scaduta. Riprova la modalità online.",
   "Cannot synchronize the host's cup. Return to the lobby and retry.": "Impossibile sincronizzare la coppa dell'host. Torna alla lobby e riprova.",

@@ -1630,6 +1630,7 @@ static int capture_finish_order(unsigned char *event) {
     void **items = list ? pointer_at(list, 0x20) : NULL;
     if (!items || count < 1 || count > 8) return 0;
     struct CupTotal order[8] = {0};
+    int times[8] = {0};
     unsigned occupied = 0;
     for (int i = 0; i < count; ++i) {
         if (!items[i]) return 0;
@@ -1647,7 +1648,21 @@ static int capture_finish_order(unsigned char *event) {
         if (position < 0) return 0;
         occupied |= 1u << position;
         order[position] = key;
+        times[position] = team_finish_time(items[i]);
     }
+    /* The host's order is who it saw finish first: a finish that reached it late put a faster racer
+     * behind slower ones, on every screen and in the Ranked report (20/11: 3rd in 3:34.76 shown 5th,
+     * behind 3:44.39 and 3:45.01, -45 MMR). Finishers with their final times (the network's lap
+     * timestamps, the same on every game) are ordered by them; the others keep the host's places. */
+    for (int i = 1; i < count; ++i)
+        for (int j = i; j > 0 && times[j - 1] > 0 && times[j] > 0 && times[j] < times[j - 1]; --j) {
+            const struct CupTotal key = order[j];
+            const int time = times[j];
+            order[j] = order[j - 1], times[j] = times[j - 1];
+            order[j - 1] = key, times[j - 1] = time;
+            printf("Race results: player %d (%d ms) ahead of player %d (%d ms): the host had them the other "
+                   "way round\n", key.id, time, order[j].id, times[j]);
+        }
     memcpy(finish_order, order, sizeof order);
     finish_order_count = count;
     return 1;
