@@ -950,11 +950,12 @@ static int ranked_party_check(const char *doc) {
     return 1;
 }
 
-/* Keep the Ranked party answer warm while the Ranked lobby is open. The check only runs on a
- * thread of its own, and startSearch reads the cached answer, so pressing Play never waits. */
+/* Keep the Ranked party answer warm while Ranked is the chosen mode, from the ModeSelect screen
+ * on. The check only runs on a thread of its own; startSearch reads whatever answer is there and
+ * otherwise lets the server's own startSearch validate the party. */
 static void ranked_preflight(void) {
     if (!ranked_selected || matchmaking_search || confirmed_ranked) return;
-    if (!runtime_online_mode_lobby_open() || !itemless_client_available()) return;
+    if (runtime_public_match_active() || !itemless_client_available()) return;
     char body[512], target[512], ids[192];
     const char *name = runtime_np_get_online_name();
     if (!name || !*name || !party_member_ids(ids, sizeof ids)) return;
@@ -1783,12 +1784,9 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
     if (ranked_selected) {
         if (!ranked_entry_allowed()) { *result = NULL; return result; }
         if (runtime_ranked_status(0) != 1) { *result = NULL; return result; }
-        int ready = ranked_party_check(raw);
-        if (ready != 1) {
-            *result = NULL;
-            if (ready == -1) notice("Checking Ranked compatibility. Please press Play again shortly.");
-            return result;
-        }
+        /* A pending check never blocks or pops a notice: the search document carries the party,
+         * and the server validates it in its own asynchronous startSearch, like the game does. */
+        if (ranked_party_check(raw) == 0) { *result = NULL; return result; }
     }
     pthread_mutex_lock(&mode_lock);
     uint64_t previous_mark=matchmaking_search ? search_mark : 0;

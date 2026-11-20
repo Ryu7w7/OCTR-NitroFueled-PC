@@ -334,14 +334,8 @@ static void test_ranked(void) {
     ranked_selected = 1;
     expire_check();
     int before = sent;
-    /* A cold check must never wait on the game's thread: the press is refused and the lobby tick
-     * (ranked_preflight) warms the answer for the next one. */
-    start_search(&result, NULL, doc, sizeof doc, NULL);
-    assert(!result && sent == before);
-    assert(strstr(message, "Checking Ranked compatibility"));
-    rejection[0] = 0;
-    prepare_public();
-    before = sent;
+    /* A cold check never waits and never pops a modal: the press starts the search and the
+     * server validates the party in its own asynchronous startSearch. */
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(result && sent == before + 1 && !rejection[0]);
     assert(strstr(payload, "\"octr_ranked\"") && !strstr(payload, "\"octr_itemless\""));
