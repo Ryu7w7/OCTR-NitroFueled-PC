@@ -2341,6 +2341,10 @@ static void ABI racer_finished(unsigned char *racer, int finished) {
     restore_finish_position(racer);
     original_finish_racer(racer, finished);
     restore_finish_position(racer);
+    /* Another PC's racer finishes here with its final time still 0: the finish board showed
+     * "-:--:--" for them until the host's results after the countdown (19/11, Leon_EF 2nd).
+     * Its network lap times are already in: the time now, as the results will set it. */
+    if (private_cup_race_active && first_finish) synchronize_cup_finish_time(racer);
     if (private_cup_race_active && first_finish) trace_cup_finish("native-callback",racer);
     if (team_result_count && team_ranking_project) {
         refresh_team_results();
