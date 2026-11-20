@@ -1652,7 +1652,8 @@ static void ABI placeable_event(void *self, void *event) {
         pthread_mutex_unlock(&mode_lock);
         /* A Ranked room still waiting for players (its countdown held, runtime_online_mode.c) can be
          * left: it may wait a long while, and nobody should be stuck in it (20/11). */
-        if (found && !runtime_online_mode_ranked_waiting()) {
+        /* Only the room's own lobby menu: Back still closes the settings or customization opened over it (20/11). */
+        if (found && !runtime_online_mode_ranked_waiting() && runtime_online_mode_lobby_placeable(self)) {
             fprintf(stderr, "Public matchmaking: Back blocked in found room\n");
             return; /* do NOT forward Back to native */
         }

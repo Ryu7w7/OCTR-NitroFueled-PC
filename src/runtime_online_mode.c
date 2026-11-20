@@ -760,6 +760,7 @@ void runtime_online_mode_leave_cup(void) {
 /* Network callbacks must never release native GUI handles on their worker thread. */
 static unsigned pending_online_reset;
 static uint64_t lobby_updated_ms;
+static unsigned char *lobby_seen_project, *lobby_seen_root; /* the lobby menu lobby_update last ran in: compared, never read */
 static int room_on, public_on;
 void runtime_online_mode_request_leave(int fresh) {
     __atomic_fetch_or(&pending_online_reset, fresh ? 3u : 1u, __ATOMIC_ACQ_REL);
@@ -2940,6 +2941,35 @@ void runtime_online_mode_note_frame(void) {
 int runtime_online_mode_room_on(void) { return __atomic_load_n(&room_on, __ATOMIC_RELAXED); }
 int runtime_online_mode_public_on(void) { return __atomic_load_n(&public_on, __ATOMIC_RELAXED); }
 
+/* Whether a placeable (the one a Back press went to) is part of the room's own lobby menu, not a menu opened
+ * over it (settings, customization): its parents (+0x40, live while it gets events) up to the lobby menu's
+ * root, or a top whose project (+0x20, as a root's) is that menu's. The lobby pointers are only compared. */
+int runtime_online_mode_lobby_placeable(void *placeable) {
+    unsigned char *matchmaking = handle_object(&matchmaking_project);
+    unsigned char *matchmaking_root = matchmaking ? pointer_at(matchmaking, 0x10) : NULL;
+    unsigned char *top = NULL;
+    const char *top_tag = NULL;
+    int found = 0;
+    unsigned char *p = placeable;
+    for (int depth = 0; p && (uintptr_t)p >= 0x10000 && depth < 32; ++depth) {
+        if (p == lobby_seen_root || (matchmaking_root && p == matchmaking_root)) { found = 1; break; }
+        top = p;
+        p = pointer_at(p, 0x40);
+    }
+    if (!found && top) {
+        unsigned char *project = pointer_at(top, 0x20);
+        found = project && (project == lobby_seen_project || (matchmaking && project == matchmaking));
+        top_tag = pointer_at(top, 0x28);
+        if ((uintptr_t)top_tag < 0x10000) top_tag = "(no tag)";
+    }
+    static int logged;
+    if (logged++ < 64)
+        printf("Found room: Back on %p (top %p \"%.40s\") %s the room's lobby menu (lobby root %p project %p, waiting room %p)\n",
+               placeable, (void *)top, top_tag ? top_tag : "", found ? "in" : "outside", (void *)lobby_seen_root,
+               (void *)lobby_seen_project, (void *)matchmaking);
+    return found;
+}
+
 int runtime_online_mode_lobby_open(void) {
     const uint64_t at = __atomic_load_n(&lobby_updated_ms, __ATOMIC_RELAXED);
     return at && monotonic_ms() - at < 1000;
@@ -3593,6 +3623,8 @@ int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams) {
 
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
     __atomic_store_n(&lobby_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
+    lobby_seen_project = owner ? pointer_at(owner, 0x20) : NULL;
+    lobby_seen_root = lobby_seen_project ? pointer_at(lobby_seen_project, 0x10) : NULL;
     const char *tag = owner ? pointer_at(owner, 0x28) : NULL;
     if (tag && (uintptr_t)tag < 0x10000) tag = NULL;
     {   /* the menus this behavior runs in, by their tag: the private room's own (OCTR_PRIVATE_LOBBY) or any other,
