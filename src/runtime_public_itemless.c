@@ -782,8 +782,12 @@ static void check_found_room_alive(void) {
     runtime_public_itemless_abort_queue();
 }
 
+static void ranked_preflight(void);
+static int party_member_ids(char *ids, size_t size);
+
 void runtime_public_itemless_update(void) {
     members_tick();
+    ranked_preflight();
     runtime_party_server_tick(); /* opt-in: poll server-backed party for host changes (skips races) */
     update_search_clock();
     check_found_room_alive();
@@ -914,6 +918,8 @@ static int compatibility_check(const char *target,char *body,size_t size) {
     return result;
 }
 
+static char ranked_target[512]; /* the last Ranked party check target */
+
 static int ranked_party_check(const char *doc) {
     const char *members = runtime_json_field(doc, "members");
     char ids[192], target[512], body[512];
@@ -930,17 +936,12 @@ static int ranked_party_check(const char *doc) {
     const char *name = runtime_np_get_online_name();
     if (*members != ']' || !n || !name) return 0;
     snprintf(target, sizeof target, "/ryunet/ranked-party?name=%s&members=%s&mode=%d", name, ids, selected);
-    int status = compatibility_check(target, body, sizeof body);
-    if (status == -1) {
-        /* The check just started: wait for it instead of bouncing the player out with a
-         * press-again notice. A healthy server answers in milliseconds; the notice stays
-         * as the timeout fallback. */
-        uint64_t deadline = check_clock() + 5000;
-        do {
-            usleep(50000);
-            status = compatibility_check(target, body, sizeof body);
-        } while (status == -1 && check_clock() < deadline);
-    }
+    snprintf(ranked_target, sizeof ranked_target, "%s", target);
+    /* No wait here: this runs on the game's thread, inside startSearch. The 50 ms poll loop that
+     * used to wait for the answer froze the frame where Play started the search for 1.5 s
+     * (log 20/11 13:03: 1522/1623/1521 ms, guest CPU 3-4 ms). ranked_preflight keeps the answer
+     * cached while the lobby is open, so the press normally finds it here. */
+    const int status = compatibility_check(target, body, sizeof body);
     if (status == -1) return -1;
     if (status != 200 || strcmp(body, "ok")) {
         reject_search(status == 409 ? body : "Cannot verify Ranked server and party compatibility. Please retry.");
@@ -949,14 +950,30 @@ static int ranked_party_check(const char *doc) {
     return 1;
 }
 
+/* Keep the Ranked party answer warm while the Ranked lobby is open. The check only runs on a
+ * thread of its own, and startSearch reads the cached answer, so pressing Play never waits. */
+static void ranked_preflight(void) {
+    if (!ranked_selected || matchmaking_search || confirmed_ranked) return;
+    if (!runtime_online_mode_lobby_open() || !itemless_client_available()) return;
+    char body[512], target[512], ids[192];
+    const char *name = runtime_np_get_online_name();
+    if (!name || !*name || !party_member_ids(ids, sizeof ids)) return;
+    snprintf(target, sizeof target, "/ryunet/ranked-party?name=%s&members=%s&mode=%d",
+             name, ids, selected);
+    (void)compatibility_check(target, body, sizeof body);
+    if (ranked_target[0] && strcmp(ranked_target, target))
+        (void)compatibility_check(ranked_target, body, sizeof body);
+}
+
 /* Check before private Ready/Start can run its VSC side effects.
  * Read the same participant IDs used by the native manager. */
 static _Thread_local const char *dispatch_approved_party;
 static _Thread_local char checked_party[512];
-static int early_party_check(const char *feature, int notify) {
-    char ids[192] = "", target[512], body[512] = "";
-    checked_party[0]=0;
-    const char *online_name=runtime_np_get_online_name();
+/* The account ids the native search document carries: the primary local account, then the party's
+ * remote members (a5d286 / a5d329 / a5d51e). The login gate and the Ranked party check key on
+ * this same list, so both build it here. */
+static int party_member_ids(char *ids, size_t size) {
+    ids[0] = 0;
     void *manager = participants ? *participants : NULL;
     void *list = manager ? *(void **)((char *)manager + 0x10) : NULL;
     int count = list ? *(int *)((char *)list + 0xc) : 0;
@@ -964,36 +981,47 @@ static int early_party_check(const char *feature, int notify) {
     uint64_t seen[8];
     int total = 0;
     size_t length = 0;
-    if (!itemless_client_available() || !online_name || !*online_name || !items || count < 1 || count > 8)
-        goto unavailable;
+    if (!items || count < 1 || count > 8) return 0;
     /* Native search constructor (a5d286) takes the primary local account. */
     for (int i = 0; i < count; ++i) {
-        if (!items[i]) goto unavailable;
+        if (!items[i]) return 0;
         unsigned kind;
         memcpy(&kind, (char *)items[i] + 0x20, sizeof kind);
         if (kind > 7) continue;
         memcpy(&seen[total++], (char *)items[i] + 0xa8, sizeof seen[0]);
         break;
     }
-    if (!total || !seen[0]) goto unavailable;
+    if (!total || !seen[0]) return 0;
     /* a5d329 / a5d51e append remote party accounts, not local participants. */
     void *party = party_manager ? *party_manager : NULL;
     void *roster = party ? *(void **)((char *)party + 0x30) : NULL;
     int remote_count = roster ? *(int *)((char *)roster + 0xc) : -1;
     void **remote = roster ? *(void ***)((char *)roster + 0x20) : NULL;
-    if (remote_count < 0 || remote_count > 8 || (remote_count && !remote)) goto unavailable;
+    if (remote_count < 0 || remote_count > 8 || (remote_count && !remote)) return 0;
     for (int i = 0; i < remote_count; ++i) {
-        if (!remote[i]) goto unavailable;
+        if (!remote[i]) return 0;
         if (*((unsigned char *)remote[i] + 0x2c)) continue;
         uint64_t pid;
         memcpy(&pid, (char *)remote[i] + 0x18, sizeof pid);
-        if (!pid || total == 8) goto unavailable;
-        for (int j = 0; j < total; ++j) if (seen[j] == pid) goto unavailable;
+        if (!pid || total == 8) return 0;
+        for (int j = 0; j < total; ++j) if (seen[j] == pid) return 0;
         seen[total++] = pid;
     }
     for (int i = 0; i < total; ++i)
-        length += (size_t)snprintf(ids + length, sizeof ids - length,
+        length += (size_t)snprintf(ids + length, size - length,
                                   "%s%" PRIu64, i ? "," : "", seen[i]);
+    return length < size;
+}
+
+static int early_party_check(const char *feature, int notify) {
+    char ids[192] = "", target[512], body[512] = "";
+    checked_party[0]=0;
+    const char *online_name=runtime_np_get_online_name();
+    int total = 1;
+    if (!itemless_client_available() || !online_name || !*online_name ||
+        !party_member_ids(ids, sizeof ids))
+        goto unavailable;
+    for (const char *at = ids; *at; ++at) if (*at == ',') ++total;
     if (notify) fprintf(stderr, "ITEMLESS: pre-transition roster members=%s local=1 remote=%d\n", ids, total-1);
     if (feature)
         snprintf(target, sizeof target, "/ryunet/private-party?name=%s&feature=%s&release=%s&members=%s",

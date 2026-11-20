@@ -32,6 +32,8 @@ int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
+static int lobby_open = 1;
+int runtime_online_mode_lobby_open(void) { return lobby_open; }
 int runtime_online_team_points_get(int out[4]) { memset(out, 0, 4 * sizeof *out); return 0; } /* no teams here */
 void runtime_online_team_points_adopt(int teams, const int points[4]) { (void)teams; (void)points; }
 static void *hof_test_wrapper, *hof_test_content;
@@ -312,9 +314,10 @@ static void ABI resume_test_start(void *self) {
     ++resumed_starts;
 }
 static void prepare_public(void) {
-    if (!selected || rejection[0]) return;
-    expire_check(); char body[512];
-    (void)compatibility_check("/ryunet/ranked-party?name=LocalHost&members=1,2&mode=1",body,sizeof body);
+    if ((!selected && !ranked_selected) || rejection[0]) return;
+    expire_check(); char body[512], target[128];
+    snprintf(target,sizeof target,"/ryunet/ranked-party?name=LocalHost&members=1,2&mode=%d",selected);
+    (void)compatibility_check(target,body,sizeof body);
     await_check();
 }
 static void test_ranked(void) {
@@ -331,7 +334,14 @@ static void test_ranked(void) {
     ranked_selected = 1;
     expire_check();
     int before = sent;
-    /* The ranked check now waits inline instead of bouncing the player with a notice. */
+    /* A cold check must never wait on the game's thread: the press is refused and the lobby tick
+     * (ranked_preflight) warms the answer for the next one. */
+    start_search(&result, NULL, doc, sizeof doc, NULL);
+    assert(!result && sent == before);
+    assert(strstr(message, "Checking Ranked compatibility"));
+    rejection[0] = 0;
+    prepare_public();
+    before = sent;
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(result && sent == before + 1 && !rejection[0]);
     assert(strstr(payload, "\"octr_ranked\"") && !strstr(payload, "\"octr_itemless\""));
@@ -365,6 +375,7 @@ selected = 1;
     assert(!runtime_ranked_active());
     status = 404;
     expire_check();
+    prepare_public(); /* the lobby tick caches the refused answer */
     int before_unsupported = sent;
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(!result && sent == before_unsupported && strstr(rejection, "Ranked server"));
