@@ -149,7 +149,7 @@ uint64_t runtime_public_room(void);
 int runtime_public_ranked_short(void);
 int runtime_public_ranked_min_players(void); /* players a Ranked room needs, as the server said (6 until then) */
 int runtime_online_mode_room_players(void);   /* players in the online room (the game's list) */
-int runtime_online_mode_ranked_waiting(void);  /* a Ranked room short of players: countdown held, "waiting for players" shown */
+int runtime_online_mode_ranked_waiting(void);  /* a Ranked room short of players: countdown held, "WAITING 2/3" shown */
 int runtime_private_match_active(void);
 int runtime_online_party_active(void);
 /* 1 accepted, 0 rejected, -1 asynchronous check pending. */
@@ -316,6 +316,8 @@ void runtime_party_server_tick(void);                     /* guest: poll for hos
 void runtime_party_server_defer_promote(const char *successor); /* host: promote after a race ends */
 void runtime_party_server_matchmaking(int i_am_host, const char *host_name); /* shared session for a queue */
 void runtime_party_server_matchmaking_leave(void); /* queue quit: DELETE me from the shared session */
+int runtime_online_team_points_get(int out[4]);   /* the room's team points; returns its team count (0/1: none) */
+void runtime_online_team_points_adopt(int teams, const int points[4]); /* the host's, from the room's session */
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */

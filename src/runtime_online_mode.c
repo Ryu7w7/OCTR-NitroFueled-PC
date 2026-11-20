@@ -128,6 +128,7 @@ static void **gui_manager, **race_finished_type, **local_racers_finished_type;
 static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
 static void *lobby_members_project, *hof_project, *ranked_score_project, *matchmaking_project;
+static void *lobby_timer_project;   /* ui/Octane_Lobby_Timer, the lobby's countdown: a project of its own */
 static int matchmaking_private_project;
 static uint64_t ranked_score_started;
 static int ranked_score_phase, ranked_score_finished;
@@ -1166,6 +1167,10 @@ static void ABI open_race_project(void **result, void *manager, const char *name
         printf("Online UI: opened %s project=%p root=%p flags=%x alpha=%g\n",
                name, project, root, flags, (double)alpha);
     }
+    if (name && !strcasecmp(name, "Octane_Lobby_Timer")) {
+        assign_handle((unsigned char *)&lobby_timer_project, result ? *result : NULL);
+        printf("Online UI: lobby timer opened (%p)\n", (void *)handle_object(&lobby_timer_project));
+    }
     if (name && !strcasecmp(name, "Octane_LobbyMembers")) {
         team_preview_manager = manager;
         if (options) {   /* the open options (0x986170 reads +0x00..+0x21): the team screen opens with the same */
@@ -1270,10 +1275,13 @@ static void ABI cup_project_event(void *self, void *event) {
         event_type(event) == *race_finished_type)
         ranked_score_finished = 1;
     if (self == handle_object(&lobby_members_project) || self == handle_object(&hof_project) ||
-        self == handle_object(&ranked_score_project) || self == handle_object(&matchmaking_project)) {
+        self == handle_object(&ranked_score_project) || self == handle_object(&matchmaking_project) ||
+        self == handle_object(&lobby_timer_project)) {
         void *kind = event_type(event);
         const char *name = kind ? pointer_at(kind, 0x10) : NULL;
         if (name && !strcmp(name, "igGuiEventProjectUnload")) {
+            if (self == handle_object(&lobby_timer_project))
+                assign_handle((unsigned char *)&lobby_timer_project, NULL);
             if (self == handle_object(&matchmaking_project))
                 assign_handle((unsigned char *)&matchmaking_project,NULL);
             if (self == handle_object(&ranked_score_project)) {
@@ -3357,6 +3365,24 @@ int runtime_online_team_points(int team) {
     return team >= 0 && team < 4 && room_points_teams >= 2 ? __atomic_load_n(&room_points[team], __ATOMIC_RELAXED) : -1;
 }
 
+/* The room's team points kept on the server with the room's session (runtime_party_server.c), so a
+ * player who leaves the room and joins again gets them back (20/11: only theirs started from 0).
+ * The host's game reports them; the others take the host's. Game thread. */
+int runtime_online_team_points_get(int out[4]) {
+    memcpy(out, room_points, sizeof room_points);
+    return room_points_teams;
+}
+
+void runtime_online_team_points_adopt(int teams, const int points[4]) {
+    if (teams < 2 || teams > 4 || !in_online_room() || private_single_race_active || team_race_ui_owner) return;
+    if (room_points_teams >= 2 && room_points_teams != teams) return;   /* this room's teams changed meanwhile */
+    if (room_points_teams == teams && !memcmp(room_points, points, sizeof room_points)) return;
+    memcpy(room_points, points, sizeof room_points);
+    memcpy(room_points_base, points, sizeof room_points_base);
+    room_points_teams = teams;
+    printf("Team lobby: the room's points from the host %d / %d / %d / %d\n", points[0], points[1], points[2], points[3]);
+}
+
 /* The teams of a race, kept by player name: back in the room the game deals the teams out again, and the host puts
  * every player back in the team it raced in (0xbf36c0 tells the others), for a few seconds after coming back. */
 #define KEPT_TEAMS 8
@@ -3590,39 +3616,56 @@ int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams) {
     return -1;
 }
 
+/* The lobby timer's two texts (ui/Octane_Lobby_Timer, a project of its own): TimerDesc ("MATCH BEGINS
+ * IN") and the time, its next sibling (in the live menu the time's name field holds the time, so it
+ * is found by place, not by name: the 20/11 log's dump). The project's root wraps them in an
+ * igGuiComposition (runtime_online_mode_content). */
+static int lobby_timer_texts(unsigned char **desc, unsigned char **value) {
+    *desc = *value = NULL;
+    unsigned char *project = handle_object(&lobby_timer_project);
+    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    if (!root) return 0;
+    *desc = find_placeable(root, "TimerDesc", 0);
+    unsigned char *content = runtime_online_mode_content(root);
+    if (!*desc && content) *desc = find_placeable(content, "TimerDesc", 0);
+    unsigned char *parent = *desc ? pointer_at(*desc, 0x40) : NULL;
+    unsigned char *list = parent ? pointer_at(parent, 0x48) : NULL;
+    uint32_t count = 0;
+    if (list) memcpy(&count, list + 0x0c, 4);
+    unsigned char **items = list ? (unsigned char **)pointer_at(list, 0x20) : NULL;
+    for (uint32_t i = 0; items && count <= 16 && i + 1 < count; ++i)
+        if (items[i] == *desc) { *value = items[i + 1]; break; }
+    return *desc && *value;
+}
+
 /* Ranked waiting for players (runtime_online_mode_ranked_waiting, countdown held): the lobby timer
- * (ui/Octane_Lobby_Timer: TimerValue the time, TimerDesc its label) shows "WAITING FOR PLAYERS 2/3"
- * with the time hidden, and goes back to the countdown as it was once the minimum is there. Every
- * client does it (the host holds the time; the guests only show it). */
-static void ranked_waiting_timer(unsigned char *owner) {
-    static int shown, shown_players, shown_needed;
-    static char saved_desc[128];
+ * reads "WAITING 2/3", the time hidden, instead of "MATCH BEGINS IN" over the time. Once the minimum
+ * is there it is the countdown again, from its full time and the same for everyone (every game held
+ * it at full); a player leaving below the minimum brings the waiting text back. Set every frame
+ * (set_text does nothing when the text is already that one): the timer's script may write them. */
+static void ranked_waiting_timer(void) {
+    static int shown;
+    static char saved_desc[96];
     const int waiting = runtime_online_mode_ranked_waiting();
     if (!waiting && !shown) return;
-    unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
-    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
-    unsigned char *desc = root ? find_placeable(root, "TimerDesc", 0) : NULL;
-    unsigned char *value = root ? find_placeable(root, "TimerValue", 0) : NULL;
-    if (!desc || !value) {
+    unsigned char *desc, *value;
+    if (!lobby_timer_texts(&desc, &value)) {
         if (!waiting) shown = 0;   /* that lobby is gone: a new one starts with its own timer */
         return;
     }
     if (waiting) {
-        const int players = runtime_online_mode_room_players(), needed = runtime_public_ranked_min_players();
         if (!shown) {
-            const char *old = pointer_at(desc, 0x30);
-            snprintf(saved_desc, sizeof saved_desc, "%s", old && (uintptr_t)old >= 0x10000 ? old : "");
-            unsigned flags;
-            memcpy(&flags, desc + 12, 4);
-            printf("Ranked lobby: timer label \"%.60s\" (flags %#x) -> waiting for players\n", saved_desc, flags);
+            const char *d = pointer_at(desc, 0x30);
+            snprintf(saved_desc, sizeof saved_desc, "%s", d && (uintptr_t)d >= 0x10000 ? d : "");
+            printf("Ranked lobby: waiting for players (timer \"%s\")\n", saved_desc);
         }
-        if (!shown || players != shown_players || needed != shown_needed) {
-            char text[96];
-            snprintf(text, sizeof text, runtime_text("WAITING FOR PLAYERS %d/%d"), players, needed);
-            set_text(desc, text);
-            shown_players = players;
-            shown_needed = needed;
-        }
+        /* "WAITING 2/3" on the label, one short line (it has no second line, and a longer text spills
+         * out of the box: the 20/11 test). The timer draws its seconds by itself (its text field only
+         * ever holds "1:00"), so the time is hidden instead of rewritten. */
+        char text[64];
+        snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), runtime_online_mode_room_players(),
+                 runtime_public_ranked_min_players());
+        set_text(desc, text);
         if (hide_placeable) hide_placeable(value, 1);
         shown = 1;
         return;
@@ -3630,7 +3673,7 @@ static void ranked_waiting_timer(unsigned char *owner) {
     if (saved_desc[0]) set_text(desc, saved_desc);
     if (hide_placeable) hide_placeable(value, 0);
     shown = 0;
-    puts("Ranked lobby: minimum reached, timer back to the countdown");
+    puts("Ranked lobby: minimum reached, the countdown is back");
 }
 
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -3656,7 +3699,7 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     refresh_lobby_card(owner);
     refresh_lobby_members_visibility();
     runtime_public_itemless_update();
-    ranked_waiting_timer(owner);
+    ranked_waiting_timer();
     runtime_party_experiment_tick();
     if (runtime_private_party_update()) return;
     resume_private_map();
@@ -4437,7 +4480,7 @@ int runtime_online_mode_room_players(void) {
 }
 
 /* A Ranked room still short of the players the server asks for: its countdown is held and the lobby
- * timer says "waiting for players" (ranked_waiting_timer). */
+ * timer reads "WAITING 2/3" (ranked_waiting_timer). */
 int runtime_online_mode_ranked_waiting(void) {
     if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
     const int players = runtime_online_mode_room_players();

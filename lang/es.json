@@ -131,7 +131,7 @@
   "Cannot prepare matchmaking search.": null,
   "A player left your party during matchmaking. Leave and search again.": null,
   "Not enough players to start Ranked. Back to queue.": null,
-  "WAITING FOR PLAYERS %d/%d": null,
+  "WAITING": null,
   "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.": null,
   "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it.": "Una sala Clasificatoria Sin objetos está esperando jugadores. Elige Clasificatoria y luego Sin objetos para unirte."
 }

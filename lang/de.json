@@ -131,7 +131,7 @@
   "Cannot prepare matchmaking search.": "Die Spielersuche konnte nicht vorbereitet werden.",
   "A player left your party during matchmaking. Leave and search again.": "Ein Spieler hat deine Gruppe während der Suche verlassen. Verlasse die Suche und starte sie erneut.",
   "Not enough players to start Ranked. Back to queue.": "Nicht genügend Spieler für Rangliste. Zurück zur Warteschlange.",
-  "WAITING FOR PLAYERS %d/%d": "WARTE AUF SPIELER %d/%d",
+  "WAITING": "WARTEN",
   "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.": "Ein Ranglisten-Raum (Normal) wartet auf Spieler. Wähle Rangliste und dann Normal, um beizutreten.",
   "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it.": "Ein Ranglisten-Raum (Ohne Items) wartet auf Spieler. Wähle Rangliste und dann Ohne Items, um beizutreten."
 }

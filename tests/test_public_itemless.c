@@ -32,6 +32,8 @@ int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
+int runtime_online_team_points_get(int out[4]) { memset(out, 0, 4 * sizeof *out); return 0; } /* no teams here */
+void runtime_online_team_points_adopt(int teams, const int points[4]) { (void)teams; (void)points; }
 static void *hof_test_wrapper, *hof_test_content;
 void *runtime_online_mode_content(void *placeable) { return placeable == hof_test_wrapper ? hof_test_content : NULL; }
 static void *hof_focused_project, *hof_focused_list;
