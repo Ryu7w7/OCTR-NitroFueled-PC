@@ -2579,11 +2579,16 @@ static void ABI private_race_timer_done(void) {
             fputs("Native private CUP: current track zone is missing\n", stderr);
         }
     }
-    /* Ranked goes back to its room like a public match: the room keeps its players for the next map
-     * vote (the server's Ranked session keeps them across races, and its countdown clock starts again
-     * when the lobby opens). Quitting everyone to the main menu here (231dd80) broke the room after
-     * every Ranked race, whoever hosted it (user, 20/11). */
-    if (runtime_ranked_active()) puts("Ranked: race countdown reached 0, everyone back to the room");
+    if (runtime_ranked_active()) {
+        printf("Ranked: race countdown reached 0, quitting to main menu with party\n");
+        const int ret_mode = runtime_public_itemless_lobby_mode() ? 1 : 0;
+        runtime_online_mode_set_return_mode(ret_mode);
+        runtime_public_itemless_menu_return();
+        if (quit_to_main_menu && race_manager && *race_manager) {
+            quit_to_main_menu(*race_manager, 0, 0, 1, 0);
+            return;
+        }
+    }
     return_to_lobby();
 }
 
