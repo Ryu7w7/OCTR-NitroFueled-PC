@@ -4,6 +4,7 @@
 #include "runtime_hall_of_fame.h"
 #include "runtime_name_colors.h"
 #include "runtime_ai_catchup.h"
+#include "runtime_chat.h"
 #include "runtime_np_online.h"
 #include "runtime_ranked.h"
 #include <stdio.h>
@@ -3360,27 +3361,76 @@ static void close_team_preview(void) {
 
 int runtime_rooms_created(void);   /* runtime_services.c */
 
+/* The room's points are the host's: each guest adds up only the races it saw, so one who left and came back starts
+ * from 0. The host sends its sum through the room chat's channel (runtime_chat.c, a line the chat never shows) when
+ * it changes, and again now and then; a guest takes the latest from the room's host. Kept apart from the game's
+ * own traffic. */
+static int heard_points[5];             /* teams, then the four sums */
+static unsigned heard_serial;           /* bumped by each new message (any thread) */
+
+void runtime_online_team_points_heard(const char *nick, const char *data) {
+    char host[24] = "";
+    runtime_room_mode_host_name(host);
+    if (!nick || !data) return;
+    if (host[0] && strcasecmp(nick, host)) return;   /* another player's: the room's host only */
+    int v[5];
+    if (sscanf(data, "%d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4]) != 5 || (v[0] != 2 && v[0] != 4)) return;
+    for (int i = 1; i < 5; ++i) if (v[i] < 0 || v[i] > 100000) return;
+    for (int i = 0; i < 5; ++i) __atomic_store_n(&heard_points[i], v[i], __ATOMIC_RELAXED);
+    __atomic_add_fetch(&heard_serial, 1, __ATOMIC_RELEASE);
+}
+
+/* Every frame: the host tells the room its points, a guest takes the host's. */
+static void share_room_points(int teams) {
+    if (teams != 2 && teams != 4) return;
+    const uint64_t now = monotonic_ms();
+    if (room_host()) {
+        static int sent[4] = {-1, -1, -1, -1}, sent_teams;
+        static uint64_t sent_at;
+        int any = 0, changed = sent_teams != teams;
+        for (int t = 0; t < 4; ++t) {
+            any |= room_points[t] > 0;
+            changed |= sent[t] != room_points[t];
+        }
+        if (!any || !in_online_room() || (!changed && now - sent_at < 30000)) return;
+        char line[96];
+        snprintf(line, sizeof line, RC_TEAM_POINTS_TAG "%d %d %d %d %d", teams, room_points[0], room_points[1], room_points[2],
+                 room_points[3]);
+        if (runtime_chat_send_data(line)) {
+            memcpy(sent, room_points, sizeof sent);
+            sent_teams = teams;
+            sent_at = now;
+            printf("Team lobby: the room's points sent to the room (%d / %d / %d / %d)\n", room_points[0], room_points[1],
+                   room_points[2], room_points[3]);
+        }
+        return;
+    }
+    static unsigned taken;
+    const unsigned serial = __atomic_load_n(&heard_serial, __ATOMIC_ACQUIRE);
+    if (serial == taken) return;
+    taken = serial;
+    int v[5];
+    for (int i = 0; i < 5; ++i) v[i] = __atomic_load_n(&heard_points[i], __ATOMIC_RELAXED);
+    if (v[0] != teams) {
+        static unsigned told;
+        if (told != serial) {
+            told = serial;
+            printf("Team lobby: the host's points are for %d teams, this room has %d now: kept for later\n", v[0], teams);
+        }
+        taken = serial - 1;   /* again when the room's teams match */
+        return;
+    }
+    if (memcmp(room_points, v + 1, sizeof room_points)) {
+        memcpy(room_points, v + 1, sizeof room_points);
+        if (!private_single_race_active) memcpy(room_points_base, room_points, sizeof room_points_base);
+        room_points_teams = teams;
+        printf("Team lobby: the host's points for the room taken (%d / %d / %d / %d)\n", v[1], v[2], v[3], v[4]);
+    }
+}
+
 /* For the overlay (any thread): team `team`'s points in this room so far. */
 int runtime_online_team_points(int team) {
     return team >= 0 && team < 4 && room_points_teams >= 2 ? __atomic_load_n(&room_points[team], __ATOMIC_RELAXED) : -1;
-}
-
-/* The room's team points kept on the server with the room's session (runtime_party_server.c), so a
- * player who leaves the room and joins again gets them back (20/11: only theirs started from 0).
- * The host's game reports them; the others take the host's. Game thread. */
-int runtime_online_team_points_get(int out[4]) {
-    memcpy(out, room_points, sizeof room_points);
-    return room_points_teams;
-}
-
-void runtime_online_team_points_adopt(int teams, const int points[4]) {
-    if (teams < 2 || teams > 4 || !in_online_room() || private_single_race_active || team_race_ui_owner) return;
-    if (room_points_teams >= 2 && room_points_teams != teams) return;   /* this room's teams changed meanwhile */
-    if (room_points_teams == teams && !memcmp(room_points, points, sizeof room_points)) return;
-    memcpy(room_points, points, sizeof room_points);
-    memcpy(room_points_base, points, sizeof room_points_base);
-    room_points_teams = teams;
-    printf("Team lobby: the room's points from the host %d / %d / %d / %d\n", points[0], points[1], points[2], points[3]);
 }
 
 /* The teams of a race, kept by player name: back in the room the game deals the teams out again, and the host puts
@@ -3511,6 +3561,7 @@ static void team_lobby_frame(void) {
         if (room_points_teams == 0 && (teams == 2 || teams == 4)) room_points_teams = teams;   /* first teams in this room */
         if (racing && private_team_race()) keep_race_teams();
         else if (kept_pending && in_online_room()) restore_race_teams(teams);   /* teams may be off: it turns them on */
+        if (!racing) share_room_points(teams);
     }
     {
         int room_teams = 1;

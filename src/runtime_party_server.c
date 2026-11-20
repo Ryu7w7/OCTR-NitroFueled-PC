@@ -49,77 +49,6 @@ static int poll_busy, poll_ready;
 static uint64_t poll_next;
 static char poll_target[512], poll_reply[2048];
 
-/* The room's team points (private 2/4 teams) live on the server with the session: the host's game
- * reports them when they change, everyone else takes them from the members poll, so a player who
- * leaves and joins again gets them back (20/11). One report in flight at a time. */
-static int points_busy;
-static char points_target[256], points_sent[256];   /* the report in flight; the last one kept ("" none) */
-
-static void *post_points(void *unused) {
-    (void)unused;
-    char target[sizeof points_target], body[256];
-    pthread_mutex_lock(&lock);
-    snprintf(target, sizeof target, "%s", points_target);
-    pthread_mutex_unlock(&lock);
-    const int status = runtime_ryunet_request("POST", target, body, sizeof body);
-    pthread_mutex_lock(&lock);
-    if (status != 200) points_sent[0] = 0;   /* sent again on the next poll */
-    points_busy = 0;
-    pthread_mutex_unlock(&lock);
-    if (status != 200) fprintf(stderr, "Party server: team points not kept (%d)\n", status);
-    return NULL;
-}
-
-static void share_team_points(const char *sid, const char *me, int is_host, const char *body) {
-    if (is_host) {
-        int points[4], teams = runtime_online_team_points_get(points);
-        if (teams < 2 || teams > 4) return;
-        char target[sizeof points_target];
-        snprintf(target, sizeof target, "/v1/sessions/%s/points?name=%s&teams=%d&points=%d,%d,%d,%d",
-                 sid, me, teams, points[0], points[1], points[2], points[3]);
-        pthread_mutex_lock(&lock);
-        const int send = !points_busy && strcmp(target, points_sent);
-        if (send) {
-            points_busy = 1;
-            snprintf(points_target, sizeof points_target, "%s", target);
-            snprintf(points_sent, sizeof points_sent, "%s", target);
-        }
-        pthread_mutex_unlock(&lock);
-        if (!send) return;
-        pthread_t thread;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&thread, &attr, post_points, NULL)) {
-            pthread_mutex_lock(&lock);
-            points_busy = 0;
-            points_sent[0] = 0;
-            pthread_mutex_unlock(&lock);
-        }
-        pthread_attr_destroy(&attr);
-        return;
-    }
-    pthread_mutex_lock(&lock);
-    points_sent[0] = 0;   /* a guest promoted later reports its points afresh */
-    pthread_mutex_unlock(&lock);
-    const char *teams_field = runtime_json_field(body, "teams");
-    const char *list = runtime_json_field(body, "points");
-    const int teams = teams_field ? (int)strtol(teams_field, NULL, 10) : 0;
-    if (teams < 2 || teams > 4 || !list || *list != '[') return;
-    int points[4];
-    const char *at = list + 1;
-    for (int i = 0; i < 4; ++i) {
-        char *end;
-        const long value = strtol(at, &end, 10);
-        if (end == at || value < 0 || value > 100000) return;
-        points[i] = (int)value;
-        at = end;
-        while (*at == ' ') ++at;
-        if (i < 3 && *at++ != ',') return;
-    }
-    runtime_online_team_points_adopt(teams, points);
-}
-
 static void *poll_members(void *unused) {
     (void)unused;
     char target[sizeof poll_target], body[sizeof poll_reply];
@@ -418,7 +347,6 @@ void runtime_party_server_tick(void) {
     /* Keep local owner in sync with the server so promote() knows if we are still host. */
     if (ownern[0]) snprintf(owner_name, sizeof owner_name, "%s", ownern);
     pthread_mutex_unlock(&lock);
-    if (!mm) share_team_points(sid, me, is_host, body);
 
     if (changed) {
         fprintf(stderr, "Party server: session generation=%llu owner=%s%s%s\n",

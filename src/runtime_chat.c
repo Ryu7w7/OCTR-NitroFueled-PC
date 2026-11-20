@@ -171,7 +171,13 @@ static void apply_reply(char *reply) {
         char *nick = strchr(line, '\t'), *text = nick ? strchr(nick + 1, '\t') : NULL;
         if (!text) continue;
         *nick++ = 0, *text++ = 0;
-        if (nick_ok(nick)) add_line((unsigned)strtoul(line, NULL, 10), nick, text), added = 1;
+        if (!nick_ok(nick)) continue;
+        /* the host's team points for the room (runtime_online_mode.c): data, not a line to show */
+        if (!strncmp(text, RC_TEAM_POINTS_TAG, sizeof RC_TEAM_POINTS_TAG - 1)) {
+            runtime_online_team_points_heard(nick, text + sizeof RC_TEAM_POINTS_TAG - 1);
+            continue;
+        }
+        add_line((unsigned)strtoul(line, NULL, 10), nick, text), added = 1;
     }
     if (added) ++serial;
     pthread_mutex_unlock(&lock);
@@ -373,6 +379,18 @@ int runtime_chat_send(const char *text) {
     if (!text || !*text || strlen(text) >= RC_SEND) return 0;
     pthread_mutex_lock(&lock);
     const int ok = enabled && outbox_count < OUTBOX;
+    if (ok) {
+        snprintf(outbox[outbox_count++], RC_SEND, "%s", text);
+        pthread_cond_signal(&wake);
+    }
+    pthread_mutex_unlock(&lock);
+    return ok;
+}
+
+int runtime_chat_send_data(const char *text) {
+    if (!text || !*text || strlen(text) >= RC_SEND) return 0;
+    pthread_mutex_lock(&lock);
+    const int ok = outbox_count < OUTBOX;
     if (ok) {
         snprintf(outbox[outbox_count++], RC_SEND, "%s", text);
         pthread_cond_signal(&wake);
