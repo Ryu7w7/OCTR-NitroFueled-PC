@@ -3699,13 +3699,56 @@ static int lobby_timer_texts(unsigned char **desc, unsigned char **value) {
 static float ranked_component_left = -1.0f;
 static uint64_t ranked_component_at;
 
-/* Ranked lobby timer: the port writes it. The game's timer GUI counts its number on its own from when
- * its menu opened, whatever the timer component says (the 20/11 dumps: no time in its behavior, only
- * state flags), so the players already waiting saw 45 or 40 when the last player came in while the
- * component, held at 60, started from 60 with everyone. The GUI's number is hidden and its label says
- * "WAITING 2/3" while the room is short, then "MATCH BEGINS IN 41" from the component's time. Set every
- * frame (set_text does nothing when the text is already that one). One short line: the label has no
- * second line and a longer text spills out of its box. */
+/* Ranked lobby timer, the timer artwork's own two lines (TimerDesc over TimerValue): while the room is
+ * short of its minimum the label reads "WAITING" and the number below reads "2/3"; from the minimum the
+ * label is the game's own and the number counts the map vote down, red and pulsing under ten seconds
+ * (the timer's own LowTime animation, played here so it follows the component's time, not the GUI's).
+ * The game's CGuiBehaviorTimer is stopped for this project: its update is the one counting and writing
+ * TimerValue and playing that pulse (the behavior's vtable +0xd8), so the port owns both lines. Only
+ * this instance's vtable is swapped, a copy: other timers of the game keep working. */
+static unsigned char *timer_value, *timer_writer;
+static BehaviorUpdate timer_native_update;
+static void **timer_vtable;
+static float timer_value_color[4], timer_value_scale[3];
+static uint64_t timer_pulse_at;
+
+static void ABI timer_update(unsigned char *self, unsigned char *owner, float dt) {
+    if (self == timer_writer) return;   /* the port writes this timer: no count, no pulse */
+    if (timer_native_update) timer_native_update(self, owner, dt);
+}
+
+/* Stop the game's timer of this project (found by the text it writes, +0x50). Retried until it is
+ * found; a project that opens later gets its own instance. */
+static void timer_stop_native(unsigned char *desc, unsigned char *value) {
+    if (timer_writer && pointer_at(timer_writer, 0) == timer_vtable) return;
+    unsigned char *behavior = NULL, *node = pointer_at(desc, 0x40);
+    for (int up = 0; node && up < 4 && !behavior; ++up, node = pointer_at(node, 0x40)) {
+        unsigned char *behaviors = pointer_at(node, 0xe8);
+        unsigned char *items = behaviors ? pointer_at(behaviors, 0x20) : NULL;
+        uint32_t count = 0;
+        if (behaviors) memcpy(&count, behaviors + 0x0c, 4);
+        for (uint32_t i = 0; items && count <= 16 && i < count; ++i) {
+            unsigned char *candidate = ((unsigned char **)items)[i];
+            if (candidate && pointer_at(candidate, 0x50) == value) { behavior = candidate; break; }
+        }
+    }
+    if (!behavior) return;
+    if (!timer_vtable) {
+        void **native = pointer_at(behavior, 0);
+        if (!native) return;
+        void **copy = malloc(0x100);
+        if (!copy) return;
+        memcpy(copy, native, 0x100);
+        timer_native_update = (BehaviorUpdate)copy[0xd8 / 8];
+        if (!timer_native_update) { free(copy); return; }
+        copy[0xd8 / 8] = (void *)timer_update;
+        timer_vtable = copy;
+    }
+    timer_writer = behavior;
+    memcpy(behavior, &timer_vtable, sizeof timer_vtable);
+    printf("Ranked lobby: the game's timer stopped (update %p)\n", (void *)timer_native_update);
+}
+
 static int ranked_waiting_players(void);
 static void ranked_waiting_timer(void) {
     static int shown;
@@ -3717,6 +3760,13 @@ static void ranked_waiting_timer(void) {
         if (!active) shown = 0;   /* that lobby is gone: a new one starts with its own timer */
         return;
     }
+    if (value != timer_value) {   /* a new timer project */
+        timer_value = value;
+        timer_pulse_at = 0;
+        timer_writer = NULL;
+        memcpy(timer_value_color, value + 0xc0, sizeof timer_value_color);
+        memcpy(timer_value_scale, value + 0x84, sizeof timer_value_scale);
+    }
     const int waiting = runtime_online_mode_ranked_waiting();
     const int timed = ranked_component_left >= 0.0f && monotonic_ms() - ranked_component_at < 1000;
     if (active && (waiting || timed)) {
@@ -3725,24 +3775,46 @@ static void ranked_waiting_timer(void) {
             snprintf(saved_desc, sizeof saved_desc, "%s", d && (uintptr_t)d >= 0x10000 ? d : "");
             printf("Ranked lobby: the port writes the timer (label \"%s\")\n", saved_desc);
         }
+        timer_stop_native(desc, value);
         char text[128];
+        int seconds = -1;
         if (waiting) {
-            snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), ranked_waiting_players(),
+            snprintf(text, sizeof text, "%s", runtime_text("WAITING"));
+            set_text(desc, text);
+            snprintf(text, sizeof text, "%d/%d", ranked_waiting_players(),
                      runtime_public_ranked_min_players());
+            set_text(value, text);
         } else {
-            int seconds = (int)(ranked_component_left + 0.999f);
+            seconds = (int)(ranked_component_left + 0.999f);
             if (seconds < 0) seconds = 0;
             if (seconds > 99) seconds = 99;
-            snprintf(text, sizeof text, "%s %02d", saved_desc[0] ? saved_desc : "MATCH BEGINS IN", seconds);
+            if (saved_desc[0]) set_text(desc, saved_desc);
+            snprintf(text, sizeof text, "%02d", seconds);
+            set_text(value, text);
         }
-        set_text(desc, text);
-        if (hide_placeable) hide_placeable(value, 1);
+        if (hide_placeable) hide_placeable(value, 0);
+        if (seconds >= 0 && seconds <= 10) {
+            const uint64_t now = monotonic_ms();
+            if (now - timer_pulse_at >= 800) {   /* the animation runs 0.77 s: played again for a pulse */
+                static int told;
+                timer_pulse_at = now;
+                if (!told) { told = 1; puts("Ranked lobby: the timer's own LowTime animation (red pulse)"); }
+                if (gui_animation_tag_type && *gui_animation_tag_type)
+                    play_named_gui_animation(value, "LowTime");
+            }
+        } else {
+            memcpy(value + 0xc0, timer_value_color, sizeof timer_value_color);
+            memcpy(value + 0x84, timer_value_scale, sizeof timer_value_scale);
+        }
         shown = 1;
         return;
     }
     if (!shown) return;
     if (saved_desc[0]) set_text(desc, saved_desc);
     if (hide_placeable) hide_placeable(value, 0);
+    memcpy(value + 0xc0, timer_value_color, sizeof timer_value_color);
+    memcpy(value + 0x84, timer_value_scale, sizeof timer_value_scale);
+    timer_writer = NULL;   /* the game's timer runs again */
     shown = 0;
     puts("Ranked lobby: the game's timer is back");
 }

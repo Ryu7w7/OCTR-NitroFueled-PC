@@ -484,10 +484,14 @@ int runtime_public_ranked_short(void) {
     int players = 0;
     if (!runtime_public_ranked_clock(&since, &players)) return 0;
     const int min_required = runtime_public_ranked_min_players();
-    fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d)\n",
-            (unsigned long long)room, players, min_required);
+    /* The server's count is its lobby connections, which drop while a player is still in the game:
+     * a room the game's own list holds at the minimum is not dissolved (20/11, room 23). Without a
+     * list the server's count is the only word. */
+    const int local = runtime_online_mode_room_players();
+    fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d, game list: %d)\n",
+            (unsigned long long)room, players, min_required, local);
     int status_code = 0;
-    if (players > 0 && players < min_required) {
+    if (players > 0 && players < min_required && !(local > 0 && local >= min_required)) {
         /* Post once per room, on a thread of its own: the server dissolves the room and pushes
          * everyone back to the queue. */
         if (__atomic_exchange_n(&short_sent_room, room, __ATOMIC_SEQ_CST) != room) {

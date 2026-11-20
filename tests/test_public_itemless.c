@@ -34,6 +34,9 @@ int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
 static int lobby_open = 1;
 int runtime_online_mode_lobby_open(void) { return lobby_open; }
+/* The game's own room list (runtime_online_mode.c); 0 = no list, the server's count decides. */
+static int room_players;
+int runtime_online_mode_room_players(void) { return room_players; }
 static void *hof_test_wrapper, *hof_test_content;
 void *runtime_online_mode_content(void *placeable) { return placeable == hof_test_wrapper ? hof_test_content : NULL; }
 static void *hof_focused_project, *hof_focused_list;
@@ -1406,6 +1409,25 @@ int main(void) {
     assert(runtime_public_ranked_short()==1);   /* known for this room: no second report */
     for (int wait = 0; wait < 200 && requests == before_short; ++wait) usleep(5000);   /* the report's thread */
     assert(requests==before_short+1);
+    /* The server counts its lobby connections, which drop while a player is still in the game: its
+     * count below the minimum must not dissolve a room the game's own list holds full (20/11, room
+     * 23: WAITING 2/3, the race never started); a room the game's list also holds short is still
+     * reported short. */
+    matchmaking_room=79; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=79; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    room_players=3;
+    assert(runtime_public_ranked_short()==0);
+    matchmaking_room=80; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=80; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    room_players=1;
+    assert(runtime_public_ranked_short()==1);
+    for (int wait = 0; wait < 200 && requests == before_short+1; ++wait) usleep(5000);   /* the report's thread */
+    assert(requests==before_short+2);
+    room_players=0;
     matchmaking_room=0; joined_ranked=0;
     assert(runtime_public_ranked_short()==0);
     ranked_min_seen=6;
