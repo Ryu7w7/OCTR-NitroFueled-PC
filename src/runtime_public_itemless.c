@@ -723,21 +723,52 @@ static void do_queue_abort(void) {
     runtime_public_itemless_reset();
     runtime_public_itemless_party_ready();
 }
+/* The found room's liveness is asked on a thread of its own: this check runs on every lobby frame
+ * of the game's thread, and the request (a round trip, up to the socket's 8 s timeout) made the
+ * game stutter once a second in found rooms ("the polling is still deferred, not async", 20/11).
+ * The frame only reads the answer: a room the server says is gone. */
+static int room_alive_busy;
+static uint64_t room_alive_gone;   /* a found room the server reported dissolved, 0 none */
+static int ranked_min_seen = 6;    /* the server's RYUNET_RANKED_MIN_PLAYERS, from room-alive */
+
+/* Players a Ranked room needs to start, as the server last said (6 until it answered). */
+int runtime_public_ranked_min_players(void) { return __atomic_load_n(&ranked_min_seen, __ATOMIC_SEQ_CST); }
+static void *room_alive_worker(void *arg) {
+    const uint64_t room = (uint64_t)(uintptr_t)arg;
+    const char *me = runtime_np_get_online_name();
+    char target[512], body[256];
+    if (me && *me) {
+        snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu", me, (unsigned long long)room);
+        if (runtime_ryunet_request("GET", target, body, sizeof body) == 200) {
+            const char *alive = runtime_json_field(body, "alive");
+            if (alive && !strncmp(alive, "false", 5)) __atomic_store_n(&room_alive_gone, room, __ATOMIC_SEQ_CST);
+            const char *min_str = runtime_json_field(body, "min_players");
+            const int min_players = min_str && *min_str ? (int)strtol(min_str, NULL, 10) : 0;
+            if (min_players >= 1 && min_players <= 8) __atomic_store_n(&ranked_min_seen, min_players, __ATOMIC_SEQ_CST);
+        }
+    }
+    __atomic_store_n(&room_alive_busy, 0, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
 static void check_found_room_alive(void) {
     pthread_mutex_lock(&mode_lock);
     const uint64_t room = matchmaking_room;
     pthread_mutex_unlock(&mode_lock);
+    const uint64_t gone = __atomic_exchange_n(&room_alive_gone, 0, __ATOMIC_SEQ_CST);
     const uint64_t now = check_clock();
-    if (!room || now < room_alive_after) return;
-    room_alive_after = now + 1000;
-    const char *me = runtime_np_get_online_name();
-    if (!me || !*me) return;
-    char target[512], body[256];
-    snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu",
-             me, (unsigned long long)room);
-    if (runtime_ryunet_request("GET", target, body, sizeof body) != 200) return;
-    const char *alive = runtime_json_field(body, "alive");
-    if (!alive || strncmp(alive, "false", 5)) return;
+    if (room && gone != room && now >= room_alive_after &&
+        !__atomic_exchange_n(&room_alive_busy, 1, __ATOMIC_SEQ_CST)) {
+        room_alive_after = now + 1000;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attr, room_alive_worker, (void *)(uintptr_t)room))
+            __atomic_store_n(&room_alive_busy, 0, __ATOMIC_SEQ_CST);
+        pthread_attr_destroy(&attr);
+    }
+    if (!room || gone != room) return;   /* an answer about an older room is dropped */
     /* The server dissolved this found room (short-handed / room-short from another player).
      * Tell every client still in the found room before dumping them back to ModeSelect, so no
      * player is left confused on the unranked screen without a notice. Ranked only: classic
@@ -1619,7 +1650,9 @@ static void ABI placeable_event(void *self, void *event) {
         pthread_mutex_lock(&mode_lock);
         const int found = matchmaking_room != 0;
         pthread_mutex_unlock(&mode_lock);
-        if (found) {
+        /* A Ranked room still waiting for players (its countdown held, runtime_online_mode.c) can be
+         * left: it may wait a long while, and nobody should be stuck in it (20/11). */
+        if (found && !runtime_online_mode_ranked_waiting()) {
             fprintf(stderr, "Public matchmaking: Back blocked in found room\n");
             return; /* do NOT forward Back to native */
         }

@@ -4380,7 +4380,50 @@ static void ABI countdown_init(unsigned char *self) {
     } else original_countdown_init(self);
 }
 
+/* Ranked: the map countdown waits for the players the server asks for (RYUNET_RANKED_MIN_PLAYERS,
+ * from room-alive): below it, the host keeps the timer at its full time every tick, so it neither
+ * counts down nor ends; when a player leaves during the countdown it goes back to full and waits
+ * again. The host's remaining time is what the guests follow. The cancel at the map vote's end
+ * (runtime_public_ranked_short) stays as the last net. */
+/* Players in the online room now, from the game's own player list (any thread reads it as the menus do). */
+int runtime_online_mode_room_players(void) {
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    int players = 0;
+    if (list) memcpy(&players, (unsigned char *)list + 0x0c, 4);
+    return players > 0 && players <= 8 ? players : 0;
+}
+
+/* A Ranked room still short of the players the server asks for: its countdown is held, and leaving
+ * it is allowed (Back, its legend). */
+int runtime_online_mode_ranked_waiting(void) {
+    if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
+    const int players = runtime_online_mode_room_players();
+    return players > 0 && players < runtime_public_ranked_min_players();
+}
+
+static void ranked_hold_countdown(unsigned char *self) {
+    static unsigned char *timer;
+    static float full;
+    static int held = -1;
+    float remaining;
+    memcpy(&remaining, self + 0x28, 4);
+    if (self != timer) { timer = self; full = 0; held = -1; }
+    if (remaining > full) full = remaining;   /* its full time: the highest it showed */
+    if (!runtime_ranked_active() || !runtime_public_match_active() || !room_host()) return;
+    void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
+    int players = 0;
+    if (list) memcpy(&players, (unsigned char *)list + 0x0c, 4);
+    const int needed = runtime_public_ranked_min_players();
+    const int hold = players > 0 && players < needed && full > 0;
+    if (hold != held) {
+        held = hold;
+        printf("Ranked lobby: %d/%d players, map countdown %s\n", players, needed, hold ? "held at full" : "running");
+    }
+    if (hold && remaining < full) memcpy(self + 0x28, &full, 4);
+}
+
 static void ABI lobby_countdown(unsigned char *self) {
+    ranked_hold_countdown(self);
     int mode = 0, teams = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
     if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
@@ -4984,7 +5027,8 @@ void runtime_online_mode_hof_legend(void *project) {
 static int back_legend_hidden;
 static int back_legend_button;
 static void update_found_room_back_legend(unsigned char *owner) {
-    const int found = runtime_public_found_room();
+    /* a Ranked room waiting for players can be left: its BACK stays (runtime_online_mode_ranked_waiting) */
+    const int found = runtime_public_found_room() && !runtime_online_mode_ranked_waiting();
     if (found == back_legend_hidden) return; /* no transition */
     unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
     unsigned char *remove = gui_manager && *gui_manager ? pointer_at(*gui_manager, 0xf0) : NULL;
