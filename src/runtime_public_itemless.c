@@ -1431,9 +1431,59 @@ static uint64_t ranked_request_until;
  * mode as octr_ranked.room, which the server places first (ranked_lfg.go, ctr_async.go place). */
 static uint64_t ranked_request_room;
 
+/* The same request straight from the Discord bot's "Unirse" button (the server's ranked_join.go): the
+ * bot tells the server which player pressed it, and the game asks every 3 seconds on a thread of its
+ * own, with no browser. "ok\nmode=N\nroom=R" once, else "none". */
+static int bot_join_busy, bot_join_ready, bot_join_mode;
+static uint64_t bot_join_room, bot_join_next;
+
+static void *bot_join_worker(void *unused) {
+    (void)unused;
+    const char *me = runtime_np_get_online_name();
+    char target[256], body[128] = "";
+    if (me && *me) {
+        snprintf(target, sizeof target, "/ryunet/ranked-join?name=%s", me);
+        if (runtime_ryunet_request("GET", target, body, sizeof body) == 200 && !strncmp(body, "ok\n", 3)) {
+            const char *mode = strstr(body, "mode="), *room = strstr(body, "room=");
+            if (mode && room) {
+                __atomic_store_n(&bot_join_mode, atoi(mode + 5), __ATOMIC_SEQ_CST);
+                __atomic_store_n(&bot_join_room, strtoull(room + 5, NULL, 10), __ATOMIC_SEQ_CST);
+                __atomic_store_n(&bot_join_ready, 1, __ATOMIC_SEQ_CST);
+            }
+        }
+    }
+    __atomic_store_n(&bot_join_busy, 0, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+static void ranked_request_apply(int mode, uint64_t room, uint64_t now, const char *from) {
+    __atomic_store_n(&ranked_request_mode, mode, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_notice, 1, __ATOMIC_SEQ_CST);
+    ranked_request_until = now + 600000;
+    __atomic_store_n(&ranked_request_room, room, __ATOMIC_SEQ_CST);
+    online_return_button = 1;   /* the online menu opens with Ranked focused */
+    printf("Ranked join: Discord asks for Ranked %s (room %llu, %s)\n", mode ? "Itemless" : "Normal",
+           (unsigned long long)room, from);
+}
+
 void runtime_public_itemless_poll_ranked_request(void) {
     static uint64_t next_check;
     const uint64_t now = check_clock();
+    if (__atomic_exchange_n(&bot_join_ready, 0, __ATOMIC_SEQ_CST)) {
+        const int mode = __atomic_load_n(&bot_join_mode, __ATOMIC_SEQ_CST);
+        if (mode == 0 || mode == 1)
+            ranked_request_apply(mode, __atomic_load_n(&bot_join_room, __ATOMIC_SEQ_CST), now, "the bot's button");
+    }
+    if (now >= bot_join_next && !__atomic_exchange_n(&bot_join_busy, 1, __ATOMIC_SEQ_CST)) {
+        bot_join_next = now + 3000;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attr, bot_join_worker, NULL)) __atomic_store_n(&bot_join_busy, 0, __ATOMIC_SEQ_CST);
+        pthread_attr_destroy(&attr);
+    }
     if (now < next_check) return;
     next_check = now + 1000;
     char path[600];
@@ -1464,13 +1514,7 @@ void runtime_public_itemless_poll_ranked_request(void) {
         printf("Ranked join: ignored a request file (mode=%d age=%llds)\n", mode, wall - written);
         return;
     }
-    __atomic_store_n(&ranked_request_mode, mode, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&ranked_request_notice, 1, __ATOMIC_SEQ_CST);
-    ranked_request_until = now + 600000;
-    __atomic_store_n(&ranked_request_room, (uint64_t)room, __ATOMIC_SEQ_CST);
-    online_return_button = 1;   /* the online menu opens with Ranked focused */
-    printf("Ranked join: Discord asks for Ranked %s (room %llu)\n", mode ? "Itemless" : "Normal", room);
+    ranked_request_apply(mode, (uint64_t)room, now, "the join page");
 }
 
 /* Mode Select (runtime_online_mode.c), Ranked chosen: the mode the Discord join asked for, once; -1 none. */
