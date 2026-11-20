@@ -106,13 +106,20 @@ class RankedScoreTests(unittest.TestCase):
         new = Igz(manual_navigation(old.build()))
         changed = {o for o,t in old.objects() if
                    old.data[o:o+old.sizes[old.u64(o)]] != new.data[o:o+old.sizes[old.u64(o)]]}
-        self.assertEqual(changed, {0x3418,0x5d60})
-        for node in changed:
+        self.assertEqual(changed, {0x3418,0x5d60,0x38e0,0x3ea0})
+        for node in (0x3418,0x5d60):
             self.assertEqual(new.u32(node+0x10),2)
             self.assertEqual(new.data[node+0x28:node+0x40],old.data[node+0x28:node+0x40])
-        for node in (0x3ea0,0x6850):
-            self.assertEqual(new.u32(node+0x10),0)  # End_Race_Flow and input keep online branches.
+        # Continue confirms the finish positions through a const-true gate.
+        self.assertEqual(old.u64(0x38e0+0x10),0x10a0)
+        self.assertEqual(new.u64(0x38e0+0x10),0x1090)
+        self.assertEqual(new.data[0x38e0+0x18:0x38e0+0x28],old.data[0x38e0+0x18:0x38e0+0x28])
         self.assertEqual(new.u32(0x58b8+0x10),0)
+        # CONTINUE's End_Race_Flow gate now routes both native and Ranked arms to Wumpa.
+        self.assertEqual(new.u32(0x3ea0+0x10),2)
+        self.assertEqual(new.u64(new.u64(0x3ee0+0x20)),0x3f18)
+        self.assertEqual(new.u64(new.u64(0x3ee0+0x20)+8),0x3f40)
+        self.assertEqual(new.u32(0x6850+0x10),0)  # Input network gate stays native.
         self.assertEqual(new.strings,old.strings)
 
     def test_card_and_native_reverse_animation(self):

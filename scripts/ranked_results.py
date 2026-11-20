@@ -176,7 +176,8 @@ def score_card(blob, reward_blob):
 
 
 def manual_navigation(blob):
-    """Use native manual score navigation for Ranked; keep the online background."""
+    """Use native manual score navigation for Ranked; keep the online background and
+    let Continue confirm the finish positions so the AAR reaches Wumpa."""
     g = Igz(blob)
     methods = g.fixup('EXNM')
     names = [g.strings[a] for a, b in struct.iter_unpack('<II', methods[3][:methods[1] * 8])
@@ -195,4 +196,33 @@ def manual_navigation(blob):
         g.set_u64(node + 0x18, (1 << 56) | (1 << 52) | 16)
         g.set_u64(node + 0x20, pins)
         g.add_site('ROFS', node + 0x20)
+    # The AAR's Continue event confirms the finish positions (and so leaves for
+    # Wumpa) only when this flag is set. Ranked never takes the online branch,
+    # so Continue hid the legend but stayed on the ranking panel.
+    confirm = 0x38e0
+    if (kinds.get(confirm) != 'igVscTestBoolNode' or
+            g.u64(confirm + 0x10) != 0x10a0 or
+            kinds.get(0x1090) != 'igVscConstBoolAccessor' or
+            g.data[0x1090 + 0xe] != 1):
+        raise ValueError('unsupported native race ranking confirmation')
+    g.set_u64(confirm + 0x10, 0x1090)
+    # CONTINUE reaches the End_Race_Flow handler at this network gate. Native
+    # picks index !in_network_game(); in Ranked that is the hide arm. Both arms
+    # reach the Wumpa event, so only mark the node with two pins: the Ranked
+    # runtime hook then takes the deterministic arm instead of relying on the
+    # network query. Auto navigation stays suppressed (the delay branches above
+    # still pick their no-op arms).
+    gate = 0x3ea0
+    if kinds.get(gate) != 'igVscCppActionNode' or g.u64(gate + 0x38) != method or \
+            g.u32(gate + 0x10) != 0 or kinds.get(0x3ee0) != 'igVscActionNodeList':
+        raise ValueError('unsupported native race ranking End_Race_Flow gate')
+    arm_array = g.u64(0x3ee0 + 0x20)
+    if g.u32(0x3ee0 + 0x10) != 2 or g.u64(arm_array) != 0x3f18 or \
+            g.u64(arm_array + 8) != 0x3f40:
+        raise ValueError('unsupported native race ranking End_Race_Flow branch order')
+    g.set_u32(gate + 0x10, 2)
+    g.set_u32(gate + 0x14, 2)
+    g.set_u64(gate + 0x18, (1 << 56) | (1 << 52) | 16)
+    g.set_u64(gate + 0x20, pins)
+    g.add_site('ROFS', gate + 0x20)
     return g.build()

@@ -975,6 +975,8 @@ static void ABI load_private_map(const char *map, int reason) {
     normalize_race_teams();
     const int team_return = team_ranking_project && map &&
         !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
+    const int ranked_return = runtime_ranked_active() && map &&
+        !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
     int next_mode = 0;
     if (race_manager && *race_manager) memcpy(&next_mode, (unsigned char *)*race_manager + 0xd40, 4);
     private_single_race_active = map && !runtime_public_match_active() && is_private() && next_mode == 1 &&
@@ -1054,13 +1056,14 @@ static void ABI load_private_map(const char *map, int reason) {
         fputs("Native private CUP: could not enable fresh AI driver loading\n", stderr);
     ranked_race_rules(!lobby && runtime_ranked_active());
     original_load_map(map, reason);
-    if (incomplete_cup_return || team_return) {
+    if (incomplete_cup_return || team_return || ranked_return) {
         unsigned char *zone = find_zone(*zone_manager, map);
         unsigned char *data = zone ? pointer_at(zone, 0x1b0) : NULL;
         /* Online podium data can still contain track 1/2/3 after host loss. */
         if (data) {
             data[0x71] = 0;
             puts(team_return ? "Native private TEAM: no custom podium; returning to lobby" :
+                 ranked_return ? "Ranked: no podium; returning to the online room" :
                  "Native private CUP: skipped stale podium (no final host results)");
         }
     }
@@ -2579,16 +2582,11 @@ static void ABI private_race_timer_done(void) {
             fputs("Native private CUP: current track zone is missing\n", stderr);
         }
     }
-    if (runtime_ranked_active()) {
-        printf("Ranked: race countdown reached 0, quitting to main menu with party\n");
-        const int ret_mode = runtime_public_itemless_lobby_mode() ? 1 : 0;
-        runtime_online_mode_set_return_mode(ret_mode);
-        runtime_public_itemless_menu_return();
-        if (quit_to_main_menu && race_manager && *race_manager) {
-            quit_to_main_menu(*race_manager, 0, 0, 1, 0);
-            return;
-        }
-    }
+    /* Ranked returns to its online room with the whole party, as a private race
+     * does. Do not notify a room leave: the server keeps the found room and
+     * restarts its map-vote countdown when the lobby opens again. */
+    if (runtime_ranked_active())
+        puts("Ranked: race countdown reached 0, everyone back to the online room");
     return_to_lobby();
 }
 
