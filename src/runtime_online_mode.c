@@ -4969,9 +4969,21 @@ static void ranked_member_icons(unsigned char *self) {
     }
     unsigned char *icon = pointer_at(name, 0x50);
     int matched = 0;
+    /* The private room's host needs no ready tick: the crown says it (user, 20/11). The tick is the
+     * row's unnamed sprite at x 20 (octane_ui_ico_ready_shadow with the tick inside; the Ready/UnReady
+     * animations only change its alpha), hidden on the host's row and shown on the others. */
+    const int host_row = is_private() && runtime_online_mode_lobby_open() && nick && runtime_room_host_is(nick);
     for (int i = 0; icon && i < 40; ++i, icon = pointer_at(icon, 0x50)) {
         if (!icon) continue;
         const char *label = pointer_at(icon, 0x28);
+        float icon_x;
+        memcpy(&icon_x, icon + 0x60, sizeof icon_x);
+        if (!label && icon_x == 20.0f) {
+            unsigned tick_flags;
+            memcpy(&tick_flags, icon + 12, sizeof tick_flags);
+            if (!!(tick_flags & 0x400) != host_row) hide_placeable(icon, host_row);
+            continue;
+        }
         const int background = label && !strncmp(label, "OCTR_RANK_SHADOW_", 17);
         const int foreground = label && !strncmp(label, "OCTR_RANK_ICON_", 15);
         if (!background && !foreground) continue;
