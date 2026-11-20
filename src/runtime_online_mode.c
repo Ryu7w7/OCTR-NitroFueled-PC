@@ -4466,11 +4466,13 @@ static void ABI countdown_init(unsigned char *self) {
 }
 
 /* Ranked: the map countdown waits for the players the server asks for (RYUNET_RANKED_MIN_PLAYERS,
- * from room-alive): below it, every player's game keeps the timer at its full time every tick, so it
- * neither counts down nor ends; when a player leaves during the countdown it goes back to full and
- * waits again. Not the host alone: a guest's timer also runs on its own between the host's updates,
- * and one reaching 0 ended the vote and dissolved the room (20/11). The cancel at the map vote's end
- * (runtime_public_ranked_short) stays as the last net. */
+ * from room-alive): below it, the host keeps the timer at its full time every tick, so it neither
+ * counts down nor ends; when a player leaves during the countdown it goes back to full and waits
+ * again. The host alone: only the host's timer counts (0xeb7950 subtracts the frame's time when the
+ * component has no network object or its +0x3b bit 0 is set), a guest's +0x28 is the host's,
+ * replicated. Holding it on the guests too (test19/20) wrote each guest's own "full" over the
+ * host's value and the rooms' countdowns drifted apart (20/11: 23 on one screen, 00 on another).
+ * The cancel at the map vote's end (runtime_public_ranked_short) stays as the last net. */
 /* Players in the online room now, from the game's own player list (any thread reads it as the menus do). */
 int runtime_online_mode_room_players(void) {
     void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
@@ -4495,7 +4497,7 @@ static void ranked_hold_countdown(unsigned char *self) {
     memcpy(&remaining, self + 0x28, 4);
     if (self != timer) { timer = self; full = 0; held = -1; }
     if (remaining > full) full = remaining;   /* its full time: the highest it showed */
-    if (!runtime_ranked_active() || !runtime_public_match_active()) return;
+    if (!runtime_ranked_active() || !runtime_public_match_active() || !room_host()) return;
     void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
     int players = 0;
     if (list) memcpy(&players, (unsigned char *)list + 0x0c, 4);

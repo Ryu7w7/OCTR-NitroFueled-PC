@@ -2898,10 +2898,14 @@ void TeamLobbyList() {
 static void AddTeamFont() {
     ImGuiIO& io = ImGui::GetIO();
     banner_title_font = nullptr;
-    if (const char* dir = std::getenv("BB_ART_DIR"); dir && *dir) {
+    // BB_TEAM_FONT (run.py/run.sh: art/ctr-title.ttf) names the file; BB_ART_DIR (Tacho's launcher) its folder.
+    std::filesystem::path file;
+    if (const char* font = std::getenv("BB_TEAM_FONT"); font && *font)
+        file = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(font)));
+    else if (const char* dir = std::getenv("BB_ART_DIR"); dir && *dir)
+        file = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(dir))) / "ctr-title.ttf";
+    if (!file.empty()) {
         std::error_code ec;
-        const std::filesystem::path file =
-            std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(dir))) / "ctr-title.ttf";
         if (std::filesystem::is_regular_file(file, ec)) {
             const std::u8string utf8 = file.u8string();
             banner_title_font = io.Fonts->AddFontFromFileTTF(reinterpret_cast<const char*>(utf8.c_str()), 40.0f);

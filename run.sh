@@ -20,6 +20,8 @@ out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
 export BB_WINDOW_ICON=${BB_WINDOW_ICON:-$PWD/launcher/io.github.sacredfire.Launcher.png}
+# the game's title font for the room's members by team (run.py does the same)
+export BB_TEAM_FONT=${BB_TEAM_FONT:-$PWD/art/ctr-title.ttf}
 if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
     exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash run.sh $args"

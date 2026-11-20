@@ -1007,6 +1007,8 @@ def remove_obsolete_files():
 def launch(args, restarted=False):
     env = os.environ
     env.setdefault('BB_WINDOW_ICON', str(PORT / 'launcher/io.github.sacredfire.Launcher.png'))
+    # The game's title font for the room's members by team (the overlay's own font otherwise).
+    env.setdefault('BB_TEAM_FONT', str(PORT / 'art/ctr-title.ttf'))
     remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
