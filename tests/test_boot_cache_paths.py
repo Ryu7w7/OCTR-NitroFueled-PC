@@ -85,7 +85,7 @@ class BootPathTests(unittest.TestCase):
                 result = subprocess.run([sys.executable, '-c', code, str(ROOT / 'scripts'), str(alias)],
                                         capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Another game launch', result.stderr)
+            self.assertIn('already running from this folder', result.stderr)
         finally:
             if os.name == 'nt':
                 linked.rmdir()

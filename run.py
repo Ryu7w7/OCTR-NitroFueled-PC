@@ -965,6 +965,18 @@ def main():
     try:
         with launch_lock.session(Path(os.environ.get('BB_DATA_DIR', PORT))):
             return launch(args, restarted)
+    except PermissionError as error:
+        # Windows would not let the launch rewrite one of its own files in out/ (seen 20/11 with
+        # out/online-mode/cup-files.map): another SacredFire still open, or an antivirus holding it.
+        name = error.filename or ''
+        fail(f'Launch failed: Windows did not let SacredFire write {name} ({error.strerror or error}). '
+             'Another SacredFire or launcher may still be open in the background: look in the system tray '
+             'and in Task Manager (sacredfire.exe), close it and start again. If it keeps happening, an '
+             'antivirus or Controlled folder access is blocking the game folder: add it as an exclusion.\n'
+             f'No se pudo iniciar: Windows no dejó a SacredFire escribir {name}. Puede que otro SacredFire o '
+             'launcher siga abierto en segundo plano: búscalo en la bandeja del sistema y en el Administrador '
+             'de tareas (sacredfire.exe), ciérralo y vuelve a iniciar. Si sigue pasando, un antivirus o el '
+             'Acceso controlado a carpetas bloquea la carpeta del juego: agrégala como exclusión.')
     except (OSError, ValueError, RuntimeError, boot_cache.prepare.GameCheckError) as error:
         fail('Launch failed: ' + str(error))
 

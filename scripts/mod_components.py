@@ -18,6 +18,28 @@ def save_json(path, obj):
     temp.write_text(json.dumps(obj, indent=2) + '\n', encoding='utf-8')
     os.replace(temp, path)
 
+def replace_bytes(path, data, wait=3.0):
+    """Write a file whole through a temporary one, so a reader never sees half of it. Windows
+    refuses the swap while another process holds the old file (an antivirus scanning it, a second
+    launch): that is tried again for a few seconds before the PermissionError goes up."""
+    import time
+    path = Path(path)
+    temp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    temp.write_bytes(data)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.25)
+
 def long_path(path):
     """On Windows, the absolute path in extended-length form (\\\\?\\C:\\...): a package's files
     (archive/folder/asset names nested in the mod) pass the 259-character limit of a library in

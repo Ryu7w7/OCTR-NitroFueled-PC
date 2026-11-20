@@ -6039,10 +6039,12 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     release_result_sound = (NativeEvent)(image + (0x149d260 - shift));
     set_animation_selector = (AnimationSelector)(image + 0xcb0c70);
     send_animation_event = (AnimationEvent)(image + 0xc64790);
-    create_gui_object = (GuiObjectFactory)(image + 0x14a0e30);
+    /* both 0x10 lower in the European game: unshifted, the Ranked timer's LowTime pulse and the Hall
+     * of Fame's cycling called into the middle of a function there (0xc000001d, 20/11) */
+    create_gui_object = (GuiObjectFactory)(image + (0x14a0e30 - shift));
     play_gui_animation = (GuiAnimation)(image + 0x250b20);
     initialize_gui_animation = (NativeEvent)(image + 0x9990b0);
-    release_gui_animation_tag = (NativeEvent)(image + 0x149d260);
+    release_gui_animation_tag = (NativeEvent)(image + (0x149d260 - shift));
     gui_animation_tag_type = (void **)(image + 0x2a21310);
     original_race_setup = (NativeEvent)(trampoline + 1280);
     assign_ai_teams = (NoArgument)(image + (0xe9dcf0 - shift));

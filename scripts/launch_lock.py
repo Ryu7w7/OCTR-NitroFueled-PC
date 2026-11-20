@@ -65,7 +65,14 @@ def output_session(out):
         try:
             lock_file(stream)
         except OSError as error:
-            raise RuntimeError('Another game launch is using this data directory: ' + str(path.parent.parent)) from error
+            folder = str(path.parent.parent).removeprefix('\\\\?\\')   # without the long-path prefix
+            raise RuntimeError(
+                f'SacredFire is already running from this folder ({folder}): another launcher, or a game '
+                'that is still open in the background. Look in the system tray and in Task Manager '
+                '(sacredfire.exe), close it and start again.\n'
+                f'SacredFire ya está abierto desde esta carpeta ({folder}): otro launcher, o un juego que '
+                'sigue abierto en segundo plano. Búscalo en la bandeja del sistema y en el Administrador '
+                'de tareas (sacredfire.exe), ciérralo y vuelve a iniciar.') from error
         HELD[path] = stream
         try:
             yield
