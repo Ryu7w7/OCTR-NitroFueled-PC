@@ -2582,11 +2582,18 @@ static void ABI private_race_timer_done(void) {
             fputs("Native private CUP: current track zone is missing\n", stderr);
         }
     }
-    /* Ranked returns to its online room with the whole party, as a private race
-     * does. Do not notify a room leave: the server keeps the found room and
-     * restarts its map-vote countdown when the lobby opens again. */
-    if (runtime_ranked_active())
-        puts("Ranked: race countdown reached 0, everyone back to the online room");
+    if (runtime_ranked_active()) {
+        /* Ranked ends the room: go back to the online menu with the party so the
+         * next race starts from a fresh queue, not the finished room's map vote. */
+        printf("Ranked: race countdown reached 0, quitting to main menu with party\n");
+        const int ret_mode = runtime_public_itemless_lobby_mode() ? 1 : 0;
+        runtime_online_mode_set_return_mode(ret_mode);
+        runtime_public_itemless_menu_return();
+        if (quit_to_main_menu && race_manager && *race_manager) {
+            quit_to_main_menu(*race_manager, 0, 0, 1, 0);
+            return;
+        }
+    }
     return_to_lobby();
 }
 
@@ -2634,6 +2641,15 @@ static void ABI private_guest_return_timer(unsigned char *self) {
     if (private_cup_race_active && current_cup() && index >= 0 && index < 3) {
         puts("Native private CUP: guest following host countdown; retaining session");
         schedule_guest_return(self, private_race_timer_done, self);
+        return;
+    }
+    if (runtime_ranked_active()) {
+        /* Ranked ends the room for everyone: leave with the party on the guest's
+         * own timer, not the native host handshake that stalled on Wumpa. The
+         * native quit-with-party sends the party leave, menu_return reports the
+         * room leave — no extra deadline, no waiting on the room host. */
+        puts("Ranked: guest ending race with the party");
+        private_race_timer_done(self);
         return;
     }
     original_guest_return_timer(self);
