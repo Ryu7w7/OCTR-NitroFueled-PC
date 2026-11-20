@@ -66,6 +66,7 @@ static int block_get, entered_get;
 static char expected_ids[192];
 static char payload[4096], message[512], reply[512] = "ok";
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
+uint64_t runtime_ryunet_last_sent_ms(void) { return 0; } /* runtime_http.c: no send time here */
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t size) {
     ++requests;
     if (!strcmp(target,"/ryunet/theme")) {
@@ -1387,16 +1388,27 @@ int main(void) {
     setenv("BB_PUBLIC_ITEMLESS","1",1);
     snprintf(reply,sizeof reply,"ok"); status=200; requests=0;
 
-    /* The native map-vote handler is dispatched repeatedly for one match: one room-alive
-     * request per room, and no repeat once the answer is known. */
+    /* The native map-vote handler runs on the game's thread: it never asks the server (a slow
+     * answer froze the game at 00), it reads the room-alive thread's latest answer. With none,
+     * the race goes ahead; with a short room, it says so (the report goes on a thread). */
     matchmaking_room=77; joined_ranked=1;
     int before_short=requests;
     assert(runtime_public_ranked_short()==0);
-    assert(requests==before_short+1);
+    assert(requests==before_short);
+    matchmaking_room=0; joined_ranked=0;
     assert(runtime_public_ranked_short()==0);
+    matchmaking_room=78; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=78; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    ranked_min_seen=3;
+    assert(runtime_public_ranked_short()==1);
+    assert(runtime_public_ranked_short()==1);   /* known for this room: no second report */
+    for (int wait = 0; wait < 200 && requests == before_short; ++wait) usleep(5000);   /* the report's thread */
     assert(requests==before_short+1);
     matchmaking_room=0; joined_ranked=0;
     assert(runtime_public_ranked_short()==0);
+    ranked_min_seen=6;
 
     native_search=send_search; native_register=send_info; native_notice=show;
     network_manager=&test_network; native_stop_matchmaking=stop_matchmaking;

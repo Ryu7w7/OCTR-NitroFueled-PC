@@ -3689,43 +3689,57 @@ static int lobby_timer_texts(unsigned char **desc, unsigned char **value) {
     return *desc && *value;
 }
 
-/* Ranked waiting for players (runtime_online_mode_ranked_waiting, countdown held): the lobby timer
- * reads "WAITING 2/3", the time hidden, instead of "MATCH BEGINS IN" over the time. Once the minimum
- * is there it is the countdown again, from its full time and the same for everyone (every game held
- * it at full); a player leaving below the minimum brings the waiting text back. Set every frame
- * (set_text does nothing when the text is already that one): the timer's script may write them. */
+/* The Ranked map countdown's time as the timer component has it (ranked_hold_countdown, every tick):
+ * the one the race starts on, the same on every screen. */
+static float ranked_component_left = -1.0f;
+static uint64_t ranked_component_at;
+
+/* Ranked lobby timer: the port writes it. The game's timer GUI counts its number on its own from when
+ * its menu opened, whatever the timer component says (the 20/11 dumps: no time in its behavior, only
+ * state flags), so the players already waiting saw 45 or 40 when the last player came in while the
+ * component, held at 60, started from 60 with everyone. The GUI's number is hidden and its label says
+ * "WAITING 2/3" while the room is short, then "MATCH BEGINS IN 41" from the component's time. Set every
+ * frame (set_text does nothing when the text is already that one). One short line: the label has no
+ * second line and a longer text spills out of its box. */
 static int ranked_waiting_players(void);
 static void ranked_waiting_timer(void) {
     static int shown;
     static char saved_desc[96];
-    const int waiting = runtime_online_mode_ranked_waiting();
-    if (!waiting && !shown) return;
+    const int active = runtime_ranked_active() && runtime_public_found_room() && runtime_public_match_active();
+    if (!active && !shown) return;
     unsigned char *desc, *value;
     if (!lobby_timer_texts(&desc, &value)) {
-        if (!waiting) shown = 0;   /* that lobby is gone: a new one starts with its own timer */
+        if (!active) shown = 0;   /* that lobby is gone: a new one starts with its own timer */
         return;
     }
-    if (waiting) {
+    const int waiting = runtime_online_mode_ranked_waiting();
+    const int timed = ranked_component_left >= 0.0f && monotonic_ms() - ranked_component_at < 1000;
+    if (active && (waiting || timed)) {
         if (!shown) {
             const char *d = pointer_at(desc, 0x30);
             snprintf(saved_desc, sizeof saved_desc, "%s", d && (uintptr_t)d >= 0x10000 ? d : "");
-            printf("Ranked lobby: waiting for players (timer \"%s\")\n", saved_desc);
+            printf("Ranked lobby: the port writes the timer (label \"%s\")\n", saved_desc);
         }
-        /* "WAITING 2/3" on the label, one short line (it has no second line, and a longer text spills
-         * out of the box: the 20/11 test). The timer draws its seconds by itself (its text field only
-         * ever holds "1:00"), so the time is hidden instead of rewritten. */
-        char text[64];
-        snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), ranked_waiting_players(),
-                 runtime_public_ranked_min_players());
+        char text[128];
+        if (waiting) {
+            snprintf(text, sizeof text, "%s %d/%d", runtime_text("WAITING"), ranked_waiting_players(),
+                     runtime_public_ranked_min_players());
+        } else {
+            int seconds = (int)(ranked_component_left + 0.999f);
+            if (seconds < 0) seconds = 0;
+            if (seconds > 99) seconds = 99;
+            snprintf(text, sizeof text, "%s %02d", saved_desc[0] ? saved_desc : "MATCH BEGINS IN", seconds);
+        }
         set_text(desc, text);
         if (hide_placeable) hide_placeable(value, 1);
         shown = 1;
         return;
     }
+    if (!shown) return;
     if (saved_desc[0]) set_text(desc, saved_desc);
     if (hide_placeable) hide_placeable(value, 0);
     shown = 0;
-    puts("Ranked lobby: minimum reached, the countdown is back");
+    puts("Ranked lobby: the game's timer is back");
 }
 
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -4577,10 +4591,8 @@ int runtime_online_mode_room_players(void) {
 /* A Ranked room still short of the players the server asks for: its countdown is held and the lobby
  * timer reads "WAITING 2/3" (ranked_waiting_timer). */
 int runtime_online_mode_ranked_waiting(void) {
+    /* the game's own list of the room's players against the server's minimum (0 unknown: not waiting) */
     if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
-    int64_t since = 0;
-    /* the server's word first: -1 short of players; -2 (the lobby closed: the vote ended) is not waiting */
-    if (runtime_public_ranked_clock(&since, NULL)) return since == -1;
     const int players = runtime_online_mode_room_players();
     return players > 0 && players < runtime_public_ranked_min_players();
 }
@@ -4588,18 +4600,17 @@ int runtime_online_mode_ranked_waiting(void) {
 /* The players shown in "WAITING x/y": the server's count when it has one (it counts a guest still
  * joining through the relay), else the game's own list. */
 static int ranked_waiting_players(void) {
-    int players = 0;
-    int64_t since;
-    if (runtime_public_ranked_clock(&since, &players) && players > 0) return players;
     return runtime_online_mode_room_players();
 }
 
-/* Every game sets its map countdown from the server's clock (runtime_public_ranked_clock, room-alive
- * every second): held at full while the room is short of its minimum, and full minus the time since
- * the room reached it afterwards, on the server's clock placed on ours (runtime_public_ranked_clock),
- * corrected every frame when a tenth of a second off. All the screens
- * count from the same moment, a player joining late included (20/11: 23 on one screen, 00 on another
- * when only the host held it). Without a fresh answer from the server the host alone holds it. */
+/* Ranked: every game, host or guest, keeps its map countdown at 60 while its own list of the room's
+ * players is short of the server's minimum (RYUNET_RANKED_MIN_PLAYERS, from room-alive), and lets it
+ * run once the minimum is there: they all see the last player come in at about the same moment and
+ * start together, and the game's own updates from the host keep them close. Each game runs its own
+ * timer (the host's value reaches the guests only now and then), so a guest left alone counted on
+ * behind "WAITING 2/3". Nothing here waits on the network: following the server's clock depended on
+ * answers that took 3 to 21 s with three games on one PC (20/11 tests). The server's clock is still
+ * read for the log. */
 static void ranked_hold_countdown(unsigned char *self) {
     static unsigned char *timer;
     static float full;
@@ -4617,24 +4628,42 @@ static void ranked_hold_countdown(unsigned char *self) {
     int64_t since = 0;
     int players = 0, state;   /* 1 held at full, 2 the server's time, 0 left alone */
     const int needed = runtime_public_ranked_min_players();
-    if (runtime_public_ranked_clock(&since, &players)) {
-        state = since == -1 ? 1 : since < 0 ? 0 : 2;   /* -2: the lobby closed, the game's own countdown goes on */
-    } else {
-        if (!room_host()) return;
-        players = runtime_online_mode_room_players();
-        state = players > 0 && players < needed;
-    }
+    const int host = room_host();
+    int server_players = 0;
+    const int fresh = runtime_public_ranked_clock(&since, &server_players);
+    players = runtime_online_mode_room_players();
+    state = players > 0 && players < needed;   /* needed 0: the minimum not known yet, left alone */
     if (state != held) {
         held = state;
         printf("Ranked lobby: %d/%d players, map countdown %s (%s)\n", players, needed,
-               state == 1 ? "held at full" : state == 2 ? "on the server's clock" : "running", room_host() ? "host" : "guest");
+               state == 1 ? "held at full" : state == 2 ? "on the server's clock" : state < 0 ? "the host's" : "running",
+               host ? "host" : "guest");
     }
+    float target = remaining;
+    ranked_component_at = monotonic_ms();
     if (state == 1 && remaining < full) {
+        target = full;
         memcpy(self + 0x28, &full, 4);
     } else if (state == 2) {
-        float target = full - (float)since / 1000.0f;
+        target = full - (float)since / 1000.0f;
         if (target < 0.0f) target = 0.0f;
         if (remaining - target > 0.1f || target - remaining > 0.1f) memcpy(self + 0x28, &target, 4);
+    }
+    ranked_component_left = target;   /* what the timer has now: the port writes it (ranked_waiting_timer) */
+    {   /* every 2 s, with the wall clock: the screens' countdowns compared across logs (20/11 test) */
+        static uint64_t next_log;
+        const uint64_t now_ms = monotonic_ms();
+        if (now_ms >= next_log) {
+            next_log = now_ms + 2000;
+            struct timespec wall;
+            clock_gettime(CLOCK_REALTIME, &wall);
+            const float server = fresh && since >= 0 ? full - (float)since / 1000.0f : -1.0f;
+            printf("Ranked countdown: wall %lld.%03ld timer %p had %.2f -> %.2f, server says %.2f (state %d, clock %s, "
+                   "since %lld ms, %d/%d, %s, mode %d)\n",
+                   (long long)wall.tv_sec, wall.tv_nsec / 1000000, (void *)self, remaining, target, server, state,
+                   fresh ? "fresh" : "MISSING", (long long)since, players, needed, host ? "host" : "guest",
+                   runtime_public_itemless_lobby_mode());
+        }
     }
 }
 

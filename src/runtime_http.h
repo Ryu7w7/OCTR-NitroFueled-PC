@@ -46,6 +46,9 @@ int32_t runtime_http_wait_request(void *handle, void *events, int32_t max_events
 /* The port's own signed requests to the RyuNET server (runtime_friends.c). */
 int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size);
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size);
+/* This thread's last runtime_ryunet_request: when its request went out, once connected (CLOCK_MONOTONIC ms;
+ * 0 none). A round trip timed from here leaves out a slow connect, for placing the server's clock. */
+uint64_t runtime_ryunet_last_sent_ms(void);
 /* The item-box rules id the game plays with since it applied rules while running (runtime_item_lead.c,
  * GET /ryunet/items/live): logins say it (X-RyuNET-Items) instead of the startup's BB_ITEM_RULES_ID. */
 void runtime_items_id_set(const char *id);

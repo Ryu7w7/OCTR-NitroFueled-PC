@@ -446,6 +446,17 @@ uint64_t runtime_public_room(void) {
  *
  * The returned values are status codes, not booleans: -1 is truthy in C, so callers must compare
  * against 1 and -1 explicitly. */
+static void *room_short_worker(void *arg) {
+    const uint64_t room = (uint64_t)(uintptr_t)arg;
+    const char *me = runtime_np_get_online_name();
+    char target[512], body[256];
+    if (!me || !*me) return NULL;
+    snprintf(target, sizeof target, "/ryunet/room-short?name=%s&room=%llu", me, (unsigned long long)room);
+    const int status = runtime_ryunet_request("POST", target, body, sizeof body);
+    fprintf(stderr, "Public matchmaking: room %llu reported short (%d)\n", (unsigned long long)room, status);
+    return NULL;
+}
+
 int runtime_public_ranked_short(void) {
     uint64_t room;
     int checked, cached;
@@ -465,47 +476,35 @@ int runtime_public_ranked_short(void) {
     }
     if (!ranked) return 0;
     if (checked) return cached;
-    const char *me = runtime_np_get_online_name();
-    if (!me || !*me) return 0;
-    char target[512], body[256];
-    snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu",
-             me, (unsigned long long)room);
-    if (runtime_ryunet_request("GET", target, body, sizeof body) != 200) return 0;
-    int status_code = 0, cache = 1;
-    const char *alive = runtime_json_field(body, "alive");
-    if (alive && strncmp(alive, "false", 5) == 0) {
-        /* The server already dissolved this room (another client's room-short). Report it so
-         * every remaining client shows the same notice and backs out to the queue. */
-        status_code = -1;
-    } else {
-        const char *players = runtime_json_field(body, "players");
-        if (players && *players) {
-            const int n = (int)strtol(players, NULL, 10);
-            const char *min_str = runtime_json_field(body, "min_players");
-            const int min_required = (min_str && *min_str) ? (int)strtol(min_str, NULL, 10) : 6;
-            fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d)\n",
-                    (unsigned long long)room, n, min_required);
-            if (n > 0 && n < min_required) {
-                /* Post once per room: this runs on every countdown tick, and repeating the POST just
-                 * repeats the same server-side dissolve. Retry only while the POST itself fails. */
-                if (__atomic_load_n(&short_sent_room, __ATOMIC_SEQ_CST) != room) {
-                    snprintf(target, sizeof target, "/ryunet/room-short?name=%s&room=%llu",
-                             me, (unsigned long long)room);
-                    if (runtime_ryunet_request("POST", target, body, sizeof body) == 200)
-                        __atomic_store_n(&short_sent_room, room, __ATOMIC_SEQ_CST);
-                    else
-                        cache = 0; /* a failed POST must be retried on the next dispatch */
-                }
-                status_code = 1;
-            }
+    /* No request here: this runs on the game's thread at the end of the map vote, and a server slow to
+     * answer froze the game at 00 (20/11: queries of 3 to 18 s). The room-alive thread's latest
+     * answer says how many players the room has (runtime_public_ranked_clock); without a fresh one the
+     * race goes ahead. A room-dissolved answer is handled by check_found_room_alive. */
+    int64_t since = 0;
+    int players = 0;
+    if (!runtime_public_ranked_clock(&since, &players)) return 0;
+    const int min_required = runtime_public_ranked_min_players();
+    fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d)\n",
+            (unsigned long long)room, players, min_required);
+    int status_code = 0;
+    if (players > 0 && players < min_required) {
+        /* Post once per room, on a thread of its own: the server dissolves the room and pushes
+         * everyone back to the queue. */
+        if (__atomic_exchange_n(&short_sent_room, room, __ATOMIC_SEQ_CST) != room) {
+            pthread_t thread;
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&thread, &attr, room_short_worker, (void *)(uintptr_t)room))
+                __atomic_store_n(&short_sent_room, 0, __ATOMIC_SEQ_CST);
+            pthread_attr_destroy(&attr);
         }
+        status_code = 1;
     }
-    if (cache) {
-        pthread_mutex_lock(&mode_lock);
-        checked_room = room;
-        checked_status = status_code;
-        pthread_mutex_unlock(&mode_lock);
-    }
+    pthread_mutex_lock(&mode_lock);
+    checked_room = room;
+    checked_status = status_code;
+    pthread_mutex_unlock(&mode_lock);
     return status_code;
 }
 
@@ -729,7 +728,9 @@ static void do_queue_abort(void) {
  * The frame only reads the answer: a room the server says is gone. */
 static int room_alive_busy;
 static uint64_t room_alive_gone;   /* a found room the server reported dissolved, 0 none */
-static int ranked_min_seen = 6;    /* the server's RYUNET_RANKED_MIN_PLAYERS, from room-alive */
+/* The server's RYUNET_RANKED_MIN_PLAYERS, from room-alive; 0 unknown (no answer yet): a guess of 6 said
+ * "WAITING 3/6" in a room of 3 that was already counting (20/11). */
+static int ranked_min_seen = 0;
 
 /* Players a Ranked room needs to start, as the server last said (6 until it answered). */
 int runtime_public_ranked_min_players(void) { return __atomic_load_n(&ranked_min_seen, __ATOMIC_SEQ_CST); }
@@ -754,7 +755,12 @@ int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
     pthread_mutex_unlock(&mode_lock);
     const uint64_t now = check_clock();
     pthread_mutex_lock(&ranked_clock_lock);
-    const int fresh = room && ranked_clock_room == room && ranked_clock_at && now - ranked_clock_at < 3000;
+    /* 20 s: once placed, the clock counts on ours, so a slow answer or two (3 to 18 s on 20/11) changes nothing */
+    /* A countdown already on the server's clock goes on with it for 2 minutes without an answer (it
+     * counts on our own clock): a stale one put it back to 60 mid-countdown (20/11, answers of 21 s). */
+    const int fresh = room && ranked_clock_room == room && ranked_clock_at &&
+                      (now - ranked_clock_at < 20000 ||
+                       (ranked_clock_ready >= 0 && ranked_clock_synced && ranked_clock_ready_at > 0 && now - ranked_clock_at < 120000));
     if (fresh) {
         /* -1 short of players, -2 the lobby closed (the map vote ended, a race), else the time since */
         int64_t since = ranked_clock_ready < 0 ? ranked_clock_ready : 0;
@@ -779,6 +785,16 @@ static void *room_alive_worker(void *arg) {
         const uint64_t sent = check_clock();
         const int status = runtime_ryunet_request("GET", target, body, sizeof body);
         const uint64_t answered = check_clock();
+        {   /* the countdown clock's answers, when they change (20/11: a host went 20 s without one) */
+            static int last_status = -2;
+            static uint64_t last_room;
+            if (status != last_status || room != last_room) {
+                last_status = status;
+                last_room = room;
+                printf("Ranked clock: room %llu answered %d in %llu ms: %.160s\n", (unsigned long long)room, status,
+                       (unsigned long long)(answered - sent), status == 200 ? body : "");
+            }
+        }
         if (status == 200) {
             const char *alive = runtime_json_field(body, "alive");
             if (alive && !strncmp(alive, "false", 5)) __atomic_store_n(&room_alive_gone, room, __ATOMIC_SEQ_CST);
@@ -795,9 +811,14 @@ static void *room_alive_worker(void *arg) {
                 ranked_clock_players = (int)strtol(players, NULL, 10);
                 ranked_clock_at = answered;
                 if (server_now && *server_now && ready_at && *ready_at) {
-                    const uint64_t rtt = answered - sent;
-                    const int64_t offset = strtoll(server_now, NULL, 10) - (int64_t)(sent + rtt / 2);
-                    if (!ranked_clock_synced || rtt <= ranked_clock_rtt || answered - ranked_clock_rtt_at > 30000) {
+                    /* timed from when the request went out, once connected: a connect that lost its first
+                     * packets (3 to 6 s on 20/11) is not a round trip, and halving it put a screen 0.5 to 2 s
+                     * off. The quickest answer of the room is kept: the clocks do not drift in a minute. */
+                    const uint64_t went = runtime_ryunet_last_sent_ms();
+                    const uint64_t from = went && went >= sent && went <= answered ? went : sent;
+                    const uint64_t rtt = answered - from;
+                    const int64_t offset = strtoll(server_now, NULL, 10) - (int64_t)(from + rtt / 2);
+                    if (!ranked_clock_synced || rtt <= ranked_clock_rtt) {
                         ranked_clock_offset = offset;
                         ranked_clock_rtt = rtt;
                         ranked_clock_rtt_at = answered;
@@ -819,6 +840,20 @@ static void check_found_room_alive(void) {
     pthread_mutex_unlock(&mode_lock);
     const uint64_t gone = __atomic_exchange_n(&room_alive_gone, 0, __ATOMIC_SEQ_CST);
     const uint64_t now = check_clock();
+    {   /* the countdown clock's queries (20/11: a host went 20 s without an answer): the room this game
+         * asks about when it changes, and a query still running after 3 s */
+        static uint64_t logged_room = UINT64_MAX, busy_logged_at;
+        if (room != logged_room) {
+            logged_room = room;
+            printf("Ranked clock: asking about room %llu (host %d)\n", (unsigned long long)room, runtime_room_mode_following() ? 0 : 1);
+        }
+        if (__atomic_load_n(&room_alive_busy, __ATOMIC_SEQ_CST) && now > room_alive_after + 2000 &&
+            now - busy_logged_at > 3000) {
+            busy_logged_at = now;
+            printf("Ranked clock: room %llu query still running %llu ms after it started\n", (unsigned long long)room,
+                   (unsigned long long)(now - (room_alive_after - 1000)));
+        }
+    }
     if (room && gone != room && now >= room_alive_after &&
         !__atomic_exchange_n(&room_alive_busy, 1, __ATOMIC_SEQ_CST)) {
         room_alive_after = now + 1000;
