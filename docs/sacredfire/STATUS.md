@@ -114,6 +114,11 @@ with the desktop apps closed.
   (logs/run18.log on 2026-10-09, logs/hang-repro-1-assert.log). Such a descriptor is now bound as
   a null descriptor, as invalid ones are (vk_rasterizer.cpp `IsBindableFormat`).
 
+- **Private Cup: corrupt free, then a lobby crash** (fixed 2026-11-20, see
+  24-private-settings-overflow.md, untested in game): the team count was reset and kept
+  4 bytes past the 0x28-byte `COctaneLobbyPrivateMatchRaceData`, overwriting the next
+  heap block's size.
+
 - **Fur/hair characters** (fixed 2026-10-09, see 06-fur.md): previously missing (driver select, run 12): bodies drawn with the fur material
   are missing; rigid parts (eyes, teeth, hats, kart) draw. The only GPU errors in the run are
   "image view type Color1D is incompatible with image type Color2D" (4 images) and one
