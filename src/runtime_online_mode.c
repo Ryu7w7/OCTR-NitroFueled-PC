@@ -2649,7 +2649,7 @@ static void ABI private_guest_return_timer(unsigned char *self) {
          * native quit-with-party sends the party leave, menu_return reports the
          * room leave — no extra deadline, no waiting on the room host. */
         puts("Ranked: guest ending race with the party");
-        private_race_timer_done(self);
+        private_race_timer_done();
         return;
     }
     original_guest_return_timer(self);
