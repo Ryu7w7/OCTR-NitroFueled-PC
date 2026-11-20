@@ -4566,6 +4566,7 @@ static void ranked_hold_countdown(unsigned char *self) {
      * full time and count from there). */
     if (self == countdown_started_timer && countdown_started_full > 0.0f) full = countdown_started_full;
     if (!runtime_ranked_active() || !runtime_public_match_active() || full <= 0) return;
+    full = 60.0f;   /* Ranked: the map vote counts 60 seconds from the minimum, on every screen (user, 20/11) */
     int64_t since = 0;
     int players = 0, state;   /* 1 held at full, 2 the server's time, 0 left alone */
     const int needed = runtime_public_ranked_min_players();
