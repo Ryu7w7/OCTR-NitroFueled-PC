@@ -2577,6 +2577,39 @@ static void ABI private_race_timer_done(void) {
     return_to_lobby();
 }
 
+/* Quitting a race to the main menu (0xfe6320; EU 16 bytes earlier: its 14-byte prologue is copied
+ * into a trampoline). Its 4th argument is "with the party": quitToMainMenuWithParty_VSC (the
+ * race's pause menu) passes 1, the plain quit 0. With the party, in a private room, it left the
+ * room's players behind (19/11: the host was alone afterwards). The user's rule: a private room's
+ * host takes everyone back to the room, as a private race's end does (return_to_lobby, 0xa9cbe0);
+ * a Cup in progress ends there. Anything else quits as the game does. Every quit is logged with
+ * its arguments and caller: some screens reach it by other paths (quitToMainMenu2_VSC, the
+ * results), whose arguments are still to be read. */
+static int room_host(void);
+static QuitToMainMenu original_quit_to_main_menu;
+static unsigned char *quit_image;   /* for the log's caller offsets */
+static void ABI quit_to_main_menu_hook(void *manager, int a, int b, int with_party, int d) {
+    /* In a race the game's private flag (is_private) does not hold: the private race/Cup state and the
+     * party's own private flag say it (19/11: is_private() was 0 at this quit). */
+    const int in_private = runtime_online_mode_in_private() || runtime_private_match_active();
+    const int host = room_host();
+    const int host_private = in_private && host && !runtime_public_match_active() && !runtime_ranked_active();
+    printf("Quit to main menu: args %d %d party=%d %d private=%d host=%d -> %s caller=image+%#lx\n", a, b,
+           with_party, d, in_private, host, with_party && host_private ? "back to the room" : "native quit",
+           (unsigned long)((unsigned char *)__builtin_return_address(0) - quit_image));
+    if (with_party && host_private && return_to_lobby) {
+        if (race_manager && *race_manager) {
+            int mode;
+            memcpy(&mode, (unsigned char *)*race_manager + 0xd4c, 4);
+            if (mode == 6) cup_reset_pending = 1;   /* the lobby goes back to single races, as after a Cup */
+        }
+        puts("Private room: Quit with party takes everyone back to the room");
+        return_to_lobby();
+        return;
+    }
+    original_quit_to_main_menu(manager, a, b, with_party, d);
+}
+
 /* The native guest first asks the host to return to the lobby, then leaves
  * the race session (keeping the room's party) when its grace timer expires.
  * Cup races 1-3 need the same end-of-results deadline as the host, without
@@ -5665,6 +5698,30 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     network_race = (NetworkRace)(image + 0x9fa130);
     return_to_lobby = (NoArgument)(image + 0xa9cbe0);
     quit_to_main_menu = (QuitToMainMenu)(image + (0xfe6320 - shift));
+    quit_image = image;
+    {   /* The quit's prologue: push rbp; mov rbp,rsp; push r15..r12; push rbx; push rax (14 bytes, no
+         * rip-relative operand), copied into a trampoline that jumps back after it. */
+        static const unsigned char quit_prologue[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,
+                                                      0x41,0x54,0x53,0x50};
+        unsigned char *quit = image + (0xfe6320 - shift);
+#ifdef _WIN32
+        unsigned char *stub = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+#else
+        unsigned char *stub = mmap(NULL, 64, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (stub == MAP_FAILED) stub = NULL;
+#endif
+        unsigned char code[14];
+        if (stub && !memcmp(quit, quit_prologue, sizeof quit_prologue)) {
+            memcpy(stub, quit_prologue, sizeof quit_prologue);
+            jump_to(stub + sizeof quit_prologue, quit + sizeof quit_prologue);
+            original_quit_to_main_menu = (QuitToMainMenu)stub;
+            jump_to(code, (const void *)quit_to_main_menu_hook);
+            if (write_code(quit, code, sizeof code)) quit_to_main_menu = original_quit_to_main_menu;
+            else fputs("Private room: the quit to the main menu could not be hooked\n", stderr);
+        } else {
+            fputs("Private room: the quit to the main menu not hooked (unexpected code)\n", stderr);
+        }
+    }
     receive_private_settings = (NativeEvent)(trampoline + 192);
     publish_private_track = (NativeEvent)(image + (0xf4f7c0 - shift));
     broadcast_race_settings = (NativeEvent)(trampoline + 2560);

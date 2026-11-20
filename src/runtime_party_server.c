@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 static int enabled;
@@ -201,7 +202,10 @@ int runtime_party_server_promote(const char *successor) {
     if (!has) return 0;
     /* Only the current owner may promote. After an earlier promotion this client is no
      * longer host (403 from the server); skip instead of spamming a rejected request. */
-    if (owner[0] && me[0] && strcmp(owner, me) != 0) {
+    /* The server keeps nicknames in lower case (signedOwner): "ryu7w7" is "Ryu7w7". Compared
+     * exactly, every host with a capital letter skipped the promotion and its leaving closed the
+     * room for everyone (19/11). */
+    if (owner[0] && me[0] && strcasecmp(owner, me) != 0) {
         fprintf(stderr, "Party server: promote skipped, not owner (owner=%s me=%s)\n", owner, me);
         return 0;
     }
@@ -303,7 +307,7 @@ void runtime_party_server_tick(void) {
         while (owner[n] && owner[n] != '"' && n + 1 < sizeof ownern) { ownern[n] = owner[n]; ++n; }
         ownern[n] = 0;
     }
-    int is_host = ownern[0] && !strcmp(ownern, me);
+    int is_host = ownern[0] && !strcasecmp(ownern, me);   /* the server's owner is lower case */
 
     pthread_mutex_lock(&lock);
     int changed = g != seen_generation;
@@ -330,7 +334,7 @@ void runtime_party_server_tick(void) {
         /* A queue has no ctrRoom to push us: when the session owner changes away from the
          * host we were following, the survivor requeues in the same mode instead of bengong. */
         if (mm && !mm_done && prev_owner[0] && ownern[0] &&
-            strcmp(prev_owner, ownern)) {
+            strcasecmp(prev_owner, ownern)) {   /* "Ryu7w7" (ours) and "ryu7w7" (the server's) are one */
             pthread_mutex_lock(&lock);
             matchmaking_host_lost_done = 1;
             pthread_mutex_unlock(&lock);

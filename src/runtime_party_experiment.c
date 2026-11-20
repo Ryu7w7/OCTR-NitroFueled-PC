@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 void runtime_invite_join(const char *host); /* runtime_services.c */
@@ -78,8 +79,10 @@ static int elect_successor(char out[24]) {
     for (int i = 0; i < count; ++i) {
         unsigned char *item = items[i];
         const char *name = item ? at(item, 0x10) : NULL;
-        if (!name || !*name || !strcmp(name, host)) continue;
-        if (!best || strcmp(name, best) < 0) {
+        /* Case-insensitive, as the RyuNET server's own pick when a host's game dies
+         * (party_session.go): every machine and the server name the same host. */
+        if (!name || !*name || !strcasecmp(name, host)) continue;
+        if (!best || strcasecmp(name, best) < 0) {
             best = name;
             local = item[0x2c] != 0;
         }

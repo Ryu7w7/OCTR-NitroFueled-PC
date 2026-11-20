@@ -311,8 +311,9 @@ void runtime_public_itemless_menu_return(void) {
             const char *me = runtime_np_get_online_name();
             const char *successor = NULL;
             for (int i = 0; i < n; ++i) {
-                if (!members[i][0] || (me && !strcmp(members[i], me))) continue;
-                if (!successor || strcmp(members[i], successor) < 0) successor = members[i];
+                /* case-insensitive: the same pick as the game's takeover and the server */
+                if (!members[i][0] || (me && !strcasecmp(members[i], me))) continue;
+                if (!successor || strcasecmp(members[i], successor) < 0) successor = members[i];
             }
             if (successor) {
                 if (runtime_room_mode_race_frozen())
