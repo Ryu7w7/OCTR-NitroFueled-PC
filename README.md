@@ -398,6 +398,11 @@ Import names from shadPS4's aerolib list.
 
 ## Recent releases
 
+- [v0.9.0](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.0): Ranked (Normal and
+  Itemless queues, MMR, ranks, seasons, Hall of Fame; a linked Discord or Steam account); voice chat
+  in rooms and races; private Cup, team and N.Sane modes; Pack Tacho built in; one launcher for
+  Windows and Linux with Steam login; DLSS Transformer K; translations and the European game at
+  par; Xbox controls diagram (#256) and Steam Deck controls (#258).
 - [v0.8.8](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8.8): DirectX 11
   renderer (experimental, Windows; shaders prepared once in about 3 minutes); internal resolution,
   FPS unlock and motion blur apply without restarting (#230); a smoother, lighter Windows launcher;
