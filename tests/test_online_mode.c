@@ -3818,8 +3818,17 @@ static void test_region(size_t shift) {
     put_pointer(labels[3],0x28,"TimerValue");
     unsigned char countdown_before[0x100]; memcpy(countdown_before,labels[3],sizeof countdown_before);
     *(unsigned *)(search_panel+12)|=0x400;
+    /* The searching panel is drawn once early, at one pixel, so the game prepares its artwork
+     * before the queue instead of freezing the first searching frame. */
+    *(float *)(search_panel+0x90)=300.f; *(float *)(search_panel+0x94)=120.f;
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(!(*(unsigned *)(search_panel+12)&0x400));
+    assert(*(float *)(search_panel+0x90)==1.f && *(float *)(search_panel+0x94)==1.f);
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(search_panel+12)&0x400);
     search_test_active=search_test_ranked=1;search_test_elapsed=42;search_test_range=700;
     runtime_online_mode_matchmaking_update(search_root);
+    assert(*(float *)(search_panel+0x90)==300.f && *(float *)(search_panel+0x94)==120.f);
     assert(!strcmp(*(char **)(labels[0]+0x30),"SEARCHING"));
     assert(!strcmp(*(char **)(labels[1]+0x30),"00:42 / 03:00"));
     assert(!strcmp(*(char **)(labels[2]+0x30),"WIDENED: 700 MMR"));

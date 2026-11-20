@@ -239,8 +239,23 @@ void runtime_party_server_matchmaking(int i_am_host, const char *host_name) {
     }
 }
 
+struct Leave {
+    char target[512], me[24];
+};
+
+static void *delete_member(void *arg) {
+    struct Leave *job = arg;
+    char body[256];
+    const int status = runtime_ryunet_request("DELETE", job->target, body, sizeof body);
+    fprintf(stderr, "Party server: queue leave %s status=%d\n", job->me, status);
+    free(job);
+    return NULL;
+}
+
 /* Quitting a queue: drop ourselves from the shared session so the server either promotes the
- * next member or deletes the session. The survivors poll that change and requeue immediately. */
+ * next member or deletes the session. The survivors poll that change and requeue immediately.
+ * The request goes to a thread of its own: run on the game's thread (menu_return hook) it
+ * stalled the frame for the server's round trip (log 20/11 12:46: 870 ms to 129.151.105.177). */
 void runtime_party_server_matchmaking_leave(void) {
     if (!enabled) return;
     pthread_mutex_lock(&lock);
@@ -248,15 +263,20 @@ void runtime_party_server_matchmaking_leave(void) {
     char sid[96], me[24];
     snprintf(sid, sizeof sid, "%s", session_id);
     snprintf(me, sizeof me, "%s", my_name);
-    pthread_mutex_unlock(&lock);
-    if (!mm || !sid[0] || !me[0]) return;
-    char target[512], body[256];
-    snprintf(target, sizeof target, "/v1/sessions/%s/members/me?name=%s", sid, me);
-    const int status = runtime_ryunet_request("DELETE", target, body, sizeof body);
-    fprintf(stderr, "Party server: queue leave %s status=%d\n", me, status);
-    pthread_mutex_lock(&lock);
     matchmaking_mode = 0;
     pthread_mutex_unlock(&lock);
+    if (!mm || !sid[0] || !me[0]) return;
+    struct Leave *job = calloc(1, sizeof *job);
+    pthread_t worker;
+    if (job) {
+        snprintf(job->target, sizeof job->target, "/v1/sessions/%s/members/me?name=%s", sid, me);
+        snprintf(job->me, sizeof job->me, "%s", me);
+    }
+    if (!job || pthread_create(&worker, NULL, delete_member, job)) {
+        free(job);
+        return; /* the server drops a silent member when the RyuNET connection closes */
+    }
+    pthread_detach(worker);
 }
 
 /* Host leaving: promote the successor on the server before the native quit.

@@ -124,6 +124,9 @@ static NativeEvent enable_project_controls;
 static NativeEvent activate_project_input;
 static _Thread_local int opening_team_race_ui, opening_cup_finish_ui;
 static SetSeason hide_placeable;
+static int search_panel_prewarm;        /* frames left to draw it early (0: already drawn) */
+static int search_panel_shrunk;         /* size saved and pixels still 1x1 */
+static unsigned char search_panel_size[8];
 static void **gui_manager, **race_finished_type, **local_racers_finished_type;
 static void *cup_ranking_project, *cup_finish_project;
 static void *team_ranking_project;
@@ -837,6 +840,8 @@ void runtime_online_mode_new_session(void) {
     if (!runtime_room_mode_following()) runtime_speed_mode_set(0);
     runtime_public_itemless_new_session();
     runtime_ranked_race_begin();
+    search_panel_prewarm = 0;
+    search_panel_shrunk = 0;
     __atomic_store_n(&lobby_updated_ms, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&room_on, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&public_on, 0, __ATOMIC_RELAXED);
@@ -3705,10 +3710,37 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     resume_private_map();
 }
 
+/* The searching panel is a clone of the lobby countdown, and the game prepares its artwork the
+ * first time it is drawn: that single frame stalled the search start for up to 2 s (log 20/11
+ * 12:38, Play pressed, 1.9 s frozen, one image registered). Draw it once, at one pixel, as soon
+ * as the lobby appears, so the work happens before the queue and the artwork stays cached. */
+
+static void panel_visibility(unsigned char *panel, int active) {
+    if (active) {
+        if (search_panel_shrunk && memcmp(panel+0x90,search_panel_size,sizeof search_panel_size)) {
+            memcpy(panel+0x90,search_panel_size,sizeof search_panel_size);
+            *(unsigned *)(panel+12)|=0x1000;
+        }
+        search_panel_shrunk=0;
+        search_panel_prewarm=0;
+        hide_placeable(panel,0);
+    } else if (search_panel_prewarm>0) {
+        if (!search_panel_shrunk) {
+            memcpy(search_panel_size,panel+0x90,sizeof search_panel_size);
+            const float pixel[]={1.0f,1.0f};
+            memcpy(panel+0x90,pixel,sizeof pixel);
+            search_panel_shrunk=1;
+        }
+        *(unsigned *)(panel+12)|=0x1000;
+        hide_placeable(panel,0); /* one frame at one pixel: its artwork is prepared now */
+        --search_panel_prewarm;
+    } else hide_placeable(panel,1);
+}
+
 static void matchmaking_labels(unsigned char *node, int active, int elapsed, int timeout, int range, int ranked, int depth) {
     if (!node || depth>16) return;
     const char *tag=pointer_at(node,0x28);
-    if (tag && !strcmp(tag,"OCTR_SEARCH_PANEL")) hide_placeable(node,!active);
+    if (tag && !strcmp(tag,"OCTR_SEARCH_PANEL")) panel_visibility(node,active);
     if (tag && active) {
         if (!strcmp(tag,"OCTR_SEARCH_TITLE") || !strcmp(tag,"OCTR_SEARCH_TIME")) {
             const int title=!strcmp(tag,"OCTR_SEARCH_TITLE");
@@ -3775,6 +3807,9 @@ void runtime_online_mode_matchmaking_update(unsigned char *root) {
     if (project && handle_object(&matchmaking_project)!=project) {
         assign_handle((unsigned char *)&matchmaking_project,NULL);
         make_handle(&matchmaking_project,project);
+        /* A new lobby project: draw the searching panel once early, off the queue. */
+        search_panel_prewarm=1;
+        search_panel_shrunk=0;
     }
     if (matchmaking_private_project) return;
     int elapsed=0,timeout=180,range=0,ranked=0;
