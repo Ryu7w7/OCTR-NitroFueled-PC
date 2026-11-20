@@ -1647,7 +1647,9 @@ static void test_region(size_t shift) {
     put_pointer(selected_list, 32, zone_items);
     unsigned char native_settings[0x40] = {0};
     put_pointer(image, 0x2ad4e30, native_settings);
-    unsigned char private_settings[48] = {0};
+    /* COctaneLobbyPrivateMatchRaceData is 0x28 bytes; the 8 bytes after it stand for the
+     * next heap block's header and must stay untouched. */
+    unsigned char private_settings[0x28 + 8] = {0};
     put_pointer(manager, 0xde8, private_settings);
     for (int i = 0; i < 4; ++i) put_pointer(test_zones[i], 0x10, maps[i]);
     /* Entering CUP initializes the first native cup and publishes its first map. */
@@ -2181,7 +2183,6 @@ static void test_region(size_t shift) {
     assert(*race_mode == 1 && *(int *)(manager + 0xd4c) == 1);
     assert(*(int *)(private_settings + 0x20) == 1);
     memcpy(packet + 0x3c, &single_mode, 4);
-    *(int *)(private_settings + 0x28) = 1; /* Host selected No Teams. */
     received(packet);
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
     room_active = 0;
@@ -2193,7 +2194,7 @@ static void test_region(size_t shift) {
     card_event(NULL, &event, card);
     assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - NORMAL"));
     room_active = 1;
-    assert(*(int *)(private_settings + 0x28) == 1);
+    assert(!memcmp(private_settings + 0x28, "\0\0\0\0\0\0\0\0", 8));
     memset(native_settings, 0, sizeof native_settings);
     *(int *)(native_settings + 0x28) = 2;
     unsigned char team_slot[0x88]={0}, slot_name[0x120]={0}, slot_number[0x120]={0};
@@ -2824,7 +2825,9 @@ static void test_region(size_t shift) {
     assert(!(*(unsigned *)(members_root + 12) & 0x400)); /* Restored with lobby. */
     assert(!(native_selector_project[0x34] & 0x20));
     assert(*(unsigned *)(native_selector_root + 12) & 0x400);
-    assert(*(int *)(native_settings + 0x28) == 1 && *(int *)(private_settings + 0x28) == 1);
+    assert(*(int *)(native_settings + 0x28) == 1);
+    /* Leaving resets the team count without writing past the private settings. */
+    assert(!memcmp(private_settings + 0x28, "\0\0\0\0\0\0\0\0", 8));
     /* Replay delayed opens after leaving Teams into every mode, with stale team settings. */
     for (int room = 0; room <= 1; ++room)
         for (int mode = 0; mode <= 15; ++mode)

@@ -308,11 +308,13 @@ static int private_team_selector_allowed(void) {
         (private_team_selector_active || is_private());
 }
 
+/* The team count lives only in the native race settings (+0x28, read by the game). Race
+ * manager +0xde8 is a 0x28-byte COctaneLobbyPrivateMatchRaceData: its +0x28 is the next heap
+ * block's size, and writing there broke the pool on the return to the lobby
+ * (docs/sacredfire/24-private-settings-overflow.md). */
 static void reset_team_count(void) {
     const int single = 1;
     if (race_settings && *race_settings) memcpy(*race_settings + 0x28, &single, 4);
-    unsigned char *settings = race_manager && *race_manager ? pointer_at(*race_manager, 0xde8) : NULL;
-    if (settings) memcpy(settings + 0x28, &single, 4);
 }
 
 static void normalize_race_teams(void) {
@@ -3402,10 +3404,6 @@ static void restore_race_teams(int teams) {
         *race_settings) {
         printf("Team lobby: the room came back with %d team(s): %d again\n", teams, kept_team_count);
         set_team_count(*race_settings, kept_team_count);
-        unsigned char *settings = race_manager && *race_manager ? pointer_at(*race_manager, 0xde8) : NULL;
-        int there = 0;
-        if (settings) memcpy(&there, settings + 0x28, 4);
-        if (settings && there >= 1 && there <= 4) memcpy(settings + 0x28, &kept_team_count, 4);   /* a team count there only */
         teams = kept_team_count;
     }
     /* and tells the guests, as a change in the room's settings does (0xc2ed20 sends the race settings): about once a
@@ -3450,18 +3448,16 @@ static void team_lobby_frame(void) {
         }
         rooms_seen = rooms;
         if (new_room_until && now < new_room_until) {
-            /* only a value that is a team count (2..4) is put back to 1: while the room is set up the settings
-             * behind race_manager +0xde8 are not always that object (it read 65 and 0 there just before a corrupt
-             * free, 19/11 13:52) */
+            /* only a team count (2..4) is put back to 1, and only in the native race settings: race manager
+             * +0xde8 has no team count (its +0x28 is the next heap block's size: the 65 and 0 read there
+             * before a corrupt free, 19/11 13:52) */
             const int one = 1;
-            int teams = 1, kept = 1;
+            int teams = 1;
             if (race_settings && *race_settings) memcpy(&teams, *race_settings + 0x28, 4);
-            unsigned char *settings = race_manager && *race_manager ? pointer_at(*race_manager, 0xde8) : NULL;
-            if (settings) memcpy(&kept, settings + 0x28, 4);
-            if (teams >= 2 && teams <= 4) memcpy(*race_settings + 0x28, &one, 4);
-            if (settings && kept >= 2 && kept <= 4) memcpy(settings + 0x28, &one, 4);
-            if ((teams >= 2 && teams <= 4) || (kept >= 2 && kept <= 4))
-                printf("Team lobby: a new room, teams off (the last room had %d)\n", teams >= 2 && teams <= 4 ? teams : kept);
+            if (teams >= 2 && teams <= 4) {
+                memcpy(*race_settings + 0x28, &one, 4);
+                printf("Team lobby: a new room, teams off (the last room had %d)\n", teams);
+            }
         } else {
             new_room_until = 0;
         }
