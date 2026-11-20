@@ -131,6 +131,7 @@
   "Cannot prepare matchmaking search.": "Cannot prepare matchmaking search.",
   "A player left your party during matchmaking. Leave and search again.": "A player left your party during matchmaking. Leave and search again.",
   "Not enough players to start Ranked. Back to queue.": "Not enough players to start Ranked. Back to queue.",
+  "WAITING FOR PLAYERS %d/%d": "WAITING FOR PLAYERS %d/%d",
   "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.": "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.",
   "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it.": "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it."
 }

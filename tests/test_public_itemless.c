@@ -32,8 +32,6 @@ int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
-int runtime_online_mode_ranked_waiting(void) { return 0; } /* a found room is never waiting here: Back stays blocked */
-int runtime_online_mode_lobby_placeable(void *placeable) { (void)placeable; return 1; } /* every Back here is the lobby's */
 static void *hof_test_wrapper, *hof_test_content;
 void *runtime_online_mode_content(void *placeable) { return placeable == hof_test_wrapper ? hof_test_content : NULL; }
 static void *hof_focused_project, *hof_focused_list;

@@ -1643,21 +1643,8 @@ static void ABI placeable_event(void *self, void *event) {
             }
         }
     }
-    /* Found room: block Back (signal 9) so nobody can leave mid-matchmaking. This prevents the
-     * host-exit / requeue / mode-fallback churn entirely. Still in queue (matchmaking_room == 0)
-     * Back is allowed. A disconnect is a connection close, not a Back event, so it still works. */
-    if (signal == 9) {
-        pthread_mutex_lock(&mode_lock);
-        const int found = matchmaking_room != 0;
-        pthread_mutex_unlock(&mode_lock);
-        /* A Ranked room still waiting for players (its countdown held, runtime_online_mode.c) can be
-         * left: it may wait a long while, and nobody should be stuck in it (20/11). */
-        /* Only the room's own lobby menu: Back still closes the settings or customization opened over it (20/11). */
-        if (found && !runtime_online_mode_ranked_waiting() && runtime_online_mode_lobby_placeable(self)) {
-            fprintf(stderr, "Public matchmaking: Back blocked in found room\n");
-            return; /* do NOT forward Back to native */
-        }
-    }
+    /* Found rooms used to block Back (no leaving mid-matchmaking); players may cancel or go back
+     * again (20/11): the server handles a departure (room-left, found-room rule). */
     const char *previous = dispatch_approved_party;
     if (approval[0]) dispatch_approved_party = approval;
     native_placeable_event(self, event);

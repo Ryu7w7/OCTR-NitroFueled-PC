@@ -149,8 +149,7 @@ uint64_t runtime_public_room(void);
 int runtime_public_ranked_short(void);
 int runtime_public_ranked_min_players(void); /* players a Ranked room needs, as the server said (6 until then) */
 int runtime_online_mode_room_players(void);   /* players in the online room (the game's list) */
-int runtime_online_mode_ranked_waiting(void);  /* a Ranked room short of players: countdown held, Back allowed */
-int runtime_online_mode_lobby_placeable(void *placeable);  /* that placeable is in the room's lobby menu (not settings over it) */
+int runtime_online_mode_ranked_waiting(void);  /* a Ranked room short of players: countdown held, "waiting for players" shown */
 int runtime_private_match_active(void);
 int runtime_online_party_active(void);
 /* 1 accepted, 0 rejected, -1 asynchronous check pending. */

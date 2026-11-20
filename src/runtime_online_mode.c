@@ -115,7 +115,6 @@ typedef void (ABI *RunGraphNode)(void *, void *);
 static RunGraphNode run_graph_node;
 static NativeEvent finish_project_context;
 typedef void (ABI *ProjectEvent)(void *, void *);
-static void update_found_room_back_legend(unsigned char *owner);
 typedef void (ABI *OpenProject)(void **, void *, const char *, void *, int, void *, float);
 static ProjectEvent original_project_event;
 static OpenProject open_project;
@@ -760,7 +759,6 @@ void runtime_online_mode_leave_cup(void) {
 /* Network callbacks must never release native GUI handles on their worker thread. */
 static unsigned pending_online_reset;
 static uint64_t lobby_updated_ms;
-static unsigned char *lobby_seen_project, *lobby_seen_root; /* the lobby menu lobby_update last ran in: compared, never read */
 static int room_on, public_on;
 void runtime_online_mode_request_leave(int fresh) {
     __atomic_fetch_or(&pending_online_reset, fresh ? 3u : 1u, __ATOMIC_ACQ_REL);
@@ -2941,35 +2939,6 @@ void runtime_online_mode_note_frame(void) {
 int runtime_online_mode_room_on(void) { return __atomic_load_n(&room_on, __ATOMIC_RELAXED); }
 int runtime_online_mode_public_on(void) { return __atomic_load_n(&public_on, __ATOMIC_RELAXED); }
 
-/* Whether a placeable (the one a Back press went to) is part of the room's own lobby menu, not a menu opened
- * over it (settings, customization): its parents (+0x40, live while it gets events) up to the lobby menu's
- * root, or a top whose project (+0x20, as a root's) is that menu's. The lobby pointers are only compared. */
-int runtime_online_mode_lobby_placeable(void *placeable) {
-    unsigned char *matchmaking = handle_object(&matchmaking_project);
-    unsigned char *matchmaking_root = matchmaking ? pointer_at(matchmaking, 0x10) : NULL;
-    unsigned char *top = NULL;
-    const char *top_tag = NULL;
-    int found = 0;
-    unsigned char *p = placeable;
-    for (int depth = 0; p && (uintptr_t)p >= 0x10000 && depth < 32; ++depth) {
-        if (p == lobby_seen_root || (matchmaking_root && p == matchmaking_root)) { found = 1; break; }
-        top = p;
-        p = pointer_at(p, 0x40);
-    }
-    if (!found && top) {
-        unsigned char *project = pointer_at(top, 0x20);
-        found = project && (project == lobby_seen_project || (matchmaking && project == matchmaking));
-        top_tag = pointer_at(top, 0x28);
-        if ((uintptr_t)top_tag < 0x10000) top_tag = "(no tag)";
-    }
-    static int logged;
-    if (logged++ < 64)
-        printf("Found room: Back on %p (top %p \"%.40s\") %s the room's lobby menu (lobby root %p project %p, waiting room %p)\n",
-               placeable, (void *)top, top_tag ? top_tag : "", found ? "in" : "outside", (void *)lobby_seen_root,
-               (void *)lobby_seen_project, (void *)matchmaking);
-    return found;
-}
-
 int runtime_online_mode_lobby_open(void) {
     const uint64_t at = __atomic_load_n(&lobby_updated_ms, __ATOMIC_RELAXED);
     return at && monotonic_ms() - at < 1000;
@@ -3621,10 +3590,51 @@ int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams) {
     return -1;
 }
 
+/* Ranked waiting for players (runtime_online_mode_ranked_waiting, countdown held): the lobby timer
+ * (ui/Octane_Lobby_Timer: TimerValue the time, TimerDesc its label) shows "WAITING FOR PLAYERS 2/3"
+ * with the time hidden, and goes back to the countdown as it was once the minimum is there. Every
+ * client does it (the host holds the time; the guests only show it). */
+static void ranked_waiting_timer(unsigned char *owner) {
+    static int shown, shown_players, shown_needed;
+    static char saved_desc[128];
+    const int waiting = runtime_online_mode_ranked_waiting();
+    if (!waiting && !shown) return;
+    unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
+    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
+    unsigned char *desc = root ? find_placeable(root, "TimerDesc", 0) : NULL;
+    unsigned char *value = root ? find_placeable(root, "TimerValue", 0) : NULL;
+    if (!desc || !value) {
+        if (!waiting) shown = 0;   /* that lobby is gone: a new one starts with its own timer */
+        return;
+    }
+    if (waiting) {
+        const int players = runtime_online_mode_room_players(), needed = runtime_public_ranked_min_players();
+        if (!shown) {
+            const char *old = pointer_at(desc, 0x30);
+            snprintf(saved_desc, sizeof saved_desc, "%s", old && (uintptr_t)old >= 0x10000 ? old : "");
+            unsigned flags;
+            memcpy(&flags, desc + 12, 4);
+            printf("Ranked lobby: timer label \"%.60s\" (flags %#x) -> waiting for players\n", saved_desc, flags);
+        }
+        if (!shown || players != shown_players || needed != shown_needed) {
+            char text[96];
+            snprintf(text, sizeof text, runtime_text("WAITING FOR PLAYERS %d/%d"), players, needed);
+            set_text(desc, text);
+            shown_players = players;
+            shown_needed = needed;
+        }
+        if (hide_placeable) hide_placeable(value, 1);
+        shown = 1;
+        return;
+    }
+    if (saved_desc[0]) set_text(desc, saved_desc);
+    if (hide_placeable) hide_placeable(value, 0);
+    shown = 0;
+    puts("Ranked lobby: minimum reached, timer back to the countdown");
+}
+
 static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt) {
     __atomic_store_n(&lobby_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
-    lobby_seen_project = owner ? pointer_at(owner, 0x20) : NULL;
-    lobby_seen_root = lobby_seen_project ? pointer_at(lobby_seen_project, 0x10) : NULL;
     const char *tag = owner ? pointer_at(owner, 0x28) : NULL;
     if (tag && (uintptr_t)tag < 0x10000) tag = NULL;
     {   /* the menus this behavior runs in, by their tag: the private room's own (OCTR_PRIVATE_LOBBY) or any other,
@@ -3646,7 +3656,7 @@ static void ABI lobby_update(unsigned char *self, unsigned char *owner, float dt
     refresh_lobby_card(owner);
     refresh_lobby_members_visibility();
     runtime_public_itemless_update();
-    update_found_room_back_legend(owner);
+    ranked_waiting_timer(owner);
     runtime_party_experiment_tick();
     if (runtime_private_party_update()) return;
     resume_private_map();
@@ -4413,9 +4423,10 @@ static void ABI countdown_init(unsigned char *self) {
 }
 
 /* Ranked: the map countdown waits for the players the server asks for (RYUNET_RANKED_MIN_PLAYERS,
- * from room-alive): below it, the host keeps the timer at its full time every tick, so it neither
- * counts down nor ends; when a player leaves during the countdown it goes back to full and waits
- * again. The host's remaining time is what the guests follow. The cancel at the map vote's end
+ * from room-alive): below it, every player's game keeps the timer at its full time every tick, so it
+ * neither counts down nor ends; when a player leaves during the countdown it goes back to full and
+ * waits again. Not the host alone: a guest's timer also runs on its own between the host's updates,
+ * and one reaching 0 ended the vote and dissolved the room (20/11). The cancel at the map vote's end
  * (runtime_public_ranked_short) stays as the last net. */
 /* Players in the online room now, from the game's own player list (any thread reads it as the menus do). */
 int runtime_online_mode_room_players(void) {
@@ -4425,8 +4436,8 @@ int runtime_online_mode_room_players(void) {
     return players > 0 && players <= 8 ? players : 0;
 }
 
-/* A Ranked room still short of the players the server asks for: its countdown is held, and leaving
- * it is allowed (Back, its legend). */
+/* A Ranked room still short of the players the server asks for: its countdown is held and the lobby
+ * timer says "waiting for players" (ranked_waiting_timer). */
 int runtime_online_mode_ranked_waiting(void) {
     if (!runtime_ranked_active() || !runtime_public_found_room()) return 0;
     const int players = runtime_online_mode_room_players();
@@ -4441,7 +4452,7 @@ static void ranked_hold_countdown(unsigned char *self) {
     memcpy(&remaining, self + 0x28, 4);
     if (self != timer) { timer = self; full = 0; held = -1; }
     if (remaining > full) full = remaining;   /* its full time: the highest it showed */
-    if (!runtime_ranked_active() || !runtime_public_match_active() || !room_host()) return;
+    if (!runtime_ranked_active() || !runtime_public_match_active()) return;
     void *list = player_manager && *player_manager ? pointer_at(*player_manager, 0x10) : NULL;
     int players = 0;
     if (list) memcpy(&players, (unsigned char *)list + 0x0c, 4);
@@ -4449,7 +4460,8 @@ static void ranked_hold_countdown(unsigned char *self) {
     const int hold = players > 0 && players < needed && full > 0;
     if (hold != held) {
         held = hold;
-        printf("Ranked lobby: %d/%d players, map countdown %s\n", players, needed, hold ? "held at full" : "running");
+        printf("Ranked lobby: %d/%d players, map countdown %s (%s)\n", players, needed, hold ? "held at full" : "running",
+               room_host() ? "host" : "guest");
     }
     if (hold && remaining < full) memcpy(self + 0x28, &full, 4);
 }
@@ -5052,33 +5064,6 @@ void runtime_online_mode_hof_legend(void *project) {
                           "To Parameters" : "To Leaderboard");
     add_legend(project, list_button, &label, 1);
     if (label) drop_string(*string_pool, label - 16);
-}
-
-/* Hide the native BACK (O/B) legend + icon while a matchmaking room is found, so players cannot
- * quit mid-match; restore it once the room is gone (still queueing / back in the lobby). */
-static int back_legend_hidden;
-static int back_legend_button;
-static void update_found_room_back_legend(unsigned char *owner) {
-    /* a Ranked room waiting for players can be left: its BACK stays (runtime_online_mode_ranked_waiting) */
-    const int found = runtime_public_found_room() && !runtime_online_mode_ranked_waiting();
-    if (found == back_legend_hidden) return; /* no transition */
-    unsigned char *project = owner ? pointer_at(owner, 0x20) : NULL;
-    unsigned char *remove = gui_manager && *gui_manager ? pointer_at(*gui_manager, 0xf0) : NULL;
-    if (!project || !remove) return;
-    ProjectEvent dispatch = (ProjectEvent)pointer_at(pointer_at(project, 0), 0xb0);
-    if (!dispatch) return;
-    /* Try button 2 first (HOF uses 1 and 3, so BACK is likely 2). */
-    int button = 2;
-    memcpy(remove + 0x18, &button, 4);
-    dispatch(project, remove);
-    back_legend_hidden = found;
-    back_legend_button = button;
-    if (!found && back_legend_button) {
-        char *label = intern_string(*string_pool, runtime_text("BACK"));
-        add_legend(project, back_legend_button, &label, 1);
-        if (label) drop_string(*string_pool, label - 16);
-    }
-    fprintf(stderr, "Found-room BACK legend hidden=%d button=%d\n", found, back_legend_button);
 }
 
 static void refresh_team_legend(unsigned char *self) {
