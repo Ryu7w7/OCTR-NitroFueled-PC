@@ -95,7 +95,9 @@ int runtime_ranked_status(int fresh) {
     pthread_mutex_lock(&lock);
     if ((!status_until || now >= status_until || (fresh && status_state == 1)) && !status_pending) {
         status_pending = 1;
-        status_state = -1;
+        /* Keep the last answer while the refresh runs on the worker: the Ranked menu's
+         * Go To Lobby stays usable instead of dimming for one round trip. */
+        if (!status_until) status_state = -1;
     }
     const int state = status_state;
     pthread_mutex_unlock(&lock);

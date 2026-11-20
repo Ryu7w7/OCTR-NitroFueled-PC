@@ -124,7 +124,12 @@ static void test_status_contract(void) {
     status_state = 1;
     status_until = monotonic_ms() + 5000;
     assert(runtime_ranked_status(0) == 1);
-    assert(runtime_ranked_status(1) == -1 && status_pending);
+    /* A fresh check refreshes in the background: the Ranked menu keeps the last answer,
+     * so Go To Lobby stays usable while the request is in flight. */
+    assert(runtime_ranked_status(1) == 1 && status_pending);
+    status_pending = 0;
+    status_until = monotonic_ms() - 1;   /* expired: the stale answer holds too */
+    assert(runtime_ranked_status(0) == 1 && status_pending);
     status_pending = 0;
     status_until = 0;
 }
@@ -152,7 +157,7 @@ static void test_status_refresh(void) {
     ranked_status_fetch();
     assert(runtime_ranked_status(0) == 1);
     status_http = 503;
-    assert(runtime_ranked_status(1) == -1);
+    assert(runtime_ranked_status(1) == 1 && status_pending); /* the good answer holds */
     ranked_status_fetch();
     assert(runtime_ranked_status(0) == 0);
     status_http = 200;
