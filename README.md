@@ -104,9 +104,35 @@ Steam Deck notes:
 
 ### Updating
 
-On Windows, unzip the new version over your folder to keep your settings, saves and nickname key.
-To use another folder instead, copy `user\`, `bbport.ini`, `launcher.ini` and `ryunet_online.key`
-across.
+The launcher asks GitHub for the latest release every time it starts, and the line under its
+header shows the new version with an **Update** button (**Tools → Check for updates** asks again).
+Updating from the launcher keeps every setting and save.
+
+**From the launcher**
+
+- *Windows:* the launcher downloads the release's portable ZIP into `update\`, checks its size and
+  SHA-256, unpacks it over the folder and restarts itself. Your files are never written: `user\`,
+  `bbport.ini`, `launcher.ini` and `ryunet_online.key` stay as they are. Every file it replaces is
+  moved aside first, so a failed or interrupted update is rolled back and the folder keeps
+  working. Close the game first (the launcher refuses to update while it runs). With the
+  automatic install on (Settings, off by default) the update starts by itself; otherwise press
+  the button.
+- *Linux:* the new AppImage is downloaded next to the running one as a `.part` file, checked
+  against the size and SHA-256 of the release, made executable and put in place of the running
+  AppImage — same path and name, so desktop entries and the Steam shortcut
+  (`~/.local/share/sacredfire/SacredFire.AppImage`) keep working — then the launcher restarts
+  itself. A failed download leaves the current AppImage untouched. From a source checkout or a
+  Nix build the button opens the release page instead.
+
+**Manual**
+
+- *Windows:* unzip the new `CTR-NitroFueled-PC-portable-<version>-windows.zip` over your folder;
+  the player files listed above are not in the ZIP, so they survive. Updating into a different
+  folder means copying `user\`, `bbport.ini`, `launcher.ini` and `ryunet_online.key` across.
+- *Linux:* download the release AppImage, `chmod +x` it and replace the AppImage you run, in the
+  same path (a Steam shortcut points at `~/.local/share/sacredfire/SacredFire.AppImage`). Saves,
+  settings and the nickname key live in `~/.local/share/sacredfire` and are not part of the
+  AppImage.
 
 ## Online
 
