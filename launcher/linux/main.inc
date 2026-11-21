@@ -68,6 +68,10 @@ void RenderFrame() {
         if (ImGui::IsKeyDown(ImGuiKey(key))) { KeepAnimating(1.0); break; }
     Frame();
     ImGui::Render();
+    // SDL_Renderer defaults to pixel coordinates, while ImGui's draw data is in logical
+    // window units: without this the whole UI is drawn unscaled in the top-left and the
+    // backend's clip rectangles (multiplied by FramebufferScale) cut the left edge.
+    SDL_SetRenderScale(g_renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
     SDL_SetRenderDrawColor(g_renderer, 20, 20, 26, 255);
     SDL_RenderClear(g_renderer);
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_renderer);
