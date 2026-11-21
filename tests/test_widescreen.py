@@ -303,6 +303,36 @@ class WidescreenTests(unittest.TestCase):
             with self.assertRaises(ValueError):  # a patch of another archive
                 archive_patch.write_entries_patch(root / 'x.bbpatch', pak, '/app0/archives/update.pak', {0: b'1'}, playlist)
 
+    def test_runs_go_over_another_features_copy(self):
+        """Issue #267: Pack Tacho replaces the Options page the layout changes; the layout's runs
+        are found in its copy by the bytes around them, and the copy is replaced again."""
+        import hashlib
+        filler = bytes(range(256)) * 4
+        original = filler[:300] + b'\xf0\x44' + filler[300:600] + b'\x01' + filler[600:]
+        op = {'kind': 'archive_asset', 'original_sha256': hashlib.sha256(original).hexdigest(),
+              'runs': [[300, 'f044', '7045'], [602, '01', '00']]}
+        copy = b'PACK' * 16 + original  # another feature's copy: the same bytes, further on
+        result = widescreen.runs_over(op, original, copy)
+        self.assertEqual(result, b'PACK' * 16 + original[:300] + b'\x70\x45' + original[302:602] + b'\x00' + original[603:])
+        with self.assertRaises(ValueError):  # not in the copy
+            widescreen.runs_over(op, original, copy.replace(b'\xf0\x44', b'\x00\x00'))
+        with self.assertRaises(ValueError):  # twice in it, whatever the context
+            widescreen.runs_over(op, original, copy + copy)
+        with self.assertRaises(ValueError):  # not the game's own asset
+            widescreen.runs_over(op, original[1:], copy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pak = root / 'update2.pak'
+            fake_archive(pak, [b'one', original])
+            guest = '/app0/archives/update2.pak'
+            pack = root / 'pack.bbpatch'
+            archive_patch.write_entry_patch(pack, pak, guest, 1, copy)
+            self.assertIsNone(archive_patch.replaced_entry(pak, 2, 0, pack))
+            self.assertEqual(archive_patch.replaced_entry(pak, 2, 1, pack), copy)
+            layout = root / 'layout.bbpatch'
+            archive_patch.write_entries_patch(layout, pak, guest, {1: result}, pack, override={1})
+            self.assertEqual(entry(pak, layout, 1), result)
+
     def test_archive_list_replaces_the_base_patch_of_the_same_archive(self):
         base = {'/app0/archives/update2.pak': Path('playlist.bbpatch')}
         layout = {'archive_patches': {'/app0/archives/update2.pak': Path('a.bbpatch'),

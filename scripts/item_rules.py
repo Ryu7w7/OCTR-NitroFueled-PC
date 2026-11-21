@@ -239,13 +239,8 @@ def loaded_copies(game):
 
 def current(archive, path, entry, base_patch):
     """The entry as the game reads it now: base_patch's replacement for it, else the archive's."""
-    if base_patch is not None:
-        record_at = 0x38 + 4 * len(archive.files) + 16 * entry['index']
-        for offset, data in archive_patch.read(base_patch)[2]:
-            if offset == record_at and len(data) == 16:
-                low, extra, length, _mode = struct.unpack('<4I', data)
-                return archive_patch.view(path, base_patch, low | ((extra & 0xFF) << 32), length)
-    return bytes(archive.extract(entry))
+    replaced = archive_patch.replaced_entry(path, len(archive.files), entry['index'], base_patch)
+    return replaced if replaced is not None else bytes(archive.extract(entry))
 
 
 def prepare(game, out, rules, base, log=print):
