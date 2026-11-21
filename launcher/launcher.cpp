@@ -3358,25 +3358,52 @@ void GraphicsSettings() {
     }
     GpuCombo();
     {
-        int limit = a.game.Int("fps_limit", 60);
+        // bbport.ini accepts any limit up to 1000 (gpu/shim/bbport_settings.cpp); a value off the
+        // list (e.g. 75 for a 75 Hz screen) shows as "Custom" with its own field.
+        constexpr int kMaxFpsLimit = 1000;
+        static bool custom_picked = false;
+        int limit = std::clamp(a.game.Int("fps_limit", 60), 0, kMaxFpsLimit);
+        const bool listed = std::find(std::begin(kFpsLimits), std::end(kFpsLimits), limit) != std::end(kFpsLimits);
+        const bool custom = custom_picked || !listed;
         auto name = [](int v) -> std::string {
             if (v == 0) return T("Sin límite", "No limit");
             return std::to_string(v) + " FPS";
         };
+        const std::string custom_name = T("Personalizado", "Custom");
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-        if (ImGui::BeginCombo(FormLabel(T("Límite de FPS", "FPS limit")), name(limit).c_str())) {
+        // HeightLarge: the 8 limits and Custom fit without scrolling (the default height shows 8).
+        if (ImGui::BeginCombo(FormLabel(T("Límite de FPS", "FPS limit")),
+                              custom ? custom_name.c_str() : name(limit).c_str(), ImGuiComboFlags_HeightLarge)) {
             for (int v : kFpsLimits) {
-                if (ImGui::Selectable(name(v).c_str(), v == limit)) {
+                if (ImGui::Selectable(name(v).c_str(), !custom && v == limit)) {
+                    custom_picked = false;
                     a.game.Set("fps_limit", std::to_string(v));
+                    SaveGameIni();
+                }
+            }
+            if (ImGui::Selectable(custom_name.c_str(), custom)) {
+                custom_picked = true;
+                if (limit == 0) {  // the field starts from a real limit, not "No limit"
+                    a.game.Set("fps_limit", "60");
                     SaveGameIni();
                 }
             }
             ImGui::EndCombo();
         }
         HelpMarker(T("Con el parche de 60 FPS el juego va tan rápido como permita tu PC. En una pantalla de 144 Hz sin "
-                     "G-Sync/FreeSync, 72 reparte los fotogramas de forma pareja.",
+                     "G-Sync/FreeSync, 72 reparte los fotogramas de forma pareja. Personalizado acepta cualquier "
+                     "valor de 1 a 1000, por ejemplo la frecuencia de tu pantalla.",
                      "With the 60 FPS patch the game runs as fast as your PC allows. On a 144 Hz screen without "
-                     "G-Sync/FreeSync, 72 divides the refresh evenly."));
+                     "G-Sync/FreeSync, 72 divides the refresh evenly. Custom takes any value from 1 to 1000, such "
+                     "as your screen's refresh rate."));
+        if (custom) {
+            int value = limit > 0 ? limit : 60;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            if (ImGui::InputInt(FormLabel(T("FPS personalizados", "Custom FPS")), &value, 1, 10)) {
+                a.game.Set("fps_limit", std::to_string(std::clamp(value, 1, kMaxFpsLimit)));
+                SaveGameIni();
+            }
+        }
     }
     GameFlag("async_pipelines", T("Shaders en segundo plano (experimental)", "Background shaders (experimental)"), false,
              T("Compila los shaders en segundo plano: menos tirones la primera vez que aparece un efecto; a veces un "

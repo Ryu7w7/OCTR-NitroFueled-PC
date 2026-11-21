@@ -451,9 +451,11 @@ std::string Row(std::size_t row, int change) {
         return text;
     }
     case 5: {
-        const auto& limits = BbSettings::FpsLimits;
-        constexpr int count = int(std::size(BbSettings::FpsLimits));
+        // The fixed limits plus the launcher's custom one (e.g. 75), so cycling comes back to it.
+        int limits[BbSettings::FpsLimitCount + 1];
         int limit = v.fps_limit.load(), k = 0;
+        const int custom = BbSettings::SessionFpsLimitCustom(limit);
+        const int count = BbSettings::FpsLimitChoices(custom, limits);
         while (k < count && limits[k] != limit) {
             ++k;
         }

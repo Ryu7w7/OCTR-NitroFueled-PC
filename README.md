@@ -49,7 +49,8 @@ That covers menus, Adventure and Arcade, races, sound, cutscenes, Xbox/SDL contr
 keyboard, saving, the community patches (60 FPS, no motion blur), restart from the in-game menu,
 and the game's DLC from your own packages (optional). Internal resolution goes from 480p to native
 4K, with AMD FSR 1 or temporal upscaling (AMD FSR 3.1, or NVIDIA DLSS on RTX cards;
-experimental). The FPS limit keeps the game at 60 by default and goes up to 240.
+experimental). The FPS limit keeps the game at 60 by default and goes up to 240, or takes a custom
+value such as 75 for a 75 Hz screen.
 
 Since v0.5.3 the first start prepares the game's shaders for your GPU from your own dump (a few
 seconds, once: [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop
