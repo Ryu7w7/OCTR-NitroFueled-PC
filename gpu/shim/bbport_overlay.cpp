@@ -2482,23 +2482,21 @@ void Menu() {
     if (settings_sub == 3) {   // Tacho: Rendimiento, pestana de "Imagen y rendimiento"
     MenuSection(BbSettings::MenuText("Performance", "Производительность"));
     {
-        const auto& limits = BbSettings::FpsLimits;
-        const char* names[] = {BbSettings::MenuText("No limit", "Без ограничения"), "30", "60",
-                               BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)"),
-                               "90", "120", "144", "240"};
+        // The fixed limits plus the launcher's custom one (e.g. 75 for a 75 Hz screen).
         const int current = s.fps_limit;
-        int index = -1;
-        for (int i = 0; i < int(std::size(limits)); ++i) {
-            if (limits[i] == current) {
-                index = i;
-            }
-        }
-        char other[32];
-        std::snprintf(other, sizeof(other), "%d", current);
-        if (ImGui::BeginCombo(BbSettings::MenuText("FPS limit", "Ограничение FPS"),
-                              index >= 0 ? names[index] : other)) {
-            for (int i = 0; i < int(std::size(limits)); ++i) {
-                if (ImGui::Selectable(names[i], i == index)) {
+        const int custom = BbSettings::SessionFpsLimitCustom(current);
+        int limits[BbSettings::FpsLimitCount + 1];
+        const int count = BbSettings::FpsLimitChoices(custom, limits);
+        auto name = [](int limit) -> std::string {
+            if (limit == 0) return BbSettings::MenuText("No limit", "Без ограничения");
+            if (limit == 72) return BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)");
+            return std::to_string(limit);
+        };
+        // HeightLarge: with a custom limit the list has 9 entries; the default height shows 8.
+        if (ImGui::BeginCombo(BbSettings::MenuText("FPS limit", "Ограничение FPS"), name(current).c_str(),
+                              ImGuiComboFlags_HeightLarge)) {
+            for (int i = 0; i < count; ++i) {
+                if (ImGui::Selectable(name(limits[i]).c_str(), limits[i] == current)) {
                     Store(s.fps_limit, limits[i], true);
                 }
             }

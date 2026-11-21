@@ -66,6 +66,31 @@ inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatch
 inline constexpr int RenderResHeights[] = {480, 720, 1080, 1440, 1620, 2160};
 inline constexpr int RenderResCount = 6;
 inline constexpr int FpsLimits[] = {0, 30, 60, 72, 90, 120, 144, 240};
+inline constexpr int FpsLimitCount = int(sizeof(FpsLimits) / sizeof(FpsLimits[0]));
+/// The limits the menus offer: FpsLimits plus a custom one (0: none) in order. Returns how many
+/// are in `out`.
+inline int FpsLimitChoices(int custom, int (&out)[FpsLimitCount + 1]) {
+    int n = 0;
+    bool placed = custom <= 0;
+    for (int limit : FpsLimits) {
+        if (!placed && limit != 0 && custom <= limit) {
+            if (custom != limit) out[n++] = custom;
+            placed = true;
+        }
+        out[n++] = limit;
+    }
+    if (!placed) out[n++] = custom;
+    return n;
+}
+/// The custom limit the menus offer: the last limit off the list seen this session (from the
+/// launcher or bbport.ini, e.g. 75 for a 75 Hz screen), so moving off it and back finds it. 0: none.
+inline int SessionFpsLimitCustom(int limit) {
+    static std::atomic<int> custom{0};
+    bool listed = false;
+    for (int fixed : FpsLimits) listed = listed || fixed == limit;
+    if (!listed) custom = limit;
+    return custom;
+}
 /// Display shape (aspect_ratio); the corrected wide modes also accept the older widescreen keys.
 enum AspectRatio : int { Aspect16x9 = 0, Aspect16x10, Aspect21x9, Aspect32x9, AspectRatioCount };
 inline constexpr const char* AspectRatioKeys[] = {"16x9", "16x10", "21x9", "32x9"};

@@ -99,6 +99,15 @@ static void controls_test() {
     v.fps_limit = 60; assert(Row(6, 1) == "72");
     assert(Row(6, 1) == "90");
     assert(Row(6, 1) == "120");
+    // A limit off the list (the launcher's Custom, e.g. 75) stays in the cycle for the session.
+    v.fps_limit = 75; assert(Row(6, 0) == "75");
+    assert(Row(6, 1) == "90");
+    assert(Row(6, -1) == "75");
+    assert(Row(6, -1) == "72");
+    v.fps_limit = 300; assert(Row(6, 0) == "300");
+    assert(Row(6, 1) == "Off");
+    assert(Row(6, -1) == "300");
+    assert(Row(6, -1) == "240");
     unsigned char item[0x38] = {}, list_item[0x80] = {};
     rows.assign(8, 0); rows[7] = reinterpret_cast<u64>(item);
     list_items.assign(8, 0); list_items[7] = reinterpret_cast<u64>(list_item);
