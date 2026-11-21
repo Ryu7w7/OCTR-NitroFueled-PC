@@ -175,7 +175,10 @@ void runtime_ranked_gate_update(void *root, int ranked);
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode);
 /* One racer of the validated finish order, best first (runtime_ranked.c). */
-struct runtime_ranked_racer { char name[32]; int finished; int pos; }; /* pos: the on-screen finish position (AIs take their own slots, honestly) */
+/* pos: the on-screen finish position (AIs take their own slots, honestly); time: the stamp of the racer's
+ * last required lap as this game recorded it, 0 unknown; self: the local player; laps/stamps: the laps
+ * this game recorded for them (the local player's own go to the server as its self-report). */
+struct runtime_ranked_racer { char name[32]; int finished; int pos; int time; int self; int laps; int stamps[7]; };
 /* The finish order of the race just ended, 0 none (runtime_online_mode.c). */
 int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
 /* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */

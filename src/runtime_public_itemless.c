@@ -1517,7 +1517,11 @@ void runtime_public_itemless_poll_ranked_request(void) {
         if (mode == 0 || mode == 1)
             ranked_request_apply(mode, __atomic_load_n(&bot_join_room, __ATOMIC_SEQ_CST), now, "the bot's button");
     }
-    if (now >= bot_join_next && !__atomic_exchange_n(&bot_join_busy, 1, __ATOMIC_SEQ_CST)) {
+    /* Not while searching or in a room (public, Ranked or private): a join from the bot could not be taken
+     * there anyway, and these asks were ~90 a second on the server at 140 players (21/11). */
+    const int busy_online = runtime_public_match_active() || runtime_online_mode_room_players() > 0;
+    if (busy_online) bot_join_next = now + 3000;
+    if (!busy_online && now >= bot_join_next && !__atomic_exchange_n(&bot_join_busy, 1, __ATOMIC_SEQ_CST)) {
         bot_join_next = now + 3000;
         pthread_t thread;
         pthread_attr_t attr;

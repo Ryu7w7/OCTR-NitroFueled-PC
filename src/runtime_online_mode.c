@@ -239,6 +239,9 @@ static CompleteRacer complete_racer;
 struct CupTotal { uint64_t online_id; int id, human, points, finish_position; };
 static struct CupTotal finish_order[8];
 static int finish_order_count;
+/* The Ranked report frozen with it (freeze_ranked_report). */
+static struct runtime_ranked_racer ranked_report[8];
+static int ranked_report_count;
 static struct CupTotal team_results[8]; /* Indexed by validated host finish order. */
 static struct CupTotal cup_totals[8];
 static int cup_total_count;
@@ -825,7 +828,7 @@ void runtime_online_mode_new_session(void) {
     assign_handle((unsigned char *)&matchmaking_project, NULL);
     team_race_ui_owner = NULL;
     team_result_count = team_results_pending = team_score_opened = team_score_finished = team_effects_played = 0;
-    finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0;
+    finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0; ranked_report_count = 0;
     ranked_score_started = ranked_score_phase = ranked_score_finished = 0;
     if (race_manager && *race_manager) {
         unsigned char *manager = *race_manager;
@@ -968,6 +971,7 @@ static void ABI load_private_map(const char *map, int reason) {
     ranked_score_started = 0;
     ranked_score_phase = ranked_score_finished = 0;
     finish_order_count = 0;
+    ranked_report_count = 0;
     cup_timer_pending = 0;
     runtime_nsane_map_loading(map);
     runtime_race_options_map_loading(map);
@@ -1621,6 +1625,52 @@ static int ABI team_race_order(unsigned char *a, unsigned char *b) {
     return racer_ahead(a, b);
 }
 
+/* A racer's finish from its lap records alone: the stamp of its last required lap (the network's lap
+ * timestamps, one clock on every game) when every required lap is recorded and in order, else 0. The
+ * finish flag (+0x8c) is not asked: a finish whose own message reached this game late, or never, still
+ * left its laps (docs/RANKED_ENDRACE_DESYNC_FIX.md, phase 2). laps/stamps: what is recorded, up to 7. */
+static int lap_finish_stamp(unsigned char *racer, int *laps, int stamps[7]) {
+    unsigned char *list = pointer_at(racer, 0x90);
+    int required = 0, completed = 0;
+    if (race_settings && *race_settings) memcpy(&required, *race_settings + 12, 4);
+    if (list) memcpy(&completed, list + 12, 4);
+    const int *times = list ? pointer_at(list, 0x20) : NULL;
+    if (laps) *laps = times && completed > 0 ? completed : 0;
+    for (int i = 0; stamps && i < 7; ++i) stamps[i] = times && i < completed ? times[i] : 0;
+    if (!times || required < 1 || required > 7 || completed < required) return 0;
+    for (int i = 0; i < required; ++i)
+        if (times[i] <= 0 || (i && times[i] <= times[i - 1])) return 0;
+    return times[required - 1];
+}
+
+/* The Ranked report as it was when the results came (docs/RANKED_ENDRACE_DESYNC_FIX.md, phase 1):
+ * names, finishes and stamps are read once here, while the racers are whole. The report is sent later
+ * from its own thread, after native callbacks may have recycled them. */
+static void freeze_ranked_report(void **items, int count, const struct CupTotal *order, int ordered) {
+    ranked_report_count = 0;
+    for (int rank = 0; rank < ordered; ++rank)
+        for (int i = 0; i < count; ++i) {
+            unsigned char *racer = items[i];
+            if (!racer) continue;
+            const struct CupTotal key = racer_identity(racer);
+            if (key.human != order[rank].human || key.id != order[rank].id || key.online_id != order[rank].online_id)
+                continue;
+            unsigned char *player = handle_object((void **)(racer + 0x10));
+            const char *name = player ? pointer_at(player, 0x68) : NULL;
+            if (!name || !*name) break;   /* an AI has no name to report; its slot stays */
+            struct runtime_ranked_racer *r = &ranked_report[ranked_report_count];
+            memset(r, 0, sizeof *r);
+            if (strlen(name) >= sizeof r->name) break;
+            strcpy(r->name, name);
+            r->time = lap_finish_stamp(racer, &r->laps, r->stamps);
+            r->finished = r->time > 0 || team_racer_finished(racer);
+            r->self = racer[0xb0] != 0;
+            r->pos = rank + 1;   /* the on-screen position: AIs keep their slots */
+            ++ranked_report_count;
+            break;
+        }
+}
+
 /* Freeze the validated host permutation before native callbacks can re-sort local state. */
 static int capture_finish_order(unsigned char *event) {
     if (!corrected_race_order()) return 1;
@@ -1648,57 +1698,36 @@ static int capture_finish_order(unsigned char *event) {
         if (position < 0) return 0;
         occupied |= 1u << position;
         order[position] = key;
-        times[position] = team_finish_time(items[i]);
+        times[position] = lap_finish_stamp(items[i], NULL, NULL);
     }
     /* The host's order is who it saw finish first: a finish that reached it late put a faster racer
      * behind slower ones, on every screen and in the Ranked report (20/11: 3rd in 3:34.76 shown 5th,
-     * behind 3:44.39 and 3:45.01, -45 MMR). Finishers with their final times (the network's lap
-     * timestamps, the same on every game) are ordered by them; the others keep the host's places. */
+     * behind 3:44.39 and 3:45.01, -45 MMR), or a winner among the DNFs when it never arrived (21/11,
+     * JarLster 1st in 2:59.38 scored DNF). Racers whose laps are all recorded come first, by the stamp
+     * of their last lap (the network's lap timestamps, the same on every game); the others keep the
+     * host's order after them. */
     for (int i = 1; i < count; ++i)
-        for (int j = i; j > 0 && times[j - 1] > 0 && times[j] > 0 && times[j] < times[j - 1]; --j) {
+        for (int j = i; j > 0 && times[j] > 0 && (times[j - 1] == 0 || times[j] < times[j - 1]); --j) {
             const struct CupTotal key = order[j];
             const int time = times[j];
             order[j] = order[j - 1], times[j] = times[j - 1];
             order[j - 1] = key, times[j - 1] = time;
-            printf("Race results: player %d (%d ms) ahead of player %d (%d ms): the host had them the other "
+            printf("Race results: player %d (%d) ahead of player %d (%d): the host had them the other "
                    "way round\n", key.id, time, order[j].id, times[j]);
         }
     memcpy(finish_order, order, sizeof order);
     finish_order_count = count;
+    freeze_ranked_report(items, count, order, count);
     return 1;
 }
 
 /* runtime_ranked.c: the validated finish order as the server scores it — the
  * in-game name of every racer, best first, with its finisher state. */
 int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) {
-    if (!out || max < finish_order_count || finish_order_count < 1) return 0;
-    unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x10) : NULL;
-    int count = 0;
-    if (list) memcpy(&count, list + 12, 4);
-    void **items = list ? pointer_at(list, 0x20) : NULL;
-    if (!items || count < 1 || count > 8) return 0;
-    int written = 0;
-    for (int rank = 0; rank < finish_order_count; ++rank) {
-        for (int i = 0; i < count; ++i) {
-            unsigned char *racer = items[i];
-            if (!racer) continue;
-            const struct CupTotal key = racer_identity(racer);
-            if (key.human != finish_order[rank].human || key.id != finish_order[rank].id ||
-                key.online_id != finish_order[rank].online_id) continue;
-            unsigned char *player = handle_object((void **)(racer + 0x10));
-            if (!player) break; /* an AI has no name to report */
-            const char *name = pointer_at(player, 0x68);
-            if (!name || !*name || strlen(name) >= sizeof out[written].name) break;
-            strcpy(out[written].name, name);
-            out[written].finished = team_result_count
-                ? !!(team_finished_mask & (1u << rank))
-                : team_racer_finished(racer);
-            out[written].pos = rank + 1; /* the on-screen position: AIs keep their slots */
-            ++written;
-            break;
-        }
-    }
-    return written;
+    /* the copy frozen when the results came (freeze_ranked_report), never the live racers */
+    if (!out || max < ranked_report_count || ranked_report_count < 1) return 0;
+    memcpy(out, ranked_report, (size_t)ranked_report_count * sizeof *out);
+    return ranked_report_count;
 }
 
 /* Freeze the final snapshot once, after native result handling. Late lap or
