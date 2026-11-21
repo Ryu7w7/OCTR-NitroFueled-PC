@@ -1485,6 +1485,7 @@ void LaunchGameProcess();
 void BeginGameEnv();
 void SetPlatformGameEnv();
 void ApplyPlatformCapabilities();
+void PlatformSettings();
 void StartGame() {
     App& a = g_app;
     if (!a.python || a.game_running || UpdateBusy()) return;
@@ -3617,6 +3618,8 @@ void LauncherSettings() {
     FormSection(T("Privacidad", "Privacy"));
     GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
              PerfReportsText());
+
+    PlatformSettings();
 }
 
 /// One page of Settings: its own scrolling area under the page tabs, laid out as a form.
