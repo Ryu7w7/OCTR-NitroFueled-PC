@@ -18,7 +18,9 @@ The ranked result pipeline relies entirely on a **Host-Authoritative Single-Repo
 3. Only the report from `session.host` is evaluated. All guest submissions are kept solely as dormant votes and are never used to compute standings or deltas.
 4. If a guest finishes 1st on their machine, but their finish packet is delayed, dropped, or reordered across the P2P mesh before reaching the host, the host's game client assumes the guest did not complete the race in time (marking them DNF or placing them at the back).
 5. The host submits this distorted order to the server. The server scores this as truth, immediately penalizing the winning player with the DNF/last-place MMR formula:
-   $$\Delta_{\text{DNF}} = \text{rankedBasePoints}[7] - \text{rankedDNFPenalty}[\text{mode}] = -35 - 10 = -45 \text{ MMR}$$
+   ```text
+   Delta_DNF = rankedBasePoints[7] - rankedDNFPenalty[mode] = -35 - 10 = -45 MMR
+   ```
 
 ---
 
