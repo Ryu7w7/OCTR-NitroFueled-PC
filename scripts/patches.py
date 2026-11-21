@@ -43,8 +43,9 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
                  'patch_unlock_all':'CrashTeamRacingUnlockAll.xml/Unlock Everything',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
-# Pack Tacho's executable patches (scripts/tacho_pack.py): part of the port, always applied (no
-# launcher toggle), from their own folder, which the launchers' patch lists do not read.
+# Pack Tacho's executable patches (scripts/tacho_pack.py): part of the port, always applied online
+# (offline, bbport.ini tacho_pack=0 leaves them out), from their own folder, which the launchers'
+# patch lists do not read.
 TACHO_PACK_FILES=('RaceLeaders_hud.xml','HudOriginal.xml','ItemsMejorados.xml','NtropyPosicion.xml',
                   'SinItemsPortales.xml','BarraReservas.xml')
 TACHO_PACK_DIR=Path(__file__).resolve().parent/'tacho_pack'/'patches'
@@ -534,9 +535,12 @@ def tacho_pack_patch(key):
 
 
 def tacho_pack_patches(ini=None, app_version=APP_VERSION, title_id=TITLE_ID):
-    """Pack Tacho's patches, always selected: no setting turns them off, so every player has
-    the same rules. Raises tacho_pack.Modified when a file of the pack was changed. ini is unused."""
-    from tacho_pack import verify
+    """Pack Tacho's patches: always online, so every player has the same rules; offline, unless
+    ini (bbport.ini's settings) has tacho_pack=0 (tacho_pack.wanted). Raises tacho_pack.Modified
+    when a file of the pack was changed."""
+    from tacho_pack import verify, wanted
+    if not wanted(ini or {}):
+        return []
     verify()
     folder={('CUSA13795','01.21'):TACHO_PACK_DIR,('CUSA14876','01.21'):TACHO_PACK_EU_DIR}.get((title_id,app_version))
     # Made for the USA and European games 1.21: another update has none of them.

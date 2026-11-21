@@ -16,8 +16,9 @@ which the game reads last; it would be rebuilt from a pack copy of a file it car
 builds streaming copies of the leaders list from the game's files; stream_replacements() gives
 it the pack's.
 
-It is fixed: no launcher or bbport.ini setting turns it off or changes it, so every player
-races under the same rules. Its files are checked against SHA256 values written here
+Online it is fixed: no setting turns it off or changes it, so every player races under the same
+rules. Offline (BB_ONLINE not 1), bbport.ini tacho_pack=0 (the launcher's "Use Pack Tacho offline")
+leaves the whole pack out: the game's own items, HUD and Options page (wanted()). Its files are checked against SHA256 values written here
 (verify()); a changed or missing file stops the launch until the port is installed again.
 Its Options > Game entries ("Hud Power Charged", "Barra de reservas", as in Pack Tacho 1.3.0) are
 always in: they change only how a player's own HUD looks. Both start off
@@ -196,10 +197,29 @@ def _swaps(game, ops, base):
     return found, chosen
 
 
+def wanted(settings, env=None):
+    """Whether this session gets the pack. Online (BB_ONLINE=1) always: every player races with
+    the same rules. Offline, unless bbport.ini tacho_pack=0. settings: bbport.ini's path or its
+    {key: value}."""
+    env = os.environ if env is None else env
+    if env.get('BB_ONLINE') == '1':
+        return True
+    if not isinstance(settings, dict):
+        from nitro_components import read_ini
+        try:
+            settings = read_ini(settings)
+        except (OSError, TypeError):
+            settings = {}
+    return str(settings.get('tacho_pack', '1')).strip() != '0'
+
+
 def prepare(game, out, config, env, base):
     """({guest archive: patch file}, {environment overrides}). Raises Modified when the pack's
-    files were changed. config is unused: the pack has no settings."""
+    files were changed. config (bbport.ini) can leave the pack out offline (wanted())."""
     _ACTIVE.clear()
+    if not wanted(config, env):
+        say("off in this offline session (tacho_pack=0): the game's own files")
+        return {}, {}
     ops = operations()
     folder = Path(out) / 'tacho-pack'
     names = sorted({op['archive'] for op in ops})

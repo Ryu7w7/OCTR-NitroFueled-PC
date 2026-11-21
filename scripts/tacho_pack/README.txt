@@ -19,7 +19,9 @@ Where it lives in the port:
 - scripts/tacho_pack/manifest.json and payloads/: the game files it swaps
   (scripts/tacho_pack.py applies them).
 
-It has no launcher settings: every player races with the same pack. scripts/tacho_pack.py checks
+Online it has no settings: every player races with the same pack. Offline (online mode off), the
+launcher's "Use Pack Tacho offline" (bbport.ini tacho_pack=0) leaves the whole pack out, for the
+original game's items, HUD and Options page. scripts/tacho_pack.py checks
 these files against the SHA256 values written in it, and a changed or missing file stops the
 launch until the port is installed again. Its Options > Game entries (as in Pack Tacho 1.3.0) are
 in: "Hud Power Charged" (Yes: the new HUD, No: the game's own) and "Barra de reservas". Both
