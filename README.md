@@ -399,6 +399,9 @@ Import names from shadPS4's aerolib list.
 
 ## Recent releases
 
+- [v0.9.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.4): Ranked results no
+  longer stolen by a late finish (every game reports its own result; finishes recovered from the
+  laps); custom FPS limit (#272); Linux launcher platform settings and KDE 125% scaling.
 - [v0.9.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.3): older CPUs
   (without MOVBE, BMI1 and LZCNT) start again; on them the 30 FPS free-flight correction stays off.
 - [v0.9.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.2): some saves no
