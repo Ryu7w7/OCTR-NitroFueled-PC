@@ -26,21 +26,20 @@ The ranked result pipeline relies entirely on a **Host-Authoritative Single-Repo
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Engine as Native Game Engine
-    participant Capture as capture_finish_order()
-    participant RankedEnd as runtime_ranked_race_end()
-    participant Outbox as ranked_sender (Worker Thread)
+    participant Engine as Native Engine
+    participant Capture as capture_finish_order
+    participant RankedEnd as runtime_ranked_race_end
+    participant Outbox as ranked_sender
     participant Server as RyuNET Server
 
     Engine->>Capture: race_results_received(event)
-    Note over Capture: Reads event + 0x20 + rank*4 (P2P finish IDs)<br/>Attempts bubble sort on team_finish_time
-    Capture->>Capture: finish_order = order; finish_order_count = count
-    Engine->>RankedEnd: runtime_ranked_race_end()
-    RankedEnd->>RankedEnd: runtime_online_mode_ranked_order(order, 8)
-    Note over RankedEnd: Re-reads live racer_manager objects<br/>Maps finish_order to names & flags
-    RankedEnd->>Outbox: Spawns pthread with struct ranked_outbox
-    Outbox->>Server: POST /ryunet/ranked-result?name=<nick>
+    Note over Capture: Extract P2P finish IDs and sort finish times
+    Capture->>Capture: Save finish_order array
+    Engine->>RankedEnd: Trigger race end notification
+    RankedEnd->>RankedEnd: runtime_online_mode_ranked_order
+    Note over RankedEnd: Map finish order to player identities
+    RankedEnd->>Outbox: Spawn sender worker thread
+    Outbox->>Server: POST /ryunet/ranked-result
 ```
 
 ### Critical Client Vulnerabilities
