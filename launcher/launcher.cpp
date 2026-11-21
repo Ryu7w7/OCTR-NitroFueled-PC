@@ -4550,6 +4550,15 @@ void OnlineServerPage() {
              T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
                "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
     const bool online_on = a.game.Flag("online", true);
+    // bbport.ini tacho_pack (scripts/tacho_pack.py wanted): online every player has the pack.
+    ImGui::BeginDisabled(online_on);
+    GameFlag("tacho_pack", T("Usar el Pack Tacho sin conexión", "Use Pack Tacho offline"), true,
+             T("Con el modo online apagado, desmarcarlo juega sin el Pack Tacho: los objetos, el HUD, la lista de "
+               "líderes y el menú de Opciones del juego original. Online, el pack siempre está (las mismas reglas para "
+               "todos).",
+               "With online mode off, unchecking it plays without Pack Tacho: the original game's items, HUD, leaders "
+               "list and Options page. Online, the pack is always in (the same rules for everyone)."));
+    ImGui::EndDisabled();
     ImGui::BeginDisabled(!online_on);
     if (ImGui::InputText(FormLabel(T("Servidor RyuNET", "RyuNET server")), a.online_server_buf, sizeof(a.online_server_buf))) {
         a.game.Set("online_server", a.online_server_buf);
