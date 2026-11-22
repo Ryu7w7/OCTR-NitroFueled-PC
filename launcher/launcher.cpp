@@ -1304,7 +1304,7 @@ bool ShaderProgressLine(const std::string& line) {
     const std::string rest = line.substr(prefix.size());
     if (rest.rfind("done", 0) == 0) {
         a.shader_percent = -1;
-        if (a.hwnd) HideLauncher(a.launcher.Flag("hide_on_play", false));
+        if (a.hwnd && a.launcher.Flag("hide_on_play", false)) HideLauncher(true);
         return true;
     }
     const size_t space = rest.find(' ');

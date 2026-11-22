@@ -136,10 +136,8 @@ with the desktop apps closed.
 
 ## Launcher and packaging (2026-10-09)
 
-- `bash launcher/bb-launcher.sh` starts the GTK4 launcher (tested in the container after a full
-  package upgrade repaired PyGObject); `python3 launcher/sacredfire_launcher.py --play` starts
-  the game with the saved settings (tested: PS4 Pro mode on, Pro 1080p patch, two controller
-  ports, 30 FPS).
+- `bash launcher/bb-launcher.sh` starts the native Linux launcher; `--play` starts the game
+  with saved settings.
 - `packaging/appimage.sh` builds `dist/SacredFire-x86_64.AppImage` (841 MB) with `nix bundle`.
   Built and tested on 2026-10-09 in the archbuild container after installing single-user Nix
   (`pacman -S nix`, /nix owned by the user, nixos-unstable channel): the runtime and GPU library

@@ -200,7 +200,7 @@ void LaunchGameProcess() {
         g_app.exit_code = LinuxProcess::ExitCode(status);
         g_app.job_finished = true;
     });
-    if (a.hwnd) HideLauncher(a.launcher.Flag("hide_on_play", false));
+    if (a.hwnd && a.launcher.Flag("hide_on_play", false)) HideLauncher(true);
 }
 void StopGame() {
     g_app.stopped = true;
@@ -423,7 +423,8 @@ bool RestartLauncher(const std::wstring& args) {
     std::string arguments;
     for (const auto& arg : LinuxProcess::Arguments(Narrow(args)))
         arguments += (arguments.empty() ? "" : ",") + std::string("\"") + JsonEscape(arg) + "\"";
-    const auto answer = RunService("{\"op\":\"restart\",\"executable\":\"" + JsonEscape(executable) +
+    const auto answer = RunService("{\"op\":\"restart\",\"data\":\"" + JsonEscape(PathText(g_app.data)) +
+                                   "\",\"executable\":\"" + JsonEscape(executable) +
                                    "\",\"args\":[" + arguments + "]}");
     if (!JsonBool(answer, "ok")) { g_app.notice = JsonText(answer, "error"); return false; }
     QuitLauncher(); return true;
@@ -439,10 +440,10 @@ fs::path DataRoot(const fs::path& root) {
     return root;
 }
 void PrepareData() {
-    if (!g_app.python) throw std::runtime_error("Python 3 is required to migrate settings and run the game.");
-    const auto result = RunService(ServiceRequest("migrate"));
+    if (!g_app.python) throw std::runtime_error("Python 3 is required to prepare launcher data and run the game.");
+    const auto result = RunService(ServiceRequest("prepare"));
     const auto error = JsonText(result, "error");
-    if (!error.empty()) throw std::runtime_error("Settings migration failed; original files were kept: " + error);
+    if (!error.empty()) throw std::runtime_error("Launcher data preparation failed: " + error);
 }
 std::vector<fs::path> PlatformFonts() {
     std::vector<fs::path> files;
@@ -470,7 +471,7 @@ void PlatformSettings() {
     if (ImGui::InputTextWithHint("##linux_environment", "Extra environment (KEY=value)", extra, sizeof extra)) {
         g_app.launcher.Set("extra_env", extra); SaveLauncher();
     }
-    HelpMarker("Extra environment: KEY=value pairs separated by spaces, as in the GTK launcher.");
+    HelpMarker("Extra environment: KEY=value pairs separated by spaces.");
     ImGui::TextWrapped("Saves: %s", PathText(UserRoot()).c_str());
     if (ImGui::Button("Choose save folder")) {
         if (const auto folder = PickFolder(g_app.hwnd, L"Save folder", UserRoot())) {

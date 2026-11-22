@@ -1,5 +1,4 @@
 from paths import ROOT
-import ast
 import json
 import tempfile
 import unittest
@@ -61,12 +60,7 @@ class EUUnlockAllTests(unittest.TestCase):
                 self.assertEqual(signature[offset:offset + len(value)], expected)
                 self.assertEqual(len(value), len(expected))
 
-    def test_launcher_mappings_use_shared_ini_key(self):
-        tree = ast.parse((ROOT / 'launcher/sacredfire_launcher.py').read_text(encoding='utf-8'))
-        mapping = next(ast.literal_eval(node.value) for node in tree.body
-                       if isinstance(node, ast.Assign)
-                       and any(isinstance(t, ast.Name) and t.id == 'INI_PATCHES' for t in node.targets))
-        self.assertEqual(mapping[self.KEY], 'patch_unlock_all')
+    def test_launcher_mapping_uses_shared_ini_key(self):
         windows = (ROOT / 'launcher/launcher.cpp').read_text(encoding='utf-8')
         self.assertIn('{"' + self.KEY + '", "patch_unlock_all"}', windows)
 

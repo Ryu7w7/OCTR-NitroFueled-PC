@@ -78,10 +78,7 @@ void LaunchGameProcess() {
         app.exit_code = code;
         app.job_finished = true;
     });
-    if (a.hwnd) {
-        if (a.launcher.Flag("hide_on_play", false)) ShowWindow(a.hwnd, SW_HIDE);
-        else ShowWindow(a.hwnd, SW_MINIMIZE);
-    }
+    if (a.hwnd && a.launcher.Flag("hide_on_play", false)) ShowWindow(a.hwnd, SW_HIDE);
 }
 
 std::wstring Widen(const std::string& s) {

@@ -45,7 +45,7 @@ bash packaging/appimage.sh
 (cd dist && sha256sum --check SacredFire-x86_64.AppImage.sha256)
 ```
 
-The result is `dist/SacredFire-x86_64.AppImage`, its `.sha256` checksum, and `SacredFire-x86_64.AppImage.build.txt` with the source commit and nixpkgs version. The AppImage opens the GTK launcher; `--play` starts with saved launcher settings. This build can take substantial disk space and time because Nix builds the bundled library closure. The nixpkgs channel is not pinned in this repository, so matching another build byte for byte also requires its recorded nixpkgs revision.
+The result is `dist/SacredFire-x86_64.AppImage`, its `.sha256` checksum, and `SacredFire-x86_64.AppImage.build.txt` with the source commit and nixpkgs version. The AppImage opens the shared native launcher; `--play` starts with saved launcher settings. This build can take substantial disk space and time because Nix builds the bundled library closure. The nixpkgs channel is not pinned in this repository, so matching another build byte for byte also requires its recorded nixpkgs revision.
 
 If `out/` already holds an Arch build, move it aside with `mv out out.arch` before the Nix build. After packaging, `mv out out.nix` and `mv out.arch out` restores the native build. Skip those moves when there is no existing native `out/`.
 
