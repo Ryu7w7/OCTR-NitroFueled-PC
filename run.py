@@ -1212,8 +1212,8 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"CTR TV logo: {error}; the game's own")
-        # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): its HUD, leaders list and main
-        # menu files by archive patch, and the Graphics tab's main menu made from the pack's.
+        # Pack Tacho (scripts/tacho_pack.py): its HUD, leaders list and Options page files by
+        # archive patch; the 21:9 and 32:9 layouts change its Options page over them (issue #267).
         # It has no off switch; a changed pack stops the launch (every player has the same rules).
         try:
             tacho_patches, tacho_env = startup_call('tacho_pack.prepare', tacho_pack.prepare, game, out, config, env, base_patches)
