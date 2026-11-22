@@ -70,6 +70,15 @@ asm(".section .rodata\n"
     ".previous\n");
 #endif
 extern "C" const unsigned char bb_font_ttf[];
+// src/runtime.h: a private room's member for the list by team
+struct TeamLobbyMember {
+    char name[40];
+    int team, ready, local;
+};
+extern "C" int runtime_online_team_lobby(TeamLobbyMember* out, int max, int* teams);
+extern "C" int runtime_online_team_color(int team, unsigned char rgb[3], char* name, size_t size);
+extern "C" int runtime_online_team_points(int team);   // the room's points so far, -1 none
+extern "C" void runtime_online_team_text(int which, int team, char* out, size_t size);   // 0 title, 1 hint
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
@@ -907,8 +916,18 @@ void ChatBox() {
     const ImGuiIO& io = ImGui::GetIO();
     const float em = ImGui::GetFontSize();
     const bool typing = chat_typing;
+    // After 30 s with no new line and no typing only the "T: write" hint stays, without a background;
+    // a new line or T brings the box back (user, 20/11).
+    static unsigned box_seen = 0;
+    static auto last_activity = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (chat_seen != box_seen || typing) {
+        box_seen = chat_seen;
+        last_activity = now;
+    }
+    const bool idle = now - last_activity > std::chrono::seconds(30);
     ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : racing ? 0.22f : 0.40f);
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : idle ? 0.0f : racing ? 0.22f : 0.40f);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
     if (!typing) {
@@ -916,7 +935,7 @@ void ChatBox() {
     }
     ImGui::Begin("##chat", nullptr, flags);
     ImGui::PushTextWrapPos(em * 26.0f);
-    for (int i = std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
+    for (int i = idle ? chat_line_count : std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
         ChatLine(chat_lines[i]);
     }
     ImGui::PopTextWrapPos();
@@ -2463,23 +2482,21 @@ void Menu() {
     if (settings_sub == 3) {   // Tacho: Rendimiento, pestana de "Imagen y rendimiento"
     MenuSection(BbSettings::MenuText("Performance", "Производительность"));
     {
-        const auto& limits = BbSettings::FpsLimits;
-        const char* names[] = {BbSettings::MenuText("No limit", "Без ограничения"), "30", "60",
-                               BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)"),
-                               "90", "120", "144", "240"};
+        // The fixed limits plus the launcher's custom one (e.g. 75 for a 75 Hz screen).
         const int current = s.fps_limit;
-        int index = -1;
-        for (int i = 0; i < int(std::size(limits)); ++i) {
-            if (limits[i] == current) {
-                index = i;
-            }
-        }
-        char other[32];
-        std::snprintf(other, sizeof(other), "%d", current);
-        if (ImGui::BeginCombo(BbSettings::MenuText("FPS limit", "Ограничение FPS"),
-                              index >= 0 ? names[index] : other)) {
-            for (int i = 0; i < int(std::size(limits)); ++i) {
-                if (ImGui::Selectable(names[i], i == index)) {
+        const int custom = BbSettings::SessionFpsLimitCustom(current);
+        int limits[BbSettings::FpsLimitCount + 1];
+        const int count = BbSettings::FpsLimitChoices(custom, limits);
+        auto name = [](int limit) -> std::string {
+            if (limit == 0) return BbSettings::MenuText("No limit", "Без ограничения");
+            if (limit == 72) return BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)");
+            return std::to_string(limit);
+        };
+        // HeightLarge: with a custom limit the list has 9 entries; the default height shows 8.
+        if (ImGui::BeginCombo(BbSettings::MenuText("FPS limit", "Ограничение FPS"), name(current).c_str(),
+                              ImGuiComboFlags_HeightLarge)) {
+            for (int i = 0; i < count; ++i) {
+                if (ImGui::Selectable(name(limits[i]).c_str(), limits[i] == current)) {
                     Store(s.fps_limit, limits[i], true);
                 }
             }
@@ -2783,6 +2800,134 @@ bool AnnouncementActive() {
     return std::chrono::steady_clock::now() < announce.until;
 }
 
+// The CTR title font (<BB_ART_DIR>/ctr-title.ttf, CCZoinks) for the members list by team; null without the file.
+ImFont* banner_title_font = nullptr;
+
+/// A private room with teams: the game's "Lobby members" list grouped by team, where the game's flat list was
+/// (ui/Octane_LobbyMembers, 1920x1080 canvas: header at y 112, rows from x 80 / y 160). Each team a slanted bar in
+/// its color with its name, its members under it with the ready tick; the local player in orange, as the game does.
+void TeamLobbyList() {
+    TeamLobbyMember rows[8];
+    int teams = 0;
+    const int count = runtime_online_team_lobby(rows, 8, &teams);
+    if (count < 0 || teams < 2 || teams > 4) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float s = std::min(viewport->WorkSize.x / 1920.0f, viewport->WorkSize.y / 1080.0f);
+    const ImVec2 origin(viewport->WorkPos.x + (viewport->WorkSize.x - 1920.0f * s) * 0.5f,
+                        viewport->WorkPos.y + (viewport->WorkSize.y - 1080.0f * s) * 0.5f);
+    const auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* font = banner_title_font ? banner_title_font : ImGui::GetFont();
+    // the teams' colors and names, in the game's language (picked on the team screen; blue, red, green, yellow by default)
+    ImU32 colors[4];
+    char titles[4][48];
+    for (int t = 0; t < 4; ++t) {
+        unsigned char rgb[3];
+        char color_name[24];
+        runtime_online_team_color(t, rgb, color_name, sizeof color_name);
+        colors[t] = IM_COL32(rgb[0], rgb[1], rgb[2], 255);
+        runtime_online_team_text(0, t, titles[t], sizeof titles[t]);
+    }
+    // two columns; four teams: two rows of two
+    const float column_w = 330.0f, header_h = 34.0f, row_h = 34.0f;
+    float column_bottom[2] = {160.0f, 160.0f};
+    for (int team = 0; team < teams; ++team) {
+        const int column = team % 2;
+        const float x = 80.0f + column * (column_w + 20.0f);
+        float y = team < 2 ? 160.0f : column_bottom[column] + 14.0f;
+        // the team's bar
+        const float slant = 12.0f;
+        const ImVec2 bar[4] = {at(x + slant, y), at(x + column_w - 30.0f, y), at(x + column_w - 30.0f - slant, y + header_h),
+                               at(x, y + header_h)};
+        const ImVec2 bar_shadow[4] = {at(x + slant + 4, y + 5), at(x + column_w - 26.0f, y + 5),
+                                      at(x + column_w - 26.0f - slant, y + header_h + 5), at(x + 4, y + header_h + 5)};
+        dl->AddConvexPolyFilled(bar_shadow, 4, IM_COL32(0, 0, 0, 90));
+        dl->AddConvexPolyFilled(bar, 4, colors[team]);
+        const char* title = titles[team];
+        const float title_size = 26.0f * s;
+        const ImVec2 tp = at(x + slant + 10.0f, y + 4.0f);
+        for (int ox = -1; ox <= 1; ++ox)
+            for (int oy = -1; oy <= 2; ++oy)
+                dl->AddText(font, title_size, ImVec2(tp.x + ox * 1.5f * s, tp.y + oy * 1.5f * s), IM_COL32(10, 20, 45, 230), title);
+        dl->AddText(font, title_size, tp, IM_COL32(255, 255, 255, 255), title);
+        // the room's points so far (race after race), at the bar's right end, once any team has some
+        bool any_points = false;
+        for (int t = 0; t < teams; ++t) any_points |= runtime_online_team_points(t) > 0;
+        if (any_points) {
+            char points[16];
+            std::snprintf(points, sizeof points, "%d", std::max(runtime_online_team_points(team), 0));
+            const float points_size = 28.0f * s;
+            const ImVec2 size = font->CalcTextSizeA(points_size, FLT_MAX, 0.0f, points);
+            const ImVec2 pp(origin.x + (x + column_w - 30.0f - slant - 10.0f) * s - size.x, origin.y + (y + 2.0f) * s);
+            for (int ox = -1; ox <= 1; ++ox)
+                for (int oy = -1; oy <= 2; ++oy)
+                    dl->AddText(font, points_size, ImVec2(pp.x + ox * 1.5f * s, pp.y + oy * 1.5f * s), IM_COL32(40, 14, 0, 230),
+                                points);
+            dl->AddText(font, points_size, pp, IM_COL32(255, 200, 40, 255), points);
+        }
+        y += header_h + 6.0f;
+        // its members
+        for (int i = 0; i < count; ++i) {
+            if (rows[i].team != team) continue;
+            const ImVec2 c = at(x + 18.0f, y + row_h * 0.5f);
+            const float r = 11.0f * s;
+            if (rows[i].ready) {   // the game's ready tick: a check mark in the team's color
+                dl->AddLine(ImVec2(c.x - r * 0.8f, c.y), ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), IM_COL32(0, 0, 0, 160), 6.0f * s);
+                dl->AddLine(ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), ImVec2(c.x + r, c.y - r * 0.8f), IM_COL32(0, 0, 0, 160), 6.0f * s);
+                dl->AddLine(ImVec2(c.x - r * 0.8f, c.y), ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), colors[team], 4.0f * s);
+                dl->AddLine(ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), ImVec2(c.x + r, c.y - r * 0.8f), colors[team], 4.0f * s);
+            }
+            const float name_size = 28.0f * s;
+            const ImVec2 np = at(x + 40.0f, y + 2.0f);
+            const ImU32 name_color = rows[i].local ? IM_COL32(255, 150, 28, 255) : IM_COL32(255, 255, 255, 255);
+            for (int ox = -1; ox <= 1; ++ox)
+                for (int oy = -1; oy <= 2; ++oy)
+                    dl->AddText(font, name_size, ImVec2(np.x + ox * 1.5f * s, np.y + oy * 1.5f * s), IM_COL32(10, 20, 45, 230),
+                                rows[i].name);
+            dl->AddText(font, name_size, np, name_color, rows[i].name);
+            y += row_h;
+        }
+        column_bottom[column] = y;
+    }
+    // how to pick: R1 opens the game's team screen
+    const float hint_y = std::max(column_bottom[0], column_bottom[1]) + 12.0f;
+    char hint[48];
+    runtime_online_team_text(1, 0, hint, sizeof hint);
+    const ImVec2 hp = at(84.0f, hint_y);
+    const float hint_size = 24.0f * s;
+    for (int ox = -1; ox <= 1; ++ox)
+        for (int oy = -1; oy <= 2; ++oy)
+            dl->AddText(font, hint_size, ImVec2(hp.x + ox * 1.5f * s, hp.y + oy * 1.5f * s), IM_COL32(10, 20, 45, 230), hint);
+    dl->AddText(font, hint_size, hp, IM_COL32(255, 220, 120, 255), hint);
+}
+
+// Tacho: the CTR title font (<BB_ART_DIR>/ctr-title.ttf) for the members list by team, DejaVu merged under it for
+// what it lacks (accents). Called after MakeContext(), before the backend builds the font atlas.
+static void AddTeamFont() {
+    ImGuiIO& io = ImGui::GetIO();
+    banner_title_font = nullptr;
+    // BB_TEAM_FONT (run.py/run.sh: art/ctr-title.ttf) names the file; BB_ART_DIR (Tacho's launcher) its folder.
+    std::filesystem::path file;
+    if (const char* font = std::getenv("BB_TEAM_FONT"); font && *font)
+        file = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(font)));
+    else if (const char* dir = std::getenv("BB_ART_DIR"); dir && *dir)
+        file = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(dir))) / "ctr-title.ttf";
+    if (!file.empty()) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(file, ec)) {
+            const std::u8string utf8 = file.u8string();
+            banner_title_font = io.Fonts->AddFontFromFileTTF(reinterpret_cast<const char*>(utf8.c_str()), 40.0f);
+            if (banner_title_font) {
+                ImFontConfig merge;
+                merge.FontDataOwnedByAtlas = false;
+                merge.MergeMode = true;
+                io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
+                                               int(bb_font_ttf_end - bb_font_ttf), 40.0f, &merge);
+            }
+        }
+    }
+}
+
 void AnnouncementBanner() {
     Announcement a;
     {
@@ -3071,6 +3216,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         return;
     }
     MakeContext();
+    AddTeamFont();
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -3114,6 +3260,7 @@ void InitD3d11(void* device, void* context) {
         return;
     }
     MakeContext();
+    AddTeamFont();
     if (!ImGui_ImplDX11_Init(static_cast<ID3D11Device*>(device), static_cast<ID3D11DeviceContext*>(context))) {
         std::printf("Overlay: ImGui Direct3D 11 backend init failed\n");
         ImGui::DestroyContext();
@@ -3274,7 +3421,8 @@ bool Visible() {
                            BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
                            runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing() ||
-                           !BbVoice::Speaking().empty());
+                           !BbVoice::Speaking().empty() ||
+                           runtime_online_team_lobby(nullptr, 0, nullptr) >= 0);
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -3414,6 +3562,7 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
         }
     }
     AnnouncementBanner();
+    if (!menu_open) TeamLobbyList();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
     }

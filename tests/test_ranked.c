@@ -11,7 +11,7 @@ void runtime_hof_season_changed(int season) { (void)season; }
 static char sent_target[256], sent_body[1024];
 static int sent;
 static int transfer_status = 200;
-static char transfer_reply[16384] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Gold Mask\"}";
+static char transfer_reply[16384] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Golden Wumpa\"}";
 static int tier_fetch_enabled, tier_revision, tier_gets;
 static const char *status_reply = "{\"season\":2,\"enabled\":false,\"retry_after\":895}";
 static int status_http = 200, status_gets;
@@ -31,12 +31,16 @@ const char *rr_current_level(void) { return "Electron Avenue"; }
 
 int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) {
     (void)max;
+    memset(out, 0, 3 * sizeof *out);
     snprintf(out[0].name, sizeof out[0].name, "HostRacer");
     out[0].finished = 1;
+    out[0].self = 1; /* the local player: its laps go out as "self" */
+    out[0].time = 900, out[0].laps = 3, out[0].stamps[0] = 300, out[0].stamps[1] = 600, out[0].stamps[2] = 900;
     snprintf(out[1].name, sizeof out[1].name, "SecondRacer");
     out[1].finished = 0; /* DNF: the report's dnf list */
     snprintf(out[2].name, sizeof out[2].name, "ThirdRacer");
     out[2].finished = 1;
+    out[2].time = 1200;
     return 3;
 }
 
@@ -65,9 +69,9 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
         const int updated = __atomic_load_n(&tier_revision, __ATOMIC_RELAXED);
         const char *body = updated
             ? (itemless ? "{\"tiers\":{\"hostracer\":\"Sacred Fire\"},\"mmr\":{\"hostracer\":1600}}"
-                        : "{\"tiers\":{\"hostracer\":\"Chaos Grand Prix\"},\"mmr\":{\"hostracer\":3100}}")
-            : (itemless ? "{\"tiers\":{\"hostracer\":\"Oxide Overlord\"},\"mmr\":{\"hostracer\":3000}}"
-                        : "{\"tiers\":{\"hostracer\":\"Gold Mask\"},\"mmr\":{\"hostracer\":1045}}");
+                        : "{\"tiers\":{\"hostracer\":\"Ancient Spirit\"},\"mmr\":{\"hostracer\":3100}}")
+            : (itemless ? "{\"tiers\":{\"hostracer\":\"Master Driver\"},\"mmr\":{\"hostracer\":3000}}"
+                        : "{\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}");
         *reply = strdup(body);
         assert(*reply);
         *reply_size = strlen(*reply);
@@ -108,6 +112,13 @@ static void test_status_contract(void) {
     assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,"
                                 "\"account_required\":true,\"account_linked\":false}") == 0);
     assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,\"account_required\":true}") == 0);
+    /* Normal tiers by their names since 2026-11-18, and by the older ones an older server says */
+    assert(tier_index("Bronze", 0) == 1 && tier_index("Golden Wumpa", 0) == 3 && tier_index("Uka's Chosen", 0) == 6);
+    assert(tier_index("Ancient Spirit", 0) == 7 && tier_index("Gold Mask", 0) == 3 && tier_index("Chaos Grand Prix", 0) == 7);
+    assert(tier_index("Gold Mask", 1) == 0 && tier_index("Platinum Relic", 1) == 3 && tier_index("Bronze", 1) == 0);
+    /* Itemless's top tier, Master Driver since 2026-11-19, and Oxide Overlord from an older server */
+    assert(tier_index("Master Driver", 1) == 7 && tier_index("Oxide Overlord", 1) == 7);
+    assert(tier_index("Master Driver", 0) == 0 && tier_index("Oxide Overlord", 0) == 0);
     status_state = 0;
     status_until = monotonic_ms() + 895000;
     assert(runtime_ranked_status(1) == 0 && !status_pending);
@@ -117,7 +128,12 @@ static void test_status_contract(void) {
     status_state = 1;
     status_until = monotonic_ms() + 5000;
     assert(runtime_ranked_status(0) == 1);
-    assert(runtime_ranked_status(1) == -1 && status_pending);
+    /* A fresh check refreshes in the background: the Ranked menu keeps the last answer,
+     * so Go To Lobby stays usable while the request is in flight. */
+    assert(runtime_ranked_status(1) == 1 && status_pending);
+    status_pending = 0;
+    status_until = monotonic_ms() - 1;   /* expired: the stale answer holds too */
+    assert(runtime_ranked_status(0) == 1 && status_pending);
     status_pending = 0;
     status_until = 0;
 }
@@ -145,7 +161,7 @@ static void test_status_refresh(void) {
     ranked_status_fetch();
     assert(runtime_ranked_status(0) == 1);
     status_http = 503;
-    assert(runtime_ranked_status(1) == -1);
+    assert(runtime_ranked_status(1) == 1 && status_pending); /* the good answer holds */
     ranked_status_fetch();
     assert(runtime_ranked_status(0) == 0);
     status_http = 200;
@@ -182,11 +198,14 @@ static void test_resolution(void) {
     assert(strstr(sent_body, "\"room\":42"));
     assert(strstr(sent_body, "\"mode\":0"));
     assert(strstr(sent_body, "\"track\":\"electron_avenue\""));
-    if (!strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false},"))
+    if (!strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900},"))
         fprintf(stderr, "ACTUAL BODY: %s\n", sent_body);
-    assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false},"
-                 "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true},"
-                 "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false}]"));
+    assert(strstr(sent_body, "{\"v\":2,"));
+    assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900},"
+                 "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true,\"time\":0},"
+                 "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false,\"time\":1200}]"));
+    /* the local player's own result: its laps up to its finish stamp */
+    assert(strstr(sent_body, "\"self\":{\"finished\":true,\"time\":900,\"laps\":[300,600,900]}}"));
     struct runtime_ranked_result result;
     assert(runtime_ranked_result_copy(&result) && result.delta == 45 && result.mmr == 1045);
 }
@@ -198,7 +217,7 @@ static void test_guest_pending_then_delta(void) {
     assert(sent == RANKED_RETRIES);   /* the whole budget goes on waiting for the host */
     struct runtime_ranked_result result;
     assert(!runtime_ranked_result_copy(&result)); /* waits for the host */
-    strcpy(transfer_reply, "{\"status\":\"resolved\",\"race\":8,\"delta\":30,\"mmr\":1030,\"placements\":4,\"tier\":\"Gold Mask\"}");
+    strcpy(transfer_reply, "{\"status\":\"resolved\",\"race\":8,\"delta\":30,\"mmr\":1030,\"placements\":4,\"tier\":\"Golden Wumpa\"}");
     ranked_sender(make_outbox());
     assert(sent == RANKED_RETRIES + 1);
     assert(runtime_ranked_result_copy(&result) && result.delta == 30 && result.mmr == 1030);
@@ -238,11 +257,11 @@ static void test_rejected_report_drops_out(void) {
 
 static void test_tier_batch_response(void) {
     char tier[40];
-    const char *reply = "{\"mode\":0,\"tiers\":{\"hostracer\":\"Gold Mask\"},\"mmr\":{\"hostracer\":1045}}";
+    const char *reply = "{\"mode\":0,\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}";
     assert(ranked_tier_reply(reply, "hostracer", tier, sizeof tier));
-    assert(!strcmp(tier, "Gold Mask"));
+    assert(!strcmp(tier, "Golden Wumpa"));
     assert(!ranked_tier_reply(reply, "missing", tier, sizeof tier));
-    assert(!ranked_tier_reply("{\"hostracer\":\"Gold Mask\"}", "hostracer", tier, sizeof tier));
+    assert(!ranked_tier_reply("{\"hostracer\":\"Golden Wumpa\"}", "hostracer", tier, sizeof tier));
     int mmr = 0;
     assert(ranked_mmr_reply(reply, "hostracer", &mmr) && mmr == 1045);
     assert(!ranked_mmr_reply(reply, "missing", &mmr));
@@ -330,7 +349,7 @@ static void test_result_snapshot(void) {
     session_room = 42;
     session_mode = 0;
     runtime_ranked_race_begin();
-    strcpy(transfer_reply, "{\"participants\":[{\"mmr\":9999,\"delta\":999}],\"status\":\"resolved\",\"delta\":-35,\"delta_applied\":-5,\"mmr_before\":5,\"mmr\":0,\"ranked\":true,\"ranked_before\":true,\"tier_before\":\"Bronze Wumpa\",\"tier\":\"Bronze Wumpa\",\"placements\":0}");
+    strcpy(transfer_reply, "{\"participants\":[{\"mmr\":9999,\"delta\":999}],\"status\":\"resolved\",\"delta\":-35,\"delta_applied\":-5,\"mmr_before\":5,\"mmr\":0,\"ranked\":true,\"ranked_before\":true,\"tier_before\":\"Bronze\",\"tier\":\"Bronze\",\"placements\":0}");
     struct ranked_outbox *box = make_outbox();
     box->generation = result_generation;
     ranked_sender(box);

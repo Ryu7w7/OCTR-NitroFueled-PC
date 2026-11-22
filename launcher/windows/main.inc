@@ -173,6 +173,10 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         else ShowWindow(hwnd, EnsureTray() ? SW_HIDE : SW_MINIMIZE);
         return 0;
     }
+    if (msg == kShowLauncher) {
+        BringLauncherToFront();
+        return 0;
+    }
     if (msg == kTrayMessage) {
         if (lparam == WM_LBUTTONUP) TrayAction(1);
         else if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) ShowTrayMenu();
@@ -345,8 +349,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
     bool direct_launch = false, updated = false;
+    std::string ranked_link;  // sacredfire://ranked?mode=N: a Discord announcement's Join (RankedLinkRequest)
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsnicmp(cmd_argv[i], L"sacredfire:", 11) == 0) ranked_link = Narrow(cmd_argv[i]);
             if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
@@ -360,6 +366,48 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     LoadState();
     MigrateOldLauncher();
+    RegisterRankedLink();
+    if (!ranked_link.empty() && RankedLinkRequest(ranked_link)) {
+        // A running game took the request: this launcher was only started for the link.
+        if (g_app.worker.joinable()) g_app.worker.join();
+        if (g_app.probe.joinable()) g_app.probe.join();
+        CoUninitialize();
+        return 0;
+    }
+    // One launcher per install: starting it again brings the running one back (it may be hidden in the
+    // tray while the game runs, 20/11: a second one was opened without knowing) instead of a second
+    // copy. Per install folder, so test builds side by side each keep their own launcher.
+    std::wstring instance_tag;
+    {
+        std::string root = PathText(fs::weakly_canonical(g_app.root));
+        for (char& c : root) c = char(std::tolower(static_cast<unsigned char>(c)));
+        uint64_t hash = 1469598103934665603ull;   // FNV-1a
+        for (const unsigned char c : root) hash = (hash ^ c) * 1099511628211ull;
+        wchar_t text[32];
+        swprintf(text, 32, L"%016llx", static_cast<unsigned long long>(hash));
+        instance_tag = std::wstring(L"SacredFireLauncher-") + text;
+    }
+    HANDLE single_instance = CreateMutexW(nullptr, FALSE, (L"Local\\" + instance_tag).c_str());
+    if (single_instance && GetLastError() == ERROR_ALREADY_EXISTS && ranked_link.empty()) {
+        struct Find { const std::wstring* tag; HWND hwnd; } find{&instance_tag, nullptr};
+        EnumWindows([](HWND w, LPARAM p) -> BOOL {
+            auto* f = reinterpret_cast<Find*>(p);
+            if (!GetPropW(w, f->tag->c_str())) return TRUE;
+            f->hwnd = w;
+            return FALSE;
+        }, reinterpret_cast<LPARAM>(&find));
+        if (find.hwnd) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(find.hwnd, &pid);
+            AllowSetForegroundWindow(pid);   // this start came from the user: hand its focus over
+            PostMessageW(find.hwnd, kShowLauncher, 0, 0);
+        }
+        CloseHandle(single_instance);
+        if (g_app.worker.joinable()) g_app.worker.join();
+        if (g_app.probe.joinable()) g_app.probe.join();
+        CoUninitialize();
+        return 0;
+    }
     if (!direct_launch) {
         CleanupUpdate();
         if (updated) {
@@ -429,6 +477,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                               WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
                               x, y, width, height, nullptr, nullptr, instance, nullptr);
     g_app.hwnd = hwnd;
+    SetPropW(hwnd, instance_tag.c_str(), reinterpret_cast<HANDLE>(1));   // found by a second start
     const BOOL dark_titlebar = TRUE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark_titlebar, sizeof(dark_titlebar));
     if (!CreateDevice(hwnd)) {

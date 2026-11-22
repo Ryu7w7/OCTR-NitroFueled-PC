@@ -70,7 +70,35 @@ void runtime_public_itemless_new_session(void) { public_selected=public_active=p
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
 void runtime_public_itemless_guest_room(int inside) { (void)inside; }
+/* The results points line lists every team, the winner first: "BLUE 22 / RED 17", "RED 13 (H2H) / BLUE 13".
+ * Its first entry: a team name, the winner's points and " (H2H)" only when a tie was decided head to head. */
+static int team_points_first(const char *line, int points, int h2h) {
+    if (!line) return 0;
+    char first[64];
+    const char *end = strstr(line, " / ");
+    const size_t n = end ? (size_t)(end - line) : strlen(line);
+    if (n >= sizeof first) return 0;
+    memcpy(first, line, n);
+    first[n] = 0;
+    char want[32];
+    snprintf(want, sizeof want, " %d%s", points, h2h ? " (H2H)" : "");
+    const size_t w = strlen(want);
+    return n > w && !strcmp(first + n - w, want) && first[0] != ' ';
+}
+
+int runtime_rooms_created(void) { return 0; }
+void runtime_public_itemless_poll_ranked_request(void) {}
+int runtime_public_itemless_ranked_request_take(void) { return -1; }
+int runtime_replay_signal_pressed(int signal) { (void)signal; return 0; }
+int runtime_replay_buttons_held(void) { return 0; }
 void runtime_public_itemless_update(void) {}
+int runtime_public_found_room(void) { return 0; }
+uint64_t runtime_public_room(void) { return 0; }
+int runtime_public_ranked_short(void) { return 0; }
+int runtime_public_ranked_min_players(void) { return 6; }
+int runtime_public_ranked_clock(int64_t *since_ms, int *players) { (void)since_ms; (void)players; return 0; } /* no server clock here */
+void runtime_room_mode_host_name(char out[24]) { out[0] = 0; } /* runtime_room_mode.c */
+int runtime_chat_send_data(const char *text) { (void)text; return 1; } /* runtime_chat.c */
 void runtime_party_experiment_tick(void) {}
 int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
@@ -845,6 +873,8 @@ static void test_region(size_t shift) {
     direct_stub(image + (0x110b9db - shift), disable_node_mock);
     memcpy(image + (0xeb7950 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x89\xfb\x48\x8b\x43\x18", 17);
     memcpy(image + (0xeb7961 - shift), "\x58\x5b\x41\x5e\x41\x5f\x5d\xc3", 8);
+    memcpy(image + (0xebcd40 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0xebcd51 - shift), "\xc3", 1);
     memcpy(image + (0x115a740 - shift), "\x55\x48\x89\xe5\x41\x56\x53\x48\x89\xd3\x49\x89\xfe\xe8\xbe\x63\x93\xff", 18);
     image[0x115a74e - shift] += (unsigned char)shift;
     direct_stub(image + 0xa90b10, network_query_mock);
@@ -1621,7 +1651,9 @@ static void test_region(size_t shift) {
     put_pointer(selected_list, 32, zone_items);
     unsigned char native_settings[0x40] = {0};
     put_pointer(image, 0x2ad4e30, native_settings);
-    unsigned char private_settings[48] = {0};
+    /* COctaneLobbyPrivateMatchRaceData is 0x28 bytes; the 8 bytes after it stand for the
+     * next heap block's header and must stay untouched. */
+    unsigned char private_settings[0x28 + 8] = {0};
     put_pointer(manager, 0xde8, private_settings);
     for (int i = 0; i < 4; ++i) put_pointer(test_zones[i], 0x10, maps[i]);
     /* Entering CUP initializes the first native cup and publishes its first map. */
@@ -2155,7 +2187,6 @@ static void test_region(size_t shift) {
     assert(*race_mode == 1 && *(int *)(manager + 0xd4c) == 1);
     assert(*(int *)(private_settings + 0x20) == 1);
     memcpy(packet + 0x3c, &single_mode, 4);
-    *(int *)(private_settings + 0x28) = 1; /* Host selected No Teams. */
     received(packet);
     assert(received_mode == 1 && !runtime_online_mode_private_cup());
     room_active = 0;
@@ -2167,7 +2198,7 @@ static void test_region(size_t shift) {
     card_event(NULL, &event, card);
     assert(!strcmp(*(char **)(card_mode + 0x30), "SINGLE RACE - NORMAL"));
     room_active = 1;
-    assert(*(int *)(private_settings + 0x28) == 1);
+    assert(!memcmp(private_settings + 0x28, "\0\0\0\0\0\0\0\0", 8));
     memset(native_settings, 0, sizeof native_settings);
     *(int *)(native_settings + 0x28) = 2;
     unsigned char team_slot[0x88]={0}, slot_name[0x120]={0}, slot_number[0x120]={0};
@@ -2724,25 +2755,25 @@ static void test_region(size_t shift) {
     put_pointer(selector_manager, 0x10, selector_roster);
     put_pointer(selector_roster, 0x20, selector_players);
     *(int *)(selector_roster + 12) = 8;
-    const int directions[] = {2, 3, 6, 7};
+    /* A team's cap (+0x80, 8 / teams) goes up to 9 - teams: in a full room any team can be joined while the
+     * others keep a member each (the native move skips a team at its cap). */
     for (int teams = 2; teams <= 4; teams += 2) {
         *(int *)(selector_behavior + 0x7c) = teams;
         *(int *)(selector_behavior + 0x80) = 8 / teams;
         for (int i = 0; i < 8; ++i) *(int *)(selector_peers[i] + 0xe4) = i % teams;
-        for (int slot = 0; slot < 8; ++slot) {
-            local_player_mock = selector_peers[slot];
-            for (int d = 0; d < 4; ++d) {
-                *(int *)(input_event + 0x18) = directions[d];
-                for (int repeat = 0; repeat < 3; ++repeat)
-                    selector_event(selector_behavior, input_event, selector_owner);
-                assert(selector_native_events == before_input); /* Full lobby never enters native search. */
-            }
-        }
         local_player_mock = selector_peers[0];
-        *(int *)(selector_roster + 12) = 7; /* Last team now has a vacancy. */
+        *(int *)(input_event + 0x18) = 3;
         selector_event(selector_behavior, input_event, selector_owner);
-        assert(selector_native_events == ++before_input);
-        *(int *)(selector_roster + 12) = 8;
+        assert(*(int *)(selector_behavior + 0x80) == 9 - teams);
+        assert(selector_native_events == ++before_input); /* A full room's move reaches the native one. */
+        if (teams == 2) {
+            /* every other team at the cap: the native search would loop forever, so it is never entered */
+            for (int i = 1; i < 8; ++i) *(int *)(selector_peers[i] + 0xe4) = 1;
+            *(int *)(selector_peers[0] + 0xe4) = 0;
+            for (int repeat = 0; repeat < 3; ++repeat)
+                selector_event(selector_behavior, input_event, selector_owner);
+            assert(selector_native_events == before_input);
+        }
         *(int *)(input_event + 0x18) = 8;
         selector_event(selector_behavior, input_event, selector_owner);
         assert(selector_native_events == ++before_input); /* Full lobby can still Ready. */
@@ -2798,7 +2829,9 @@ static void test_region(size_t shift) {
     assert(!(*(unsigned *)(members_root + 12) & 0x400)); /* Restored with lobby. */
     assert(!(native_selector_project[0x34] & 0x20));
     assert(*(unsigned *)(native_selector_root + 12) & 0x400);
-    assert(*(int *)(native_settings + 0x28) == 1 && *(int *)(private_settings + 0x28) == 1);
+    assert(*(int *)(native_settings + 0x28) == 1);
+    /* Leaving resets the team count without writing past the private settings. */
+    assert(!memcmp(private_settings + 0x28, "\0\0\0\0\0\0\0\0", 8));
     /* Replay delayed opens after leaving Teams into every mode, with stale team settings. */
     for (int room = 0; room <= 1; ++room)
         for (int mode = 0; mode <= 15; ++mode)
@@ -3161,20 +3194,20 @@ static void test_region(size_t shift) {
            *(void **)(race_ui_owner + 0x68) == ranking_handle);
     assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
     assert(!strcmp(*(char **)(wins_text + 0x30), "WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 22, 0));
     assert(podium_slots[0] == racers[0] && podium_slots[1] == racers[1] && podium_slots[2] == racers[2]);
     local_player_mock = players[1];
     project_event(ranking_project, panel_event);
     assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
     assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 22, 0));
     local_player_mock = players[0];
     handle_timer(NULL, &event, timer_owner);
     assert(*(float *)(timer_owner + 0x60) == 1050.0f);
     assert(*(unsigned *)(timer_owner + 12) & 0x1000);
     assert(*(float *)(wins_text + 0x64) == -19.0f);
-    assert(*(float *)(winner_text + 0x64) == -4.0f);
-    assert(*(float *)(points_text + 0x64) == 9.0f);
+    assert(*(float *)(winner_text + 0x64) == -9.0f);
+    assert(*(float *)(points_text + 0x64) == 6.0f);
     /* All eight bound identities, in reverse GUI order, including last place.
      * Deliberately wrong display text must never decide the row's identity. */
     const char *awards[] = {"10 POINT", "8 POINT", "6 POINT", "5 POINT", "4 POINT", "3 POINT", "2 POINT", "1 POINT"};
@@ -3270,7 +3303,7 @@ static void test_region(size_t shift) {
         receive_results(team_results);
         assert(!strcmp(*(char **)(score_text + 0x30), "8 POINT"));
         assert(!strcmp(*(char **)(score_position + 0x30), "2"));
-        assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+        assert(team_points_first(*(char **)(points_text + 0x30), 22, 0));
     }
     /* Late human and AI callbacks must preserve host ranks in every race variant. */
     *(int *)(ai_selections + 12) = 8;
@@ -3319,7 +3352,7 @@ static void test_region(size_t shift) {
     receive_results(team_results);
     assert(!strcmp(*(char **)(winner_text + 0x30), "BLUE TEAM WINS"));
     assert(!strcmp(*(char **)(wins_text + 0x30), "RESULT"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "22 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 22, 0));
     /* Independent final-result scenarios must begin a fresh race snapshot. */
 #define NEW_TEAM_RESULT() do { synced_finished_mask=-1; initialize_race_ui(race_ui_owner); } while (0)
     NEW_TEAM_RESULT();
@@ -3329,7 +3362,7 @@ static void test_region(size_t shift) {
     receive_results(team_results);
     assert(!strcmp(*(char **)(wins_text + 0x30), "WINS"));
     assert(!strcmp(*(char **)(winner_text + 0x30), "RED TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "13 POINTS (H2H)"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 13, 1));
     local_player_mock = players[1];
     project_event(ranking_project, panel_event);
     assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
@@ -3342,7 +3375,7 @@ static void test_region(size_t shift) {
     receive_results(team_results);
     assert(!strcmp(*(char **)(wins_text + 0x30), "LOSE"));
     assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "14 POINTS (H2H)"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 14, 1));
     NEW_TEAM_RESULT();
     *(int *)(native_settings + 0x28) = 4;
     /* Reported screenshot: GREEN 10+4=14, YELLOW 8+5=13,
@@ -3354,7 +3387,7 @@ static void test_region(size_t shift) {
         local_player_mock = players[i];
         project_event(ranking_project, panel_event);
         assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
-        assert(!strcmp(*(char **)(points_text + 0x30), "14 POINTS"));
+        assert(team_points_first(*(char **)(points_text + 0x30), 14, 0));
         assert(!strcmp(*(char **)(wins_text + 0x30), screenshot_teams[i] == 2 ? "WINS" : "LOSE"));
         put_pointer(bound_racer, 0x28, racers[i]);
         row_event(row_behavior, NULL, NULL);
@@ -3380,7 +3413,7 @@ static void test_region(size_t shift) {
     receive_results(team_results);
     room_active = 1;
     assert(!strcmp(*(char **)(winner_text + 0x30), "YELLOW TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "13 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 13, 0));
     for (int i = 0; i < 8; ++i) {
         put_pointer(bound_racer, 0x28, racers[i]);
         row_event(row_behavior, NULL, NULL);
@@ -3399,7 +3432,7 @@ static void test_region(size_t shift) {
     score_tick(row_behavior,NULL,.25f);
     assert(!strcmp(*(char **)(score_text+0x30),"0 POINT"));
     assert(*(float *)(racer_row+0xe0)==.6f && *(float *)(score_background+0xe0)==0);
-    assert(!strcmp(*(char **)(points_text+0x30),"13 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 13, 0));
     /* Guests use the authority mask, never their local completion timing.
      * Exercise the mask both before and after the native result event. */
     for (int local=0;local<8;++local) for (int early=0;early<2;++early) {
@@ -3426,7 +3459,7 @@ static void test_region(size_t shift) {
         score_tick(row_behavior,NULL,.25f);
         assert(!strcmp(*(char **)(score_text+0x30),"0 POINT"));
         assert(*(float *)(racer_row+0xe0)==.6f);
-        assert(!strcmp(*(char **)(points_text+0x30),"13 POINTS"));
+        assert(team_points_first(*(char **)(points_text + 0x30), 13, 0));
         following_host=0;
     }
     local_player_mock=players[0];
@@ -3440,7 +3473,7 @@ static void test_region(size_t shift) {
         local_player_mock = players[local];
         receive_results(team_results);
         assert(!strcmp(*(char **)(winner_text + 0x30), "YELLOW TEAM WINS"));
-        assert(!strcmp(*(char **)(points_text + 0x30), "10 POINTS"));
+        assert(team_points_first(*(char **)(points_text + 0x30), 10, 0));
         assert(!strcmp(*(char **)(wins_text + 0x30), local ? "WINS" : "LOSE"));
         put_pointer(bound_racer, 0x28, racers[local]);
         row_event(row_behavior, NULL, NULL);
@@ -3455,12 +3488,12 @@ static void test_region(size_t shift) {
     lap_times[3][2] = -1; /* Full list with missing final time is also DNF. */
     receive_results(team_results);
     assert(!strcmp(*(char **)(winner_text + 0x30), "NO FINISHERS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "0 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 0, 0));
     NEW_TEAM_RESULT();
     speed = 0;
     receive_results(team_results);
     assert(!strcmp(*(char **)(winner_text + 0x30), "GREEN TEAM WINS"));
-    assert(!strcmp(*(char **)(points_text + 0x30), "14 POINTS"));
+    assert(team_points_first(*(char **)(points_text + 0x30), 14, 0));
     local_player_mock = players[0];
     for (int i = 0; i < 8; ++i) *(int *)(players[i] + 0xe4) = i % 4;
     NEW_TEAM_RESULT();
@@ -3788,8 +3821,17 @@ static void test_region(size_t shift) {
     put_pointer(labels[3],0x28,"TimerValue");
     unsigned char countdown_before[0x100]; memcpy(countdown_before,labels[3],sizeof countdown_before);
     *(unsigned *)(search_panel+12)|=0x400;
+    /* The searching panel is drawn once early, at one pixel, so the game prepares its artwork
+     * before the queue instead of freezing the first searching frame. */
+    *(float *)(search_panel+0x90)=300.f; *(float *)(search_panel+0x94)=120.f;
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(!(*(unsigned *)(search_panel+12)&0x400));
+    assert(*(float *)(search_panel+0x90)==1.f && *(float *)(search_panel+0x94)==1.f);
+    runtime_online_mode_matchmaking_update(search_root);
+    assert(*(unsigned *)(search_panel+12)&0x400);
     search_test_active=search_test_ranked=1;search_test_elapsed=42;search_test_range=700;
     runtime_online_mode_matchmaking_update(search_root);
+    assert(*(float *)(search_panel+0x90)==300.f && *(float *)(search_panel+0x94)==120.f);
     assert(!strcmp(*(char **)(labels[0]+0x30),"SEARCHING"));
     assert(!strcmp(*(char **)(labels[1]+0x30),"00:42 / 03:00"));
     assert(!strcmp(*(char **)(labels[2]+0x30),"WIDENED: 700 MMR"));

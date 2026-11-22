@@ -338,6 +338,8 @@ def main():
     # Built-in mods (tools/make_builtin_mods.py); extra-cups-art only when it was built here.
     if (ROOT / 'scripts' / 'builtin_mods').is_dir():
         shutil.copytree(ROOT / 'scripts' / 'builtin_mods', folder / 'scripts' / 'builtin_mods', dirs_exist_ok=True)
+    # lang/: the port's translations, read by scripts/octr_texts.py at start-up (online_mode.py, tacho_pack.py)
+    shutil.copytree(ROOT / 'lang', folder / 'lang', dirs_exist_ok=True)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its

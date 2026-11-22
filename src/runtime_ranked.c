@@ -14,10 +14,10 @@
  * The server scores the race when the room's own host reports (the same
  * authority the game already uses) and answers every reporter with its own
  * outcome: {"status":"resolved","race":7,"season":1,"delta":45,"mmr":1045,
- * "placements":4,"tier":"Gold Mask"}. Guests that reported a moment before the
+ * "placements":4,"tier":"Golden Wumpa"}. Guests that reported a moment before the
  * host get "pending" and retry; once the race is resolved a retry carries
  * their delta, which then joins the lobby card:
- * RANKED - NORMAL  +45 (1045 Gold Mask).
+ * RANKED - NORMAL  +45 (1045 Golden Wumpa).
  * The Python launcher stays out of it: the mod talks to RyuNET itself, exactly
  * like chat, spectate and name colors do.
  */
@@ -41,10 +41,12 @@
 #include <windows.h>
 #endif
 
-#define RANKED_RETRIES 4
+/* The server waits for every racer's report (or RYUNET_RANKED_WINDOW_S, 12 s) before it scores the race:
+ * 8 posts 3 s apart outlast that window. */
+#define RANKED_RETRIES 8
 #define RANKED_TIER_MEMBERS 16
 #ifndef RANKED_RETRY_MS            /* the test runs the sender with 0 */
-#define RANKED_RETRY_MS 4000
+#define RANKED_RETRY_MS 3000
 #endif
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -95,7 +97,9 @@ int runtime_ranked_status(int fresh) {
     pthread_mutex_lock(&lock);
     if ((!status_until || now >= status_until || (fresh && status_state == 1)) && !status_pending) {
         status_pending = 1;
-        status_state = -1;
+        /* Keep the last answer while the refresh runs on the worker: the Ranked menu's
+         * Go To Lobby stays usable instead of dimming for one round trip. */
+        if (!status_until) status_state = -1;
     }
     const int state = status_state;
     pthread_mutex_unlock(&lock);
@@ -213,15 +217,21 @@ static int same_nick(const char *a, const char *b) {
     return !*a && !*b;
 }
 
+/* As RyuNET names them (its ranked_mmr.go rankedTierNames). Normal (FFA) since 2026-11-18, by S_97:
+ * Bronze, Silver, Golden Wumpa, Power Crystal, Mythic Gem, Uka's Chosen, Ancient Spirit. Itemless's
+ * badges by ESDRONIX; its top tier is Master Driver since 2026-11-19. */
 static const char *const tier_names[2][7] = {
-    {"Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"},
-    {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Oxide Overlord"},
+    {"Bronze", "Silver", "Golden Wumpa", "Power Crystal", "Mythic Gem", "Uka's Chosen", "Ancient Spirit"},
+    {"Sapphire Relic", "Gold Relic", "Platinum Relic", "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Master Driver"},
 };
+/* the names before that, as an older server still says them */
+static const char *const old_normal_tier_names[7] = {
+    "Bronze Wumpa", "Silver Nitro", "Gold Mask", "Platinum Trophy", "Aku Master", "Uka Legend", "Chaos Grand Prix"};
 
 static int tier_index(const char *name, int mode) {
     for (int i = 0; i < 7; ++i)
-        if (!strcmp(name, tier_names[mode][i])) return i + 1;
-    return 0;
+        if (!strcmp(name, tier_names[mode][i]) || (!mode && !strcmp(name, old_normal_tier_names[i]))) return i + 1;
+    return mode && !strcmp(name, "Oxide Overlord") ? 7 : 0;
 }
 
 static int ranked_best_mode(int normal_tier, int normal_mmr, int itemless_tier, int itemless_mmr) {
@@ -453,9 +463,10 @@ void runtime_ranked_race_end(void) {
     if (!runtime_ranked_session(&room, &mode)) return;
     struct runtime_ranked_racer order[8];
     const int count = runtime_online_mode_ranked_order(order, 8);
-    fprintf(stderr, "Ranked: race end, order entries %d\n", count);
+    fprintf(stderr, "[Ranked TX] room %llu mode %d: %d racers in the report\n", (unsigned long long)room, mode, count);
     for (int i = 0; i < count; ++i)
-        fprintf(stderr, "Ranked:   %d. %s%s\n", i + 1, order[i].name, order[i].finished ? "" : " (DNF)");
+        fprintf(stderr, "[Ranked TX]   pos %d %s%s %s time=%d laps=%d\n", order[i].pos, order[i].name,
+                order[i].self ? " (me)" : "", order[i].finished ? "FINISH" : "DNF", order[i].time, order[i].laps);
     if (count < 2) return;
 
     /* The sender owns a full copy of the report: the lobby state churns after a
@@ -574,16 +585,31 @@ void *ranked_sender(void *arg) {
     snprintf(target, sizeof target, "/ryunet/ranked-result?name=%s", me);
 
     for (int tries = 1; tries <= RANKED_RETRIES; ++tries) {
-        char body[768];
+        /* v2 (docs/RANKED_ENDRACE_DESYNC_FIX.md): every racer's finish stamp as this game saw it, and the
+         * local player's own result ("self"), which no other game can drop. An older server reads the order. */
+        char body[2048];
         size_t used = (size_t)snprintf(body, sizeof body,
-            "{\"room\":%llu,\"mode\":%d,\"track\":\"%s\",\"order\":[",
+            "{\"v\":2,\"room\":%llu,\"mode\":%d,\"track\":\"%s\",\"order\":[",
             (unsigned long long)out->room, out->mode, out->track);
-        for (int i = 0; i < out->count && used < sizeof body; ++i)
+        const struct runtime_ranked_racer *self = NULL;
+        for (int i = 0; i < out->count && used < sizeof body; ++i) {
             used += (size_t)snprintf(body + used, sizeof body - used,
-                                     "%s{\"name\":\"%s\",\"pos\":%d,\"dnf\":%s}",
+                                     "%s{\"name\":\"%s\",\"pos\":%d,\"dnf\":%s,\"time\":%d}",
                                      i ? "," : "", out->order[i].name, out->order[i].pos,
-                                     out->order[i].finished ? "false" : "true");
-        snprintf(body + used, sizeof body - used, "]}");
+                                     out->order[i].finished ? "false" : "true", out->order[i].time);
+            if (out->order[i].self) self = &out->order[i];
+        }
+        if (used < sizeof body) used += (size_t)snprintf(body + used, sizeof body - used, "]");
+        if (self && used < sizeof body) {
+            used += (size_t)snprintf(body + used, sizeof body - used,
+                                     ",\"self\":{\"finished\":%s,\"time\":%d,\"laps\":[",
+                                     self->finished ? "true" : "false", self->time);
+            for (int i = 0; i < self->laps && i < 7 && used < sizeof body; ++i)
+                used += (size_t)snprintf(body + used, sizeof body - used, "%s%d", i ? "," : "", self->stamps[i]);
+            if (used < sizeof body) used += (size_t)snprintf(body + used, sizeof body - used, "]}");
+        }
+        if (used < sizeof body) snprintf(body + used, sizeof body - used, "}");
+        if (tries == 1) fprintf(stderr, "[Ranked TX] %s\n", body);
 
         char *reply = NULL;
         size_t reply_size = 0;

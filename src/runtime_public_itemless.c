@@ -65,6 +65,12 @@ static const char *ranked_device(void) {
 
 static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
 static int installed, selected, ranked_selected, searching, allow_party;
+/* Whether the party is in a Ranked search. Survives reset_locked (which follows a leave) so a
+ * guest that takes over as host re-searches Ranked, not Casual (2026-11-19). */
+static int joined_ranked;
+/* Snapshot of the found room's mode, used to return to the right ModeSelect on a party leave. */
+static int joined_itemless;
+static uint64_t room_alive_after;
 static int confirmed_itemless, confirmed_ranked;
 static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
@@ -79,6 +85,8 @@ static int party_at_entry = 1;
  * came in together (2026-11-16, the user: leaving a private room must not group you with anyone). */
 static int entry_private;
 static int private_lobby_open;
+static int guest_room_open; /* this player is on the room's own screens */
+static int queue_return_pending, party_return_received;
 static void (ABI *native_party_quit_trace)(void *);
 static int ranked_party_size(void);
 /* Entering a lobby session: from now on, going back to the menus may bring the party along. */
@@ -97,6 +105,10 @@ static void (ABI *native_party_return)(void *);
 static uint64_t search_mark, search_ui_at, search_poll_after, search_policy_at, search_poll_serial;
 static int search_elapsed_base, search_timeout = 180, search_range, search_is_ranked;
 static int search_server_active, search_poll_running, search_timeout_pending;
+/* Stays up after the server reports "matched" so a party member leaving during the found
+ * screen still notifies the remaining player. Cleared only on a real reset. */
+static int match_found;
+static void notify_room_left(void); /* defined with the native hooks below */
 
 typedef void *(ABI *Search)(void **, void *, const char *, unsigned, void *);
 typedef void *(ABI *Register)(void **, void *, const char *, unsigned);
@@ -148,6 +160,7 @@ static int itemless_client_available(void) {
 }
 
 static uint64_t check_clock(void);
+static void notice(const char *message);
 static uint64_t capability_next;
 static int capability_running, capability_supported;
 static void *capability_worker(void *unused) {
@@ -189,6 +202,7 @@ static void reset_locked(void) {
     allow_party = 0;
     search_mark = search_ui_at = search_poll_after = search_policy_at = 0;
     search_elapsed_base = search_range = search_is_ranked = search_server_active = search_poll_running = 0;
+    match_found = 0;
     search_timeout = 180;
     search_timeout_pending = 0;
     ++search_poll_serial;
@@ -206,11 +220,27 @@ void runtime_public_itemless_party_ready(void) {
 /* The host is back in the online menus: the room's private flag must not follow it into the
  * next mode (2026-11-17: matchmaking with a party opened the private lobby's map selector). */
 static void clear_room_private(unsigned char *party) { if (party) party[0x6c] = 0; }
+/* Takeover stays inside the same room. Reset only party-exit bookkeeping; a full online-session
+ * reset destroys lobby-player state while the native room still references it. */
+void runtime_public_itemless_takeover_host(void) {
+    __atomic_store_n(&party_at_entry, ranked_party_size(), __ATOMIC_SEQ_CST);
+    __atomic_store_n(&entry_private, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&queue_return_pending, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&party_return_received, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&menu_party_returned, 0, __ATOMIC_SEQ_CST);
+    /* A guest never pressed the Ranked/Itemless button locally; it learned the mode from the
+     * host's confirmation. Restore it before native re-issues start_search, else the party's
+     * Ranked queue restarts as Casual. */
+    if (joined_ranked) {
+        ranked_selected = 1;
+        search_is_ranked = 1;
+    }
+    if (joined_itemless) selected = 1;
+}
 /* A guest back in the menus has left the host's room for good, but nothing leaves the party:
  * both sides keep it in their Lobby Members list and the host never hears about it (2026-11-18).
  * Leave it the game's way: 0xa9ffd0 tells the host (message 0x29) and empties the roster. */
 static uint64_t guest_quit_at;
-static int guest_room_open; /* this guest is on the room's own screens */
 static int leave_party_as_guest(void) {
     if (guest_quit_at && check_clock() - guest_quit_at < 5000) return 0;
     unsigned char *party = party_manager ? *party_manager : NULL;
@@ -247,6 +277,9 @@ void runtime_public_itemless_guest_room(int inside) {
 /* Use the party notification sent by native Quit with Party, without reloading the host. */
 void runtime_public_itemless_menu_return(void) {
     const int notify = !__atomic_exchange_n(&menu_party_returned,1,__ATOMIC_SEQ_CST);
+    const int queue_return = __atomic_exchange_n(&queue_return_pending,0,__ATOMIC_SEQ_CST);
+    const int received_return = __atomic_exchange_n(&party_return_received,0,__ATOMIC_SEQ_CST);
+    notify_room_left(); /* native Quit path: server must know now, not on conn close */
     runtime_public_itemless_reset();
     if (runtime_room_mode_following()) runtime_public_itemless_party_ready();
     if (!notify) return;
@@ -264,18 +297,34 @@ void runtime_public_itemless_menu_return(void) {
      * private, public or Ranked room everyone stayed grouped with its host). */
     const int before = __atomic_load_n(&party_at_entry, __ATOMIC_SEQ_CST);
     printf("Online party: menu return role=%d private=%d before=%d\n", role, private_room, before);
-    if (role == 1 && __atomic_load_n(&entry_private, __ATOMIC_SEQ_CST)) {
-        /* Leave this party without the Quit With Party return message. Guests see the connection
-         * close and recreate the private party under a remaining member. */
-        if (native_party_quit_trace) native_party_quit_trace(party);
-        puts("Online party: host left private room alone; remaining member takes host");
-    } else if (role == 1 && native_party_return && before > 1) {
+    if (role == 1 && queue_return && native_party_return && before > 1) {
         native_party_return(party);
-        printf("Online party: return notification queued; members=%d (party of %d before the room)\n",
+        printf("Online party: queue timeout returns party together; members=%d before=%d\n",
                ranked_party_size(), before);
     } else if (role == 1) {
-        printf("Online party: no party before the room; its players are not brought along\n");
-    } else if (private_room) {
+        /* Server-backed private party: promote a staying member before the native quit so the
+         * session is never deleted (no guest teardown -> no allocator churn). Never touch a
+         * native role during a race: defer to the end-race hook. */
+        if (private_room && runtime_party_server_enabled()) {
+            char members[8][24];
+            int n = runtime_room_members(members, 8);
+            const char *me = runtime_np_get_online_name();
+            const char *successor = NULL;
+            for (int i = 0; i < n; ++i) {
+                /* case-insensitive: the same pick as the game's takeover and the server */
+                if (!members[i][0] || (me && !strcasecmp(members[i], me))) continue;
+                if (!successor || strcasecmp(members[i], successor) < 0) successor = members[i];
+            }
+            if (successor) {
+                if (runtime_room_mode_race_frozen())
+                    runtime_party_server_defer_promote(successor); /* never touch native during a race */
+                else
+                    runtime_party_server_promote(successor);
+            }
+        }
+        if (native_party_quit_trace) native_party_quit_trace(party);
+        puts("Online party: host left alone; remaining members elect a new host");
+    } else if (!received_return && private_room) {
         leave_party_as_guest();
     }
 }
@@ -285,6 +334,22 @@ void runtime_public_itemless_select(int enabled) {
 }
 int runtime_public_itemless_selected(void) { return selected; }
 int runtime_ranked_selected(void) { return ranked_selected; }
+/* A search or a found match is in progress (used to tell the host when a party member bails). */
+int runtime_public_itemless_match_active(void) {
+    pthread_mutex_lock(&mode_lock);
+    const int active = searching || matchmaking_search || search_server_active || match_found;
+    pthread_mutex_unlock(&mode_lock);
+    return active;
+}
+/* The host's roster shrank during matchmaking: tell the player (debounced) that a party member
+ * left so they can drop the queue instead of continuing to match short-handed. */
+void runtime_public_itemless_party_left_notice(void) {
+    static uint64_t last_notice;
+    const uint64_t now = check_clock();
+    if (last_notice && now - last_notice < 10000) return;
+    last_notice = now;
+    notice("A player left your party during matchmaking. Leave and search again.");
+}
 /* CPartyManager owns the private session across scene changes. The lobby
  * scene's COctaneLobby::_isPrivateGame disappears when that scene unloads. */
 int runtime_private_match_active(void) {
@@ -319,6 +384,13 @@ int runtime_ranked_active(void) {
     return active;
 }
 
+/* Room id whose room-short POST was already sent (0 none). */
+static uint64_t short_sent_room;
+/* Room whose room-alive answer was fetched (0 none) and that answer. The native map-vote
+ * handler is dispatched more than once for one match, so one request per room is enough. */
+static uint64_t checked_room;
+static int checked_status;
+
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode) {
     pthread_mutex_lock(&mode_lock);
@@ -342,6 +414,103 @@ int runtime_public_match_active(void) {
     pthread_mutex_unlock(&mode_lock);
     return active;
 }
+/* The game's found-room screen shows a BACK (O/B) legend. Hide its icon+text while a room is
+ * found so nobody quits mid-matchmaking; still in queue the legend stays. */
+int runtime_public_found_room(void) {
+    pthread_mutex_lock(&mode_lock);
+    const int found = matchmaking_room != 0;
+    pthread_mutex_unlock(&mode_lock);
+    return found;
+}
+/* The found room this client is in, 0 in the queue. Callers need the id to act once per room. */
+uint64_t runtime_public_room(void) {
+    pthread_mutex_lock(&mode_lock);
+    const uint64_t room = matchmaking_room;
+    pthread_mutex_unlock(&mode_lock);
+    return room;
+}
+
+/* Ranked needs enough live players. At the countdown, ask the server how many are really in the
+ * room. If below the server's min_players, tell the server to dissolve it (room-short) so the
+ * short-handed race cannot start; the server pushes every player back to the queue.
+ *
+ * min_players is the server's rule and is used as-is (there is no client-side copy of it).
+ *
+ * Returns:
+ *   1  this client saw fewer than min_players live players, posted room-short -> caller shows
+ *      the notice.
+ *   0  room still raceable (>= min_players live players) -> countdown proceeds normally.
+ *  -1  room already dissolved (another client triggered room-short) -> caller still shows the
+ *      notice and cancels, so every player in the room gets the same native notice instead of
+ *      only whoever polled first.
+ *
+ * The returned values are status codes, not booleans: -1 is truthy in C, so callers must compare
+ * against 1 and -1 explicitly. */
+static void *room_short_worker(void *arg) {
+    const uint64_t room = (uint64_t)(uintptr_t)arg;
+    const char *me = runtime_np_get_online_name();
+    char target[512], body[256];
+    if (!me || !*me) return NULL;
+    snprintf(target, sizeof target, "/ryunet/room-short?name=%s&room=%llu", me, (unsigned long long)room);
+    const int status = runtime_ryunet_request("POST", target, body, sizeof body);
+    fprintf(stderr, "Public matchmaking: room %llu reported short (%d)\n", (unsigned long long)room, status);
+    return NULL;
+}
+
+int runtime_public_ranked_short(void) {
+    uint64_t room;
+    int checked, cached;
+    pthread_mutex_lock(&mode_lock);
+    room = matchmaking_room;
+    const int ranked = confirmed_ranked || joined_ranked || search_is_ranked;
+    checked = checked_room == room;
+    cached = checked_status;
+    pthread_mutex_unlock(&mode_lock);
+    if (!room) {
+        /* New room, new short report. */
+        __atomic_store_n(&short_sent_room, 0, __ATOMIC_SEQ_CST);
+        pthread_mutex_lock(&mode_lock);
+        checked_room = 0;
+        pthread_mutex_unlock(&mode_lock);
+        return 0;
+    }
+    if (!ranked) return 0;
+    if (checked) return cached;
+    /* No request here: this runs on the game's thread at the end of the map vote, and a server slow to
+     * answer froze the game at 00 (20/11: queries of 3 to 18 s). The room-alive thread's latest
+     * answer says how many players the room has (runtime_public_ranked_clock); without a fresh one the
+     * race goes ahead. A room-dissolved answer is handled by check_found_room_alive. */
+    int64_t since = 0;
+    int players = 0;
+    if (!runtime_public_ranked_clock(&since, &players)) return 0;
+    const int min_required = runtime_public_ranked_min_players();
+    /* The server's count is its lobby connections, which drop while a player is still in the game:
+     * a room the game's own list holds at the minimum is not dissolved (20/11, room 23). Without a
+     * list the server's count is the only word. */
+    const int local = runtime_online_mode_room_players();
+    fprintf(stderr, "Public matchmaking: ranked room %llu has %d live player(s) (min required: %d, game list: %d)\n",
+            (unsigned long long)room, players, min_required, local);
+    int status_code = 0;
+    if (players > 0 && players < min_required && !(local > 0 && local >= min_required)) {
+        /* Post once per room, on a thread of its own: the server dissolves the room and pushes
+         * everyone back to the queue. */
+        if (__atomic_exchange_n(&short_sent_room, room, __ATOMIC_SEQ_CST) != room) {
+            pthread_t thread;
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&thread, &attr, room_short_worker, (void *)(uintptr_t)room))
+                __atomic_store_n(&short_sent_room, 0, __ATOMIC_SEQ_CST);
+            pthread_attr_destroy(&attr);
+        }
+        status_code = 1;
+    }
+    pthread_mutex_lock(&mode_lock);
+    checked_room = room;
+    checked_status = status_code;
+    pthread_mutex_unlock(&mode_lock);
+    return status_code;
+}
 
 static void notice(const char *message) {
     fprintf(stderr, "Public ITEMLESS: %s\n", message);
@@ -356,6 +525,17 @@ static void notice(const char *message) {
 static int ranked_account_allowed(void) {
     if (runtime_ranked_account() != 0) return 1;
     notice(RANKED_ACCOUNT_NOTICE);
+    return 0;
+}
+
+/* Public matchmaking and Ranked take the game's own files and character mods only; any other mod or
+ * executable patch is for private rooms (scripts/online_content.py, runtime_online_content). */
+#define PUBLIC_CONTENT_NOTICE "Public matchmaking and Ranked allow only character, sound and HUD mods. Your game has other mods or patches: play them in private rooms."
+/* A public search refused for its content: 1 the notice is up, 2 its Continue was pressed (go back) */
+static int content_return;
+static int public_content_allowed(void) {
+    if (strcmp(runtime_online_content(), "modified")) return 1;
+    notice(PUBLIC_CONTENT_NOTICE);
     return 0;
 }
 
@@ -429,8 +609,10 @@ static void *search_poll(void *arg) {
                 arm_party_return();
                 search_server_active=1;search_mark=now;search_elapsed_base=elapsed;
                 search_is_ranked=ranked && !strncmp(ranked,"true",4);
+                if (search_is_ranked) joined_ranked=1; /* sticky server signal for takeover */
             } else if (!strncmp(state,"\"matched\"",9)) {
                 search_server_active=0;search_mark=0;search_timeout_pending=0;
+                match_found=1;
             } else if (!matchmaking_search) {
                 search_server_active=0;search_mark=0;
             }
@@ -517,9 +699,210 @@ int runtime_room_members(char out[][24], int max) {
     return n;
 }
 
+static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response);
+/* Someone left the party while a queue/found room was active: cancel the search and send every
+ * screen back to its ModeSelect. The native party stays intact (host reassignment is handled by
+ * the existing takeover path), so the remaining players can queue again together. */
+static volatile int queue_abort_pending;
+static uint64_t suppress_search_until; /* briefly swallow the native auto-search after host loss */
+void runtime_public_itemless_abort_queue(void) {
+    __atomic_store_n(&suppress_search_until, check_clock() + 3000, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&queue_abort_pending, 1, __ATOMIC_SEQ_CST);
+}
+static void do_queue_abort(void) {
+    if (!__atomic_exchange_n(&queue_abort_pending, 0, __ATOMIC_SEQ_CST)) return;
+    pthread_mutex_lock(&mode_lock);
+    const int leave_room = confirmed_ranked != 0 || joined_ranked;
+    const int ret_mode = confirmed_ranked || joined_ranked ? 2 :
+                         (confirmed_itemless || joined_itemless ? 1 : 0);
+    pthread_mutex_unlock(&mode_lock);
+    runtime_online_mode_set_return_mode(ret_mode);
+    /* Only the promoted host (takeover cleared followed_host) returns to ModeSelect. A party
+     * member still following stays in the party and sits at "Waiting on host...". */
+    const int following = runtime_room_mode_following();
+    fprintf(stderr, "Public matchmaking: party member left queue, following=%d mode=%d\n", following, ret_mode);
+    if (!following && network_manager && *network_manager)
+        runtime_online_mode_matchmaking_cancel(leave_room); /* route 1 ranked / 0 matchmaking */
+    runtime_public_itemless_reset();
+    runtime_public_itemless_party_ready();
+}
+/* The found room's liveness is asked on a thread of its own: this check runs on every lobby frame
+ * of the game's thread, and the request (a round trip, up to the socket's 8 s timeout) made the
+ * game stutter once a second in found rooms ("the polling is still deferred, not async", 20/11).
+ * The frame only reads the answer: a room the server says is gone. */
+static int room_alive_busy;
+static uint64_t room_alive_gone;   /* a found room the server reported dissolved, 0 none */
+/* The server's RYUNET_RANKED_MIN_PLAYERS, from room-alive; 0 unknown (no answer yet): a guess of 6 said
+ * "WAITING 3/6" in a room of 3 that was already counting (20/11). */
+static int ranked_min_seen = 0;
+
+/* Players a Ranked room needs to start, as the server last said (6 until it answered). */
+int runtime_public_ranked_min_players(void) { return __atomic_load_n(&ranked_min_seen, __ATOMIC_SEQ_CST); }
+
+/* The server's countdown clock for a Ranked room (room-alive's ready_ms, ctr_foundroom.go): -1 short of
+ * its minimum, else the milliseconds since the room reached it; with the server's count of its players.
+ * Every client sets its map countdown from it, so all of them start together (runtime_online_mode.c). */
+static pthread_mutex_t ranked_clock_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ranked_clock_room, ranked_clock_at;
+static int64_t ranked_clock_ready;
+static int ranked_clock_players;
+/* The server's clock placed on ours, NTP style: its now_ms against the middle of our request, from the
+ * quickest round trip of the last half minute (the least room for a one-way delay). ready_at_ms is the
+ * moment the room reached its minimum on that clock, 0 while it is short. */
+static int64_t ranked_clock_offset, ranked_clock_ready_at;
+static uint64_t ranked_clock_rtt, ranked_clock_rtt_at;
+static int ranked_clock_synced;
+
+int runtime_public_ranked_clock(int64_t *since_ms, int *players) {
+    pthread_mutex_lock(&mode_lock);
+    const uint64_t room = matchmaking_room;
+    pthread_mutex_unlock(&mode_lock);
+    const uint64_t now = check_clock();
+    pthread_mutex_lock(&ranked_clock_lock);
+    /* 20 s: once placed, the clock counts on ours, so a slow answer or two (3 to 18 s on 20/11) changes nothing */
+    /* A countdown already on the server's clock goes on with it for 2 minutes without an answer (it
+     * counts on our own clock): a stale one put it back to 60 mid-countdown (20/11, answers of 21 s). */
+    const int fresh = room && ranked_clock_room == room && ranked_clock_at &&
+                      (now - ranked_clock_at < 20000 ||
+                       (ranked_clock_ready >= 0 && ranked_clock_synced && ranked_clock_ready_at > 0 && now - ranked_clock_at < 120000));
+    if (fresh) {
+        /* -1 short of players, -2 the lobby closed (the map vote ended, a race), else the time since */
+        int64_t since = ranked_clock_ready < 0 ? ranked_clock_ready : 0;
+        if (ranked_clock_ready >= 0) {
+            since = ranked_clock_synced && ranked_clock_ready_at > 0
+                        ? (int64_t)now + ranked_clock_offset - ranked_clock_ready_at   /* every frame, on our clock */
+                        : ranked_clock_ready + (int64_t)(now - ranked_clock_at);       /* an older server */
+            if (since < 0) since = 0;
+        }
+        if (since_ms) *since_ms = since;
+        if (players) *players = ranked_clock_players;
+    }
+    pthread_mutex_unlock(&ranked_clock_lock);
+    return fresh;
+}
+static void *room_alive_worker(void *arg) {
+    const uint64_t room = (uint64_t)(uintptr_t)arg;
+    const char *me = runtime_np_get_online_name();
+    char target[512], body[256];
+    if (me && *me) {
+        snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu", me, (unsigned long long)room);
+        const uint64_t sent = check_clock();
+        const int status = runtime_ryunet_request("GET", target, body, sizeof body);
+        const uint64_t answered = check_clock();
+        {   /* the countdown clock's answers, when they change (20/11: a host went 20 s without one) */
+            static int last_status = -2;
+            static uint64_t last_room;
+            if (status != last_status || room != last_room) {
+                last_status = status;
+                last_room = room;
+                printf("Ranked clock: room %llu answered %d in %llu ms: %.160s\n", (unsigned long long)room, status,
+                       (unsigned long long)(answered - sent), status == 200 ? body : "");
+            }
+        }
+        if (status == 200) {
+            const char *alive = runtime_json_field(body, "alive");
+            if (alive && !strncmp(alive, "false", 5)) __atomic_store_n(&room_alive_gone, room, __ATOMIC_SEQ_CST);
+            const char *min_str = runtime_json_field(body, "min_players");
+            const int min_players = min_str && *min_str ? (int)strtol(min_str, NULL, 10) : 0;
+            if (min_players >= 1 && min_players <= 8) __atomic_store_n(&ranked_min_seen, min_players, __ATOMIC_SEQ_CST);
+            const char *ready = runtime_json_field(body, "ready_ms"), *players = runtime_json_field(body, "players");
+            const char *server_now = runtime_json_field(body, "now_ms"), *ready_at = runtime_json_field(body, "ready_at_ms");
+            if (ready && *ready && players && *players) {
+                pthread_mutex_lock(&ranked_clock_lock);
+                if (ranked_clock_room != room) ranked_clock_synced = 0;
+                ranked_clock_room = room;
+                ranked_clock_ready = strtoll(ready, NULL, 10);
+                ranked_clock_players = (int)strtol(players, NULL, 10);
+                ranked_clock_at = answered;
+                if (server_now && *server_now && ready_at && *ready_at) {
+                    /* timed from when the request went out, once connected: a connect that lost its first
+                     * packets (3 to 6 s on 20/11) is not a round trip, and halving it put a screen 0.5 to 2 s
+                     * off. The quickest answer of the room is kept: the clocks do not drift in a minute. */
+                    const uint64_t went = runtime_ryunet_last_sent_ms();
+                    const uint64_t from = went && went >= sent && went <= answered ? went : sent;
+                    const uint64_t rtt = answered - from;
+                    const int64_t offset = strtoll(server_now, NULL, 10) - (int64_t)(from + rtt / 2);
+                    if (!ranked_clock_synced || rtt <= ranked_clock_rtt) {
+                        ranked_clock_offset = offset;
+                        ranked_clock_rtt = rtt;
+                        ranked_clock_rtt_at = answered;
+                        ranked_clock_synced = 1;
+                    }
+                    ranked_clock_ready_at = strtoll(ready_at, NULL, 10);
+                }
+                pthread_mutex_unlock(&ranked_clock_lock);
+            }
+        }
+    }
+    __atomic_store_n(&room_alive_busy, 0, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+static void check_found_room_alive(void) {
+    pthread_mutex_lock(&mode_lock);
+    const uint64_t room = matchmaking_room;
+    pthread_mutex_unlock(&mode_lock);
+    const uint64_t gone = __atomic_exchange_n(&room_alive_gone, 0, __ATOMIC_SEQ_CST);
+    const uint64_t now = check_clock();
+    {   /* the countdown clock's queries (20/11: a host went 20 s without an answer): the room this game
+         * asks about when it changes, and a query still running after 3 s */
+        static uint64_t logged_room = UINT64_MAX, busy_logged_at;
+        if (room != logged_room) {
+            logged_room = room;
+            printf("Ranked clock: asking about room %llu (host %d)\n", (unsigned long long)room, runtime_room_mode_following() ? 0 : 1);
+        }
+        if (__atomic_load_n(&room_alive_busy, __ATOMIC_SEQ_CST) && now > room_alive_after + 2000 &&
+            now - busy_logged_at > 3000) {
+            busy_logged_at = now;
+            printf("Ranked clock: room %llu query still running %llu ms after it started\n", (unsigned long long)room,
+                   (unsigned long long)(now - (room_alive_after - 1000)));
+        }
+    }
+    if (room && gone != room && now >= room_alive_after &&
+        !__atomic_exchange_n(&room_alive_busy, 1, __ATOMIC_SEQ_CST)) {
+        room_alive_after = now + 1000;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attr, room_alive_worker, (void *)(uintptr_t)room))
+            __atomic_store_n(&room_alive_busy, 0, __ATOMIC_SEQ_CST);
+        pthread_attr_destroy(&attr);
+    }
+    if (!room || gone != room) return;   /* an answer about an older room is dropped */
+    /* The server dissolved this found room (short-handed / room-short from another player).
+     * Tell every client still in the found room before dumping them back to ModeSelect, so no
+     * player is left confused on the unranked screen without a notice. Ranked only: classic
+     * rooms dissolve for other reasons and keep their own flow. */
+    pthread_mutex_lock(&mode_lock);
+    const int ranked = confirmed_ranked || joined_ranked || search_is_ranked;
+    pthread_mutex_unlock(&mode_lock);
+    if (ranked) notice("Not enough players to start Ranked. Back to queue.");
+    fprintf(stderr, "Public matchmaking: found room %llu gone, returning to ModeSelect\n",
+            (unsigned long long)room);
+    runtime_public_itemless_abort_queue();
+}
+
+static void ranked_preflight(void);
+static int party_member_ids(char *ids, size_t size);
+
 void runtime_public_itemless_update(void) {
     members_tick();
+    ranked_preflight();
+    runtime_party_server_tick(); /* opt-in: poll server-backed party for host changes (skips races) */
     update_search_clock();
+    check_found_room_alive();
+    do_queue_abort();
+    /* the content notice was dismissed: out of the refused search, back to the lobby (start_search) */
+    if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 2) {
+        __atomic_store_n(&content_return, 0, __ATOMIC_SEQ_CST);
+        fprintf(stderr, "Public ITEMLESS: content notice dismissed: back to the lobby\n");
+        if (network_manager && *network_manager) {
+            native_stop_matchmaking(*network_manager);
+            native_return_to_lobby();
+        }
+        return;
+    }
     pthread_mutex_lock(&mode_lock);
     const int ranked=confirmed_ranked || (matchmaking_search && ranked_selected);
     const int leave_room=confirmed_ranked!=0;
@@ -533,11 +916,15 @@ void runtime_public_itemless_update(void) {
     if (cancelled) {
         /* Followers wait for the host's native party notification instead of leaving independently. */
         if (runtime_room_mode_following()) return;
+        const int timeout_return = cancelled == 1;
+        if (timeout_return) __atomic_store_n(&queue_return_pending,1,__ATOMIC_SEQ_CST);
         if (runtime_online_mode_matchmaking_cancel(leave_room)) {
             runtime_public_itemless_reset();
             runtime_public_itemless_party_ready();
             if (cancelled==2 && !runtime_room_mode_following())
                 notice("Ranked supports at most 4 party members. Ranked was cancelled because another player joined. Your party stays together; use Public Matchmaking for up to 8.");
+        } else if (timeout_return) {
+            __atomic_store_n(&queue_return_pending,0,__ATOMIC_SEQ_CST);
         }
         return;
     }
@@ -632,6 +1019,8 @@ static int compatibility_check(const char *target,char *body,size_t size) {
     return result;
 }
 
+static char ranked_target[512]; /* the last Ranked party check target */
+
 static int ranked_party_check(const char *doc) {
     const char *members = runtime_json_field(doc, "members");
     char ids[192], target[512], body[512];
@@ -648,17 +1037,12 @@ static int ranked_party_check(const char *doc) {
     const char *name = runtime_np_get_online_name();
     if (*members != ']' || !n || !name) return 0;
     snprintf(target, sizeof target, "/ryunet/ranked-party?name=%s&members=%s&mode=%d", name, ids, selected);
-    int status = compatibility_check(target, body, sizeof body);
-    if (status == -1) {
-        /* The check just started: wait for it instead of bouncing the player out with a
-         * press-again notice. A healthy server answers in milliseconds; the notice stays
-         * as the timeout fallback. */
-        uint64_t deadline = check_clock() + 5000;
-        do {
-            usleep(50000);
-            status = compatibility_check(target, body, sizeof body);
-        } while (status == -1 && check_clock() < deadline);
-    }
+    snprintf(ranked_target, sizeof ranked_target, "%s", target);
+    /* No wait here: this runs on the game's thread, inside startSearch. The 50 ms poll loop that
+     * used to wait for the answer froze the frame where Play started the search for 1.5 s
+     * (log 20/11 13:03: 1522/1623/1521 ms, guest CPU 3-4 ms). ranked_preflight keeps the answer
+     * cached while the lobby is open, so the press normally finds it here. */
+    const int status = compatibility_check(target, body, sizeof body);
     if (status == -1) return -1;
     if (status != 200 || strcmp(body, "ok")) {
         reject_search(status == 409 ? body : "Cannot verify Ranked server and party compatibility. Please retry.");
@@ -667,14 +1051,31 @@ static int ranked_party_check(const char *doc) {
     return 1;
 }
 
+/* Keep the Ranked party answer warm while Ranked is the chosen mode, from the ModeSelect screen
+ * on. The check only runs on a thread of its own; startSearch reads whatever answer is there and
+ * otherwise lets the server's own startSearch validate the party. */
+static void ranked_preflight(void) {
+    if (!ranked_selected || matchmaking_search || confirmed_ranked) return;
+    if (runtime_public_match_active() || !itemless_client_available()) return;
+    char body[512], target[512], ids[192];
+    const char *name = runtime_np_get_online_name();
+    if (!name || !*name || !party_member_ids(ids, sizeof ids)) return;
+    snprintf(target, sizeof target, "/ryunet/ranked-party?name=%s&members=%s&mode=%d",
+             name, ids, selected);
+    (void)compatibility_check(target, body, sizeof body);
+    if (ranked_target[0] && strcmp(ranked_target, target))
+        (void)compatibility_check(ranked_target, body, sizeof body);
+}
+
 /* Check before private Ready/Start can run its VSC side effects.
  * Read the same participant IDs used by the native manager. */
 static _Thread_local const char *dispatch_approved_party;
 static _Thread_local char checked_party[512];
-static int early_party_check(const char *feature, int notify) {
-    char ids[192] = "", target[512], body[512] = "";
-    checked_party[0]=0;
-    const char *online_name=runtime_np_get_online_name();
+/* The account ids the native search document carries: the primary local account, then the party's
+ * remote members (a5d286 / a5d329 / a5d51e). The login gate and the Ranked party check key on
+ * this same list, so both build it here. */
+static int party_member_ids(char *ids, size_t size) {
+    ids[0] = 0;
     void *manager = participants ? *participants : NULL;
     void *list = manager ? *(void **)((char *)manager + 0x10) : NULL;
     int count = list ? *(int *)((char *)list + 0xc) : 0;
@@ -682,36 +1083,47 @@ static int early_party_check(const char *feature, int notify) {
     uint64_t seen[8];
     int total = 0;
     size_t length = 0;
-    if (!itemless_client_available() || !online_name || !*online_name || !items || count < 1 || count > 8)
-        goto unavailable;
+    if (!items || count < 1 || count > 8) return 0;
     /* Native search constructor (a5d286) takes the primary local account. */
     for (int i = 0; i < count; ++i) {
-        if (!items[i]) goto unavailable;
+        if (!items[i]) return 0;
         unsigned kind;
         memcpy(&kind, (char *)items[i] + 0x20, sizeof kind);
         if (kind > 7) continue;
         memcpy(&seen[total++], (char *)items[i] + 0xa8, sizeof seen[0]);
         break;
     }
-    if (!total || !seen[0]) goto unavailable;
+    if (!total || !seen[0]) return 0;
     /* a5d329 / a5d51e append remote party accounts, not local participants. */
     void *party = party_manager ? *party_manager : NULL;
     void *roster = party ? *(void **)((char *)party + 0x30) : NULL;
     int remote_count = roster ? *(int *)((char *)roster + 0xc) : -1;
     void **remote = roster ? *(void ***)((char *)roster + 0x20) : NULL;
-    if (remote_count < 0 || remote_count > 8 || (remote_count && !remote)) goto unavailable;
+    if (remote_count < 0 || remote_count > 8 || (remote_count && !remote)) return 0;
     for (int i = 0; i < remote_count; ++i) {
-        if (!remote[i]) goto unavailable;
+        if (!remote[i]) return 0;
         if (*((unsigned char *)remote[i] + 0x2c)) continue;
         uint64_t pid;
         memcpy(&pid, (char *)remote[i] + 0x18, sizeof pid);
-        if (!pid || total == 8) goto unavailable;
-        for (int j = 0; j < total; ++j) if (seen[j] == pid) goto unavailable;
+        if (!pid || total == 8) return 0;
+        for (int j = 0; j < total; ++j) if (seen[j] == pid) return 0;
         seen[total++] = pid;
     }
     for (int i = 0; i < total; ++i)
-        length += (size_t)snprintf(ids + length, sizeof ids - length,
+        length += (size_t)snprintf(ids + length, size - length,
                                   "%s%" PRIu64, i ? "," : "", seen[i]);
+    return length < size;
+}
+
+static int early_party_check(const char *feature, int notify) {
+    char ids[192] = "", target[512], body[512] = "";
+    checked_party[0]=0;
+    const char *online_name=runtime_np_get_online_name();
+    int total = 1;
+    if (!itemless_client_available() || !online_name || !*online_name ||
+        !party_member_ids(ids, sizeof ids))
+        goto unavailable;
+    for (const char *at = ids; *at; ++at) if (*at == ',') ++total;
     if (notify) fprintf(stderr, "ITEMLESS: pre-transition roster members=%s local=1 remote=%d\n", ids, total-1);
     if (feature)
         snprintf(target, sizeof target, "/ryunet/private-party?name=%s&feature=%s&release=%s&members=%s",
@@ -852,9 +1264,9 @@ int runtime_private_party_update(void) {
         else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
-    if (pending_private.ranked && runtime_ranked_account() == 0) {
+    if (pending_private.ranked && (runtime_ranked_account() == 0 || !strcmp(runtime_online_content(), "modified"))) {
         clear_private_pending();
-        (void)ranked_account_allowed();     /* the notice */
+        if (ranked_account_allowed()) (void)public_content_allowed();     /* the notice */
         return 0;
     }
     struct PendingPrivate ready=pending_private;
@@ -1048,6 +1460,117 @@ void runtime_hof_native_ready(void *project) {
 
 /* MainMenu_Base_ButtonIndex remains 0 for clones; preserve their native focus target. */
 static int online_return_button;
+
+/* ---- Join from Discord: a Ranked room still filling (the server's ranked_lfg.go) -----------------
+ * Its "Join" button opens sacredfire://ranked?mode=N; the launcher writes ryunet_ranked.txt
+ * ("mode=N", "time=<unix>") next to bbport.ini, as ryunet_join.txt for invites. Picked up here at
+ * most once a second, on the game's thread, and removed. Then the online menu's focus lands on
+ * Ranked with a notice once, and its Mode Select opens on that mode (0 Normal, 1 Itemless): the
+ * player confirms, and the server puts them in the room that waits. Kept for 10 minutes. */
+static int ranked_request_mode = -1, ranked_request_notice, ranked_request_pending;
+static uint64_t ranked_request_until;
+/* The announced room ("room=<id>", 0 for a mode's queue): sent with the next Ranked search of that
+ * mode as octr_ranked.room, which the server places first (ranked_lfg.go, ctr_async.go place). */
+static uint64_t ranked_request_room;
+
+/* The same request straight from the Discord bot's "Unirse" button (the server's ranked_join.go): the
+ * bot tells the server which player pressed it, and the game asks every 3 seconds on a thread of its
+ * own, with no browser. "ok\nmode=N\nroom=R" once, else "none". */
+static int bot_join_busy, bot_join_ready, bot_join_mode;
+static uint64_t bot_join_room, bot_join_next;
+
+static void *bot_join_worker(void *unused) {
+    (void)unused;
+    const char *me = runtime_np_get_online_name();
+    char target[256], body[128] = "";
+    if (me && *me) {
+        snprintf(target, sizeof target, "/ryunet/ranked-join?name=%s", me);
+        if (runtime_ryunet_request("GET", target, body, sizeof body) == 200 && !strncmp(body, "ok\n", 3)) {
+            const char *mode = strstr(body, "mode="), *room = strstr(body, "room=");
+            if (mode && room) {
+                __atomic_store_n(&bot_join_mode, atoi(mode + 5), __ATOMIC_SEQ_CST);
+                __atomic_store_n(&bot_join_room, strtoull(room + 5, NULL, 10), __ATOMIC_SEQ_CST);
+                __atomic_store_n(&bot_join_ready, 1, __ATOMIC_SEQ_CST);
+            }
+        }
+    }
+    __atomic_store_n(&bot_join_busy, 0, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+static void ranked_request_apply(int mode, uint64_t room, uint64_t now, const char *from) {
+    __atomic_store_n(&ranked_request_mode, mode, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&ranked_request_notice, 1, __ATOMIC_SEQ_CST);
+    ranked_request_until = now + 600000;
+    __atomic_store_n(&ranked_request_room, room, __ATOMIC_SEQ_CST);
+    online_return_button = 1;   /* the online menu opens with Ranked focused */
+    printf("Ranked join: Discord asks for Ranked %s (room %llu, %s)\n", mode ? "Itemless" : "Normal",
+           (unsigned long long)room, from);
+}
+
+void runtime_public_itemless_poll_ranked_request(void) {
+    static uint64_t next_check;
+    const uint64_t now = check_clock();
+    if (__atomic_exchange_n(&bot_join_ready, 0, __ATOMIC_SEQ_CST)) {
+        const int mode = __atomic_load_n(&bot_join_mode, __ATOMIC_SEQ_CST);
+        if (mode == 0 || mode == 1)
+            ranked_request_apply(mode, __atomic_load_n(&bot_join_room, __ATOMIC_SEQ_CST), now, "the bot's button");
+    }
+    /* Not while searching or in a room (public, Ranked or private): a join from the bot could not be taken
+     * there anyway, and these asks were ~90 a second on the server at 140 players (21/11). */
+    const int busy_online = runtime_public_match_active() || runtime_online_mode_room_players() > 0;
+    if (busy_online) bot_join_next = now + 3000;
+    if (!busy_online && now >= bot_join_next && !__atomic_exchange_n(&bot_join_busy, 1, __ATOMIC_SEQ_CST)) {
+        bot_join_next = now + 3000;
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attr, bot_join_worker, NULL)) __atomic_store_n(&bot_join_busy, 0, __ATOMIC_SEQ_CST);
+        pthread_attr_destroy(&attr);
+    }
+    if (now < next_check) return;
+    next_check = now + 1000;
+    char path[600];
+    const char *cfg = getenv("BB_LAUNCHER_CONFIG");   /* mod sessions redirect BB_CONFIG */
+    if (!cfg || !*cfg) cfg = getenv("BB_CONFIG");
+    const char *slash = cfg ? strrchr(cfg, '/') : NULL;
+    const char *bslash = cfg ? strrchr(cfg, '\\') : NULL;
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash) snprintf(path, sizeof path, "%.*s/ryunet_ranked.txt", (int)(slash - cfg), cfg);
+    else snprintf(path, sizeof path, "ryunet_ranked.txt");
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[128];
+    int mode = -1;
+    long long written = 0;
+    unsigned long long room = 0;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "mode=", 5)) mode = atoi(line + 5);
+        else if (!strncmp(line, "time=", 5)) written = atoll(line + 5);
+        else if (!strncmp(line, "room=", 5)) room = strtoull(line + 5, NULL, 10);
+    }
+    fclose(f);
+    remove(path);
+    const long long wall = (long long)time(NULL);
+    /* A stale file (a game that never started) must not steer the menus much later. */
+    if ((mode != 0 && mode != 1) || written < wall - 300 || written > wall + 60) {
+        printf("Ranked join: ignored a request file (mode=%d age=%llds)\n", mode, wall - written);
+        return;
+    }
+    ranked_request_apply(mode, (uint64_t)room, now, "the join page");
+}
+
+/* Mode Select (runtime_online_mode.c), Ranked chosen: the mode the Discord join asked for, once; -1 none. */
+int runtime_public_itemless_ranked_request_take(void) {
+    if (!__atomic_exchange_n(&ranked_request_pending, 0, __ATOMIC_SEQ_CST)) return -1;
+    if (check_clock() > ranked_request_until) return -1;
+    __atomic_store_n(&ranked_request_notice, 0, __ATOMIC_SEQ_CST);
+    return __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST);
+}
+
 static void *return_button_in(void *node, const char *name, int depth) {
     if (!node || depth > 8) return NULL;
     const char *tag = *(const char **)((char *)node + 0x28);
@@ -1080,6 +1603,20 @@ static void note_room_screen(const char *name) {
 static int room_screen(const char *name) {
     return name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_Root");
 }
+/* A screen change to ModeSelect/Main is only a room exit when the view BEFORE it was a room or
+ * the mode-select screen. OnlineMode -> ModeSelect is forward navigation into a mode, not Back. */
+static char last_lobby_graph[64];
+static int lobby_graph_back(const char *now, const char *prev) {
+    if (!now || !prev || !*prev) return 0;
+    const int exit_screen = !strcmp(now, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
+                            !strcmp(now, "Scripts.Graph.Octane_Lobby_Main_Root");
+    if (!exit_screen) return 0;
+    return !strcmp(prev, "Scripts.Graph.Octane_Lobby_PrivateGame_Root") ||
+           !strcmp(prev, "Scripts.Graph.Octane_Lobby_Matchmaking_Root") ||
+           !strcmp(prev, "Scripts.Graph.Octane_Lobby_WaitingRoom_Root") ||
+           (!strcmp(now, "Scripts.Graph.Octane_Lobby_Main_Root") &&
+            !strcmp(prev, "Scripts.Graph.Octane_Lobby_ModeSelect_Root"));
+}
 static void native_return_focus(void *node, int ancestors) {
     for (int depth = 0; node && depth < 16; ++depth) {
         void *list = *(void **)((char *)node + 0xe8);
@@ -1088,7 +1625,13 @@ static void native_return_focus(void *node, int ancestors) {
         for (int i = 0; items && i < count; ++i) {
             const char *name = vsc_graph_name(items[i]);
             const int was_in_room = guest_room_open;
-            if (!ancestors) note_room_screen(name);
+            if (!ancestors) {
+                note_room_screen(name);
+                if (name && !strncmp(name, "Scripts.Graph.Octane_Lobby_", 27)) {
+                    if (lobby_graph_back(name, last_lobby_graph)) notify_room_left();
+                    snprintf(last_lobby_graph, sizeof last_lobby_graph, "%s", name);
+                }
+            }
             /* The room itself (host: "Start Game", guest: "Ready"). Focus inside it also comes
              * back to it when its quit dialog closes: that visit changes nothing. */
             if (!ancestors && !guest_room_open && room_screen(name)) {
@@ -1101,9 +1644,10 @@ static void native_return_focus(void *node, int ancestors) {
             }
             if (!ancestors && name && was_in_room &&
                 !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root")) {
-                /* Back out of the room lands on its setup screen; native leaves the session only,
-                 * so the party (and the host's Lobby Members row) stays behind (2026-11-18). */
+                /* Back out of the room lands on its setup screen. Complete the same party return
+                 * as every other room exit before this early return. */
                 runtime_public_itemless_guest_room(0);
+                runtime_public_itemless_menu_return();
                 return;
             }
             if (!ancestors && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_Root") ||
@@ -1177,13 +1721,26 @@ static void ABI placeable_event(void *self, void *event) {
     const char *tag = self ? *(const char **)((char *)self + 0x28) : NULL;
     int ranked_button = tag && !strcmp(tag, "OCTR_RANKED_BUTTON");
     int hall_of_fame_button = tag && !strcmp(tag, "OCTR_HALL_OF_FAME_BUTTON");
+    int signal = 0;
     if (self && event) {
         const char *type = meta_name(event);
         const int gain = type && (!strcmp(type, "igGuiEventProjectGainFocus") ||
                                   !strcmp(type, "igGuiEventPlaceableGainFocus"));
         if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
         if (gain) native_return_focus(self, 0);
-        int signal = 0;
+        /* The Discord announcement's Join (ryunet_ranked.txt): once, where the focus was put on Ranked. */
+        if (gain && ranked_button && __atomic_exchange_n(&ranked_request_notice, 0, __ATOMIC_SEQ_CST)) {
+            const int mode = __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST);
+            notice(mode == 1 ? "A Ranked Itemless room is waiting for players. Choose Ranked and then Itemless to join it."
+                             : "A Ranked Normal room is waiting for players. Choose Ranked and then Normal to join it.");
+        }
+        /* the content notice's Continue (Confirm 8) or Back (9): leave the refused search */
+        if (__atomic_load_n(&content_return, __ATOMIC_SEQ_CST) == 1 && type &&
+            (!strcmp(type, "igGuiEventFocusInputPressed") || !strcmp(type, "igGuiEventProjectInputPressed"))) {
+            int pressed = 0;
+            memcpy(&pressed, (char *)event + 0x18, sizeof pressed);
+            if (pressed == 8 || pressed == 9) __atomic_store_n(&content_return, 2, __ATOMIC_SEQ_CST);
+        }
         if (type && !strcmp(type, "igGuiEventFocusInputPressed")) {
             memcpy(&signal, (char *)event + 0x18, sizeof signal);
             if (signal != 8) clear_private_pending();
@@ -1228,11 +1785,12 @@ static void ABI placeable_event(void *self, void *event) {
                 }
                 if (confirm && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton")) {
                     ranked_selected = ranked_button;
+                    joined_ranked = ranked_button; /* a fresh user choice wins over a stale snapshot */
                     online_return_button = hall_of_fame_button ? 2 : ranked_button;
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
-                    if (confirm) ranked_selected = 0;
+                    if (confirm) { ranked_selected = 0; joined_ranked = 0; }
                     if (gain) runtime_online_mode_selector_left();
                 }
                 if (confirm && private_room && name &&
@@ -1250,7 +1808,7 @@ static void ABI placeable_event(void *self, void *event) {
                         pending_private.ranked = pending_private.target != NULL;
                     }
                     if (state != 1) return;
-                    if (!ranked_account_allowed()) return;
+                    if (!ranked_account_allowed() || !public_content_allowed()) return;
                 }
                 if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
@@ -1263,6 +1821,8 @@ static void ABI placeable_event(void *self, void *event) {
             }
         }
     }
+    /* Found rooms used to block Back (no leaving mid-matchmaking); players may cancel or go back
+     * again (20/11): the server handles a departure (room-left, found-room rule). */
     const char *previous = dispatch_approved_party;
     if (approval[0]) dispatch_approved_party = approval;
     native_placeable_event(self, event);
@@ -1287,7 +1847,16 @@ static char *extend(const char *raw, unsigned limit, uint64_t token, int mode, i
     char *out = malloc(n + 480);
     if (out) {
         size_t used = 0;
-        if (ranked) used = (size_t)snprintf(out, n + 480,
+        /* Joined from a Discord announcement: that room, once, for a search of its mode in time. */
+        uint64_t room = 0;
+        if (ranked && __atomic_load_n(&ranked_request_mode, __ATOMIC_SEQ_CST) == mode &&
+            check_clock() <= ranked_request_until)
+            room = __atomic_exchange_n(&ranked_request_room, 0, __ATOMIC_SEQ_CST);
+        if (room) fprintf(stderr, "Ranked join: searching for the announced room %llu\n", (unsigned long long)room);
+        if (ranked && room) used = (size_t)snprintf(out, n + 480,
+            "{\"octr_ranked\":{\"version\":2,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\",\"room\":%llu},",
+            mode, token, (unsigned long long)room);
+        else if (ranked) used = (size_t)snprintf(out, n + 480,
             "{\"octr_ranked\":{\"version\":2,\"mode\":%d,\"nonce\":\"%016" PRIx64 "\"},",
             mode, token);
         else { out[0] = '{'; out[1] = 0; used = 1; }
@@ -1312,20 +1881,61 @@ static void *ABI register_client(void **result, void *self, const char *raw, uns
     free(doc);
     return r;
 }
+/* The native party role and the other member's name (the host, when we are a guest). Used to
+ * mirror a queueing party into a server-backed session like private rooms have. */
+static int matchmaking_party_host(char host_name[24]) {
+    host_name[0] = 0;
+    unsigned char *party = party_manager ? *party_manager : NULL;
+    unsigned char *session = party ? *(void **)(party + 0x18) : NULL;
+    unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
+    int role = 0;
+    if (connection) memcpy(&role, connection + 0x118, sizeof role);
+    void *roster = party ? *(void **)(party + 0x30) : NULL;
+    int count = roster ? *(int *)((char *)roster + 12) : 0;
+    void **items = roster ? *(void ***)((char *)roster + 0x20) : NULL;
+    if (count < 0 || count > 8 || !items) count = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!items[i] || *((unsigned char *)items[i] + 0x2c)) continue; /* skip the local player */
+        const char *name = *(const char **)((char *)items[i] + 0x10);
+        if (name && *name) { snprintf(host_name, 24, "%s", name); break; }
+    }
+    return role;
+}
 static void *ABI start_search(void **result, void *self, const char *raw, unsigned limit, void *response) {
+    /* The host just left the queue. Native recreates the party and auto-issues start_search with
+     * the guest's own (default Casual) mode. Swallow that one automatic search; do_queue_abort
+     * handles the return to ModeSelect / Waiting on host. A real Play press later is not suppressed. */
+    if (check_clock() < __atomic_load_n(&suppress_search_until, __ATOMIC_SEQ_CST)) {
+        __atomic_store_n(&suppress_search_until, 0, __ATOMIC_SEQ_CST); /* swallow just that one */
+        fprintf(stderr, "Public matchmaking: suppressed native auto-search after host left queue\n");
+        *result = NULL;
+        return result;
+    }
     if (rejection[0]) { *result = NULL; return result; }
+    /* any public search (Normal, Itemless, Ranked): character mods only (private rooms never search).
+     * The notice first; its Continue (or Back) stops the search and goes back to the lobby
+     * (placeable_event, then runtime_public_itemless_update). */
+    if (!strcmp(runtime_online_content(), "modified")) {
+        fprintf(stderr, "Public ITEMLESS: search refused: online content is modified (private rooms only)\n");
+        notice(PUBLIC_CONTENT_NOTICE);
+        __atomic_store_n(&content_return, 1, __ATOMIC_SEQ_CST);
+        *result = NULL;
+        return result;
+    }
     /* A matchmaking search is never a private room: the party's room flag must not open the
      * private lobby (map selector) while the host waits for opponents (2026-11-17). */
     clear_room_private(party_manager ? *party_manager : NULL);
+    /* Mirror the queueing party into a server session so a host quit is visible immediately,
+     * exactly like a private room. No ctrRoom exists yet to carry that information. */
+    char mm_host[24];
+    const int mm_role = matchmaking_party_host(mm_host);
+    runtime_party_server_matchmaking(mm_role == 1, mm_host);
     if (ranked_selected) {
         if (!ranked_entry_allowed()) { *result = NULL; return result; }
         if (runtime_ranked_status(0) != 1) { *result = NULL; return result; }
-        int ready = ranked_party_check(raw);
-        if (ready != 1) {
-            *result = NULL;
-            if (ready == -1) notice("Checking Ranked compatibility. Please press Play again shortly.");
-            return result;
-        }
+        /* A pending check never blocks or pops a notice: the search document carries the party,
+         * and the server validates it in its own asynchronous startSearch, like the game does. */
+        if (ranked_party_check(raw) == 0) { *result = NULL; return result; }
     }
     pthread_mutex_lock(&mode_lock);
     uint64_t previous_mark=matchmaking_search ? search_mark : 0;
@@ -1372,7 +1982,32 @@ static void *ABI cancel_search(void **result, void *self, uint64_t id, void *res
     runtime_public_itemless_reset();
     return native_cancel(result, self, id, response);
 }
+/* Tell RyuNET the instant a player exits a found matchmaking room. Without this the server
+ * only learns on RyuNET connection close ~10s later and keeps a ghost member in the room.
+ * The room id is STICKY: native Quit calls cancel_search/reset before menu_return, so
+ * matchmaking_room is often already 0 by the time the leave hook runs. Both menu_return and
+ * leave_lobby can fire for one exit; report once. */
+static uint64_t left_room_pending;      /* set on join, cleared when reported */
+static volatile int room_left_reported; /* reset on join, dedups the two leave hooks */
+static void notify_room_left(void) {
+    const uint64_t room = __atomic_load_n(&left_room_pending, __ATOMIC_SEQ_CST);
+    /* No ctrRoom yet (still queueing): the shared party session is the only state the server
+     * has. Drop ourselves from it so the survivors see the host change and requeue. Do this
+     * BEFORE the room-left dedup: that flag is only reset on a found-room join, so after an
+     * earlier private-room exit it would skip the queue leave entirely (15:44 log). */
+    if (!room) { runtime_party_server_matchmaking_leave(); return; }
+    if (__atomic_exchange_n(&room_left_reported, 1, __ATOMIC_SEQ_CST)) return;
+    __atomic_store_n(&left_room_pending, 0, __ATOMIC_SEQ_CST);
+    const char *me = runtime_np_get_online_name();
+    char target[512], body[64];
+    snprintf(target, sizeof target, "/ryunet/room-left?name=%s&room=%llu",
+             me ? me : "", (unsigned long long)room);
+    const int status = runtime_ryunet_request("POST", target, body, sizeof body);
+    fprintf(stderr, "Online party: room-left room=%llu status=%d\n",
+            (unsigned long long)room, status);
+}
 static void *ABI leave_lobby(void **result, void *self, uint64_t id) {
+    notify_room_left();
     runtime_public_itemless_reset();
     return native_leave(result, self, id);
 }
@@ -1433,6 +2068,8 @@ static int accept_entry(void *owner, uint64_t room, const char *confirmation_doc
         confirmed_room = room; room_owner = owner;
         confirmed_itemless = itemless_advertised;
         confirmed_ranked = ranked_advertised;
+        joined_ranked = ranked_advertised; /* sticky: survives reset, for takeover re-search */
+        joined_itemless = confirmed_itemless; /* re-queue the same Classic/Ranked variant */
     } else if (confirmed_room == room || (!itemless_advertised && !ranked_advertised)) {
         confirmed_room = 0; room_owner = NULL;
         confirmed_itemless = confirmed_ranked = 0;
@@ -1440,6 +2077,8 @@ static int accept_entry(void *owner, uint64_t room, const char *confirmation_doc
     if (valid) {
         arm_party_return();
         matchmaking_room = room;
+        __atomic_store_n(&left_room_pending, room, __ATOMIC_SEQ_CST); /* sticky across reset */
+        __atomic_store_n(&room_left_reported, 0, __ATOMIC_SEQ_CST); /* new room: allow a leave notice */
         matchmaking_owner = owner;
         matchmaking_search = 0;
         if (entry==2) matchmaking_created=1;
@@ -1485,16 +2124,21 @@ static void ABI destroyed(void *self) {
     retire(self, 0);
     native_destroy(self);
 }
+static int object_valid(void *obj);
 static void ABI disbanded(void *self, uint64_t room) {
     retire(self, room);
+    /* Always tell the server the room was disbanded - this is the native lobbyDisbanded
+     * task. Skipping it when the object looks stale leaves the server with a ghost member
+     * (13:40 log: player left the found room but server only learned on connection close).
+     * The probe.c fault handler already contains stale-vtable recovery for this path. */
     native_disbanded(self, room);
 }
 static void ABI kicked(void *self, uint64_t room) {
     retire(self, room);
     native_kicked(self, room);
 }
-
 static unsigned char *party_trace_image;
+static size_t image_bytes;
 static void (ABI *native_party_reset_trace)(void *);
 static unsigned char (ABI *native_party_return_trace)(void *,void *,void *);
 static void party_trace(const char *action, void *self, void *caller) {
@@ -1509,19 +2153,50 @@ static void party_trace(const char *action, void *self, void *caller) {
             action,address>=base ? address-base : address,state,role,peers,ranked_party_size(),
             runtime_room_mode_following(),__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST));
 }
+/* Guard against stale party/session objects left over from previous takeovers.
+ * Their vtable pointer gets reset to image+0x1490000; native release/quit then
+ * calls vtable[0] which jumps outside the image and faults. Skip the native call
+ * when the object's vtable or its first method are not inside the image. */
+static int object_valid(void *obj) {
+    if (!obj) return 1; /* NULL: nothing to validate */
+    void *vtable = *(void **)obj;
+    if (!vtable) return 1; /* no vtable: let native handle it (tests/mocks) */
+    if ((uintptr_t)vtable < (uintptr_t)party_trace_image) return 1; /* outside image: not ours */
+    if ((uintptr_t)vtable >= (uintptr_t)party_trace_image + image_bytes) return 1; /* outside image */
+    /* vtable is inside the image: its first entry must be a code pointer too.
+     * Stale takeover objects point at image+0x1490000 whose vtable[0] is outside. */
+    void *vtable0 = *(void **)vtable;
+    if (!vtable0) return 0;
+    if ((uintptr_t)vtable0 < (uintptr_t)party_trace_image) return 0;
+    if ((uintptr_t)vtable0 >= (uintptr_t)party_trace_image + image_bytes) return 0;
+    return 1;
+}
+
 static void ABI traced_party_reset(void *self) {
+    if (!object_valid(self)) return;
+    unsigned char *session = *(void **)(self + 0x18);
+    if (!object_valid(session)) return;
+    unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
+    if (!object_valid(connection)) return;
     party_trace("reset",self,__builtin_return_address(0));
+    /* A guest loses the host here. Snapshot whether the active search was Ranked before the
+     * native teardown / register_client reset wipes it, so takeover_host restores it. */
+    pthread_mutex_lock(&mode_lock);
+    if (confirmed_ranked || search_is_ranked) joined_ranked=1;
+    pthread_mutex_unlock(&mode_lock);
     const int private_match=runtime_private_match_active();
-    const int announced_return=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST);
-    unsigned char *party=self;
-    unsigned char *session=party ? *(void **)(party+0x18) : NULL;
-    unsigned char *connection=session ? *(void **)(session+0x10) : NULL;
+    const int announced_return=__atomic_load_n(&party_return_received,__ATOMIC_SEQ_CST);
     int role=0;
     if (connection) memcpy(&role,connection+0x118,sizeof role);
     runtime_party_host_lost(role,private_match,announced_return);
     native_party_reset_trace(self);
 }
 static void ABI traced_party_quit(void *self) {
+    if (!object_valid(self)) return;
+    unsigned char *session = *(void **)(self + 0x18);
+    if (!object_valid(session)) return;
+    unsigned char *connection = session ? *(void **)(session + 0x10) : NULL;
+    if (!object_valid(connection)) return;
     party_trace("quit",self,__builtin_return_address(0));
     native_party_quit_trace(self);
 }
@@ -1529,10 +2204,18 @@ static void ABI traced_party_quit(void *self) {
 static unsigned char ABI received_party_return(void *sender,void *message,void *context) {
     party_trace("receive-return",party_manager ? *party_manager : NULL,__builtin_return_address(0));
     if (!runtime_room_mode_race_frozen()) {
+        __atomic_store_n(&party_return_received,1,__ATOMIC_SEQ_CST);
         unsigned char *party=party_manager ? *party_manager : NULL;
         const int already_returned=__atomic_load_n(&menu_party_returned,__ATOMIC_SEQ_CST) &&
             (!party || !party[0x6c]);
         if (party) party[0x6c]=0; /* Same private-lobby cleanup as the native receiver. */
+        /* Pin the ModeSelect we come back to. route 2 does not save it, so without this the
+         * party returns to Casual Normal even though it was queued Ranked/Itemless. */
+        pthread_mutex_lock(&mode_lock);
+        const int ret_mode = confirmed_ranked || joined_ranked ? 2 :
+                             (confirmed_itemless || joined_itemless ? 1 : 0);
+        pthread_mutex_unlock(&mode_lock);
+        runtime_online_mode_set_return_mode(ret_mode);
         /* In menus, close to native Waiting for Host; the race handler can load Start Screen. */
         if (runtime_online_mode_matchmaking_cancel(2)) return 1;
         runtime_public_itemless_menu_return();
@@ -1633,6 +2316,7 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         jump(guard+73,image+0xa18235);                    /* skip stop; clear +0x18 and release */
     }
     party_trace_image=image;
+    image_bytes=size;
     jump(image+0xa18210,(void *)traced_party_reset);
     jump(image+0xa9ffd0,(void *)traced_party_quit);
     jump(image+0xa5b680,(void *)received_party_return);

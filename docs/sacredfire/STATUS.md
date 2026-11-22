@@ -114,6 +114,11 @@ with the desktop apps closed.
   (logs/run18.log on 2026-10-09, logs/hang-repro-1-assert.log). Such a descriptor is now bound as
   a null descriptor, as invalid ones are (vk_rasterizer.cpp `IsBindableFormat`).
 
+- **Private Cup: corrupt free, then a lobby crash** (fixed 2026-11-20, see
+  24-private-settings-overflow.md, untested in game): the team count was reset and kept
+  4 bytes past the 0x28-byte `COctaneLobbyPrivateMatchRaceData`, overwriting the next
+  heap block's size.
+
 - **Fur/hair characters** (fixed 2026-10-09, see 06-fur.md): previously missing (driver select, run 12): bodies drawn with the fur material
   are missing; rigid parts (eyes, teeth, hats, kart) draw. The only GPU errors in the run are
   "image view type Color1D is incompatible with image type Color2D" (4 images) and one
@@ -131,10 +136,8 @@ with the desktop apps closed.
 
 ## Launcher and packaging (2026-10-09)
 
-- `bash launcher/bb-launcher.sh` starts the GTK4 launcher (tested in the container after a full
-  package upgrade repaired PyGObject); `python3 launcher/sacredfire_launcher.py --play` starts
-  the game with the saved settings (tested: PS4 Pro mode on, Pro 1080p patch, two controller
-  ports, 30 FPS).
+- `bash launcher/bb-launcher.sh` starts the native Linux launcher; `--play` starts the game
+  with saved settings.
 - `packaging/appimage.sh` builds `dist/SacredFire-x86_64.AppImage` (841 MB) with `nix bundle`.
   Built and tested on 2026-10-09 in the archbuild container after installing single-user Nix
   (`pacman -S nix`, /nix owned by the user, nixos-unstable channel): the runtime and GPU library

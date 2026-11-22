@@ -7,7 +7,7 @@ import archive_patch
 import mod_strings
 from archive_reader import Archive
 from archive_patch import MAX_ARCHIVE_OVERLAYS
-from mod_components import payload_bytes, under, sha_bytes, plain_path, long_path
+from mod_components import payload_bytes, under, sha_bytes, plain_path, long_path, replace_bytes
 
 
 def file_map(game, target, directories, replacements):
@@ -34,7 +34,7 @@ def file_map(game, target, directories, replacements):
         under(directories,relative).parent.mkdir(parents=True,exist_ok=True)
         records.append(struct.pack('<II',len(a),len(b))+a+b)
     if len(records)>65536:raise ValueError('Too many mod file redirections')
-    Path(target).write_bytes(b'BBFILE01'+struct.pack('<I',len(records))+b''.join(records))
+    replace_bytes(target,b'BBFILE01'+struct.pack('<I',len(records))+b''.join(records))
 
 
 

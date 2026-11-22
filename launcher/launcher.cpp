@@ -1309,7 +1309,7 @@ bool ShaderProgressLine(const std::string& line) {
     const std::string rest = line.substr(prefix.size());
     if (rest.rfind("done", 0) == 0) {
         a.shader_percent = -1;
-        if (a.hwnd) HideLauncher(a.launcher.Flag("hide_on_play", false));
+        if (a.hwnd && a.launcher.Flag("hide_on_play", false)) HideLauncher(true);
         return true;
     }
     const size_t space = rest.find(' ');
@@ -1490,6 +1490,7 @@ void LaunchGameProcess();
 void BeginGameEnv();
 void SetPlatformGameEnv();
 void ApplyPlatformCapabilities();
+void PlatformSettings();
 void StartGame() {
     App& a = g_app;
     if (!a.python || a.game_running || UpdateBusy()) return;
@@ -1751,6 +1752,11 @@ void UpdateDiscord() {
 /// Written on every start, so a portable folder that moved points at its new place.
 void RegisterDiscordLaunch(const std::string& app_id);
 
+/// The sacredfire:// URL protocol for the current user: the Join button of RyuNET's Discord
+/// announcements of Ranked rooms still filling (the server's ranked_lfg.go) opens it, which starts
+/// this launcher with the link (RankedLinkRequest). Written on every start, as the Discord one.
+void RegisterRankedLink();
+
 /// What the PLAY button does: online without a usable nickname asks for one first (NickPopup).
 void PressPlay() {
     RefreshGameSettings(true);
@@ -1822,6 +1828,42 @@ void AcceptDiscordJoin(const std::string& server, const std::string& nick) {
                       nick, nick);
     BringLauncherToFront();
     a.pending_play = true;  // PollJobs presses PLAY as soon as the game folder is checked
+}
+
+/// A sacredfire://ranked?mode=<0 Normal|1 Itemless> link (the Join button of a Discord announcement
+/// of a Ranked room still filling). The request goes to the game as ryunet_ranked.txt next to
+/// bbport.ini, as invites do (ryunet_join.txt): the game takes it within a second and removes it,
+/// then its online menu opens on Ranked and that mode (src/runtime_public_itemless.c). Returns true
+/// when a running game took it: this launcher, started only for the link, can close. Otherwise the
+/// game starts (online) and takes it then.
+bool RankedLinkRequest(const std::string& link) {
+    App& a = g_app;
+    const std::string text = Lower(link);
+    if (text.rfind("sacredfire://ranked", 0) != 0) return false;  // another link: just the launcher
+    const int mode = text.find("mode=1") != std::string::npos ? 1 : 0;
+    // room=<id>: the announced room, which the game asks the server for (none for a mode's queue)
+    unsigned long long room = 0;
+    if (const auto at = text.find("room="); at != std::string::npos)
+        room = std::strtoull(text.c_str() + at + 5, nullptr, 10);
+    const fs::path file = GameIni().parent_path() / L"ryunet_ranked.txt";
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << "mode=" << mode << "\ntime=" << int64_t(std::time(nullptr)) << "\n";
+        if (room) out << "room=" << room << "\n";
+    }
+    for (int i = 0; i < 25; ++i) {  // a running game polls it once a second
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::error_code ec;
+        if (!fs::exists(file, ec)) return true;
+    }
+    a.game.Set("online", "1");  // Ranked is online
+    SaveGameIni();
+    a.notice = mode ? T("Sala Ranked Sin objetos: el juego se abre y, en Online, Ranked ya estará elegido.",
+                        "Ranked Itemless room: the game starts and, in Online, Ranked is already chosen.")
+                    : T("Sala Ranked Normal: el juego se abre y, en Online, Ranked ya estará elegido.",
+                        "Ranked Normal room: the game starts and, in Online, Ranked is already chosen.");
+    a.pending_play = true;  // PollJobs presses PLAY as soon as the game folder is checked
+    return false;
 }
 
 /// A join secret from Discord: "ctr1|<server>|<nickname>", written by UpdateDiscord.
@@ -1999,6 +2041,9 @@ void PollJobs() {
     } else if (finished == Job::Play) {
         ReleaseGameProcess();
         a.game_running = false;
+        // Back from the tray where Play put it: a launcher left hidden there was missed and a second
+        // one opened (20/11).
+        if (!LauncherVisible()) BringLauncherToFront();
         a.show_exit = true;
         RefreshGameSettings(true);
         SyncOnlineBuffers();
@@ -3319,25 +3364,52 @@ void GraphicsSettings() {
     }
     GpuCombo();
     {
-        int limit = a.game.Int("fps_limit", 60);
+        // bbport.ini accepts any limit up to 1000 (gpu/shim/bbport_settings.cpp); a value off the
+        // list (e.g. 75 for a 75 Hz screen) shows as "Custom" with its own field.
+        constexpr int kMaxFpsLimit = 1000;
+        static bool custom_picked = false;
+        int limit = std::clamp(a.game.Int("fps_limit", 60), 0, kMaxFpsLimit);
+        const bool listed = std::find(std::begin(kFpsLimits), std::end(kFpsLimits), limit) != std::end(kFpsLimits);
+        const bool custom = custom_picked || !listed;
         auto name = [](int v) -> std::string {
             if (v == 0) return T("Sin límite", "No limit");
             return std::to_string(v) + " FPS";
         };
+        const std::string custom_name = T("Personalizado", "Custom");
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-        if (ImGui::BeginCombo(FormLabel(T("Límite de FPS", "FPS limit")), name(limit).c_str())) {
+        // HeightLarge: the 8 limits and Custom fit without scrolling (the default height shows 8).
+        if (ImGui::BeginCombo(FormLabel(T("Límite de FPS", "FPS limit")),
+                              custom ? custom_name.c_str() : name(limit).c_str(), ImGuiComboFlags_HeightLarge)) {
             for (int v : kFpsLimits) {
-                if (ImGui::Selectable(name(v).c_str(), v == limit)) {
+                if (ImGui::Selectable(name(v).c_str(), !custom && v == limit)) {
+                    custom_picked = false;
                     a.game.Set("fps_limit", std::to_string(v));
+                    SaveGameIni();
+                }
+            }
+            if (ImGui::Selectable(custom_name.c_str(), custom)) {
+                custom_picked = true;
+                if (limit == 0) {  // the field starts from a real limit, not "No limit"
+                    a.game.Set("fps_limit", "60");
                     SaveGameIni();
                 }
             }
             ImGui::EndCombo();
         }
         HelpMarker(T("Con el parche de 60 FPS el juego va tan rápido como permita tu PC. En una pantalla de 144 Hz sin "
-                     "G-Sync/FreeSync, 72 reparte los fotogramas de forma pareja.",
+                     "G-Sync/FreeSync, 72 reparte los fotogramas de forma pareja. Personalizado acepta cualquier "
+                     "valor de 1 a 1000, por ejemplo la frecuencia de tu pantalla.",
                      "With the 60 FPS patch the game runs as fast as your PC allows. On a 144 Hz screen without "
-                     "G-Sync/FreeSync, 72 divides the refresh evenly."));
+                     "G-Sync/FreeSync, 72 divides the refresh evenly. Custom takes any value from 1 to 1000, such "
+                     "as your screen's refresh rate."));
+        if (custom) {
+            int value = limit > 0 ? limit : 60;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            if (ImGui::InputInt(FormLabel(T("FPS personalizados", "Custom FPS")), &value, 1, 10)) {
+                a.game.Set("fps_limit", std::to_string(std::clamp(value, 1, kMaxFpsLimit)));
+                SaveGameIni();
+            }
+        }
     }
     GameFlag("async_pipelines", T("Shaders en segundo plano (experimental)", "Background shaders (experimental)"), false,
              T("Compila los shaders en segundo plano: menos tirones la primera vez que aparece un efecto; a veces un "
@@ -3579,6 +3651,8 @@ void LauncherSettings() {
     FormSection(T("Privacidad", "Privacy"));
     GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
              PerfReportsText());
+
+    PlatformSettings();
 }
 
 /// One page of Settings: its own scrolling area under the page tabs, laid out as a form.

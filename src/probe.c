@@ -727,10 +727,10 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
-    /* A stale lobby-player object reaches FUN_014a1fa0 with a vtable pointer of
-     * image+0x1490000. Its virtual calls (+0x158/+0x168/+0x268) land on that page
-     * start, whose first instruction writes through RAX and faults in read-only
-     * code. The call returns no value the loop needs, so skip that one call. */
+    /* A stale lobby-player object left in a native list by host takeover keeps a vtable
+     * pointer of image+0x1490000. Any virtual call through it lands on that page start,
+     * whose first instruction writes through RAX and faults in read-only code. The call
+     * returns no value the caller uses, so pop it and continue. */
     if (sig == SIGSEGV && image && info &&
         (uintptr_t)info->si_addr == (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] &&
         (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] - (uintptr_t)image == 0x1490000) {
@@ -738,7 +738,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
         uintptr_t ret = 0;
         const uintptr_t at = (uintptr_t)g[REG_RSP];
         if (read_self_memory(&ret, at, sizeof ret) == (ssize_t)sizeof ret &&
-            ret - (uintptr_t)image >= 0x14a1fa0 && ret - (uintptr_t)image <= 0x14a235b) {
+            ret - (uintptr_t)image < 0x10000000) {
             static int warned;
             if (!warned++) {
                 const char msg[] = "Runtime: skipped stale lobby-player vtable call (image+0x1490000)\n";
@@ -1424,6 +1424,7 @@ int main(int argc, char **argv) {
     if (!runtime_friends_native_start(image, size)) fail("native Friends refresh callback could not be installed");
     if (!runtime_online_mode_start(image, size)) fail("native Online mode callback could not be installed");
     if (!runtime_race_options_start(image, size)) fail("native race option callback could not be installed");
+    runtime_profile_item_guard_start(image, size); /* a save's equipped item missing here: no stop in a room */
     runtime_meta_dump_start(image, size); /* BB_META_DUMP=1 (lab) */
     if (!runtime_public_itemless_start(image, size)) fail("native public Itemless callbacks could not be installed");
     if (!runtime_time_trial_start(image, size)) fail("Time Trial challenge callback could not be installed");
@@ -1431,6 +1432,7 @@ int main(int argc, char **argv) {
     runtime_replay_start(image, size); /* spectator build: native race recording (BB_REPLAY=0 off) */
     runtime_reserves_bar_start(image, size);
     if (!runtime_party_experiment_start(image, size)) puts("Host experiment: not available in this executable");
+    runtime_party_server_init(); /* opt-in BB_PARTY_SERVER=1: server-backed private parties */
     /* After the replays: N.Sane chains through their item-box hook (runtime_nsane.c). */
     if (!runtime_nsane_start(image, size)) fail("native N.Sane item callbacks could not be installed");
     if (!runtime_hero_guard_start(image, size)) fail("start screen racer guard could not be installed");

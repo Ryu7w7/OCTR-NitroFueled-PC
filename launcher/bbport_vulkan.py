@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Select Vulkan ICDs for the packaged port before starting GTK or the game.
+"""Select Vulkan ICDs for the packaged port before starting the launcher or game.
 
 Mesa comes with the package. NVIDIA's userspace driver must come from the host,
 matching its kernel module. Expose only NVIDIA libraries, rather than the host's
-whole library directory (which would also replace the package's libc/GTK/SDL).
+whole library directory (which would also replace the package's libc/SDL).
 """
 
 import hashlib

@@ -9,9 +9,11 @@ static int party_guest=1;
 int runtime_room_mode_following(void) { return party_guest; }
 static int frozen_race;
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
+static int host_lost_return;
 void runtime_party_host_lost(int role,int private_match,int announced_return) {
-    (void)role;(void)private_match;(void)announced_return;
+    (void)role;(void)private_match;host_lost_return=announced_return;
 }
+static void ABI reset_mock(void *party) { (void)party; }
 static void *focus_test_button;
 static unsigned synthetic_signal;
 static int hof_opens;
@@ -23,11 +25,18 @@ static int ranked_status_state = 1;
 int runtime_ranked_status(int fresh) { (void)fresh; return ranked_status_state; }
 static int ranked_account_state = 1;
 int runtime_ranked_account(void) { return ranked_account_state; }
+static const char *online_content_state = "clean";
+const char *runtime_online_content(void) { return online_content_state; }
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
 int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }
 int runtime_speed_mode_enabled(void) { return private_speed; }
 int runtime_online_mode_in_private(void) { return private_room; }
+static int lobby_open = 1;
+int runtime_online_mode_lobby_open(void) { return lobby_open; }
+/* The game's own room list (runtime_online_mode.c); 0 = no list, the server's count decides. */
+static int room_players;
+int runtime_online_mode_room_players(void) { return room_players; }
 static void *hof_test_wrapper, *hof_test_content;
 void *runtime_online_mode_content(void *placeable) { return placeable == hof_test_wrapper ? hof_test_content : NULL; }
 static void *hof_focused_project, *hof_focused_list;
@@ -40,6 +49,8 @@ void runtime_online_mode_selector_left(void) { ++selector_left_calls; }
 static int timeout_attempts, timeout_ready=1, timeout_route;
 int runtime_online_mode_matchmaking_cancel(int leave_room) { timeout_route=leave_room;++timeout_attempts;return timeout_ready; }
 int runtime_online_mode_matchmaking_timeout(void) { return runtime_online_mode_matchmaking_cancel(0); }
+static int return_mode;
+void runtime_online_mode_set_return_mode(int index) { return_mode = index; }
 static int new_sessions, hosted_sessions;
 void runtime_online_mode_new_session(void) { ++new_sessions; runtime_public_itemless_new_session(); }
 void runtime_room_mode_hosting(void) { ++hosted_sessions; }
@@ -58,12 +69,18 @@ static int block_get, entered_get;
 static char expected_ids[192];
 static char payload[4096], message[512], reply[512] = "ok";
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
+uint64_t runtime_ryunet_last_sent_ms(void) { return 0; } /* runtime_http.c: no send time here */
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t size) {
     ++requests;
     if (!strcmp(target,"/ryunet/theme")) {
         snprintf(body,size,"%s",reply); return status;
     }
     if (strstr(target,"/ryunet/matchmaking-status?")) { snprintf(body,size,"%s",reply); return status; }
+    /* Found-room / party-leave notifications (issue 0042): the client tells RyuNET the instant
+     * a player exits a found room, and polls whether a found room is still alive. */
+    if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-left")) { snprintf(body,size,"ok"); return 200; }
+    if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-short")) { snprintf(body,size,"ok"); return 200; }
+    if (!strcmp(method,"GET") && strstr(target,"/ryunet/room-alive")) { snprintf(body,size,"{\"players\":\"6\"}"); return 200; }
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
@@ -299,9 +316,10 @@ static void ABI resume_test_start(void *self) {
     ++resumed_starts;
 }
 static void prepare_public(void) {
-    if (!selected || rejection[0]) return;
-    expire_check(); char body[512];
-    (void)compatibility_check("/ryunet/ranked-party?name=LocalHost&members=1,2&mode=1",body,sizeof body);
+    if ((!selected && !ranked_selected) || rejection[0]) return;
+    expire_check(); char body[512], target[128];
+    snprintf(target,sizeof target,"/ryunet/ranked-party?name=LocalHost&members=1,2&mode=%d",selected);
+    (void)compatibility_check(target,body,sizeof body);
     await_check();
 }
 static void test_ranked(void) {
@@ -318,7 +336,8 @@ static void test_ranked(void) {
     ranked_selected = 1;
     expire_check();
     int before = sent;
-    /* The ranked check now waits inline instead of bouncing the player with a notice. */
+    /* A cold check never waits and never pops a modal: the press starts the search and the
+     * server validates the party in its own asynchronous startSearch. */
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(result && sent == before + 1 && !rejection[0]);
     assert(strstr(payload, "\"octr_ranked\"") && !strstr(payload, "\"octr_itemless\""));
@@ -352,6 +371,7 @@ selected = 1;
     assert(!runtime_ranked_active());
     status = 404;
     expire_check();
+    prepare_public(); /* the lobby tick caches the refused answer */
     int before_unsupported = sent;
     start_search(&result, NULL, doc, sizeof doc, NULL);
     assert(!result && sent == before_unsupported && strstr(rejection, "Ranked server"));
@@ -359,6 +379,30 @@ selected = 1;
     status = 200;
     ranked_selected = 0;
     runtime_public_itemless_select(0);
+}
+/* A guest learns Ranked from the host's confirmation, then the host leaving fires a takeover:
+ * new_session wipes ranked_selected before takeover_host, so the sticky mode must restore it. */
+static void test_takeover_keeps_ranked(void) {
+    unsigned char owner[0x960] = {0};
+    uint64_t room = 777;
+    char confirmation[160];
+    int saved_ranked = ranked_selected, saved_joined = joined_ranked;
+    int saved_search_ranked = search_is_ranked;
+    ranked_selected = 0; joined_ranked = 0;
+    runtime_public_itemless_reset();
+    if (!registration_nonce) registration_nonce = 0x1111222233334444ULL;
+    request_nonce = registration_nonce; searching = 1; /* a ranked search owns this room */
+    matchmaking_room = room; matchmaking_owner = owner;
+    snprintf(confirmation, sizeof confirmation,
+             "{\"octr_ranked_v1\":\"2/%" PRIu64 "/0/%016" PRIx64 "\"}", room, request_nonce);
+    assert(accept(owner, room, confirmation, (unsigned)strlen(confirmation)));
+    assert(joined_ranked);
+    runtime_public_itemless_new_session();
+    assert(!ranked_selected && joined_ranked); /* the auto reset must not lose the sticky mode */
+    runtime_public_itemless_takeover_host();
+    assert(ranked_selected && search_is_ranked); /* re-search starts Ranked, not Casual */
+    runtime_public_itemless_reset();
+    ranked_selected = saved_ranked; joined_ranked = saved_joined; search_is_ranked = saved_search_ranked;
 }
 static void test_ranked_button_event(void) {
     native_placeable_event = forward_event;
@@ -561,6 +605,40 @@ static int account_notices;
 static void ABI account_notice(const char *body, void *options) {
     assert(options == NULL && strstr(body, "Discord or Steam"));
     ++account_notices;
+}
+
+static int content_notices;
+static void ABI content_notice(const char *body, void *options) {
+    assert(options == NULL && strstr(body, "character, sound and HUD mods"));
+    ++content_notices;
+}
+
+/* A "modified" game (scripts/online_content.py) never starts a public search; character mods do. */
+static void test_public_content_gate(void) {
+    Notice saved = native_notice;
+    native_notice = content_notice;
+    void *result = (void *)1;
+    const int before = sent;
+    online_content_state = "modified";
+    start_search(&result, NULL, "{}", 3, NULL);
+    /* the notice at once; the search left only when its Continue is pressed */
+    assert(result == NULL && sent == before && content_notices == 1 && content_return == 1);
+    void *(ABI *vtable[])(void *) = {object_type};
+    void *pressed_meta[3] = {0, 0, "igGuiEventFocusInputPressed"};
+    void *press[5] = {vtable, pressed_meta, 0, (void *)8, 0};
+    unsigned char dialog_button[0xf0] = {0};
+    native_placeable_event = forward_event;
+    placeable_event(dialog_button, press);
+    assert(content_return == 2);
+    runtime_public_itemless_update();
+    assert(content_return == 0);
+    assert(!public_content_allowed() && content_notices == 2);      /* Ranked's GO TO LOBBY says it at once */
+    online_content_state = "characters";
+    assert(public_content_allowed() && content_notices == 2);
+    online_content_state = "unknown";            /* not checked (an older launcher): not refused */
+    assert(public_content_allowed() && content_notices == 2);
+    online_content_state = "clean";
+    native_notice = saved;
 }
 
 static void test_ranked_season_gate(void) {
@@ -994,7 +1072,7 @@ static void test_native_party_menu_return(void) {
     root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
     placeable_event(root,event);
     native_placeable_event=saved_event;
-    assert(party_returns==old_returns+1 && stopped==old_stops+1);
+    assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
     assert(*party_manager==party && !party[0x6c] && selected && ranked_selected);
     assert(!search_mark && !matchmaking_search && !search_server_active && !matchmaking_room);
     strcpy(reply,"{\"state\":\"searching\",\"elapsed\":99,\"timeout\":180,\"range\":400,\"ranked\":true}");
@@ -1003,42 +1081,61 @@ static void test_native_party_menu_return(void) {
     (void)runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
     int polls=requests;update_search_clock();
     assert(requests==polls && !search_poll_running);
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+1 && stopped==old_stops+1);
-    /* A new lobby can notify again; a follower never broadcasts a host return. */
-    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
+    /* A new manual host exit leaves alone; a follower never broadcasts a host return. */
+    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     *(int *)(connection+0x118)=2;party_guest=1;menu_party_returned=0;
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+2);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
     int attempts=timeout_attempts;runtime_public_itemless_update();
     assert(timeout_attempts==attempts && search_timeout_pending);
-    /* A host who came alone (no party before the room): leaving brings none of the room's
-     * players along; a party that came together goes back together. */
+    /* Every manual host exit leaves alone. Only queue timeout returns the party together. */
     *(int *)(connection+0x118)=1;party_guest=0;
     {
         const int returns=party_returns;
         menu_party_returned=0;party_at_entry=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns);
+        assert(party_returns==returns && party_quits==3);
         menu_party_returned=0;party_at_entry=2;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1);
-        /* A private room: nobody comes along, not even a party that came in together. */
+        assert(party_returns==returns && party_quits==4);
+        /* Private match follows the same host-migration rule. */
         menu_party_returned=0;party_at_entry=2;entry_private=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1 && party_quits==1);
+        assert(party_returns==returns && party_quits==5);
+        menu_party_returned=0;queue_return_pending=1;entry_private=0;
+        runtime_public_itemless_menu_return();
+        assert(party_returns==returns+1 && party_quits==5);
         /* A guest of that room leaves the party on the way out: the host's notification
          * (message 0x29) and the roster reset are the game's way out. */
+        const int saved_installed=installed;installed=1;
         menu_party_returned=0;party_at_entry=2;entry_private=0;
         *(int *)(connection+0x118)=2;party[0x6c]=1;
         unsigned char roster[0x28]={0},peer[0x30]={0};
         void *items[1]={peer};
         *(int *)(roster+12)=1;*(void ***)(roster+0x20)=items;
         *(void **)(party+0x30)=roster;
-        const int saved_installed=installed;installed=1;
         runtime_public_itemless_menu_return();
         installed=saved_installed;
-        assert(party_quits==2 && party_returns==returns+1 && !party[0x6c]);
+        assert(party_quits==6 && party_returns==returns+1 && !party[0x6c]);
         *(int *)(connection+0x118)=1;
+        native_party_reset_trace=reset_mock;
+        menu_party_returned=1;party_return_received=0;host_lost_return=-1;
+        traced_party_reset(party);assert(host_lost_return==0);
+        party_return_received=1;
+        traced_party_reset(party);assert(host_lost_return==1);
+        const int sessions=new_sessions;
+        entry_private=1;menu_party_returned=1;queue_return_pending=party_return_received=1;
+        runtime_public_itemless_takeover_host();
+        assert(new_sessions==sessions && !entry_private && !menu_party_returned &&
+               !queue_return_pending && !party_return_received);
+        runtime_public_itemless_menu_return();
+        assert(party_quits==7);
+        runtime_public_itemless_takeover_host();
+        assert(new_sessions==sessions && !menu_party_returned);
+        runtime_public_itemless_menu_return();
+        assert(party_quits==8);
+        new_sessions=sessions;
         /* The next search is not a private room any more. */
         arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;
@@ -1266,6 +1363,7 @@ static void test_ranked_device_and_search_clock(void) {
 }
 
 int main(void) {
+    test_public_content_gate();
     test_ranked_device_and_search_clock();
     test_guest_main_menu_leaves_party();
     test_native_party_menu_return();
@@ -1292,6 +1390,47 @@ int main(void) {
     capability_supported = 0;
     setenv("BB_PUBLIC_ITEMLESS","1",1);
     snprintf(reply,sizeof reply,"ok"); status=200; requests=0;
+
+    /* The native map-vote handler runs on the game's thread: it never asks the server (a slow
+     * answer froze the game at 00), it reads the room-alive thread's latest answer. With none,
+     * the race goes ahead; with a short room, it says so (the report goes on a thread). */
+    matchmaking_room=77; joined_ranked=1;
+    int before_short=requests;
+    assert(runtime_public_ranked_short()==0);
+    assert(requests==before_short);
+    matchmaking_room=0; joined_ranked=0;
+    assert(runtime_public_ranked_short()==0);
+    matchmaking_room=78; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=78; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    ranked_min_seen=3;
+    assert(runtime_public_ranked_short()==1);
+    assert(runtime_public_ranked_short()==1);   /* known for this room: no second report */
+    for (int wait = 0; wait < 200 && requests == before_short; ++wait) usleep(5000);   /* the report's thread */
+    assert(requests==before_short+1);
+    /* The server counts its lobby connections, which drop while a player is still in the game: its
+     * count below the minimum must not dissolve a room the game's own list holds full (20/11, room
+     * 23: WAITING 2/3, the race never started); a room the game's list also holds short is still
+     * reported short. */
+    matchmaking_room=79; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=79; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    room_players=3;
+    assert(runtime_public_ranked_short()==0);
+    matchmaking_room=80; joined_ranked=1;
+    pthread_mutex_lock(&ranked_clock_lock);
+    ranked_clock_room=80; ranked_clock_ready=-1; ranked_clock_players=2; ranked_clock_at=check_clock();
+    pthread_mutex_unlock(&ranked_clock_lock);
+    room_players=1;
+    assert(runtime_public_ranked_short()==1);
+    for (int wait = 0; wait < 200 && requests == before_short+1; ++wait) usleep(5000);   /* the report's thread */
+    assert(requests==before_short+2);
+    room_players=0;
+    matchmaking_room=0; joined_ranked=0;
+    assert(runtime_public_ranked_short()==0);
+    ranked_min_seen=6;
 
     native_search=send_search; native_register=send_info; native_notice=show;
     network_manager=&test_network; native_stop_matchmaking=stop_matchmaking;
@@ -1386,6 +1525,7 @@ int main(void) {
     test_early_gate();
     test_full_lobby_confirmation();
     test_ranked();
+    test_takeover_keeps_ranked();
     test_ranked_button_event();
     test_native_return_focus();
     test_timeout_preserves_party_and_mode();

@@ -234,7 +234,7 @@ class LaunchLockTests(unittest.TestCase):
         with launch_lock.session(self.root):
             result = subprocess.run(self.command(code, self.root), capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Another game launch', result.stderr)
+            self.assertIn('already running from this folder', result.stderr)
             with launch_lock.session(self.root):
                 pass
         result = subprocess.run(self.command(code, self.root), capture_output=True, text=True, timeout=10)

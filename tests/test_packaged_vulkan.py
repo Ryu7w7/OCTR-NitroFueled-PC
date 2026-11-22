@@ -1,4 +1,4 @@
-"""Driver discovery at the AppImage's GTK/game entry point, without a GPU."""
+"""Driver discovery at the AppImage's launcher/game entry point, without a GPU."""
 from paths import ROOT
 import importlib.util
 import json

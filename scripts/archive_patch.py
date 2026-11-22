@@ -194,6 +194,19 @@ def write_grown_patch(target, archive, guest, entries, added):
     write(target, archive, guest, [(0, index)] + ranges)
 
 
+def replaced_entry(archive, count, index, patch):
+    """Entry index of an IGA v13 archive (count entries) as patch (a path, or None) replaces it:
+    its bytes as the game reads them, or None when patch leaves that entry alone."""
+    if patch is None:
+        return None
+    record_at = 0x38 + 4 * count + 16 * index
+    for offset, data in read(patch)[2]:
+        if offset == record_at and len(data) == 16:
+            low, extra, length, _mode = struct.unpack('<4I', data)
+            return view(archive, patch, low | ((extra & 0xFF) << 32), length)
+    return None
+
+
 def view(archive, patch, offset, length):
     """What the game reads (for tests): the archive with the patch applied."""
     archive = resolve(archive)

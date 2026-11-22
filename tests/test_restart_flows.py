@@ -1,12 +1,11 @@
-"""Update handoff and the runtime's real restart exit, without GTK or a game."""
+"""Runtime restart exit without a game."""
 import ast
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from unittest import mock
 
@@ -42,47 +41,8 @@ class RestartTests(unittest.TestCase):
             scope['apply_renderer']()
             self.assertEqual(env['BB_NATIVE_VK'], '0')
 
-    def launcher_scope(self):
-        tree = ast.parse((ROOT / 'launcher/sacredfire_launcher.py').read_text(encoding='utf-8'))
-        app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'LauncherApp')
-        window = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'LauncherWindow')
-        restart = next(n for n in window.body if isinstance(n, ast.FunctionDef) and n.name == 'restart_into')
-        base = mock.Mock()
-        class Application:
-            def __init__(self, **kwargs):
-                base(**kwargs)
-        scope = {'Adw': types.SimpleNamespace(Application=Application), 'APP_ID': 'test',
-                 'Gio': types.SimpleNamespace(ApplicationFlags=types.SimpleNamespace(DEFAULT_FLAGS=0, NON_UNIQUE=1)),
-                 'sys': sys, 'subprocess': mock.Mock(DEVNULL=subprocess.DEVNULL),
-                 'host_environment': lambda **kwargs: {'PATH': '/usr/bin'}, 'tr': lambda s: s}
-        exec(compile(ast.Module(body=[app, restart], type_ignores=[]), 'launcher', 'exec'), scope)
-        return scope, base
 
-    def test_update_starts_independent_launcher_before_quitting(self):
-        scope, base = self.launcher_scope()
-        with mock.patch.object(sys, 'argv', ['launcher', '--updated']):
-            scope['LauncherApp']()
-        self.assertEqual(base.call_args.kwargs['flags'], 1)
-        with mock.patch.object(sys, 'argv', ['launcher']):
-            scope['LauncherApp']()
-        self.assertEqual(base.call_args.kwargs['flags'], 0)
-        window = mock.Mock()
-        scope['restart_into'](window, PurePosixPath('/opt/CTR Game/SacredFire.AppImage'))
-        scope['subprocess'].Popen.assert_called_once_with(
-            ['/opt/CTR Game/SacredFire.AppImage', '--updated'], cwd='/opt/CTR Game',
-            env={'PATH': '/usr/bin'}, start_new_session=True,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        window.presence.shutdown.assert_called_once()
-        window.get_application().quit.assert_called_once()
 
-    def test_failed_update_handoff_keeps_launcher_open(self):
-        scope, _ = self.launcher_scope()
-        scope['subprocess'].Popen.side_effect = OSError('permission denied')
-        window = mock.Mock()
-        scope['restart_into'](window, PurePosixPath('/opt/SacredFire.AppImage'))
-        window.get_application.assert_not_called()
-        window.presence.shutdown.assert_not_called()
-        self.assertIn('permission denied', window.update_banner.set_title.call_args.args[0])
 
     @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('cc'), 'requires Linux C compiler')
     def test_runtime_restart_exits_to_supervisor(self):

@@ -483,6 +483,11 @@ int runtime_private_room_active(void) {
 static void private_room_active(int active) {
     __atomic_store_n(&s_private_room, active, __ATOMIC_RELEASE);
 }
+/* In a room's session now, host or guest: from creating or joining one (WebAPI POST) until leaving it (DELETE). */
+static int s_room_session, s_rooms_created;
+int runtime_room_session_open(void) { return __atomic_load_n(&s_room_session, __ATOMIC_ACQUIRE); }
+/* How many rooms this player created (each POST /v1/sessions): a new room starts without teams. */
+int runtime_rooms_created(void) { return __atomic_load_n(&s_rooms_created, __ATOMIC_ACQUIRE); }
 
 static int session_members_path(const char *sid, char *out, size_t out_size) {
     if (!sid || !*sid) return 0;
@@ -1278,8 +1283,10 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         char sid[96];
         path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
         if (sid[0]) {
+            runtime_party_server_join(sid); /* opt-in: mirror the join on the RyuNET server */
             record_session_member(sid);
             private_room_active(1);
+            __atomic_store_n(&s_room_session, 1, __ATOMIC_RELEASE);
             runtime_room_mode_joined(sid); /* the host's mode (Speed) from RyuNET */
         }
         invite_session_joined(req->path);
@@ -1318,8 +1325,11 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         const char *my_name = runtime_np_get_online_name();
         char sid[128];
         snprintf(sid, sizeof(sid), "cusa13795-session-%s", (my_name && *my_name) ? my_name : "host");
+        runtime_party_server_create(sid); /* opt-in: mirror the party on the RyuNET server */
         write_active_session(sid);
         private_room_active(1);
+        __atomic_store_n(&s_room_session, 1, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&s_rooms_created, 1, __ATOMIC_ACQ_REL);
         runtime_room_mode_hosting(); /* the room's mode to RyuNET for the players who join */
         char resp[256];
         snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid);
@@ -1354,6 +1364,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
                 return strdup("{}");
             }
         }
+        __atomic_store_n(&s_room_session, 0, __ATOMIC_RELEASE);
         remove_active_session();
         return strdup("{}");
     }
@@ -1364,6 +1375,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
         if (sid[0]) {
             record_session_member(sid);
             private_room_active(1);
+            __atomic_store_n(&s_room_session, 1, __ATOMIC_RELEASE);
             runtime_room_mode_joined(sid);
         }
         invite_session_joined(req->path);

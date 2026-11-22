@@ -32,8 +32,7 @@ Fontconfig discovers desktop fonts. `launcher/shell.nix` supplies the build depe
 `build.sh` also builds the launcher; the AppImage includes its binary, art and runtime libraries.
 The UI and tray do not require GTK or libadwaita. Linux uses Ayatana AppIndicator GLib with GMenu/GAction; it does not load SDL's deprecated GTK tray backend.
 It also exports DBusMenu through libdbusmenu-glib for KDE and other hosts that do not support GMenu.
-The old GTK script remains in the source tree for comparison and manual recovery during migration.
-Release packages always start the shared native launcher; they do not fall back to GTK.
+Release packages start the shared native launcher.
 
 ## Data and compatibility
 
@@ -50,10 +49,6 @@ unchanged managed copies and remove unchanged copies no longer bundled. Edited f
 untracked files that differ from the current bundle remain user overrides. Identical legacy
 copies are adopted automatically, so later package updates can refresh them safely.
 
-On first use, Linux imports `~/.config/sacredfire-launcher/settings.json` (or its
-`XDG_CONFIG_HOME` equivalent) into `launcher.ini`. Existing native settings take precedence;
-the original GTK preferences are preserved. Common game settings remain in `bbport.ini`.
-Legacy Pro mode is converted to an internal resolution when no resolution was already selected.
 Linux starts `run.sh` in a dedicated process group so Stop also reaches child processes.
 SIGINT and SIGTERM also stop the game; unresponsive processes are killed after two seconds.
 Arguments are passed directly to processes, without shell evaluation. Game environment overrides
@@ -163,54 +158,18 @@ For native Wayland, use `BB_TEST_TRAY_ONLY=1 SDL_VIDEODRIVER=wayland` with `laun
 and the same source/data arguments. This exercises minimize, hide, and Open through D-Bus
 without the Xvfb screenshot fixtures. Restore clears SDL's saved minimized state before Show.
 
-## Releases and upgrades from GTK
+## Releases and upgrades
 
 Pull requests and pushes to `main` build the shared launcher on Linux and Windows. Release
 packages depend on both launcher jobs and the existing source checks. The Linux job exercises
-the legacy updater and a subsequent native update against the finished AppImage before uploading it. A failed upgrade or
-migration check blocks the draft release. The release remains a draft until published.
-The Windows game build uses the same standalone launcher CMake target as CI, preserving the
-portable ZIP's executable path.
+native AppImage replacement before uploading the artifact.
 
-Keep the published asset name `SacredFire-<version>-x86_64.AppImage` and publish a newer stable
-version in the same GitHub repository. The GTK launcher's existing updater recognizes it,
-replaces the AppImage at its existing path and restarts into the native launcher. No separate
-launcher installation or manual settings export is needed.
-
-### Release instructions for Ryu
-
-Use the shared C++ launcher for this release and every later Linux release. Merge these changes
-before building, then use `.github/workflows/release.yml` or the normal `build.sh` and
-`packaging/appimage.sh` sequence. The package entry point in `packaging/default.nix` must keep
-starting `bin/sacredfire-launcher`. Do not point it at `launcher/sacredfire_launcher.py` or
-replace the release artifact with a package built from the old GTK branch.
-
-Publish the newer stable AppImage in `Ryu7w7/OCTR-NitroFueled-PC`, which existing launchers
-already check. Keep the asset naming above and the CI upgrade check enabled for every release.
-A draft or prerelease is not offered by the stable updater. The first update replaces GTK with
-the native launcher; later updates replace that launcher with the newer native build at the
-same AppImage path, preserving desktop and Steam shortcuts.
-
-After a successful download, size/hash verification and replacement, the native launcher saves
-its settings and automatically restarts the AppImage with `--updated`, matching GTK and Windows.
-If the game starts during the download, restart waits until the game exits. A failed download
-keeps the existing AppImage; a failed restart leaves the launcher open with a manual Restart button.
-Configure EOS separately using the [maintainer setup](eos-bridge.md#build-the-game-and-eos-together);
-SDK secrets must be supplied before CI can include EOS for either platform.
-
-### Settings retained across updates
-
-On first start, missing `settings.json` values are merged into `launcher.ini`; existing native
-values win. `gtk_migration=1` prevents reimport after later edits. The original JSON remains
-unchanged. Existing INI files receive a `.pre-native.bak` backup before migration changes them.
-Game settings, input bindings, mods, saves, trophies, DLC and online keys stay in the same data
-directory. Invalid JSON or a write failure stops startup rather than replacing settings with
-defaults; the desktop displays the error.
-
-The native updater clears libraries and font paths inherited from the old AppImage before
-restarting, while retaining custom data/config/save paths. Already released GTK launchers may
-discard custom `BB_*` environment overrides during restart; those users must reopen with their
-usual environment. The standard XDG paths are preserved by those old launchers too.
+Publish a newer stable `SacredFire-<version>-x86_64.AppImage` in
+`Ryu7w7/OCTR-NitroFueled-PC`. The native updater checks the published asset, verifies size and
+SHA-256 when available, and replaces the AppImage at its existing path. Desktop and Steam
+shortcuts retain their target. After replacement, the launcher exits and a detached helper
+starts the new AppImage when the old process releases its mount. Startup errors are written to
+`launcher-restart.log` in the launcher data directory.
 
 Run the upgrade check against the finished AppImage, or use `--native` for a standalone build:
 
@@ -219,7 +178,4 @@ python3 packaging/test_launcher_upgrade.py dist/SacredFire-x86_64.AppImage
 python3 packaging/test_launcher_upgrade.py out/launcher/sacredfire-launcher --native
 ```
 
-It covers GTK-to-native and native-to-native replacement, every GTK preference, retained
-game/input settings and user files, native edits surviving the next update, and malformed
-preferences, using temporary directories and a local download fixture. The UI test checks
-automatic restart, deferral while the game runs, and no repeated restart after a failure.
+The check covers native-to-native replacement and preservation of launcher settings and user files.

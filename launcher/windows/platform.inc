@@ -78,10 +78,7 @@ void LaunchGameProcess() {
         app.exit_code = code;
         app.job_finished = true;
     });
-    if (a.hwnd) {
-        if (a.launcher.Flag("hide_on_play", false)) ShowWindow(a.hwnd, SW_HIDE);
-        else ShowWindow(a.hwnd, SW_MINIMIZE);
-    }
+    if (a.hwnd && a.launcher.Flag("hide_on_play", false)) ShowWindow(a.hwnd, SW_HIDE);
 }
 
 std::wstring Widen(const std::string& s) {
@@ -416,6 +413,26 @@ void RegisterDiscordLaunch(const std::string& app_id) {
     set(base, L"URL Protocol", L"");
     set(base + L"\\DefaultIcon", nullptr, path + L",0");
     set(base + L"\\shell\\open\\command", nullptr, L"\"" + path + L"\"");
+}
+
+void RegisterRankedLink() {
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    const std::wstring path(exe, n);
+    const std::wstring base = L"Software\\Classes\\sacredfire";
+    const auto set = [](const std::wstring& key, const wchar_t* name, const std::wstring& value) {
+        HKEY h = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS)
+            return;
+        RegSetValueExW(h, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       DWORD((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(h);
+    };
+    set(base, nullptr, L"URL:SacredFire");
+    set(base, L"URL Protocol", L"");
+    set(base + L"\\DefaultIcon", nullptr, path + L",0");
+    set(base + L"\\shell\\open\\command", nullptr, L"\"" + path + L"\" \"%1\"");
 }
 
 void BringLauncherToFront() {
@@ -1004,6 +1021,7 @@ bool OpenUrl(const std::string& url) {
     return INT_PTR(ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 constexpr UINT kTrayMessage = WM_APP + 20, kMinimizeToTray = WM_APP + 21, kToggleLauncher = WM_APP + 22;
+constexpr UINT kShowLauncher = WM_APP + 23;   // another start of this install's launcher: come back to the front
 bool LauncherVisible() { return g_app.hwnd && IsWindowVisible(g_app.hwnd) && !IsIconic(g_app.hwnd); }
 void ToggleLauncher() { PostMessageW(g_app.hwnd, kToggleLauncher, 0, 0); }
 NOTIFYICONDATAW g_tray{};

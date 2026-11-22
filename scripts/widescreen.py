@@ -55,7 +55,7 @@ TITLE_ID, APP_VERSION = 'CUSA13795', '01.21'
 # moved (ultrawide_eu.json, port_meta). The HUD shaders are the same.
 EU_TITLE = 'CUSA14876'
 EU = DATA / 'eu'
-FORMAT = 13  # target GrandPrixReport's native blue sprite; restore standings
+FORMAT = 14  # issue #267: a base patch's copy of an asset (Pack Tacho's Options page) gets the runs
 MESSAGES = sys.stdout  # run.sh reads the shell lines on stdout: its messages go to stderr
 
 
@@ -125,6 +125,30 @@ def port_meta(meta, port):
     return meta
 
 
+def runs_over(op, original, current):
+    """op's byte runs (made for the game's own copy of its asset, original) applied to current,
+    another feature's copy of that asset (Pack Tacho's Options page, issue #267). Each run is found
+    in current by the original bytes around it, widened until exactly one place matches; ValueError
+    when a run is not there or stays ambiguous."""
+    if hashlib.sha256(original).hexdigest() != op['original_sha256']:
+        raise ValueError('Original content checksum mismatch')
+    result = bytearray(current)
+    for offset, old, new in op['runs']:
+        old, new = bytes.fromhex(old), bytes.fromhex(new)
+        for context in (32, 64, 128, 256):
+            lo, hi = max(0, offset - context), min(len(original), offset + len(old) + context)
+            first = current.find(original[lo:hi])
+            if first < 0:
+                raise ValueError(f'the change at {offset:#x} has no place in it')
+            if current.find(original[lo:hi], first + 1) < 0:
+                at = first + offset - lo
+                result[at:at + len(old)] = new
+                break
+        else:
+            raise ValueError(f'the change at {offset:#x} fits several places in it')
+    return bytes(result)
+
+
 def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', text_factor=1.0):
     """{guest: patch file} of the layout's assets, made from the player's archives (and kept in
     them the patches of base, {guest: patch file}, for the same archives)."""
@@ -154,15 +178,30 @@ def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', 
     say(f'preparing {len(operations)} menu and HUD assets from the game\'s archives (once)')
     target.mkdir(parents=True, exist_ok=True)
     for name, ops in sorted(groups.items()):
+        guest = f'/app0/archives/{name}'
         a = Archive(archives / name)
         try:
-            entries = {}
+            entries, over = {}, set()
             for op in ops:
                 entry = a.files[op['index']]
                 if entry['path'] != op['asset']:
                     raise ValueError(f'{name}: entry {op["index"]} is not {op["asset"]}')
                 # Checked against the original's and the result's SHA-256 (nitro_components.py).
                 original = a.extract(entry)
+                # An asset a base patch already replaces (Pack Tacho's Options page): the layout's
+                # runs go over that copy; when they cannot, that one asset keeps the copy (16:9).
+                replaced = archive_patch.replaced_entry(archives / name, len(a.files), op['index'], base.get(guest))
+                if replaced is not None:
+                    try:
+                        if op['kind'] != 'archive_asset' or 'runs' not in op:
+                            raise ValueError('it is replaced whole')
+                        payload = runs_over(op, original, replaced)
+                    except ValueError as error:
+                        say(f'{op["asset"]} in {name} keeps its 16:9 layout ({error})')
+                        continue
+                    entries[op['index']] = payload
+                    over.add(op['index'])
+                    continue
                 if op['kind'] == 'online_notice':
                     if hashlib.sha256(original).hexdigest() != op['original_sha256']:
                         raise ValueError(f'{name}: unexpected notification asset')
@@ -179,8 +218,7 @@ def archive_patches(game, out, folder, operations, base, data='nitro-mod.json', 
         finally:
             a.data.close()
             a._file.close()
-        guest = f'/app0/archives/{name}'
-        archive_patch.write_entries_patch(made[guest], archives / name, guest, entries, base.get(guest))
+        archive_patch.write_entries_patch(made[guest], archives / name, guest, entries, base.get(guest), override=over)
     (target / 'stamp.json').write_text(json.dumps(stamp))
     prune(target, 'stamp.json', r'[0-9a-f]{16}', say)
     return made

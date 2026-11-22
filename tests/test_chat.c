@@ -7,6 +7,7 @@ static int room_on_now = 1, public_now = 0, following = 0, reply_status = 200, p
 static const char *reply_text = "ok 0\n";
 
 int runtime_online_mode_room_on(void) { return room_on_now; }
+void runtime_online_team_points_heard(const char *nick, const char *data) { (void)nick; (void)data; }
 int runtime_online_mode_public_on(void) { return public_now; }
 int runtime_replay_chat_allowed(void) { return 1; }
 int runtime_room_mode_following(void) { return following; }

@@ -3114,7 +3114,14 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     if (!camera_timestep_contract(image,size) ||
         !vfx_timestep_contract(image,size) || !angular_timestep_contract(image,size) ||
         !deceleration_timestep_contract(image,size) || !scaled_clock_contract(image,size) ||
-        !ground_speed_project_contract(image,size) || !freeflight_timestep_contract(image,size)) return 0;
+        !ground_speed_project_contract(image,size)) return 0;
+    /* The free-flight timestep checks code around it, ANDN included (0x81af9c, 0x81b65b): on a CPU without
+     * BMI1 the ISA rewrite has replaced those, and the game stopped at start ("native race option callback
+     * could not be installed", 20/11, a GTX 1050 Ti PC). Without its contract only that timestep is left as
+     * the game's own; everything else installs. */
+    const int freeflight = freeflight_timestep_contract(image,size);
+    if (!freeflight)
+        puts("Native free-flight: the game's own timestep (its code differs here, e.g. rewritten for this CPU)");
     const uintptr_t team_native = (uintptr_t)ptr(image, 0x2778150);
     /* Online may already wrap this slot; detect the region from the native code. */
     const unsigned char signature[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
@@ -3217,7 +3224,7 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     if (!writable(image+0xc89b54,15) || !writable(image+0xc89bd4,16) ||
         !writable(image+0xc89c44,17) || !writable(image+0xa997c0,14)) return 0;
     if (!writable(image+0x2b3670,sizeof vfx_worker_code) || !writable(image+0x2c4f98,sizeof vfx_drag_code)) return 0;
-    for (unsigned i=0;i<sizeof freeflight_sites/sizeof *freeflight_sites;++i)
+    for (unsigned i=0;freeflight && i<sizeof freeflight_sites/sizeof *freeflight_sites;++i)
         if (!writable(image+freeflight_sites[i].address,freeflight_sites[i].length)) return 0;
     timestep_clock=(void **)(image+0x2ab4100);
     install_vfx_timestep(image,cold+4960);
@@ -3225,7 +3232,7 @@ int runtime_race_options_start(unsigned char *image, size_t size) {
     install_deceleration_timestep(image,cold+6048);
     install_scaled_clock(image,cold+6560);
     install_ground_speed_project(image,cold+7072);
-    install_freeflight_timestep(image,cold+7584);
+    if (freeflight) install_freeflight_timestep(image,cold+7584);
     puts("Native steering: nonlinear angular acceleration follows the 30 FPS reference");
     /* Gameplay validation found visible shake and stutter; retain the native camera path. */
     if (0) install_camera_timestep(image,cold+CAMERA_BRIDGE);

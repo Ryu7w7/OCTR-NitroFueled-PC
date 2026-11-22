@@ -965,6 +965,18 @@ def main():
     try:
         with launch_lock.session(Path(os.environ.get('BB_DATA_DIR', PORT))):
             return launch(args, restarted)
+    except PermissionError as error:
+        # Windows would not let the launch rewrite one of its own files in out/ (seen 20/11 with
+        # out/online-mode/cup-files.map): another SacredFire still open, or an antivirus holding it.
+        name = error.filename or ''
+        fail(f'Launch failed: Windows did not let SacredFire write {name} ({error.strerror or error}). '
+             'Another SacredFire or launcher may still be open in the background: look in the system tray '
+             'and in Task Manager (sacredfire.exe), close it and start again. If it keeps happening, an '
+             'antivirus or Controlled folder access is blocking the game folder: add it as an exclusion.\n'
+             f'No se pudo iniciar: Windows no dejó a SacredFire escribir {name}. Puede que otro SacredFire o '
+             'launcher siga abierto en segundo plano: búscalo en la bandeja del sistema y en el Administrador '
+             'de tareas (sacredfire.exe), ciérralo y vuelve a iniciar. Si sigue pasando, un antivirus o el '
+             'Acceso controlado a carpetas bloquea la carpeta del juego: agrégala como exclusión.')
     except (OSError, ValueError, RuntimeError, boot_cache.prepare.GameCheckError) as error:
         fail('Launch failed: ' + str(error))
 
@@ -1007,6 +1019,8 @@ def remove_obsolete_files():
 def launch(args, restarted=False):
     env = os.environ
     env.setdefault('BB_WINDOW_ICON', str(PORT / 'launcher/io.github.sacredfire.Launcher.png'))
+    # The game's title font for the room's members by team (the overlay's own font otherwise).
+    env.setdefault('BB_TEAM_FONT', str(PORT / 'art/ctr-title.ttf'))
     remove_obsolete_files()
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
@@ -1107,6 +1121,7 @@ def launch(args, restarted=False):
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
     import mod_packages
+    source_game = game          # the game's own files, before any mod (scripts/online_content.py)
     try:
         game, config = startup_call('mod_packages.prepare', mod_packages.prepare, PORT, data, env, game, config,log=say)
     except (ValueError, RuntimeError, OSError) as error:
@@ -1197,8 +1212,8 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"CTR TV logo: {error}; the game's own")
-        # Pack Tacho (bbport.ini tacho_pack, scripts/tacho_pack.py): its HUD, leaders list and main
-        # menu files by archive patch, and the Graphics tab's main menu made from the pack's.
+        # Pack Tacho (scripts/tacho_pack.py): its HUD, leaders list and Options page files by
+        # archive patch; the 21:9 and 32:9 layouts change its Options page over them (issue #267).
         # It has no off switch; a changed pack stops the launch (every player has the same rules).
         try:
             tacho_patches, tacho_env = startup_call('tacho_pack.prepare', tacho_pack.prepare, game, out, config, env, base_patches)
@@ -1220,9 +1235,20 @@ def launch(args, restarted=False):
         # path and the patches read its settings (the player's, with the ones it was made for),
         # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
         layout_saved = {}
+        mod_file_map = {}   # 'mods': BB_MOD_FILE_MAP before the first pass (None: no map)
 
         def apply_layout():
             env.pop('BB_SPEED_MODE', None)
+            # Every pass starts from the mods' file map (or none), as the first one did: online mode
+            # below replaces BB_MOD_FILE_MAP with its own map (the mods' files and its own), and a
+            # second pass (a restart from the menu, a start that stopped and is tried again) read that
+            # one as its input: online mode then rebuilt, removed its old map and read it next
+            # ("[WinError 2] ... out/online-mode/cup-files.map", 20/11).
+            first_map = mod_file_map.setdefault('mods', env.get('BB_MOD_FILE_MAP'))
+            if first_map is None:
+                env.pop('BB_MOD_FILE_MAP', None)
+            else:
+                env['BB_MOD_FILE_MAP'] = first_map
             for key, value in layout_saved.items():
                 if value is None:
                     env.pop(key, None)
@@ -1405,6 +1431,26 @@ def launch(args, restarted=False):
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out, '--boot-dir', boot,
                        '--settings', settings)
+            # What this launch plays online with (scripts/online_content.py): public matchmaking and
+            # Ranked take the game's own files and character mods only, private rooms anything. The
+            # game tells RyuNET (X-RyuNET-Content) and refuses public play itself when "modified".
+            env.pop('BB_ONLINE_CONTENT', None)
+            if env.get('BB_ONLINE') == '1':
+                result = run_python('scripts/online_content.py', '--game', source_game, '--view', game, '--out', out,
+                                    *(['--file-map', env['BB_MOD_FILE_MAP']] if env.get('BB_MOD_FILE_MAP') else []),
+                                    *(['--archive-plan', env['BB_MOD_ARCHIVE_PLAN']] if env.get('BB_MOD_ARCHIVE_PLAN') else []),
+                                    *(['--layout-dir', layout_patches] if layout_patches else []),
+                                    '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
+                                    '--app-version', app_version, '--title-id', title_id, capture=True, check=False)
+                lines = [line for line in result.stdout.splitlines() if line.strip()]
+                content = lines[0].partition('=')[2] if result.returncode == 0 and lines and lines[0].startswith('class=') else 'unknown'
+                env['BB_ONLINE_CONTENT'] = content
+                say({'clean': 'Online content: the game\'s own files (public matchmaking and Ranked allowed)',
+                     'characters': 'Online content: character mods only (public matchmaking and Ranked allowed)',
+                     'modified': 'Online content: modified (private rooms only):'}.get(
+                         content, 'Online content: could not be checked (scripts/online_content.py stopped)'))
+                for reason in lines[1:6]:
+                    say('  ' + reason)
             # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
             for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
                 env.pop(key, None)

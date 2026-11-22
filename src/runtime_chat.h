@@ -36,6 +36,12 @@ unsigned runtime_chat_serial(void);
 /* The newest lines, oldest first, without the muted players'. The serial changes with them. */
 unsigned runtime_chat_view(RcLine *out, int max, int *count, int *status);
 int runtime_chat_send(const char *text);
+/* Data for the other players of the room through the same channel, never shown as a line: it starts with this tag.
+ * Sent even with the chat off (a host polls then too); a guest gets it while its chat is on. */
+#define RC_TEAM_POINTS_TAG "~octr-team-points~ "
+int runtime_chat_send_data(const char *text);
+/* runtime_online_mode.c: the host's team points heard ("<teams> <p0> <p1> <p2> <p3>"). */
+void runtime_online_team_points_heard(const char *nick, const char *data);
 /* Kept between games (chat_muted.txt, next to the saves). */
 void runtime_chat_mute(const char *nick, int muted);
 int runtime_chat_muted(const char *nick);

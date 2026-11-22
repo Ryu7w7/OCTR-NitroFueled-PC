@@ -49,7 +49,8 @@ That covers menus, Adventure and Arcade, races, sound, cutscenes, Xbox/SDL contr
 keyboard, saving, the community patches (60 FPS, no motion blur), restart from the in-game menu,
 and the game's DLC from your own packages (optional). Internal resolution goes from 480p to native
 4K, with AMD FSR 1 or temporal upscaling (AMD FSR 3.1, or NVIDIA DLSS on RTX cards;
-experimental). The FPS limit keeps the game at 60 by default and goes up to 240.
+experimental). The FPS limit keeps the game at 60 by default and goes up to 240, or takes a custom
+value such as 75 for a 75 Hz screen.
 
 Since v0.5.3 the first start prepares the game's shaders for your GPU from your own dump (a few
 seconds, once: [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop
@@ -104,9 +105,35 @@ Steam Deck notes:
 
 ### Updating
 
-On Windows, unzip the new version over your folder to keep your settings, saves and nickname key.
-To use another folder instead, copy `user\`, `bbport.ini`, `launcher.ini` and `ryunet_online.key`
-across.
+The launcher asks GitHub for the latest release every time it starts, and the line under its
+header shows the new version with an **Update** button (**Tools → Check for updates** asks again).
+Updating from the launcher keeps every setting and save.
+
+**From the launcher**
+
+- *Windows:* the launcher downloads the release's portable ZIP into `update\`, checks its size and
+  SHA-256, unpacks it over the folder and restarts itself. Your files are never written: `user\`,
+  `bbport.ini`, `launcher.ini` and `ryunet_online.key` stay as they are. Every file it replaces is
+  moved aside first, so a failed or interrupted update is rolled back and the folder keeps
+  working. Close the game first (the launcher refuses to update while it runs). With the
+  automatic install on (Settings, off by default) the update starts by itself; otherwise press
+  the button.
+- *Linux:* the new AppImage is downloaded next to the running one as a `.part` file, checked
+  against the size and SHA-256 of the release, made executable and put in place of the running
+  AppImage — same path and name, so desktop entries and the Steam shortcut
+  (`~/.local/share/sacredfire/SacredFire.AppImage`) keep working — then the launcher restarts
+  itself. A failed download leaves the current AppImage untouched. From a source checkout or a
+  Nix build the button opens the release page instead.
+
+**Manual**
+
+- *Windows:* unzip the new `CTR-NitroFueled-PC-portable-<version>-windows.zip` over your folder;
+  the player files listed above are not in the ZIP, so they survive. Updating into a different
+  folder means copying `user\`, `bbport.ini`, `launcher.ini` and `ryunet_online.key` across.
+- *Linux:* download the release AppImage, `chmod +x` it and replace the AppImage you run, in the
+  same path (a Steam shortcut points at `~/.local/share/sacredfire/SacredFire.AppImage`). Saves,
+  settings and the nickname key live in `~/.local/share/sacredfire` and are not part of the
+  AppImage.
 
 ## Online
 
@@ -372,6 +399,22 @@ Import names from shadPS4's aerolib list.
 
 ## Recent releases
 
+- [v0.9.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.4): Ranked results no
+  longer stolen by a late finish (every game reports its own result; finishes recovered from the
+  laps); custom FPS limit (#272); Linux launcher platform settings and KDE 125% scaling.
+- [v0.9.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.3): older CPUs
+  (without MOVBE, BMI1 and LZCNT) start again; on them the 30 FPS free-flight correction stays off.
+- [v0.9.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.2): some saves no
+  longer stop the game before the main menu; no "cup-files.map" error when a start is tried again;
+  race results ordered by finish times; Pack Tacho's Yes/No in the game's language.
+- [v0.9.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.1): hotfix: the
+  European game no longer crashes in the Ranked timer's last seconds or the Hall of Fame; another
+  SacredFire left open in the background is named instead of a file error.
+- [v0.9.0](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.9.0): Ranked (Normal and
+  Itemless queues, MMR, ranks, seasons, Hall of Fame; a linked Discord or Steam account); voice chat
+  in rooms and races; private Cup, team and N.Sane modes; Pack Tacho built in; one launcher for
+  Windows and Linux with Steam login; DLSS Transformer K; translations and the European game at
+  par; Xbox controls diagram (#256) and Steam Deck controls (#258).
 - [v0.8.8](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8.8): DirectX 11
   renderer (experimental, Windows; shaders prepared once in about 3 minutes); internal resolution,
   FPS unlock and motion blur apply without restarting (#230); a smoother, lighter Windows launcher;

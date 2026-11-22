@@ -238,7 +238,7 @@ rated humans finishing P1/P2 receive +45/−35. The asymmetric caps allow mild i
 | 4 | Platinum Trophy | Sacred Fire | 1500–1999 |
 | 5 | Aku Master | Ultimate Sacred Fire | 2000–2499 |
 | 6 | Uka Legend | Time Crusher | 2500–2999 |
-| 7 | Chaos Grand Prix | Oxide Overlord | 3000+ **and** the mode's top 100 |
+| 7 | Chaos Grand Prix | Master Driver | 3000+ **and** the mode's top 100 |
 
 A 3000+ rating outside the top 100 shows the tier 6 name. Lobby Members uses seven distinct stock
 kart-decal sprites for the seven tiers; the server returns tier names, and the client maps them to

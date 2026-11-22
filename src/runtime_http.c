@@ -516,6 +516,17 @@ static int ryunet_http_addr(const char *host, const char *port, struct sockaddr_
 static pthread_mutex_t items_id_lock = PTHREAD_MUTEX_INITIALIZER;
 static char items_id[48];
 
+/* What this launch plays online with (scripts/online_content.py, BB_ONLINE_CONTENT from run.py and
+ * run.sh): "clean" the game's own files, "characters" character mods only, "modified" anything else
+ * (private rooms only), "unknown" not checked (offline, or an older launcher). */
+const char *runtime_online_content(void) {
+    static const char *const known[] = {"clean", "characters", "modified"};
+    const char *v = getenv("BB_ONLINE_CONTENT");
+    for (unsigned i = 0; v && i < sizeof known / sizeof *known; ++i)
+        if (!strcmp(v, known[i])) return known[i];
+    return "unknown";
+}
+
 void runtime_items_id_set(const char *id) {
     pthread_mutex_lock(&items_id_lock);
     snprintf(items_id, sizeof items_id, "%s", id && strlen(id) < sizeof items_id && !strpbrk(id, "\r\n") ? id : "");
@@ -530,7 +541,63 @@ int runtime_items_id(char *out, size_t size) {
     return have;
 }
 
+/* A connection to RyuNET, with send/receive timeouts of io_ms. Each attempt to connect gives up after
+ * 2 s and is made again, 3 times: a lost SYN otherwise waited the system's own retries (3, 6 then 12 s:
+ * room-alive answers of 21 s with three games open on one PC, 20/11) before failing at all.
+ * INVALID_SOCKET when none connects. */
+static SOCKET ryunet_open(const struct sockaddr_in *sin, int io_ms) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) return INVALID_SOCKET;
+#ifdef _WIN32
+        u_long nonblocking = 1;
+        ioctlsocket(s, FIONBIO, &nonblocking);
+        int r = connect(s, (const struct sockaddr *)sin, sizeof *sin);
+        const int pending = r != 0 && WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+        int nonblocking = 1;
+        ioctl(s, FIONBIO, &nonblocking);
+        int r = connect(s, (const struct sockaddr *)sin, sizeof *sin);
+        const int pending = r != 0 && errno == EINPROGRESS;
+#endif
+        int ok = r == 0;
+        if (pending) {
+            fd_set writable, failed;
+            FD_ZERO(&writable);
+            FD_ZERO(&failed);
+            FD_SET(s, &writable);
+            FD_SET(s, &failed);
+            struct timeval wait = {2, 0};
+            if (select((int)s + 1, NULL, &writable, &failed, &wait) > 0 && FD_ISSET(s, &writable) && !FD_ISSET(s, &failed)) {
+                int error = 0;
+                socklen_t length = sizeof error;
+                ok = getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&error, &length) == 0 && error == 0;
+            }
+        }
+        if (ok) {
+#ifdef _WIN32
+            nonblocking = 0;
+            ioctlsocket(s, FIONBIO, &nonblocking);
+            DWORD timeout = (DWORD)io_ms;
+#else
+            nonblocking = 0;
+            ioctl(s, FIONBIO, &nonblocking);
+            struct timeval timeout = {io_ms / 1000, (io_ms % 1000) * 1000};
+#endif
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+            return s;
+        }
+        closesocket(s);
+    }
+    return INVALID_SOCKET;
+}
+
+static __thread uint64_t ryunet_sent_ms;
+uint64_t runtime_ryunet_last_sent_ms(void) { return ryunet_sent_ms; }
+
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
+    ryunet_sent_ms = 0;
     if (body_size) body[0] = '\0';
     const char *host = getenv("BB_ONLINE_SERVER");
     const char *port = getenv("BB_ONLINE_HTTP_PORT");
@@ -542,19 +609,8 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
     for (int tried = 0; tried < RYUNET_FORMS; tried++) {
         const int form = (first + tried) % RYUNET_FORMS;
-        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        SOCKET s = ryunet_open(&sin, 8000);
         if (s == INVALID_SOCKET) return 0;
-#ifdef _WIN32
-        DWORD timeout = 8000;
-#else
-        struct timeval timeout = {8, 0};
-#endif
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
-        if (connect(s, (const struct sockaddr *)&sin, sizeof sin) != 0) {
-            closesocket(s);
-            return 0;
-        }
         char host_header[96];
         snprintf(host_header, sizeof host_header, "%s", form == 0 ? host
                                                        : form == 1 && address[0] ? address
@@ -566,6 +622,11 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
                                "Cache-Control: no-cache\r\nX-RyuNET-Clock: %s\r\n%s%s%s\r\n",
                                method, target, host_header, ryunet_clock_token(), signed_ok ? "X-RyuNET-Proof: " : "",
                                signed_ok ? proof : "", signed_ok ? "\r\n" : "");
+        {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            ryunet_sent_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+        }
         if (n <= 0 || n >= (int)sizeof request || send(s, request, n, 0) != n) {
             closesocket(s);
             return 0;
@@ -631,19 +692,8 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
     for (int tried = 0; tried < RYUNET_FORMS; tried++) {
         const int form = (first + tried) % RYUNET_FORMS;
-        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        SOCKET s = ryunet_open(&sin, 30000);
         if (s == INVALID_SOCKET) break;
-#ifdef _WIN32
-        DWORD timeout = 30000;
-#else
-        struct timeval timeout = {30, 0};
-#endif
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
-        if (connect(s, (const struct sockaddr *)&sin, sizeof sin) != 0) {
-            closesocket(s);
-            break;
-        }
         char host_header[96];
         snprintf(host_header, sizeof host_header, "%s", form == 0 ? host
                                                        : form == 1 && address[0] ? address
@@ -811,6 +861,11 @@ static int http_exchange(const HttpConnection *c, const HttpRequest *r, const st
         if (machine && *machine && strlen(machine) < 80 && !strpbrk(machine, "\r\n") &&
             hlen < (int)sizeof(header_buf) - 112)
             hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Machine: %s\r\n", machine);
+        /* What this launch plays with (runtime_online_content): the server can keep "modified"
+         * games out of public matchmaking and Ranked (its online_content.go). */
+        if (hlen < (int)sizeof(header_buf) - 48)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Content: %s\r\n",
+                             runtime_online_content());
     }
     hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
 
