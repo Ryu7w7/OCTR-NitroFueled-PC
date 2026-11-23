@@ -74,7 +74,7 @@ static int parse_row(const char *json, struct HofRow *row) {
     size_t n = strcspn(tier, "\"");
     if (!n || n >= sizeof row->tier || tier[n] != '"') return 0;
     for (size_t i = 0; i < n; ++i)
-        if (!isalpha((unsigned char)tier[i]) && tier[i] != ' ') return 0;
+        if (!isalpha((unsigned char)tier[i]) && tier[i] != ' ' && tier[i] != '\'') return 0;
     memcpy(row->tier, tier, n); row->tier[n] = 0;
     return nickname(json, row->name) && number(json, "rank", &row->rank) && row->rank > 0 &&
         number(json, "mmr", &row->mmr);

@@ -82,6 +82,24 @@ static void parse_tests(void) {
         memset(&b, 0, sizeof b); assert(!parse_board(bad[i], &b)); free(b.seasons);
     }
 }
+static void tier_name_tests(void) {
+    const char *tiers[] = {"Bronze", "Silver", "Golden Wumpa", "Power Crystal", "Mythic Gem",
+        "Uka's Chosen", "Ancient Spirit", "Sapphire Relic", "Gold Relic", "Platinum Relic",
+        "Sacred Fire", "Ultimate Sacred Fire", "Time Crusher", "Master Driver"};
+    for (unsigned i=0; i<sizeof tiers/sizeof tiers[0]; ++i) {
+        char json[512];
+        snprintf(json,sizeof json,"{\"current_season\":1,\"seasons\":[{\"id\":1}],"
+            "\"players\":[{\"name\":\"Leader\",\"rank\":1,\"tier\":\"%s\",\"mmr\":2700}],"
+            "\"player\":{\"name\":\"Local\",\"rank\":2,\"tier\":\"%s\",\"mmr\":2600}}",tiers[i],tiers[i]);
+        struct HofBoard b={0};
+        assert(parse_board(json,&b));
+        assert(b.count==1 && !strcmp(b.rows[0].tier,tiers[i]) && !strcmp(b.player.tier,tiers[i]));
+        free(b.seasons);
+    }
+    struct HofRow row={0};
+    assert(!parse_row("{\"name\":\"Leader\",\"rank\":1,\"tier\":\"<tag>\",\"mmr\":2700}",&row));
+}
+
 static void player_visibility_tests(void) {
     const int ranks[] = {99, 100, 500, 1};
     const char *flags[] = {"true", "false", "false", "false"};
@@ -115,6 +133,7 @@ static void player_visibility_tests(void) {
     ready = population = 0;
 }
 int main(void) {
+    tier_name_tests();
     player_visibility_tests();
     friends_self_tests();
     parse_tests();
