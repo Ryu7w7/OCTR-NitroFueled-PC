@@ -5,9 +5,9 @@
 #include "runtime_name_colors.h"
 #include "runtime_ai_catchup.h"
 #include "runtime_chat.h"
+#include "runtime_clan_tags.h"
 #include "runtime_np_online.h"
 #include "runtime_ranked.h"
-#include "runtime_replay.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -119,8 +119,6 @@ static NativeEvent finish_project_context;
 typedef void (ABI *ProjectEvent)(void *, void *);
 typedef void (ABI *OpenProject)(void **, void *, const char *, void *, int, void *, float);
 static ProjectEvent original_project_event;
-static ProjectEvent original_map_choices;
-static NativeEvent clear_map_choice_names;
 static OpenProject open_project;
 typedef void (ABI *OpenAssetProject)(void **, void *, void *, void *, int, void *, float);
 static OpenAssetProject open_asset_project;
@@ -245,13 +243,6 @@ static int finish_order_count;
 /* The Ranked report frozen with it (freeze_ranked_report). */
 static struct runtime_ranked_racer ranked_report[8];
 static int ranked_report_count;
-static struct RaceIdentity {
-    unsigned char *racer;
-    struct CupTotal key;
-    struct runtime_ranked_racer report;
-} race_identity[8];
-static int race_identity_count;
-
 static struct CupTotal team_results[8]; /* Indexed by validated host finish order. */
 static struct CupTotal cup_totals[8];
 static int cup_total_count;
@@ -785,26 +776,6 @@ void runtime_online_mode_request_leave(int fresh) {
 static unsigned char *ranked_settings_owner;
 static int ranked_previous_laps;
 static unsigned char ranked_previous_ai;
-static unsigned char **cutscene_manager;
-static unsigned char *ranked_cutscene_owner;
-static unsigned char ranked_previous_skip;
-static int ranked_intro_active;
-
-static void ranked_intro_skip(void) {
-    unsigned char *manager = cutscene_manager ? *cutscene_manager : NULL;
-    const int active = ranked_intro_active && runtime_ranked_active();
-    if (ranked_cutscene_owner && (!active || manager != ranked_cutscene_owner)) {
-        if (manager == ranked_cutscene_owner) manager[0x7a] = ranked_previous_skip;
-        ranked_cutscene_owner = NULL;
-    }
-    if (!active || !manager) return;
-    if (!ranked_cutscene_owner) {
-        ranked_cutscene_owner = manager;
-        ranked_previous_skip = manager[0x7a];
-    }
-    /* Native cutscene update checks this before the saved auto-skip option. */
-    manager[0x7a] = 1;
-}
 
 static void ranked_race_rules(int active) {
     unsigned char *settings = race_settings ? *race_settings : NULL;
@@ -859,7 +830,6 @@ void runtime_online_mode_new_session(void) {
     team_race_ui_owner = NULL;
     team_result_count = team_results_pending = team_score_opened = team_score_finished = team_effects_played = 0;
     finish_order_count = cup_total_count = cup_result_count = private_grid_count = 0; ranked_report_count = 0;
-    race_identity_count = 0;
     ranked_score_started = ranked_score_phase = ranked_score_finished = 0;
     if (race_manager && *race_manager) {
         unsigned char *manager = *race_manager;
@@ -1003,7 +973,6 @@ static void ABI load_private_map(const char *map, int reason) {
     ranked_score_phase = ranked_score_finished = 0;
     finish_order_count = 0;
     ranked_report_count = 0;
-    race_identity_count = 0;
     cup_timer_pending = 0;
     runtime_nsane_map_loading(map);
     runtime_race_options_map_loading(map);
@@ -1011,7 +980,7 @@ static void ABI load_private_map(const char *map, int reason) {
     normalize_race_teams();
     const int team_return = team_ranking_project && map &&
         !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
-    const int ranked_return = (runtime_ranked_active() || ranked_intro_active) && map &&
+    const int ranked_return = runtime_ranked_active() && map &&
         !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
     int next_mode = 0;
     if (race_manager && *race_manager) memcpy(&next_mode, (unsigned char *)*race_manager + 0xd40, 4);
@@ -1091,8 +1060,6 @@ static void ABI load_private_map(const char *map, int reason) {
         !write_code(ai_asset_reuse_branch, reuse, sizeof native_ai_asset_reuse))
         fputs("Native private CUP: could not enable fresh AI driver loading\n", stderr);
     ranked_race_rules(!lobby && runtime_ranked_active());
-    ranked_intro_active = !lobby && runtime_ranked_active();
-    ranked_intro_skip();
     original_load_map(map, reason);
     if (incomplete_cup_return || team_return || ranked_return) {
         unsigned char *zone = find_zone(*zone_manager, map);
@@ -1101,8 +1068,8 @@ static void ABI load_private_map(const char *map, int reason) {
         if (data) {
             data[0x71] = 0;
             puts(team_return ? "Native private TEAM: no custom podium; returning to lobby" :
-                      ranked_return ? "Ranked: no podium; returning to the online room" :
-                      "Native private CUP: skipped stale podium (no final host results)");
+                 ranked_return ? "Ranked: no podium; returning to the online room" :
+                 "Native private CUP: skipped stale podium (no final host results)");
         }
     }
 }
@@ -1304,7 +1271,7 @@ static int refresh_cup_title(unsigned char *row, const char *title, int depth) {
     return 0;
 }
 
-static void synchronize_finish_time(unsigned char *racer);
+static void synchronize_cup_finish_time(unsigned char *racer);
 static void name_color_project(unsigned char *project);
 static void ABI cup_project_event(void *self, void *event) {
     if (private_cup_race_active &&
@@ -1315,7 +1282,7 @@ static void ABI cup_project_event(void *self, void *event) {
         if (list) memcpy(&count,list+12,4);
         void **items=list ? pointer_at(list,0x20) : NULL;
         for (int i=0;items && count<=8 && i<count;++i)
-            if (items[i]) synchronize_finish_time(items[i]);
+            if (items[i]) synchronize_cup_finish_time(items[i]);
     }
     GetType event_type = (GetType)pointer_at(pointer_at(event, 0), 0);
     if (runtime_ranked_active() && self == handle_object(&ranked_score_project) &&
@@ -1541,46 +1508,6 @@ static void *ABI spawn_net_kart(unsigned char *manager, unsigned char *infos) {
     return original_spawn_net_kart(manager, infos);
 }
 
-static struct RaceIdentity *saved_race_identity(unsigned char *racer) {
-    for (int i=0;i<race_identity_count;++i)
-        if (race_identity[i].racer==racer) return &race_identity[i];
-    return NULL;
-}
-
-int runtime_online_mode_departed_kart(void *entity) {
-    if (!entity || !race_identity_count || !runtime_public_match_active()) return 0;
-    unsigned char *list=racer_manager && *racer_manager ? pointer_at(*racer_manager,0x10) : NULL;
-    const int count=list ? *(int *)(list+12) : 0;
-    void **items=list ? pointer_at(list,0x20) : NULL;
-    for (int i=0;items && count<=8 && i<count;++i) {
-        unsigned char *racer=items[i];
-        const struct RaceIdentity *saved=saved_race_identity(racer);
-        if (saved && saved->report.dc && handle_object((void **)(racer+0x20))==entity) return 1;
-    }
-    return 0;
-}
-
-static void snapshot_race_identity(void) {
-    if (!runtime_public_match_active()) return;
-    unsigned char *list=racer_manager && *racer_manager ? pointer_at(*racer_manager,0x10) : NULL;
-    int count=list ? *(int *)(list+12) : 0;
-    void **items=list ? pointer_at(list,0x20) : NULL;
-    for (int i=0;items && count<=8 && i<count;++i) {
-        unsigned char *racer=items[i];
-        if (!racer || saved_race_identity(racer)) continue;
-        unsigned char *player=handle_object((void **)(racer+0x10));
-        const char *name=player ? pointer_at(player,0x68) : NULL;
-        if (!name || !*name || strlen(name)>=sizeof race_identity[0].report.name || race_identity_count>=8) continue;
-        struct RaceIdentity *saved=&race_identity[race_identity_count++];
-        memset(saved,0,sizeof *saved);
-        saved->racer=racer;saved->key.human=1;
-        memcpy(&saved->key.online_id,player+0xa8,8);
-        memcpy(&saved->key.id,player+0xc8,4);
-        strcpy(saved->report.name,name);
-        saved->report.self=racer[0xb0]!=0;
-    }
-}
-
 static struct CupTotal racer_identity(unsigned char *racer) {
     struct CupTotal result = {0};
     unsigned char *player = handle_object((void **)(racer + 0x10));
@@ -1591,8 +1518,6 @@ static struct CupTotal racer_identity(unsigned char *racer) {
     } else {
         memcpy(&result.id, racer + 0x164, 4);
     }
-    const struct RaceIdentity *saved=saved_race_identity(racer);
-    if (saved) result=saved->key;
     memcpy(&result.points, racer + 0xb8, 4);
     memcpy(&result.finish_position, racer + 0x60, 4);
     return result;
@@ -1719,18 +1644,6 @@ static int lap_finish_stamp(unsigned char *racer, int *laps, int stamps[7]) {
     return times[required - 1];
 }
 
-void runtime_online_mode_racer_left(uint64_t pid) {
-    snapshot_race_identity();
-    for (int i=0;i<race_identity_count;++i) {
-        struct RaceIdentity *saved=&race_identity[i];
-        if (saved->key.online_id!=pid || saved->report.dc) continue;
-        saved->report.dc=1;
-        /* Freeze human lap evidence before native conversion lets an AI drive this kart. */
-        saved->report.time=lap_finish_stamp(saved->racer,&saved->report.laps,saved->report.stamps);
-        saved->report.finished=saved->report.time>0;
-    }
-}
-
 /* The Ranked report as it was when the results came (docs/RANKED_ENDRACE_DESYNC_FIX.md, phase 1):
  * names, finishes and stamps are read once here, while the racers are whole. The report is sent later
  * from its own thread, after native callbacks may have recycled them. */
@@ -1744,8 +1657,7 @@ static void freeze_ranked_report(void **items, int count, const struct CupTotal 
             if (key.human != order[rank].human || key.id != order[rank].id || key.online_id != order[rank].online_id)
                 continue;
             unsigned char *player = handle_object((void **)(racer + 0x10));
-            const struct RaceIdentity *saved=saved_race_identity(racer);
-            const char *name = saved ? saved->report.name : player ? pointer_at(player, 0x68) : NULL;
+            const char *name = player ? pointer_at(player, 0x68) : NULL;
             if (!name || !*name) break;   /* an AI has no name to report; its slot stays */
             struct runtime_ranked_racer *r = &ranked_report[ranked_report_count];
             memset(r, 0, sizeof *r);
@@ -1753,8 +1665,7 @@ static void freeze_ranked_report(void **items, int count, const struct CupTotal 
             strcpy(r->name, name);
             r->time = lap_finish_stamp(racer, &r->laps, r->stamps);
             r->finished = r->time > 0 || team_racer_finished(racer);
-            r->self = saved ? saved->report.self : racer[0xb0] != 0;
-            if (saved && saved->report.dc) *r=saved->report;
+            r->self = racer[0xb0] != 0;
             r->pos = rank + 1;   /* the on-screen position: AIs keep their slots */
             ++ranked_report_count;
             break;
@@ -1788,15 +1699,16 @@ static int capture_finish_order(unsigned char *event) {
         if (position < 0) return 0;
         occupied |= 1u << position;
         order[position] = key;
-        /* CUP awards and cumulative standings use the validated host order. */
-        const struct RaceIdentity *saved=saved_race_identity(items[i]);
-        times[position] = private_cup_race_active ? 0 : saved && saved->report.dc ?
-            saved->report.time : lap_finish_stamp(items[i], NULL, NULL);
+        times[position] = lap_finish_stamp(items[i], NULL, NULL);
     }
-    /* Correct delayed finish messages only when both racers have complete lap records.
-     * A missing remote timestamp is not proof of DNF: keep its host position. */
+    /* The host's order is who it saw finish first: a finish that reached it late put a faster racer
+     * behind slower ones, on every screen and in the Ranked report (20/11: 3rd in 3:34.76 shown 5th,
+     * behind 3:44.39 and 3:45.01, -45 MMR), or a winner among the DNFs when it never arrived (21/11,
+     * JarLster 1st in 2:59.38 scored DNF). Racers whose laps are all recorded come first, by the stamp
+     * of their last lap (the network's lap timestamps, the same on every game); the others keep the
+     * host's order after them. */
     for (int i = 1; i < count; ++i)
-        for (int j = i; j > 0 && times[j] > 0 && times[j - 1] > 0 && times[j] < times[j - 1]; --j) {
+        for (int j = i; j > 0 && times[j] > 0 && (times[j - 1] == 0 || times[j] < times[j - 1]); --j) {
             const struct CupTotal key = order[j];
             const int time = times[j];
             order[j] = order[j - 1], times[j] = times[j - 1];
@@ -1804,16 +1716,6 @@ static int capture_finish_order(unsigned char *event) {
             printf("Race results: player %d (%d) ahead of player %d (%d): the host had them the other "
                    "way round\n", key.id, time, order[j].id, times[j]);
         }
-    for (int i=count-2;i>=0;--i) {
-        int dropped=0;
-        for (int k=0;k<race_identity_count;++k)
-            if (race_identity[k].key.online_id==order[i].online_id &&
-                race_identity[k].report.dc && !race_identity[k].report.finished) dropped=1;
-        if (!dropped) continue;
-        const struct CupTotal key=order[i];
-        memmove(order+i,order+i+1,(size_t)(count-i-1)*sizeof order[0]);
-        order[count-1]=key;
-    }
     memcpy(finish_order, order, sizeof order);
     finish_order_count = count;
     freeze_ranked_report(items, count, order, count);
@@ -2050,9 +1952,7 @@ static void ABI ranking_row_event(unsigned char *self, void *event, void *owner)
         if (extras[i]) memcpy(self + 0x98 + i * 8, &extras[i], sizeof extras[i]);
     if (team_race) team_ranking_row(self);
     unsigned char *racer = handle_object((void **)(self+0x78));
-    const struct RaceIdentity *saved=saved_race_identity(racer);
-    if (saved && saved->report.dc) set_text(pointer_at(self,0xa8),saved->report.name);
-    if (!team_race) online_name_badge(pointer_at(self,0xa8),saved || (racer && handle_object((void **)(racer+0x10))!=NULL));
+    if (!team_race) online_name_badge(pointer_at(self,0xa8),racer && handle_object((void **)(racer+0x10))!=NULL);
 }
 
 static int local_race_team(void) {
@@ -2389,10 +2289,54 @@ static void ABI leader_event(unsigned char *self, void *event, void *owner) {
 
 static void colored_name(unsigned char *placeable, int allowed);
 static int name_colors_allowed(void);
+/* The shared button legend writes the signed-in account through the VSC
+ * display-text setter. Format that specific write before native layout so
+ * Online and Customization cannot repaint a bare nickname between UI events. */
+typedef void (ABI *VscDisplayText)(unsigned char *, const char *);
+static VscDisplayText original_display_text;
+
+static void ABI menu_display_text(unsigned char *placeable, const char *text) {
+    const char *field = placeable ? pointer_at(placeable, 0x28) : NULL;
+    if (!field || strcmp(field, "CurrentUser")) {
+        original_display_text(placeable, text);
+        return;
+    }
+    const char *account = runtime_np_get_online_name();
+    if (account && text && *text && !strcmp(text, account)) {
+        char label[CLAN_VISUAL_CAP];
+        if (getenv("BB_CLAN_TILES")) runtime_clan_visual_label(account, label, sizeof label);
+        else runtime_clan_label(account, label, sizeof label);
+        original_display_text(placeable, label);
+        static int reported;
+        if (!reported && strcmp(label, account)) {
+            reported = 1;
+            puts("Clan tags: decorated signed-in footer");
+        }
+    } else {
+        original_display_text(placeable, text);
+    }
+    colored_name(placeable, name_colors_allowed());
+}
+
+/* Preserve the account nickname for rank, colour, host and voice lookups. */
+static void clan_name(unsigned char *placeable) {
+    const char *current = placeable ? pointer_at(placeable, 0x30) : NULL;
+    if (!current || strlen(current) >= CLAN_MARKER_CAP) return;
+    // The voice worker owns the speaker suffix. It removes the icon when
+    // speaking ends; avoid stripping and reappending it on every frame.
+    const size_t length = strlen(current), speaker = sizeof RUNTIME_NAME_SPEAKER_SUFFIX - 1;
+    if (length >= speaker && !strcmp(current + length - speaker, RUNTIME_NAME_SPEAKER_SUFFIX)) return;
+    char label[CLAN_VISUAL_CAP];
+    if (getenv("BB_CLAN_TILES")) runtime_clan_visual_label(current, label, sizeof label);
+    else runtime_clan_label(current, label, sizeof label);
+    if (strcmp(label, current)) set_text(placeable, label);
+}
+
 static void ABI leader_update(unsigned char *self, unsigned char *owner, float dt) {
     original_leader_update(self, owner, dt);
     team_leader_border(self);
     colored_name(pointer_at(self, 0x20), name_colors_allowed()); /* _playerTagText */
+    clan_name(pointer_at(self, 0x20));
 }
 
 static void ABI race_team_setup(unsigned char *self) {
@@ -2433,7 +2377,6 @@ static void ABI place_cup_racers(unsigned char *self) {
     }
     original_place_racers(self);
     snapshot_private_grid();
-    snapshot_race_identity();
 }
 
 static void snapshot_cup_totals(void) {
@@ -2472,8 +2415,8 @@ static void restore_cup_total(unsigned char *racer) {
 
 /* Network lap timestamps are authoritative. A follower's local clock can
  * differ, and its final-time callback can be skipped until race teardown. */
-static void synchronize_finish_time(unsigned char *racer) {
-    if (!(private_cup_race_active || runtime_public_match_active()) || !racer[0x8c]) return;
+static void synchronize_cup_finish_time(unsigned char *racer) {
+    if (!private_cup_race_active || !racer[0x8c]) return;
     unsigned char *laps=pointer_at(racer,0x90);
     int required=0, count=0;
     if (race_settings && *race_settings) memcpy(&required,*race_settings+12,4);
@@ -2508,13 +2451,13 @@ static void ABI racer_finished(unsigned char *racer, int finished) {
     /* Another PC's racer finishes here with its final time still 0: the finish board showed
      * "-:--:--" for them until the host's results after the countdown (19/11, Leon_EF 2nd).
      * Its network lap times are already in: the time now, as the results will set it. */
-    if (first_finish) synchronize_finish_time(racer);
+    if (private_cup_race_active && first_finish) synchronize_cup_finish_time(racer);
     if (private_cup_race_active && first_finish) trace_cup_finish("native-callback",racer);
     if (team_result_count && team_ranking_project) {
         refresh_team_results();
     }
     if (!private_cup_race_active || !cup_result_count) return;
-    synchronize_finish_time(racer);
+    synchronize_cup_finish_time(racer);
     const struct CupTotal key = racer_identity(racer);
     for (int i = 0; i < cup_result_count; ++i) {
         const struct CupTotal *result = &cup_results[i].key;
@@ -2593,7 +2536,7 @@ static int apply_cup_results(unsigned char *event) {
                 break;
             }
         }
-        synchronize_finish_time(racer);
+        synchronize_cup_finish_time(racer);
         if (!cup_result_count) trace_cup_finish("host-results",racer);
         const int position = positions[i] + 1;
         const int award = positions[i] < awards ? points[positions[i]] : 0;
@@ -2617,11 +2560,6 @@ static int apply_cup_results(unsigned char *event) {
 static int ABI podium_position(void *racer, int finish_position) {
     for (int i = 0; i < podium_count; ++i)
         if (podium_order[i] == racer) return i + 1;
-    if (runtime_public_match_active() && finish_order_count) {
-        const struct CupTotal key=racer_identity(racer);
-        for (int i=0;i<finish_order_count;++i)
-            if (same_cup_racer(&key,&finish_order[i])) return i+1;
-    }
     return finish_position;
 }
 
@@ -2647,25 +2585,9 @@ static void open_team_score(void) {
 
 static void ABI race_results_received(unsigned char *event) {
     podium_count = 0;
-    const int captured = capture_finish_order(event);
-    if (!captured) {
-        unsigned char *list = racer_manager && *racer_manager ? pointer_at(*racer_manager, 0x10) : NULL;
-        int count = 0;
-        if (list) memcpy(&count, list + 12, 4);
-        void **items = list ? pointer_at(list, 0x20) : NULL;
-        fprintf(stderr, "Race results: rejected permutation count=%d ids=", count);
-        for (int i = 0; i < 8; ++i) {
-            int id;
-            memcpy(&id, event + 0x20 + i * 4, 4);
-            fprintf(stderr, "%s%d", i ? "," : "", id);
-        }
-        fputs(" roster=", stderr);
-        for (int i = 0; items && count <= 8 && i < count; ++i)
-            fprintf(stderr, "%s%d", i ? "," : "", items[i] ? result_racer_id(items[i]) : -1);
-        fputc('\n', stderr);
-    }
-    if (captured) open_team_score();
-    const int applied = captured && apply_cup_results(event);
+    if (!capture_finish_order(event)) return;
+    open_team_score();
+    const int applied = apply_cup_results(event);
     if (applied && current_cup_index() == 3) {
         unsigned char *list = pointer_at(*racer_manager, 0x10);
         podium_count = cup_result_count;
@@ -2683,10 +2605,7 @@ static void ABI race_results_received(unsigned char *event) {
     if (list) memcpy(&count, list + 12, 4);
     void **items = list ? pointer_at(list, 0x20) : NULL;
     for (int i = 0; items && i < count && i < 8; ++i)
-        if (items[i]) {
-            restore_finish_position(items[i]);
-            synchronize_finish_time(items[i]);
-        }
+        if (items[i]) restore_finish_position(items[i]);
     /* Native result handling can complete remote racers; score that final state. */
     apply_team_results(event);
     ranked_score_finished = runtime_ranked_active();
@@ -2756,8 +2675,9 @@ static void ABI private_race_timer_done(void) {
         /* Ranked ends the room: go back to the online menu with the party so the
          * next race starts from a fresh queue, not the finished room's map vote. */
         printf("Ranked: race countdown reached 0, quitting to main menu with party\n");
-        runtime_online_mode_set_return_mode(2);
-        runtime_public_itemless_ranked_return();
+        const int ret_mode = runtime_public_itemless_lobby_mode() ? 1 : 0;
+        runtime_online_mode_set_return_mode(ret_mode);
+        runtime_public_itemless_menu_return();
         if (quit_to_main_menu && race_manager && *race_manager) {
             quit_to_main_menu(*race_manager, 0, 0, 1, 0);
             return;
@@ -2796,8 +2716,6 @@ static void ABI quit_to_main_menu_hook(void *manager, int a, int b, int with_par
         return_to_lobby();
         return;
     }
-    if (runtime_public_match_active() || runtime_ranked_active())
-        runtime_public_itemless_begin_race_quit();
     original_quit_to_main_menu(manager, a, b, with_party, d);
 }
 
@@ -3112,26 +3030,8 @@ static void refresh_ranked_score(void) {
 }
 
 static void team_lobby_frame(void);
-int runtime_online_mode_race_running(void) {
-    if (!network_state || !network_race) return 0;
-    /* Native state 16 survives Ranked return; its predicate excludes only OnlineLobby. */
-    const char *level = rr_current_level();
-    if (level && (strcasestr(level, "octane_startscreen") ||
-                  strcasestr(level, "octane_onlinelobby"))) return 0;
-    unsigned char *state = network_state();
-    if (!state) return 0;
-    int state_id;
-    memcpy(&state_id, state + 0x144, sizeof state_id);
-    return network_race(state_id);
-}
 void runtime_online_mode_note_frame(void) {
-    ranked_intro_skip();
     team_lobby_frame();
-    if (runtime_online_mode_race_running()) {
-        snapshot_race_identity();
-        runtime_party_server_tick();
-    }
-    runtime_public_itemless_poll_race_host();
     runtime_public_itemless_poll_ranked_request();
     startup_update();
     apply_pending_online_reset();
@@ -3956,14 +3856,7 @@ static int ranked_waiting_players(void);
 static void ranked_waiting_timer(void) {
     static int shown;
     static char saved_desc[96];
-    const int survivor = runtime_public_waiting_for_opponent();
-    const int found = runtime_public_found_room();
-    const int ranked = runtime_ranked_active();
-    int elapsed = 0, timeout, range, search_ranked;
-    const int searching = survivor &&
-        runtime_matchmaking_view(&elapsed, &timeout, &range, &search_ranked);
-    const int retained = ranked && survivor && found;
-    const int active = searching || retained || (ranked && found && runtime_public_match_active());
+    const int active = runtime_ranked_active() && runtime_public_found_room() && runtime_public_match_active();
     if (!active && !shown) return;
     unsigned char *desc, *value;
     if (!lobby_timer_texts(&desc, &value)) {
@@ -3979,7 +3872,7 @@ static void ranked_waiting_timer(void) {
     }
     const int waiting = runtime_online_mode_ranked_waiting();
     const int timed = ranked_component_left >= 0.0f && monotonic_ms() - ranked_component_at < 1000;
-    if (active && (searching || retained || waiting || timed)) {
+    if (active && (waiting || timed)) {
         if (!shown) {
             const char *d = pointer_at(desc, 0x30);
             snprintf(saved_desc, sizeof saved_desc, "%s", d && (uintptr_t)d >= 0x10000 ? d : "");
@@ -3988,11 +3881,7 @@ static void ranked_waiting_timer(void) {
         timer_stop_native(desc, value);
         char text[128];
         int seconds = -1;
-        if (searching) {
-            set_text(desc, runtime_text("SEARCHING"));
-            snprintf(text, sizeof text, "%02d:%02d", elapsed / 60, elapsed % 60);
-            set_text(value, text);
-        } else if (retained || waiting) {
+        if (waiting) {
             snprintf(text, sizeof text, "%s", runtime_text("WAITING"));
             set_text(desc, text);
             snprintf(text, sizeof text, "%d/%d", ranked_waiting_players(),
@@ -4089,7 +3978,7 @@ static void panel_visibility(unsigned char *panel, int active) {
     } else hide_placeable(panel,1);
 }
 
-static void matchmaking_labels(unsigned char *node, int active, int elapsed, int timeout, int range, int ranked, int waiting, int depth) {
+static void matchmaking_labels(unsigned char *node, int active, int elapsed, int timeout, int range, int ranked, int depth) {
     if (!node || depth>16) return;
     const char *tag=pointer_at(node,0x28);
     if (tag && !strcmp(tag,"OCTR_SEARCH_PANEL")) panel_visibility(node,active);
@@ -4103,12 +3992,10 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
                 *(unsigned *)(node+12)|=0x1000;
             }
         }
-        if (!strcmp(tag,"OCTR_SEARCH_TITLE")) set_text(node,waiting ? runtime_text("WAITING") : "SEARCHING");
+        if (!strcmp(tag,"OCTR_SEARCH_TITLE")) set_text(node,"SEARCHING");
         else if (!strcmp(tag,"OCTR_SEARCH_TIME")) {
             char text[48];
-            if (waiting) snprintf(text,sizeof text,"%d/%d",elapsed,timeout);
-            else if (!ranked) snprintf(text,sizeof text,"%02d:%02d",elapsed/60,elapsed%60);
-            else snprintf(text,sizeof text,"%02d:%02d / %02d:%02d",elapsed/60,elapsed%60,timeout/60,timeout%60);
+            snprintf(text,sizeof text,"%02d:%02d / %02d:%02d",elapsed/60,elapsed%60,timeout/60,timeout%60);
             set_text(node,text);
         } else if (!strcmp(tag,"OCTR_SEARCH_RANGE")) {
             hide_placeable(node,!ranked);
@@ -4126,7 +4013,7 @@ static void matchmaking_labels(unsigned char *node, int active, int elapsed, int
     int count=children ? *(int *)(children+12) : 0;
     void **items=children ? pointer_at(children,0x20) : NULL;
     for (int i=0;items && count<=256 && i<count;++i)
-        matchmaking_labels(items[i],active,elapsed,timeout,range,ranked,waiting,depth+1);
+        matchmaking_labels(items[i],active,elapsed,timeout,range,ranked,depth+1);
 }
 
 int runtime_online_mode_matchmaking_cancel(int route) {
@@ -4168,15 +4055,7 @@ void runtime_online_mode_matchmaking_update(unsigned char *root) {
     if (matchmaking_private_project) return;
     int elapsed=0,timeout=180,range=0,ranked=0;
     int active=runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
-    const int waiting = !active && runtime_ranked_active() && runtime_public_waiting_for_opponent() && runtime_public_found_room();
-    if (waiting) {
-        elapsed = ranked_waiting_players();
-        timeout = runtime_public_ranked_min_players();
-        ranked = 0; /* Rank range belongs to a search. */
-    }
-    unsigned char *desc, *value;
-    const int native_timer = runtime_public_waiting_for_opponent() && lobby_timer_texts(&desc, &value) && placeable_shown(desc, NULL);
-    matchmaking_labels(root,(active || waiting) && !native_timer,elapsed,timeout,range,ranked,waiting,0);
+    matchmaking_labels(root,active,elapsed,timeout,range,ranked,0);
 }
 
 static void refresh_lobby_card(unsigned char *owner) {
@@ -4490,7 +4369,9 @@ void ranked_mode_select_layout(unsigned char *root, int ranked) {
     float current_first, current_content;
     memcpy(&current_first, first + 0x64, 4);
     memcpy(&current_content, content + 0x64, 4);
-    if (first != cached_first || content != cached_content) {
+    if (first != cached_first || content != cached_content ||
+        (current_first != first_y && current_first != first_y + 190.0f) ||
+        (current_content != content_y && current_content != content_y + 190.0f)) {
         cached_first = first;
         cached_content = content;
         first_y = current_first;
@@ -4899,8 +4780,6 @@ int runtime_online_mode_ranked_waiting(void) {
 /* The players shown in "WAITING x/y": the server's count when it has one (it counts a guest still
  * joining through the relay), else the game's own list. */
 static int ranked_waiting_players(void) {
-    const int players = runtime_public_waiting_for_opponent();
-    if (players) return players;
     return runtime_online_mode_room_players();
 }
 
@@ -4969,7 +4848,6 @@ static void ranked_hold_countdown(unsigned char *self) {
 }
 
 static void ABI lobby_countdown(unsigned char *self) {
-    if (runtime_public_waiting_for_opponent()) return;
     ranked_hold_countdown(self);
     int mode = 0, teams = 0;
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
@@ -4984,17 +4862,6 @@ static void ABI lobby_countdown(unsigned char *self) {
     original_lobby_countdown(self);
 }
 
-/* Native receipt appends three entries; a repeated room snapshot replaces that snapshot. */
-static void ABI receive_map_choices(void *self, void *event) {
-    /* Late party packets must not reopen voting after the found room was left. */
-    if (!runtime_public_found_room()) return;
-    unsigned char *names = pointer_at(self, 0x48), *modes = pointer_at(self, 0x50);
-    clear_map_choice_names(names);
-    const int empty = 0;
-    memcpy(modes + 12, &empty, sizeof empty);
-    original_map_choices(self, event);
-}
-
 /* Ranked: the exact native map-selection moment. COctaneLobbyTimerComponent posts
  * CLobbyMapVoteFinishedMessage (sender image+0x120f740, called from image+0xeb7ee0), and the
  * lobby subscribes this handler (image+0xebcd40) to that message. Every client runs it once per
@@ -5002,7 +4869,6 @@ static void ABI receive_map_choices(void *self, void *event) {
  * Below the server's min_players, show the notice and cancel before the native handler selects
  * the map. */
 static void ABI ranked_map_vote_finished(unsigned char *self) {
-    if (runtime_public_waiting_for_opponent()) return;
     if (!is_private() && runtime_public_found_room()) {
         static uint64_t handled_room;
         /* Status codes, not booleans: -1 means the room is already dissolved, so it must not be
@@ -5126,7 +4992,7 @@ static void name_color_changed(unsigned char *placeable) {
     memcpy(placeable + 12, &flags, 4);
 }
 
-/* BB_NAME_COLORS=0: no nickname is colored and no GUI tree is walked (to rule them out in a test). */
+/* BB_NAME_COLORS=0: disable nickname colors independently of clan labels. */
 static int name_colors_off(void) {
     static int off = -1;
     if (off < 0) {
@@ -5141,7 +5007,7 @@ static void colored_name(unsigned char *placeable, int allowed) {
     if (!placeable || name_colors_off()) return;
     const char *text = (const char *)pointer_at(placeable, 0x30);
     float rgb[3];
-    const int colored = allowed && text && runtime_name_color(text, rgb);
+    const int colored = allowed && runtime_clan_color(text, rgb);
     ColoredName *entry = NULL, *free_entry = NULL;
     for (unsigned i = 0; i < sizeof colored_names / sizeof *colored_names; ++i) {
         if (colored_names[i].placeable == placeable) entry = colored_names + i;
@@ -5214,7 +5080,8 @@ static void online_name_badge(unsigned char *name, int human) {
         if (label && !strncmp(label,"OCTR_NAME_ICON_",15)) { badges=1;break; }
     }
     if (!badges) return;
-    const char *nick = pointer_at(name,0x30);
+    char account[17];
+    const char *nick = runtime_clan_identity(pointer_at(name,0x30), account);
     int mode = runtime_speed_race_active() != 0, tier = -1;
     const int online=in_network_game() && !battle_selected();
     human=online && human>0 && nick && *nick;
@@ -5271,6 +5138,19 @@ static void online_name_badge(unsigned char *name, int human) {
 static void name_color_tree(unsigned char *placeable, int depth, int allowed) {
     if (!placeable || depth > 32 || name_color_visited > 4096) return;
     ++name_color_visited;
+    /* These are account-name fields in the shipped GUI projects. Ordinary
+     * menu text can also be a valid nickname, so never use it as a lookup. */
+    const char *field = pointer_at(placeable, 0x28);
+    static const char *const account_fields[] = {
+        "[PlayerGamerTagText]", "CurrentUser", "[PlayerTagText]", "[FriendName]",
+        "Gamertag_Text", "PlayerName"
+    };
+    for (size_t i = 0; field && i < sizeof account_fields / sizeof account_fields[0]; ++i) {
+        if (!strcmp(field, account_fields[i])) {
+            clan_name(placeable);
+            break;
+        }
+    }
     colored_name(placeable, allowed);
     /* a placeable hosting another composition (a nested menu: the members list, a row) */
     unsigned char *composition = resolved_object(pointer_at(placeable, 0x38));
@@ -5307,7 +5187,7 @@ static uint64_t monotonic_ms(void) {
  * composition) passes its events through cup_project_event: the lobby's members, the pause
  * menu's racers, the results. Each project's tree is walked at most every 150 ms. */
 static void name_color_project(unsigned char *project) {
-    unsigned char *root = project && !name_colors_off() ? pointer_at(project, 0x10) : NULL;
+    unsigned char *root = project ? pointer_at(project, 0x10) : NULL;
     if (!root) return;
     static struct { unsigned char *root; uint64_t at; } roots[32];
     static unsigned next_root;
@@ -5343,7 +5223,8 @@ static int ranked_icon_logged;
 
 static void ranked_member_icons(unsigned char *self) {
     unsigned char *name = pointer_at(self, 0x10);
-    const char *nick = name ? pointer_at(name, 0x30) : NULL;
+    char account[17];
+    const char *nick = name ? runtime_clan_identity(pointer_at(name, 0x30), account) : NULL;
     if (!name) return;
     int mode = 0, selected_mode = -1;
     const uint64_t at = __atomic_load_n(&mode_select_updated_ms, __ATOMIC_RELAXED);
@@ -5382,8 +5263,6 @@ static void ranked_member_icons(unsigned char *self) {
         const int background = label && !strncmp(label, "OCTR_RANK_SHADOW_", 17);
         const int foreground = label && !strncmp(label, "OCTR_RANK_ICON_", 15);
         if (!background && !foreground) continue;
-        /* Rebuild generated sprite draw state during native menu focus animations. */
-        if (!(*(unsigned *)(icon + 12) & 0x400)) name_color_changed(icon);
         ++matched;
         const char *rank = label + (background ? 17 : 15);
         const int icon_mode = rank[0] - '0';
@@ -5411,10 +5290,7 @@ static void ranked_member_icons(unsigned char *self) {
                 if (background) x += 2.0f;
                 float now_x;
                 memcpy(&now_x, icon + 0x60, sizeof now_x);
-                if (now_x != x) {
-                    memcpy(icon + 0x60, &x, sizeof x);
-                    name_color_changed(icon);
-                }
+                if (now_x != x) memcpy(icon + 0x60, &x, sizeof x);
             }
             continue;
         }
@@ -5444,6 +5320,7 @@ static void ABI member_event(unsigned char *self, void *event, void *owner) {
     if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
+    clan_name(pointer_at(self, 0x10));
 }
 
 static void ABI member_update(unsigned char *self, unsigned char *owner, float dt) {
@@ -5452,32 +5329,32 @@ static void ABI member_update(unsigned char *self, unsigned char *owner, float d
     team_lobby_row(self);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
+    clan_name(pointer_at(self, 0x10));
 }
 
 static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {
     original_marker_update(self, owner, dt);
+    clan_name(pointer_at(self, 0x50));
     colored_name(pointer_at(self, 0x50), name_colors_allowed() && !self[0x88]); /* _playerTagPlaceable, _isBattle */
 }
 
 static void ABI results_item_update(unsigned char *self, unsigned char *owner, float dt) {
-    unsigned char *result_racer = handle_object((void **)(self + 0x78));
-    if (result_racer) synchronize_finish_time(result_racer);
     original_results_item_update(self, owner, dt);
     if (team_ranking_project) {
         if (team_results_pending) refresh_team_results();
         team_ranking_row(self);
     }
+    clan_name(pointer_at(self, 0xa8));
     colored_name(pointer_at(self, 0xa8), name_colors_allowed() && !self[0xd8]); /* _namePlaceable, _isTeamBattle */
     unsigned char *racer=handle_object((void **)(self+0x78));
-    const struct RaceIdentity *saved=saved_race_identity(racer);
-    if (saved && saved->report.dc) set_text(pointer_at(self,0xa8),saved->report.name);
-    if (!team_ranking_project) online_name_badge(pointer_at(self,0xa8),saved || (racer && handle_object((void **)(racer+0x10))!=NULL));
+    if (!team_ranking_project) online_name_badge(pointer_at(self,0xa8),racer && handle_object((void **)(racer+0x10))!=NULL);
 }
 
 static void ABI team_slot_update(unsigned char *self, unsigned char *owner, float dt) {
     if (runtime_private_party_update()) return;
     if (resume_private_map()) return; /* Loading may invalidate the old UI objects. */
     original_team_slot_update(self, owner, dt);
+    clan_name(pointer_at(self, 0x10));
     colored_name(pointer_at(self, 0x10), name_colors_allowed()); /* _namePlaceable */
     refresh_lobby_members_visibility();
     if (!private_team_selector_allowed()) return;
@@ -5844,8 +5721,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     const unsigned char disable_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
         0x41,0x54,0x53,0x48,0x83,0xec,0x10};
     if (memcmp(image + (0x110b9c0 - shift), disable_prefix, sizeof disable_prefix) ||
-        memcmp(image + (0x110bbc0 - shift), legend_prefix, sizeof legend_prefix) ||
-        memcmp(image + (0xeba370 - shift), legend_prefix, sizeof legend_prefix)) return 0;
+        memcmp(image + (0x110bbc0 - shift), legend_prefix, sizeof legend_prefix)) return 0;
     unsigned char network_branch[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
         0x48,0x89,0xd3,0x49,0x89,0xfe,0xe8,0xbe,0x63,0x93,0xff};
     network_branch[14] += (unsigned char)shift;
@@ -6196,12 +6072,7 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     jump_to(trampoline + 2752 + sizeof map_vote_prefix,
             image + (0xebcd40 - shift) + sizeof map_vote_prefix);
     original_map_vote_finished = (NativeEvent)(trampoline + 2752);
-    memcpy(trampoline + 2800, legend_prefix, sizeof legend_prefix);
-    jump_to(trampoline + 2800 + sizeof legend_prefix,
-            image + (0xeba370 - shift) + sizeof legend_prefix);
-    original_map_choices = (ProjectEvent)(trampoline + 2800);
-    clear_map_choice_names = (NativeEvent)(image + (0x1510220 - shift));
-    stub_end = 2800 + sizeof legend_prefix + 14;
+    stub_end = 2752 + sizeof map_vote_prefix + 14;
     team_confirm_type = (void **)(image + 0x2abee50);
     team_unconfirm_type = (void **)(image + 0x2abee68);
     original_lobby_countdown = (NativeEvent)(trampoline + 1472);
@@ -6349,7 +6220,6 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     zone_manager = (void **)(image + 0x2ae3c18);
     set_race_mode = (SetSeason)(image + (0xfdeb70 - shift));
     race_manager = (void **)(image + 0x2acde48);
-    cutscene_manager = (unsigned char **)(image + 0x2ab67f0);
     original_choice = (EmitChoice)trampoline;
     original_season = (SetSeason)(trampoline + 64);
     original_event = (EventHandler)(image + (0x1277c70 - shift));
@@ -6417,6 +6287,14 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     }
     jump_to(jump, team_ready_broadcast);
     if (!write_code(image + 0x248d10, jump, sizeof jump)) return 0;
+    /* The property registry imports these adjacent getter/setter bindings
+     * before constructing VSC graphs. Other layouts retain the stock writer. */
+    if (pointer_at(image, 0x2807238) == image + 0x268ed0 &&
+        pointer_at(image, 0x2807170) == image + 0x268ef0) {
+        original_display_text = (VscDisplayText)(image + 0x268ef0);
+        const VscDisplayText writer = menu_display_text;
+        if (!write_code(image + 0x2807170, &writer, sizeof writer)) return 0;
+    }
     const BehaviorUpdate team_slot_replacement = team_slot_update;
     if (!write_code(image + 0x2544140, &team_slot_replacement, sizeof team_slot_replacement)) return 0;
     const EventHandler team_selector_replacement = team_selector_event;
@@ -6474,8 +6352,6 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xeb7950 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, ranked_map_vote_finished);
     if (!write_code(image + (0xebcd40 - shift), jump, sizeof jump)) return 0;
-    jump_to(jump, receive_map_choices);
-    if (!write_code(image + (0xeba370 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, team_selector_disable_node);
     if (!write_code(image + (0x110b9c0 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, ranking_network_branch);

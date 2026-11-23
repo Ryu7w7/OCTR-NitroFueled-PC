@@ -77,6 +77,7 @@ let
     <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
     <fontconfig>
       <dir>${pkgs.dejavu_fonts}/share/fonts</dir>
+      <dir>${pkgs.noto-fonts}/share/fonts</dir>
       <dir>${pkgs.noto-fonts-cjk-sans}/share/fonts</dir>
       <dir>/usr/share/fonts</dir>
       <dir>/usr/local/share/fonts</dir>

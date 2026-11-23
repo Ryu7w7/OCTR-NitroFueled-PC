@@ -15,7 +15,7 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
     return reply_status;
 }
 
-static int near(float a, float b) { return a - b < 0.001f && b - a < 0.001f; }
+static int close_channel(float a, float b) { return a - b < 0.001f && b - a < 0.001f; }
 
 int main(void) {
     float rgb[3] = {-1, -1, -1};
@@ -28,24 +28,24 @@ int main(void) {
 
     /* a whole turn, slow and without a jump */
     rainbow_at(0, 12000, rgb);
-    assert(near(rgb[0], 1) && near(rgb[1], RAINBOW_FLOOR) && near(rgb[2], RAINBOW_FLOOR));
+    assert(close_channel(rgb[0], 1) && close_channel(rgb[1], RAINBOW_FLOOR) && close_channel(rgb[2], RAINBOW_FLOOR));
     rainbow_at(4000, 12000, rgb);
-    assert(near(rgb[1], 1));
+    assert(close_channel(rgb[1], 1));
     rainbow_at(8000, 12000, rgb);
-    assert(near(rgb[2], 1));
+    assert(close_channel(rgb[2], 1));
     float before[3];
     rainbow_at(11999, 12000, before);
     rainbow_at(12000, 12000, rgb);
-    assert(near(rgb[0], before[0]) && rgb[2] - before[2] < 0.01f);
+    assert(close_channel(rgb[0], before[0]) && rgb[2] - before[2] < 0.01f);
 
     /* the server's list replaces it, also its speed, and what cannot be read stays out */
     reply_text = "ok\nstaff_1\t#ff8000\nRyu7w7\trainbow:30\nbad line\nno\t#ffffff\nnocolor\tred\nslow\trainbow:999\nfast\trainbow:2\n"
                  "toolongtobeanicknamehere\t#000000\ncrlf_1\t#00ff00\r\n";
     assert(fetch_names());
     assert(current->count == 3);
-    assert(runtime_name_color("Staff_1", rgb) && near(rgb[0], 1) && near(rgb[1], 128 / 255.0f) && near(rgb[2], 0));
+    assert(runtime_name_color("Staff_1", rgb) && close_channel(rgb[0], 1) && close_channel(rgb[1], 128 / 255.0f) && close_channel(rgb[2], 0));
     assert(runtime_name_color("ryu7w7", rgb) && current->names[1].turn_ms == 30000);
-    assert(runtime_name_color("crlf_1", rgb) && near(rgb[1], 1));
+    assert(runtime_name_color("crlf_1", rgb) && close_channel(rgb[1], 1));
     assert(!runtime_name_color("slow", rgb) && !runtime_name_color("no", rgb));
 
     /* the same list again is not a new one */

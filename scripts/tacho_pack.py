@@ -37,7 +37,7 @@ from archive_reader import Archive
 from mod_file_paths import resolve
 
 FOLDER = Path(__file__).resolve().parent / 'tacho_pack'
-FORMAT = 3
+FORMAT = 4
 # The pack as shipped: the manifest (which holds every game file's SHA256) and its patches.
 EXPECTED = {
     'manifest.json': '0def9a284e171fb1533fddb2115fb75edcb5a64a8f62d8ba1351170bd22bb58f',
@@ -136,7 +136,8 @@ def localized(op, own=None):
     column = octr_texts.current_column()
     rebase = own is not None and hashlib.sha256(own).hexdigest() == EU_ORIGINALS.get(op['asset'].lower())
     translate = op['asset'].lower() == OPTIONS_PAGE and column != 'mx'
-    if not rebase and not translate:
+    gameplay = op['asset'].lower() == OPTIONS_PAGE
+    if not rebase and not gameplay:
         return data
     from igz_file import Igz
     page = Igz(data)
@@ -148,6 +149,9 @@ def localized(op, own=None):
             english = OPTION_TEXTS.get(original)
             if english:
                 page.strings[i] = octr_texts.text(english, None if column == 'en' else column)
+    if gameplay:
+        from gameplay_camera import add_camera
+        add_camera(page, column)
     return page.build()
 
 
@@ -196,6 +200,10 @@ def _swaps(game, ops, base):
     return found, chosen
 
 
+def _camera_page_digest():
+    return hashlib.sha256(Path(__file__).with_name('gameplay_camera.py').read_bytes()).hexdigest()
+
+
 def prepare(game, out, config, env, base):
     """({guest archive: patch file}, {environment overrides}). Raises Modified when the pack's
     files were changed. config is unused: the pack has no settings."""
@@ -204,7 +212,7 @@ def prepare(game, out, config, env, base):
     folder = Path(out) / 'tacho-pack'
     names = sorted({op['archive'] for op in ops})
     archives = [resolve(Path(game) / 'archives' / n) for n in names]
-    stamp = {'format': FORMAT, 'script': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    stamp = {'camera': _camera_page_digest(), 'format': FORMAT, 'script': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
              'manifest': hashlib.sha256((FOLDER / 'manifest.json').read_bytes()).hexdigest(),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives if a.is_file()},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())},
@@ -263,7 +271,7 @@ def graphics_tab_override(game, out, env, chosen):
     if not relevant:
         return {}
     generated = hashlib.sha256(Path(source).read_bytes()).hexdigest()
-    key = hashlib.sha256(json.dumps({'format': FORMAT, 'generated': generated,
+    key = hashlib.sha256(json.dumps({'format': FORMAT, 'camera': _camera_page_digest(), 'generated': generated,
                                      'language': octr_texts.current_column(),
                                      'operations': sorted(relevant.values(), key=lambda o: (o['archive'], o['index']))},
                                     sort_keys=True).encode()).hexdigest()[:16]

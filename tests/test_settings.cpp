@@ -31,6 +31,8 @@ int main() {
     BbSettings::Load();
     auto& s = BbSettings::Get();
     assert(s.temporal == BbSettings::TemporalFsr3 && !s.show_fps && s.menu_x < 0.0f);
+    assert(s.starting_camera == -1);
+    s.starting_camera = 1;
     s.show_fps = true;
     s.temporal = BbSettings::TemporalOff;
     s.menu_x = 0.625f;
@@ -45,9 +47,12 @@ int main() {
     assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
     assert(saved.find("temporal=fsr3") == std::string::npos);
 
+    assert(saved.find("starting_camera=1\n") != std::string::npos);
+    s.starting_camera = 0;
     s.menu_x = -1.0f;
     s.menu_y = -1.0f;
     BbSettings::Load();
+    assert(s.starting_camera == 1);
     assert(s.menu_x == 0.625f && s.menu_y == 0.125f && s.temporal == BbSettings::TemporalOff);
 
     // External changes appear without reloading startup state; local edits survive the merge.
@@ -89,6 +94,8 @@ int main() {
         _exit(0);
     }
     close(gate[0]);
+    assert(s.starting_camera == -1);
+    s.starting_camera = 1;
     s.show_fps = true;
     assert(write(gate[1], "x", 1) == 1);
     close(gate[1]);

@@ -335,6 +335,57 @@ def with_speaker(blob, glyph):
     return bytes(out)
 
 
+def with_clan_brackets(blob, outlined):
+    """Give the two unused 1.21 alternate glyphs literal square brackets.
+
+    Older fonts use the ASCII codes for shoulder buttons. Only the newer
+    Unicode button layout has these two spare cells and accepts this patch.
+    """
+    array, slots = _alternate_list(blob)
+    if array is None or any(code in (91, 93) for _, _, code in slots):
+        return blob
+    width, height, at, length = image_location(blob)
+    cells = {}
+    for _, metrics, code in slots:
+        if code:
+            continue
+        u, v, right, bottom = struct.unpack_from('<4f', blob, metrics + CM_UV)
+        cell = (round(u * width), round(v * height),
+                round(right * width) + 1, round(bottom * height) + 1)
+        if cell != SPEAKER_CELL:
+            cells[cell] = metrics
+    if set(cells) != {(93, 170, 180, 259), (186, 85, 271, 170)}:
+        return blob
+    out = bytearray(blob)
+    linear = bytearray(untile(blob[at:at + length], width, height))
+    # Symmetric brackets, including a transparent margin for atlas filtering.
+    gw, gh = 28, 76
+    def stroke(px, py):
+        return 4 <= px < 24 and 4 <= py < gh - 4 and (px < 11 or py < 11 or py >= gh - 11)
+
+    for code, ((x0, y0, _, _), metrics) in zip((91, 93), sorted(cells.items())):
+        for y in range(gh):
+            for x in range(gw):
+                local_x = x if code == 91 else gw - 1 - x
+                if stroke(local_x, y):
+                    pixel = bytes((255, 255, 255, 255))
+                elif outlined and any(stroke(local_x + dx, y + dy) for dx, dy in
+                                      ((-2, 0), (2, 0), (0, -2), (0, 2))):
+                    pixel = bytes((0, 0, 0, 255))
+                else:
+                    pixel = bytes(4)
+                pos = ((y0 + y) * width + x0 + x) * 4
+                linear[pos:pos + 4] = pixel
+        struct.pack_into('<H', out, metrics + CM_CHAR, code)
+        struct.pack_into('<9f', out, metrics + 16, 0, 0, gw, 0, 12, gw, gh, 0, 0)
+        struct.pack_into('<4f', out, metrics + CM_UV, x0 / width, y0 / height,
+                         (x0 + gw - 1) / width, (y0 + gh - 1) / height)
+    ordered = sorted(slots, key=lambda slot: struct.unpack_from('<H', out, slot[1] + CM_CHAR)[0])
+    out[array:array + len(slots) * 8] = b''.join(blob[pos:pos + 8] for pos, _, _ in ordered)
+    out[at:at + length] = tile(linear, width, height, blob[at:at + length])
+    return bytes(out)
+
+
 def _controls_check(igz):
     """(the controller type check node, its XB1 output's reference, the nodes leading to the
     check) in the Options page's script; None when it is not the script expected.
@@ -428,7 +479,11 @@ def prepare(game, out, config, env, base):
     from mod_file_paths import resolve
     names = list(ARCHIVES) + [name for name in CONTROLS_ARCHIVES if name not in ARCHIVES]
     archives = [resolve(Path(game) / 'archives' / name) for name in names if resolve(Path(game) / 'archives' / name).is_file()]
-    stamp = {'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    import clan_tag_font
+    import name_swatch_font
+    stamp = {'swatch_font': hashlib.sha256(Path(name_swatch_font.__file__).read_bytes() +
+                                          name_swatch_font.PALETTE.read_bytes()).hexdigest(),
+             'clan_font': hashlib.sha256(Path(clan_tag_font.__file__).read_bytes()).hexdigest(), 'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
              'style': style, 'art': hashlib.sha256(art_path.read_bytes()).hexdigest() if art_path else '',
              'speaker': hashlib.sha256(SPEAKER_ART.read_bytes()).hexdigest(), 'fonts': list(FONTS),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
@@ -438,6 +493,8 @@ def prepare(game, out, config, env, base):
     try:
         made = json.loads(stamp_file.read_text(encoding='utf-8'))
         if made['stamp'] == stamp and all(Path(p).is_file() for p in made['patches'].values()):
+            if made.get('clan_tiles'):
+                env['BB_CLAN_TILES'] = '1'
             if made.get('speaker'):
                 env['BB_VOICE_GLYPH'] = '1'
             return {g: Path(p) for g, p in made['patches'].items()}
@@ -450,6 +507,7 @@ def prepare(game, out, config, env, base):
     glyph = read_png(SPEAKER_ART)
     folder.mkdir(parents=True, exist_ok=True)
     patches, speakers, diagrams = {}, 0, 0
+    tiled_fonts = set()
     for path in archives:
         archive = Archive(path)
         entries = {}
@@ -466,16 +524,25 @@ def prepare(game, out, config, env, base):
                 styled = restyled_font(blob, art) if art else blob
                 spoken = with_speaker(styled, glyph)
                 speakers += spoken is not None
-                if spoken is not None or art:
-                    entries[f['index']] = spoken if spoken is not None else styled
+                styled = with_clan_brackets(spoken or styled, 'outline' in entry)
+                if spoken:
+                    tiled = clan_tag_font.add_native(styled)
+                    if tiled != styled:
+                        tiled_fonts.add(entry)
+                    styled = tiled
+                if styled != blob:
+                    entries[f['index']] = styled
         if not entries:
             continue
         guest = f'/app0/archives/{path.name}'
         target = folder / (path.stem + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, base.get(guest))
         patches[guest] = target
+    clan_tiles = tiled_fonts == {font.lower() for font in FONTS}
+    if clan_tiles:
+        env['BB_CLAN_TILES'] = '1'
     stamp_file.write_text(json.dumps({'stamp': stamp, 'patches': {g: str(p) for g, p in patches.items()},
-                                      'speaker': speakers > 0}), encoding='utf-8')
+                                      'speaker': speakers > 0, 'clan_tiles': clan_tiles}), encoding='utf-8')
     if speakers:
         env['BB_VOICE_GLYPH'] = '1'
     say(f'{style} buttons, the loudspeaker in {speakers} fonts, ' +

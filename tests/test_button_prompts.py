@@ -176,6 +176,120 @@ class ButtonPromptTests(unittest.TestCase):
                                                       glyph[2][middle + 3])))
             self.assertIsNone(bp.with_speaker(made, glyph))   # only once
 
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'needs the game (BB_TEST_GAME)')
+    def test_clan_brackets_in_game_fonts(self):
+        from archive_reader import Archive
+        archive = Archive(Path(os.environ['BB_TEST_GAME']) / 'archives' / 'update.pak')
+        files = {f['path'].lower(): f for f in archive.files}
+        for font_name in bp.FONTS:
+            with self.subTest(font=font_name):
+                blob = bytes(archive.extract(files[font_name.lower()]))
+                original = bp.with_speaker(blob, bp.read_png(bp.SPEAKER_ART))
+                made = bp.with_clan_brackets(original, 'outline' in font_name.lower())
+                self.assertEqual(len(original), len(made))
+                self.assertEqual(bp.with_clan_brackets(made, False), made)
+                _, slots = bp._alternate_list(made)
+                codes = [code for _, _, code in slots]
+                self.assertEqual(codes, sorted(codes))
+                self.assertEqual(set(codes), {code for _, _, code in bp._alternate_list(original)[1] if code} | {91, 93})
+                w, h, at, size = bp.image_location(made)
+                pixels = bp.untile(made[at:at + size], w, h)
+                before = bp.untile(original[at:at + size], w, h)
+                restored = bytearray(pixels)
+                for _, metrics, code in slots:
+                    if code not in (91, 93):
+                        continue
+                    u, v, right, bottom = struct.unpack_from('<4f', made, metrics + bp.CM_UV)
+                    x, y = round(u * w), round(v * h)
+                    gw, gh = round(right * w) - x + 1, round(bottom * h) - y + 1
+                    def alpha(dx, dy):
+                        return pixels[((y + dy) * w + x + dx) * 4 + 3]
+                    self.assertEqual((gw, gh), (28, 76))
+                    self.assertEqual((alpha(14, 6), alpha(14, gh - 6)), (255, 255))
+                    self.assertEqual((alpha(6, 38), alpha(21, 38)), (255, 0) if code == 91 else (0, 255))
+                    for row in range(gh):
+                        offset = ((y + row) * w + x) * 4
+                        restored[offset:offset + gw * 4] = before[offset:offset + gw * 4]
+                self.assertEqual(restored, before)  # all other art, including the voice icon
+
+    def test_clan_tile_edges_and_coverage(self):
+        import clan_tag_font as clan
+        pixels = bytearray(W * H * 4)
+        clan.paint_tiles(pixels, W)
+        for mask in range(clan.MASKS):
+            x, y = clan.cell(mask)
+            for dy in range(-1, 3):
+                for dx in range(-1, 3):
+                    bit = 2 * min(1, max(0, dy)) + min(1, max(0, dx))
+                    expected = ((mask >> (2*bit)) & 3) * 85
+                    self.assertEqual(pixels[((y+dy)*W+x+dx)*4+3], expected)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'needs the game (BB_TEST_GAME)')
+    def test_clan_tiles_in_game_fonts(self):
+        import clan_tag_font as clan
+        from archive_reader import Archive
+        archive = Archive(Path(os.environ['BB_TEST_GAME']) / 'archives' / 'update.pak')
+        files = {f['path'].lower(): f for f in archive.files}
+        for name in bp.FONTS:
+            with self.subTest(font=name):
+                original = bytes(archive.extract(files[name.lower()]))
+                base = bp.with_clan_brackets(bp.with_speaker(original, bp.read_png(bp.SPEAKER_ART)), 'outline' in name.lower())
+                made = clan.add_native(base)
+                slots = bp._alternate_list(made)[1]
+                codes = [c for _, _, c in slots]
+                self.assertEqual(codes, sorted(codes))
+                self.assertEqual(set(codes), {c for _, _, c in bp._alternate_list(base)[1]} |
+                                 {c for c, _, _ in clan.glyphs()} | set(range(0xe050,0xe050+18*64)))
+                self.assertEqual(clan.add_native(made), made)
+                offsets = {c: off for _, off, c in slots}
+                self.assertEqual(struct.unpack_from('<f', made, offsets[clan.FIRST+1]+24)[0], 0)
+                self.assertEqual(struct.unpack_from('<f', made, offsets[clan.ADVANCE]+24)[0], 4)
+                from name_swatch_font import ALPHABET, COLORS, FIRST
+                objs, names, file_offset = bp._objects(base)
+                font = next(p for p,k in objs if k == 'igImage2' and
+                            names[struct.unpack_from('<Q',base,p+16)[0]] == 'font')
+                fw, fh = struct.unpack_from('<HH',base,font+24)
+                start = file_offset(struct.unpack_from('<Q',base,font+64)[0])
+                a = next(p for p,k in objs if k == 'igCharMetrics' and
+                         struct.unpack_from('<H',base,p+12)[0] == ord('A'))
+                def bounds(data, p, w, h):
+                    return [round(v*d) for v,d in zip(struct.unpack_from('<4f',data,p+52),(w,h,w,h))]
+                def pixel(data, start, w, x, y):
+                    p = start + (((y//8)*(w//8) + x//8)*64 + bp._morton(x%8,y%8))*4
+                    return data[p:p+4]
+                l,t,r,b = bounds(base,a,fw,fh)
+                x,y = next((x,y) for y in range(t,b) for x in range(l,r)
+                           if pixel(base,start,fw,x,y) == bytes([255]*4))
+                w,h,img,_ = bp.image_location(made)
+                self.assertLessEqual(max(w, h), 16384, name)
+                # The title screen and startup video use the alternate Cross
+                # from Zoinks Outline. Check its full rectangle after repacking.
+                original_icons = {code: off for _, off, code in bp._alternate_list(original)[1]}
+                iw, ih, old_image, _ = bp.image_location(original)
+                icon = 0xe000
+                rect = bounds(original, original_icons[icon], iw, ih)
+                self.assertEqual(bounds(made, offsets[icon], w, h), rect)
+                left, top, right, bottom = rect
+                for py in range(top, bottom+1):
+                    for px in range(left, right+1):
+                        self.assertEqual(pixel(made, img, w, px, py),
+                                         pixel(original, old_image, iw, px, py))
+
+                for i,rgb in enumerate(COLORS):
+                    painted = offsets[FIRST+i*len(ALPHABET)]
+                    self.assertEqual(made[painted+16:painted+52], base[a+16:a+52])
+                    px,py,_,_ = bounds(made,painted,w,h)
+                    self.assertEqual(pixel(made,img,w,px+x-l,py+y-t),
+                                     bytes((rgb & 255,(rgb>>8)&255,rgb>>16,255)))
+                # Moving the original brackets into the larger sheet preserves their ink.
+                old_alt = {c:o for _,o,c in bp._alternate_list(base)[1]}
+                ow,oh,oldimg,_ = bp.image_location(base)
+                l,t,r,b = bounds(base,old_alt[91],ow,oh)
+                self.assertEqual(bounds(made,offsets[91],w,h),[l,t,r,b])
+                for x in range(l,r):
+                    for y in range(t,b):
+                        self.assertEqual(pixel(made,img,w,x,y),pixel(base,oldimg,ow,x,y))
+
     def test_xbox_controls_leaves_other_files_alone(self):
         self.assertIsNone(bp.xbox_controls(b'not an igz'))
 

@@ -1,52 +1,15 @@
 #define SACREDFIRE_RELEASE "v9.9.9"
-#define runtime_party_server_matchmaking_leave test_matchmaking_leave
 #include "../src/runtime_public_itemless.c"
-static int rejoin_player_calls;
-static void ABI rejoin_players_mock(void *manager) {
-    ++rejoin_player_calls;
-    unsigned char *list=ptr(manager,0x10);
-    int count=*(int *)(list+12),slot=0;
-    void **rows=ptr(list,0x20);
-    for (int i=0;i<count;++i) {
-        unsigned char *player=rows[i];
-        if (*(unsigned *)(player+0x20)>7) continue;
-        *(unsigned *)(player+0xb4)=slot++;
-        *(unsigned *)(player+0xc8)=*(unsigned *)(player+0xb4);
-    }
-}
-void runtime_online_mode_racer_left(uint64_t pid) { (void)pid; }
-#undef runtime_party_server_matchmaking_leave
 #include "../src/runtime_text.c"
 #include <assert.h>
+void runtime_clan_request_editor(int open) { (void)open; }
 #include <unistd.h>
 static int sent, dialogs, status = 200, stopped, returned, early, forwarded, requests, private_room, ranked_notices;
-static int matchmaking_leaves, matchmaking_keep;
-void test_matchmaking_leave(int keep) { ++matchmaking_leaves; matchmaking_keep=keep; }
 static int private_speed, private_cup, private_teams, modified_difficulty, selector_left_calls;
 static int party_guest=1;
-static int hidden_quit;
-void runtime_online_mode_show_placeable(void *placeable, int shown) { (void)placeable; assert(!shown); ++hidden_quit; }
 int runtime_room_mode_following(void) { return party_guest; }
 static int frozen_race;
 int runtime_room_mode_race_frozen(void) { return frozen_race; }
-int runtime_online_mode_race_running(void) { return frozen_race; }
-static int kart_racing, departures;
-static uint64_t ranked_finished_room;
-int runtime_ranked_result_copy(struct runtime_ranked_result *out) {
-    memset(out,0,sizeof *out);out->room=ranked_finished_room;
-    return ranked_finished_room!=0;
-}
-static int peer_leave_calls;
-static uint64_t ABI peer_leave_mock(void *message) { (void)message; ++peer_leave_calls; return 7; }
-static int race_switch_calls;
-static void ABI race_switch_mock(void *race,void *connection) { (void)race; (void)connection; ++race_switch_calls; }
-void bbgpu_notify(const char *title,const char *name,const char *detail,int kind,const void *image,uint64_t size) {
-    (void)title; (void)detail; (void)kind; (void)image; (void)size;
-    const char *expected[]={"Test-Racer left","Player 125 left","Guest left","OldHost left"};
-    assert(departures < 4 && !strcmp(name, expected[departures]));
-    departures++;
-}
-int runtime_replay_race_active(void) { return kart_racing; }
 static int host_lost_return;
 void runtime_party_host_lost(int role,int private_match,int announced_return) {
     (void)role;(void)private_match;host_lost_return=announced_return;
@@ -105,8 +68,6 @@ static pthread_mutex_t http_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t http_condition = PTHREAD_COND_INITIALIZER;
 static int block_get, entered_get;
 static char expected_ids[192];
-static char last_room_poll[128];
-static const char *room_poll_reply="{\"players\":\"6\"}";
 static char payload[4096], message[512], reply[512] = "ok";
 const char *runtime_np_get_online_name(void) { return "LocalHost"; }
 uint64_t runtime_ryunet_last_sent_ms(void) { return 0; } /* runtime_http.c: no send time here */
@@ -120,7 +81,7 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
      * a player exits a found room, and polls whether a found room is still alive. */
     if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-left")) { snprintf(body,size,"ok"); return 200; }
     if (!strcmp(method,"POST") && strstr(target,"/ryunet/room-short")) { snprintf(body,size,"ok"); return 200; }
-    if (!strcmp(method,"GET") && strstr(target,"/ryunet/room-alive")) { snprintf(last_room_poll,sizeof last_room_poll,"%s",target); snprintf(body,size,"%s",room_poll_reply); return 200; }
+    if (!strcmp(method,"GET") && strstr(target,"/ryunet/room-alive")) { snprintf(body,size,"{\"players\":\"6\"}"); return 200; }
     if (!strcmp(method,"POST")) {
         assert(strstr(target,"/ryunet/itemless-client?name=LocalHost&version=1&nonce="));
         assert(strstr(target,"&release=" SACREDFIRE_RELEASE));
@@ -169,11 +130,6 @@ static void *ABI send_cancel(void **out, void *self, uint64_t id, void *response
 static void *ABI send_leave(void **out, void *self, uint64_t id) {
     return send_cancel(out, self, id, NULL);
 }
-static int leave_saw_active;
-static void *ABI send_leave_observed(void **out, void *self, uint64_t id) {
-    leave_saw_active = runtime_public_itemless_active();
-    return send_leave(out, self, id);
-}
 static void ABI merge_event(void *self, uint64_t search, uint64_t from, uint64_t to,
                             const char *host, unsigned hn, const char *doc, unsigned dn) {
     (void)search; (void)from; (void)host; (void)hn; (void)doc; (void)dn;
@@ -204,12 +160,6 @@ static void ABI native_stop_party(void *self) { (void)self; ++native_party_teard
 static void ABI native_stop_session(void *self, int keep_party) { (void)self; native_keep_party=keep_party; }
 static void ABI native_release_session(void *self) { assert(self); ++native_session_releases; }
 static void ABI native_stop_session_object(void *self) { assert(self); ++native_session_stops; }
-static uint32_t ABI session_init_mock(void *session,void *second,void *third,int host) {
-    assert(ptr(session,0x10)==second && third==session && host==1);
-    memcpy((char *)second+0xb0,&native_session_admission,sizeof native_session_admission);
-    return 0x12340001u;
-}
-
 static void test_installed_hooks(const char *region) {
     size_t size=0x2af3000;
     unsigned char *im=mmap(NULL,size,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
@@ -235,22 +185,6 @@ static void test_installed_hooks(const char *region) {
     memcpy(im+0xa5b680,"\x55\x48\x89\xe5\x41\x56\x53\x48\x83\xec\x30\x4c\x8b\x35\x06\xba\xda\x01",18);
     memcpy(im+0xa5b692,"\x48\x83\xc4\x30\x5b\x41\x5e\x5d\xb0\x01\xc3",11);
     memcpy(im+0xa18210,"\x55\x48\x89\xe5\x53\x50\x48\x89\xfb\x83\x7b\x54\x0a\x0f\x84\x93\x00\x00\x00",19);
-    const unsigned char bind_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x49,0x89,0xfd,0x49,0x89,0xf6,0x49,0x8b,0x45,0x20};
-    const unsigned char leave_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
-    memcpy(im+0xa44190,bind_prefix,sizeof bind_prefix);
-    memcpy(im+0xa44d34,"\xe8\x57\xf4\xff\xff",5);
-    memcpy(im+0xa17526,"\xe8\x85\xe8\xff\xff",5);
-    memcpy(im+0xa170a8,"\x0f\x84\x86\x01\x00\x00",6);
-    memcpy(im+0xa90b10,"\x48\x83\x3d\x98\xbc\x03\x02\x00\x74\x19\x55\x48\x89\xe5",14);
-    memcpy(im+0xa54060,leave_prefix,sizeof leave_prefix);
-    memcpy(im+0xc22160,"\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x54\x53\x48\x83\xec\x10",15);
-    memcpy(im+0xbd0ad0,"\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18",17);
-    memcpy(im+0xbd0ae1,"\x48\x83\xc4\x18\x5b\x41\x5c\x41\x5d\x41\x5e\x41\x5f\x5d",14);
-    jump(im+0xbd0aef,(void *)rejoin_players_mock);
-    const unsigned char reset_ids_code[]="\x48\x63\x47\x0c\x48\x85\xc0\x7e\x43\x48\x8b\x4f\x20\x48\x8b\x11\x83\x7a\x20\x07\x77\x0c\x8b\xb2\xb0\x00\x00\x00\x89\xb2\xc8\x00\x00\x00\x83\xf8\x02\x7c\x25\x48\xff\xc8\x48\x83\xc1\x08\x48\x8b\x11\x83\x7a\x20\x07\x77\x0c\x8b\xb2\xb0\x00\x00\x00\x89\xb2\xc8\x00\x00\x00\x48\x83\xc1\x08\x48\xff\xc8\x75\xe2\xc3";
-    memcpy(im+0xc23120,reset_ids_code,sizeof reset_ids_code-1);
-    memcpy(im+0xa53d70,"\x55\x48\x89\xe5\x53\x50\x48\x8b\x05\x5b\x76\x07\x02",13);
-    memcpy(im+0xa53dad,"\xe9\x3e\xb5\xff\xff",5);
     /* Both reset branches unwind the stolen prologue; quit does the same. */
     memcpy(im+0xa18223,"\x48\x8b\x7b\x18\x48\x85\xff\x74\x1f\x48\x8b\x07\xff\x90\xb8\x00\x00\x00",18);
     memcpy(im+0xa182b6,"\x58\x5b\x5d\xc3",4);
@@ -277,90 +211,7 @@ static void test_installed_hooks(const char *region) {
     memcpy(im+0x24de10,prefix,16);im[0x24de20]=0x48;
     memcpy(im+0xa548e0,prefix,16);im[0xa548f0]=0x38;
     setenv("BB_ONLINE_MODE_HOOK",region,1);
-    int trace=!strcmp(region,"1277e00");
-    setenv("BB_HOST_EXPERIMENT",trace ? "1" : "0",1);
-    const size_t init_slots[]={0x254edc0,0x255e6c8};
-    SessionInit init=(SessionInit)(im+0xa52710);
-    jump(im+0xa52710,(void *)session_init_mock);
-    for (int i=0;i<2;++i) memcpy(im+init_slots[i],&init,sizeof init);
     assert(runtime_public_itemless_start(im,size));
-    assert(native_party_reset_trace && native_race_switch_original && native_peer_leave_original);
-    assert(native_remove_player_original && !memcmp(im+0xc22160,"\xff\x25",2));
-    unsigned char id_players[3][0xcc]={{0}}, id_list[0x28]={0};
-    void *id_rows[]={id_players[0],id_players[1],id_players[2]}, *id_items=id_rows;
-    memcpy(id_list+0x20,&id_items,sizeof id_items);
-    *(int *)(id_list+12)=3;
-    for (int i=0;i<3;++i) {
-        *(int *)(id_players[i]+0xb0)=i;
-        *(int *)(id_players[i]+0xc8)=7-i;
-    }
-    *(unsigned *)(id_players[1]+0x20)=UINT32_MAX;
-    void (ABI *reset_ids)(void *)=(void (ABI *)(void *))(im+0xc23120);
-    int saved_lobby_open=lobby_open;
-    left_room_pending=73;kart_racing=1;local_race_quitting=0;lobby_open=0;
-    reset_ids(id_list);
-    for (int i=0;i<3;++i) assert(*(int *)(id_players[i]+0xc8)==7-i);
-    lobby_open=1;reset_ids(id_list);
-    assert(*(int *)(id_players[0]+0xc8)==0 && *(int *)(id_players[2]+0xc8)==2);
-    lobby_open=0;
-    *(int *)(id_players[0]+0xc8)=7;*(int *)(id_players[2]+0xc8)=5;
-    local_race_quitting=1;reset_ids(id_list);
-    assert(*(int *)(id_players[0]+0xc8)==0 && *(int *)(id_players[1]+0xc8)==6 && *(int *)(id_players[2]+0xc8)==2);
-    local_race_quitting=0;kart_racing=0;left_room_pending=0;
-    *(int *)(id_players[0]+0xc8)=7;*(int *)(id_list+12)=1;reset_ids(id_list);
-    assert(*(int *)(id_players[0]+0xc8)==0);
-    kart_racing=1;*(int *)(id_players[0]+0xc8)=7;reset_ids(id_list);
-    assert(*(int *)(id_players[0]+0xc8)==0); /* Offline races still reset. */
-    kart_racing=0;
-    *(int *)(id_list+12)=0;reset_ids(id_list);
-    lobby_open=saved_lobby_open;
-    unsigned char id_manager[0x20]={0}, id_all[8][0xcc]={{0}};
-    void *id_all_rows[8], *id_all_items=id_all_rows;
-    memcpy(id_manager+0x10,&(void *){id_list},8);
-    memcpy(id_list+0x20,&id_all_items,8);
-    void (ABI *rejoin)(void *)=(void (ABI *)(void *))(im+0xbd0ad0);
-    left_room_pending=73;kart_racing=1;lobby_open=0;
-    for (int count=2;count<=8;++count) {
-        *(int *)(id_list+12)=count;
-        for (int local=0;local<count;++local) {
-            for (int i=0;i<count;++i) {
-                id_all_rows[i]=id_all[i];
-                *(uint64_t *)(id_all[i]+0xa8)=100+i;
-                *(unsigned *)(id_all[i]+0xc8)=i;
-                *(unsigned *)(id_all[i]+0x20)=i==local ? 0 : UINT32_MAX;
-            }
-            for (int departed=0;departed<count;++departed) if (departed!=local) {
-                int calls=rejoin_player_calls;
-                rejoin(id_manager);
-                assert(rejoin_player_calls==calls+1);
-                assert(*(unsigned *)(id_all[local]+0xb4)==0);
-                for(int i=0;i<count;++i) assert(*(unsigned *)(id_all[i]+0xc8)==(unsigned)i);
-            }
-        }
-        /* Multiple local controllers are reinitialized by the same native loop. */
-        for(int i=0;i<count;++i) {
-            *(unsigned *)(id_all[i]+0x20)=i;
-            *(unsigned *)(id_all[i]+0xc8)=count-1-i;
-        }
-        rejoin(id_manager);
-        for(int i=0;i<count;++i) assert(*(unsigned *)(id_all[i]+0xc8)==(unsigned)(count-1-i));
-    }
-    lobby_open=1;rejoin(id_manager);assert(*(unsigned *)(id_all[7]+0xc8)==7);
-    lobby_open=0;local_race_quitting=1;*(unsigned *)(id_all[7]+0xc8)=4;
-    rejoin(id_manager);assert(*(unsigned *)(id_all[7]+0xc8)==7);
-    local_race_quitting=0;left_room_pending=0;*(unsigned *)(id_all[7]+0xc8)=4;
-    rejoin(id_manager);assert(*(unsigned *)(id_all[7]+0xc8)==7);
-    kart_racing=0;lobby_open=saved_lobby_open;
-    assert(native_join_match_host && !memcmp(im+0xa170a8,"\x90\x90\x90\x90\x90\x90",6));
-    assert(!memcmp(im+0xa90b10,"\xff\x25",2));
-    unsigned char init_connection[0x120]={0};
-    void *session[3]={NULL,NULL,init_connection};
-    for (int i=0;i<2;++i) {
-        SessionInit entry=(SessionInit)ptr(im,init_slots[i]);
-        assert(entry==traced_session_init);
-        assert(entry(session,session[2],session,1)==0x12340001u);
-        assert(ptr(init_connection,0xb0)==(void *)admit_race_rejoin);
-    }
     assert(im[stop_quit_site]==0xe8); /* Do not alter an unrelated native sync-stop wrapper. */
     int resets=native_race_resets,closes=native_lobby_closes;
     native_stop_matchmaking(manager);
@@ -403,8 +254,6 @@ static void test_installed_hooks(const char *region) {
     ((void (ABI *)(void *))(im+0xa14550))(owner);
     assert(!runtime_public_itemless_active() && room_owner==NULL);
     munmap(im,size);
-    race_racers=race_object_root=NULL;
-    native_take_racer_ownership=NULL;
 }
 static void await_check(void);
 static void *party_return_expected_target;
@@ -555,35 +404,6 @@ static void test_takeover_keeps_ranked(void) {
     assert(ranked_selected && search_is_ranked); /* re-search starts Ranked, not Casual */
     runtime_public_itemless_reset();
     ranked_selected = saved_ranked; joined_ranked = saved_joined; search_is_ranked = saved_search_ranked;
-}
-static void test_ranked_pause_quit(void) {
-    native_placeable_event=forward_event;
-    void *(ABI *vtable[])(void *)={object_type};
-    void *meta[3]={0,0,"Scripts.Graph.PauseMenu_Octane_QuitButton"};
-    void *behavior[2]={vtable,meta},*items[]={behavior};
-    unsigned char button[0xf0]={0},list[0x28]={0},owner[0x960]={0};
-    *(void **)(button+0xe8)=list;*(int *)(list+12)=1;*(void ***)(list+0x20)=items;
-    void *event_meta[3]={0,0,"igGuiEventProjectGainFocus"};
-    void *event[5]={vtable,event_meta,0,(void *)8};
-    unsigned char *saved_owner=room_owner;
-    uint64_t saved_room=confirmed_room;
-    int saved_ranked=confirmed_ranked;
-    room_owner=owner;confirmed_room=777;confirmed_ranked=1;
-    memcpy(owner+0x958,&confirmed_room,8);
-    int old_forwarded=forwarded,old_hidden=hidden_quit;
-    placeable_event(button,event);
-    assert(forwarded==old_forwarded+1 && hidden_quit==old_hidden+1);
-    event_meta[2]="igGuiEventFocusInputPressed";
-    placeable_event(button,event);
-    assert(forwarded==old_forwarded+1);
-    event_meta[2]="igGuiEventProjectUnload";
-    placeable_event(button,event);
-    assert(forwarded==old_forwarded+2 && hidden_quit==old_hidden+1);
-    confirmed_ranked=0;
-    assert(!ranked_pause_quit(button));
-    confirmed_ranked=1;meta[2]="Scripts.Graph.PauseMenu_Octane_ResumeButton";
-    assert(!ranked_pause_quit(button));
-    room_owner=saved_owner;confirmed_room=saved_room;confirmed_ranked=saved_ranked;
 }
 static void test_ranked_button_event(void) {
     native_placeable_event = forward_event;
@@ -823,15 +643,6 @@ static void test_public_content_gate(void) {
 }
 
 static void test_ranked_season_gate(void) {
-    unsigned char manager[0x18] = {0}, roster[0x28] = {0}, player[0xb0] = {0};
-    unsigned char party[0x70] = {0}, remote_roster[0x28] = {0};
-    void *manager_pointer = manager, *party_pointer = party, *players[] = {player};
-    void **saved_participants = participants, **saved_party = party_manager;
-    participants = &manager_pointer; party_manager = &party_pointer;
-    *(void **)(manager + 0x10) = roster;
-    *(void ***)(roster + 0x20) = players; *(int *)(roster + 12) = 1;
-    *(uint64_t *)(player + 0xa8) = 1;
-    *(void **)(party + 0x30) = remote_roster;
     native_placeable_event = forward_event;
     native_make_handle = make_test_handle;
     native_resolve_handle = resolve_test_handle;
@@ -851,10 +662,6 @@ static void test_ranked_season_gate(void) {
     private_room = 0;
     ranked_selected = 1;
     for (selected = 0; selected < 2; ++selected) {
-        expire_check();
-        assert(ranked_lobby_check(0) == -1);
-        await_check();
-        assert(ranked_lobby_check(0) == 1);
         ranked_status_state = 0;
         int before = forwarded;
         placeable_event(button, event);
@@ -873,28 +680,6 @@ static void test_ranked_season_gate(void) {
         runtime_ranked_gate_update(button, 1);
         memcpy(&alpha, button + 0xe0, 4);
         assert(alpha == 1.0f);
-    }
-    /* A refused release stays on Mode Select, including a cold asynchronous check. */
-    {
-        Notice saved_notice = native_notice;
-        native_notice = count_notice;
-        selected = 0; status = 409;
-        snprintf(reply, sizeof reply, "[RyuNET Ranked] required release: v0.9.4");
-        expire_check();
-        int before = forwarded, shown = ranked_notices, stops = stopped, returns = returned;
-        placeable_event(button, event);
-        assert(pending_private.ranked && forwarded == before && ranked_notices == shown);
-        await_check();
-        assert(!runtime_private_party_update());
-        assert(!pending_private.target && handles == 0 && ranked_notices == shown + 1);
-        assert(forwarded == before && stopped == stops && returned == returns && !rejection[0]);
-        placeable_event(button, event);
-        assert(!pending_private.target && forwarded == before && ranked_notices == shown + 2);
-        assert(stopped == stops && returned == returns);
-        status = 200; snprintf(reply, sizeof reply, "ok");
-        expire_check();
-        assert(ranked_lobby_check(0) == -1); await_check();
-        native_notice = saved_notice;
     }
     /* No Discord or Steam account linked: Ranked is open, but Go to Lobby tells the player and
      * stays (dimmed), directly and after a deferred status check. */
@@ -929,7 +714,6 @@ static void test_ranked_season_gate(void) {
     assert(forwarded == before && handles == 0);
     ranked_selected = 0;
     selected = 0;
-    participants = saved_participants; party_manager = saved_party;
     /* Opening mode selection is not entering a private lobby; keep current party intact. */
     graph_meta[2] = "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton";
     event[3] = (void *)8;
@@ -1198,42 +982,7 @@ static void ABI release_input_event(void *object) {
     --allocated_input_events; free(event);
 }
 
-static int entry_joins,entry_creates,host_starts;
-static void *test_session_manager[6];
-static int removed_players, disconnected_players;
-static void *expected_remote;
-static int ABI remove_remote(void *manager, void *player) {
-    assert(manager == *participants && player == expected_remote);
-    ++removed_players;
-    return 1;
-}
-static void ABI disconnect_remote(void *session, uint64_t pid) {
-    assert(session == ptr(*match_session_manager,0x28) && pid == 321 && removed_players == disconnected_players + 1);
-    if (disconnected_players) assert(requeued_room==74 && matchmaking_search);
-    ++disconnected_players;
-}
-static void ABI release_match_session(void *session) {
-    assert(__atomic_fetch_sub((int *)((char *)session+8),1,__ATOMIC_SEQ_CST)==1);
-}
-static int peer_back_messages;
-static void ABI peer_back_mock(void) { ++peer_back_messages; }
-static int race_binds;
-static int race_connection_sets;
-static uint64_t expected_switch_departed;
-static void ABI bind_race_mock(void *race,void *connection) {
-    if (expected_switch_departed) assert(race_switch_departed==expected_switch_departed);
-    void **replication=ptr(race,0x20);
-    replication[2]=connection;
-    ++race_binds;
-}
-static void ABI set_race_connection_mock(void *replication,void *connection) {
-    ((void **)replication)[2]=connection;
-    ++race_connection_sets;
-}
-static void ABI start_match_host_mock(void *manager) {
-    assert(manager==test_session_manager);
-    ++host_starts;
-}
+static int entry_joins,entry_creates;
 static void ABI entry_join(void *self,uint64_t search,uint64_t room,const char *host,unsigned hn,const char *doc,unsigned dn) {
     (void)search;(void)host;(void)hn;(void)doc;(void)dn;
     __atomic_store_n((uint64_t *)((char *)self+0x958),room,__ATOMIC_RELAXED);
@@ -1247,50 +996,6 @@ static void *parallel_create(void *owner) {
     for(int i=0;i<100;++i) created(owner,4,74,1,"",0,"{}",2);
     return NULL;
 }
-static void test_join_waits_for_native_session(void) {
-    unsigned char owner[0x1000]={0};
-    void *manager[6]={0}, *manager_pointer=manager;
-    void **saved_manager=match_session_manager;
-    Join saved_join=native_join;
-    Create saved_create=native_create;
-    const int before_creates=entry_creates;
-    const int saved_guest=party_guest, before=entry_joins;
-    runtime_public_itemless_reset();party_guest=1;
-    runtime_public_itemless_party_ready();
-    match_session_manager=&manager_pointer;native_join=entry_join;
-    manager[3]=manager; /* HostSession has not published manager+0x28 yet. */
-    char host[]="host snapshot", backend[]="{}";
-    joined(owner,1,810,host,sizeof host-1,backend,sizeof backend-1);
-    assert(entry_joins==before && pending_lobby_join && matchmaking_room==810);
-    host[0]='X';backend[0]='X';
-    assert(!strcmp(pending_lobby_join->docs,"host snapshot"));
-    assert(!strcmp(pending_lobby_join->docs+pending_lobby_join->host_len+1,"{}"));
-    joined(owner,1,810,"",0,"{}",2);
-    update_lobby_connection();assert(entry_joins==before);
-    manager[3]=NULL;manager[4]=manager;
-    update_lobby_connection();assert(entry_joins==before);
-    manager[4]=NULL;
-    update_lobby_connection();update_lobby_connection();
-    assert(entry_joins==before+1 && !pending_lobby_join);
-    runtime_public_itemless_reset();runtime_public_itemless_party_ready();
-    manager[3]=manager;
-    joined(owner,2,811,"",0,"{}",2);
-    assert(pending_lobby_join);
-    runtime_public_itemless_reset();manager[3]=NULL;
-    update_lobby_connection();assert(entry_joins==before+1 && !pending_lobby_join);
-    runtime_public_itemless_party_ready();manager[3]=manager;
-    joined(owner,3,812,"",0,"{}",2);
-    assert(pending_lobby_join);
-    native_create=entry_create;
-    created(owner,3,812,2,"",0,"{}",2);
-    assert(!pending_lobby_join && entry_creates==before_creates+1);
-    manager[3]=NULL;update_lobby_connection();
-    assert(entry_joins==before+1);
-    runtime_public_itemless_reset();
-    match_session_manager=saved_manager;native_join=saved_join;party_guest=saved_guest;
-    native_create=saved_create;entry_creates=before_creates;entry_joins=before;
-}
-
 static void test_cancelled_and_duplicate_lobby_entries(void) {
     unsigned char owner[0x1000]={0};char doc[512];
     Join old_join=native_join;Create old_create=native_create;
@@ -1308,248 +1013,16 @@ static void test_cancelled_and_duplicate_lobby_entries(void) {
     runtime_public_itemless_reset();
     created(owner,2,72,1,"",0,"{}",2);assert(entry_creates==1);
     party_guest=1;runtime_public_itemless_party_ready();
-    unsigned char follower[0x80]={0};void *follower_pointer=follower;
-    void **saved_party_manager=party_manager;
-    party_manager=&follower_pointer;follower[0x6c]=1;
     joined(owner,3,73,"",0,"{}",2);joined(owner,3,73,"",0,"{}",2);
-    assert(entry_joins==1 && !follower[0x6c]);
-    party_manager=saved_party_manager;
+    assert(entry_joins==1);
     /* A guest may take over as host once; repeated create must not reopen map voting. */
     created(owner,3,73,2,"",0,"{}",2);created(owner,3,73,2,"",0,"{}",2);
     assert(entry_creates==2 && entry_joins==1);
     runtime_public_itemless_reset();party_guest=0;matchmaking_search=1;
-    Join old_update=native_update;
-    native_update=entry_join;
-    joined(owner,4,75,"",0,"{}",2);
-    void *manager=test_session_manager;
-    match_session_manager=&manager;
-    native_start_match_host=start_match_host_mock;
-    native_bind_race_connection=bind_race_mock;
-    native_set_race_connection=set_race_connection_mock;
-    kart_racing=1;
-    created(owner,4,76,2,"",0,"{}",2);
-    assert(entry_creates==2 && entry_joins==2 && matchmaking_room==75);
-    created(owner,4,75,2,"",0,"{}",2);
-    created(owner,4,75,2,"",0,"{}",2);
-    assert(entry_creates==2 && entry_joins==3 && matchmaking_created);
-    unsigned char premade_roster[0x28]={0}, premade_member[0x38]={0};
-    void *premade_rows[]={premade_member}, *roster_pointer=premade_roster;
-    uint64_t premade_pid=123;
-    memcpy(premade_member+0x18,&premade_pid,sizeof premade_pid);
-    void **premade_items=premade_rows;
-    memcpy(premade_roster+0x20,&premade_items,sizeof premade_items);
-    *(int *)(premade_roster+12)=1;
-    memcpy(follower+0x30,&roster_pointer,sizeof roster_pointer);
-    party_manager=&follower_pointer;
-    had_public_race=1;kart_racing=0;
-    apply_room_update(75,1,"{\"octr_departed_pid\":123,\"octr_departed_name\":\"Test-Racer\"}",0);
-    assert(!departures); /* Race ended, but this player is still in the premade. */
-    kart_racing=1;
-    ranked_finished_room=75;
-    apply_room_update(75,2,"{\"octr_departed_pid\":123,\"octr_departed_name\":\"Test-Racer\"}",0);
-    assert(!departures); /* Native race flags survive the result screen and loading. */
-    ranked_finished_room=76;last_departure_version=1;last_departure_pid=0;
-    apply_room_update(75,2,"{\"octr_departed_pid\":123,\"octr_departed_name\":\"Test-Racer\"}",0);
-    ranked_finished_room=0;
-    party_manager=saved_party_manager;had_public_race=0;
-    apply_room_update(75,2,"{\"octr_departed_pid\":123,\"octr_departed_name\":\"Test-Racer\"}",0);
-    apply_room_update(76,3,"{\"octr_departed_pid\":124}",0);
-    assert(departures==1);
-    apply_room_update(75,3,"{\"octr_departed_pid\":125}",0);
-    assert(departures==2);
-    room_alive_after=UINT64_MAX;
-    test_session_manager[3]=manager;
-    runtime_public_itemless_poll_race_host();
-    assert(host_starts==0);
-    test_session_manager[3]=NULL;
-    runtime_public_itemless_poll_race_host();
-    runtime_public_itemless_poll_race_host();
-    assert(host_starts==1 && pending_host_room==75);
-    host_retry_after=0;
-    runtime_public_itemless_poll_race_host();
-    assert(host_starts==2);
-    unsigned char connection[0x120]={0};
-    int role=1;
-    memcpy(connection+0x118,&role,sizeof role);
-    void *session[3]={NULL,NULL,connection};
-    test_session_manager[5]=session;
-    void **previous_network=network_manager;
-    void *replication[3]={NULL,NULL,manager}, *race[5]={NULL,NULL,NULL,manager,replication};
-    void *network[19]={0}, *root=network;
-    network[15]=race;
-    network_manager=&root;
-    host_retry_after=0;
-    runtime_public_itemless_poll_race_host();
-    assert(race_binds==0 && pending_host_room==75);
-    network[18]=manager;
-    runtime_public_itemless_poll_race_host();
-    assert(race_binds==1 && replication[2]==connection && pending_host_room==75);
-    runtime_public_itemless_poll_race_host();
-    assert(race_binds==1);
-    role=2;
-    memcpy(connection+0x118,&role,sizeof role);
-    connection[0x110]=1;
-    race_join_room=75;
-    race_join_until=UINT64_MAX;
-    race_join_old_connection=manager;
-    unsigned char state_call[5]={0};
-    unsigned char *saved_state_call=race_join_state_call;
-    race_join_state_call=state_call;
-    replication[2]=manager;
-    void (ABI *saved_switch)(void *,void *)=native_race_switch_original;
-    native_race_switch_original=bind_race_mock;
-    native_bind_race_connection=race_connection_switch;
-    left_room_pending=75;race_handoff_departed_pid=expected_switch_departed=33;
-    race[3]=NULL;
-    runtime_public_itemless_poll_race_host();
-    assert(race_join_room==75 && race_binds==1 && replication[2]==manager);
-    race[3]=manager;
-    runtime_public_itemless_poll_race_host();
-    assert(race_connection_sets==0 && race_binds==2 && replication[2]==connection && !race_join_room);
-    assert(!race_switch_departed);
-    runtime_public_itemless_poll_race_host();
-    assert(race_connection_sets==0 && race_binds==2); /* Bind once, including native peer cleanup. */
-    native_race_switch_original=saved_switch;expected_switch_departed=0;
-    race_join_state_call=saved_state_call;
-    network_manager=previous_network;
-    native_bind_race_connection=NULL;
-    native_set_race_connection=NULL;
-    assert(!pending_host_room && host_starts==2);
-    test_session_manager[5]=NULL;
-    room_alive_after=0;
-    runtime_public_itemless_reset();
-    runtime_public_itemless_poll_race_host();
-    for (int i=0;i<1000 && __atomic_load_n(&room_alive_busy,__ATOMIC_SEQ_CST);++i) usleep(1000);
-    assert(!__atomic_load_n(&room_alive_busy,__ATOMIC_SEQ_CST));
-    assert(!strcmp(last_room_poll,"/ryunet/room-alive?name=LocalHost&room=75&race=1"));
-    match_session_manager=NULL;
-    native_start_match_host=NULL;
-    kart_racing=0;
-    native_update=old_update;
-    frozen_race=0;
-    runtime_public_itemless_reset();matchmaking_search=1;
     pthread_t workers[2];
     for(int i=0;i<2;++i) assert(!pthread_create(&workers[i],NULL,parallel_create,owner));
     for(int i=0;i<2;++i) assert(!pthread_join(workers[i],NULL));
     assert(entry_creates==3);
-    const char held[]="{\"octr_waiting_for_opponent\":true}";
-    assert(accept(owner,74,held,sizeof held-1));
-    int elapsed, timeout, range, ranked;
-    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked) && !timeout && !ranked);
-    void *cancel_result=NULL;
-    native_cancel=send_cancel;
-    cancel_search(&cancel_result,NULL,1,NULL);
-    assert(matchmaking_room==74);
-    native_send_departure=peer_back_mock;
-    match_session_manager=&manager;
-    test_session_manager[5]=session;
-    role=2;
-    memcpy(connection+0x118,&role,sizeof role);
-    void **saved_participants=participants;
-    unsigned char list[0x28]={0}, player[0xb0]={0};
-    void *rows[]={player}, *players[3]={NULL,NULL,list}, *roster=players;
-    participants=&roster;
-    send_confirmed_departure(74);
-    assert(peer_back_messages==0);
-    *(int *)(list+12)=1;
-    void **items=rows;
-    memcpy(list+0x20,&items,sizeof items);
-    unsigned char lobby_button[0xf0]={0};
-    *(const char **)(lobby_button+0x28)="OCTR_PUBLIC_LOBBY";
-    void *(ABI *input_vtable[])(void *)={object_type};
-    void *meta[]={NULL,NULL,"igGuiEventProjectInputPressed"};
-    void *back[]={input_vtable,meta,NULL,(void *)9,NULL};
-    native_placeable_event=forward_event;
-    int before=forwarded;
-    placeable_event(lobby_button,back);
-    assert(forwarded==before+1 && !peer_back_messages && matchmaking_room==74 && left_room_pending==74);
-    const int previous_leaves=matchmaking_leaves;
-    notify_room_left();
-    assert(matchmaking_leaves==previous_leaves+1 && matchmaking_keep);
-    notify_room_left();
-    assert(peer_back_messages==1);
-    /* A different client survives the same departure. */
-    assert(accept(owner,74,held,sizeof held-1));
-    unsigned char remote[0xb0]={0};
-    void *pair[]={player,remote};
-    uint64_t departed_pid=321;
-    memcpy(remote+0xa8,&departed_pid,sizeof departed_pid);
-    *(unsigned *)(remote+0x20)=8;
-    *(int *)(list+12)=2;
-    items=pair;
-    memcpy(list+0x20,&items,sizeof items);
-    expected_remote=remote;
-    native_remove_player=remove_remote;
-    native_disconnect_player=disconnect_remote;
-    void (ABI *saved_release)(void *)=native_release_object;
-    native_release_object=release_match_session;
-    apply_lobby_departure(322);
-    assert(!removed_players && !disconnected_players);
-    const char held_after_leave[]="{\"octr_waiting_for_opponent\":true,\"octr_departed_pid\":321,\"octr_departed_name\":\"Guest\"}";
-    native_update=entry_join;
-    updated(owner,74,2,"",0,held_after_leave,sizeof held_after_leave-1);
-    updated(owner,74,2,"",0,held_after_leave,sizeof held_after_leave-1);
-    assert(removed_players==1 && disconnected_players==1 && matchmaking_room==74);
-    const int previous_updates=entry_joins;
-    updated(owner,74,1,"",0,"{}",2);
-    assert(entry_joins==previous_updates && runtime_public_waiting_for_opponent());
-    native_update=old_update;
-    const char requeue[]="{\"octr_requeue\":true,\"octr_departed_pid\":321,\"octr_departed_name\":\"OldHost\"}";
-    memset(owner+0x958,0,8); /* Old native session closed just before the push. */
-    updated(owner,74,3,"",0,requeue,sizeof requeue-1);
-    assert(!matchmaking_room && matchmaking_search && runtime_public_waiting_for_opponent());
-    cancel_search(&cancel_result,NULL,1,NULL);
-    runtime_public_itemless_abort_queue();
-    do_queue_abort();
-    assert(matchmaking_search && !queue_abort_pending);
-    assert(removed_players==2 && disconnected_players==2);
-    void *leave_result=NULL;
-    native_leave=send_leave;
-    leave_lobby(&leave_result,NULL,74);
-    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked) && !timeout && !ranked);
-    updated(owner,74,3,"",0,requeue,sizeof requeue-1);
-    assert(!matchmaking_room && matchmaking_search);
-    assert(removed_players==2 && disconnected_players==2);
-    native_remove_player=NULL;
-    native_disconnect_player=NULL;
-    native_release_object=saved_release;
-    participants=saved_participants;
-    native_send_departure=NULL;
-    test_session_manager[5]=NULL;
-    match_session_manager=NULL;
-    struct SearchPoll *pending=calloc(1,sizeof *pending);
-    pending->generation=session_generation;
-    pending->serial=search_poll_serial;
-    strcpy(pending->target,"/ryunet/matchmaking-status?name=LocalHost");
-    strcpy(reply,"{\"state\":\"matched\",\"elapsed\":0,\"timeout\":180,\"range\":0}");
-    search_poll(pending);
-    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
-    strcpy(reply,"ok");
-    match_session_manager=&manager;
-    native_start_match_host=start_match_host_mock;
-    test_session_manager[5]=session;
-    created(owner,4,76,1,"",0,"{}",2);
-    assert(entry_creates==3 && pending_lobby_create && matchmaking_room==76 && runtime_public_waiting_for_opponent());
-    assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked) && !ranked && !timeout);
-    int previous_starts=host_starts;
-    update_lobby_connection();
-    update_lobby_connection();
-    assert(entry_creates==3 && host_starts==previous_starts+1 && runtime_public_waiting_for_opponent());
-    role=1;
-    memcpy(connection+0x118,&role,sizeof role);
-    room_players=2;
-    update_lobby_connection();
-    assert(entry_creates==4 && !pending_lobby_create && !prepare_requeue_host && !runtime_public_waiting_for_opponent());
-    assert(!runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
-    match_session_manager=NULL;
-    native_start_match_host=NULL;
-    test_session_manager[5]=NULL;
-    room_players=0;
-    room_poll_reply="{\"alive\":false,\"requeued\":true}";
-    room_alive_worker((void *)(uintptr_t)76);
-    assert(requeued_room==76 && runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
-    assert(!matchmaking_room && !timeout && !ranked);
-    room_poll_reply="{\"players\":\"6\"}";
     party_guest=1;
     runtime_public_itemless_reset();native_join=old_join;native_create=old_create;
 }
@@ -1558,8 +1031,6 @@ static int party_returns;
 static void ABI return_party_mock(void *party) { assert(party); ++party_returns; }
 static int party_quits;
 static void ABI quit_party_mock(void *party) { assert(party);++party_quits; }
-static int ranked_lobby_returns;
-static void ABI ranked_return_to_lobby(void) { ++ranked_lobby_returns; }
 static void test_native_party_menu_return(void) {
     unsigned char party[0x80]={0},session[0x20]={0},connection[0x120]={0};
     void *party_value=party,*network_value=test_network;
@@ -1567,11 +1038,10 @@ static void test_native_party_menu_return(void) {
     void (ABI *saved_return)(void *)=native_party_return;
     void (ABI *saved_quit)(void *)=native_party_quit_trace;
     void (ABI *saved_stop)(void *)=native_stop_matchmaking;
-    void (ABI *saved_lobby)(void)=native_return_to_lobby;
     int saved_guest=party_guest,old_stops=stopped,old_returns=party_returns;
     party_manager=&party_value;network_manager=&network_value;
     native_party_return=return_party_mock;native_party_quit_trace=quit_party_mock;
-    native_stop_matchmaking=stop_matchmaking;native_return_to_lobby=ranked_return_to_lobby;party_quits=0;
+    native_stop_matchmaking=stop_matchmaking;party_quits=0;
     *(void **)(party+0x18)=session;*(void **)(session+0x10)=connection;
     *(int *)(connection+0x118)=1;party[0x6c]=1;
     party_guest=0;menu_party_returned=0;
@@ -1603,7 +1073,7 @@ static void test_native_party_menu_return(void) {
     root_meta[2]="Scripts.Graph.Octane_Lobby_ModeSelect_Root";
     placeable_event(root,event);
     native_placeable_event=saved_event;
-    assert(party_returns==old_returns+1 && party_quits==0 && stopped==old_stops+1);
+    assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
     assert(*party_manager==party && !party[0x6c] && selected && ranked_selected);
     assert(!search_mark && !matchmaking_search && !search_server_active && !matchmaking_room);
     strcpy(reply,"{\"state\":\"searching\",\"elapsed\":99,\"timeout\":180,\"range\":400,\"ranked\":true}");
@@ -1612,38 +1082,31 @@ static void test_native_party_menu_return(void) {
     (void)runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked);
     int polls=requests;update_search_clock();
     assert(requests==polls && !search_poll_running);
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+1 && party_quits==0 && stopped==old_stops+1);
-    /* ModeSelect can initialize again after the leader already started the next Ranked queue.
-     * A duplicate menu-return hook must not erase that fresh search or broadcast another return. */
-    matchmaking_search=1;matchmaking_room=57;search_mark=check_clock();
-    runtime_public_itemless_menu_return();
-    assert(matchmaking_search && matchmaking_room==57 && search_mark);
-    assert(party_returns==old_returns+1 && party_quits==0 && stopped==old_stops+1);
-    matchmaking_search=matchmaking_room=0;search_mark=0;
-    /* A premade leader returns with their party; a follower never broadcasts a host return. */
-    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns+2 && party_quits==0);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==1 && stopped==old_stops+1);
+    /* A new manual host exit leaves alone; a follower never broadcasts a host return. */
+    menu_party_returned=0;runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     *(int *)(connection+0x118)=2;party_guest=1;menu_party_returned=0;
-    runtime_public_itemless_menu_return();assert(party_returns==old_returns+2 && party_quits==0);
+    runtime_public_itemless_menu_return();assert(party_returns==old_returns && party_quits==2);
     matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;
     int attempts=timeout_attempts;runtime_public_itemless_update();
     assert(timeout_attempts==attempts && search_timeout_pending);
-    /* Solo hosts leave alone. Public and Ranked premades return together. */
+    /* Every manual host exit leaves alone. Only queue timeout returns the party together. */
     *(int *)(connection+0x118)=1;party_guest=0;
     {
         const int returns=party_returns;
         menu_party_returned=0;party_at_entry=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns && party_quits==1);
+        assert(party_returns==returns && party_quits==3);
         menu_party_returned=0;party_at_entry=2;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1 && party_quits==1);
-        /* Private rooms keep the existing host-migration rule. */
+        assert(party_returns==returns && party_quits==4);
+        /* Private match follows the same host-migration rule. */
         menu_party_returned=0;party_at_entry=2;entry_private=1;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+1 && party_quits==2);
+        assert(party_returns==returns && party_quits==5);
         menu_party_returned=0;queue_return_pending=1;entry_private=0;
         runtime_public_itemless_menu_return();
-        assert(party_returns==returns+2 && party_quits==2);
+        assert(party_returns==returns+1 && party_quits==5);
         /* A guest of that room leaves the party on the way out: the host's notification
          * (message 0x29) and the roster reset are the game's way out. */
         const int saved_installed=installed;installed=1;
@@ -1655,7 +1118,7 @@ static void test_native_party_menu_return(void) {
         *(void **)(party+0x30)=roster;
         runtime_public_itemless_menu_return();
         installed=saved_installed;
-        assert(party_quits==3 && party_returns==returns+2 && !party[0x6c]);
+        assert(party_quits==6 && party_returns==returns+1 && !party[0x6c]);
         *(int *)(connection+0x118)=1;
         native_party_reset_trace=reset_mock;
         menu_party_returned=1;party_return_received=0;host_lost_return=-1;
@@ -1668,49 +1131,20 @@ static void test_native_party_menu_return(void) {
         assert(new_sessions==sessions && !entry_private && !menu_party_returned &&
                !queue_return_pending && !party_return_received);
         runtime_public_itemless_menu_return();
-        assert(party_quits==3 && party_returns==returns+3);
+        assert(party_quits==7);
         runtime_public_itemless_takeover_host();
         assert(new_sessions==sessions && !menu_party_returned);
         runtime_public_itemless_menu_return();
-        assert(party_quits==3 && party_returns==returns+4);
+        assert(party_quits==8);
         new_sessions=sessions;
         /* The next search is not a private room any more. */
         arm_party_return();assert(!entry_private && !menu_party_returned);
         party_at_entry=1;
     }
-    /* Ranked completion keeps the original premade, including delayed room cleanup. */
-    unsigned char ranked_roster[0x28]={0},ranked_peer[0x30]={0};
-    void *ranked_members[]={ranked_peer};
-    *(int *)(ranked_roster+12)=1;*(void ***)(ranked_roster+0x20)=ranked_members;
-    *(void **)(party+0x30)=ranked_roster;
-    for (int role=1;role<=2;++role) {
-        *(int *)(connection+0x118)=role;
-        menu_party_returned=0;entry_private=0;party_at_entry=2;party_exit_sent=0;
-        const int quits=party_quits,returns=party_returns;
-        runtime_public_itemless_ranked_return();
-        assert(party_quits==quits && party_returns==returns+(role==1));
-        assert(*(void **)(party+0x18)==session);
-        guest_quit_at=0;
-        runtime_public_itemless_guest_left("cusa13795-session-PremadeHost");
-        guest_room_open=1;runtime_public_itemless_guest_room(0);
-        assert(party_quits==quits);
-        runtime_public_itemless_ranked_return();
-        assert(party_quits==quits && party_returns==returns+(role==1));
-    }
-    /* Match takeover cannot turn a solo entrant into a premade of room members. */
-    menu_party_returned=0;party_at_entry=1;
-    runtime_public_itemless_takeover_host();
-    assert(party_at_entry==1);
-    *(int *)(connection+0x118)=1;
-    const int solo_quits=party_quits;
-    runtime_public_itemless_ranked_return();
-    assert(party_quits==solo_quits+1 && !ranked_return_party);
-    arm_private_room();assert(!ranked_return_party && entry_private);
-    entry_private=0;menu_party_returned=1;
     runtime_public_itemless_reset();
     party_guest=saved_guest;party_manager=saved_party;network_manager=saved_network;
     native_party_return=saved_return;native_stop_matchmaking=saved_stop;
-    native_party_quit_trace=saved_quit;native_return_to_lobby=saved_lobby;
+    native_party_quit_trace=saved_quit;
     stopped=old_stops;selected=ranked_selected=0;strcpy(reply,"ok");
 }
 
@@ -1834,77 +1268,10 @@ static void test_guest_menu_return_destination(void) {
     assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
     assert(returned==old_returns+2 && !party[0x6c]);
     frozen_race=1;
-    unsigned char ranked_owner[0x960]={0};
-    unsigned char *saved_owner=room_owner;
-    const uint64_t saved_room=confirmed_room;
-    const int saved_confirmed_ranked=confirmed_ranked,saved_entry=party_at_entry;
-    confirmed_room=4321;confirmed_ranked=1;room_owner=ranked_owner;
-    memcpy(ranked_owner+0x958,&confirmed_room,8);
-    entry_private=0;party_at_entry=2;ranked_return_party=0;
     assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
     assert(native_race_party_returns==1 && timeout_attempts==old_attempts+5);
-    assert(ranked_return_party); /* Leader's message may beat this guest's finish timer. */
-    /* Ranked races do not freeze private-room settings. They still need native scene exit. */
-    frozen_race=0;kart_racing=1;
-    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
-    assert(native_race_party_returns==2 && timeout_attempts==old_attempts+5);
-    kart_racing=0;
-    ranked_return_party=0;party_at_entry=saved_entry;
-    room_owner=saved_owner;confirmed_room=saved_room;confirmed_ranked=saved_confirmed_ranked;
-    /* A delayed previous-room return cannot cancel a premade's replacement Ranked search. */
-    requeued_room=4321;matchmaking_search=1;matchmaking_room=0;party_at_entry=2;menu_party_returned=0;
-    const int requeue_attempts=timeout_attempts,requeue_returns=returned;
-    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
-    assert(timeout_attempts==requeue_attempts && returned==requeue_returns && matchmaking_search);
-    /* Manual queues have no requeued_room; stale native packets still cannot cancel them. */
-    requeued_room=0;
-    for (int follower=0;follower<2;++follower) {
-        matchmaking_search=!follower;search_server_active=0;
-        *(int *)(party+0x54)=follower ? 7 : 0;
-        assert(received_party_return((void *)1,(void *)2,(void *)3)==1 && party_return_check==1);
-        struct SearchPoll *job=calloc(1,sizeof *job);
-        job->generation=session_generation;job->serial=search_poll_serial;
-        strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");
-        strcpy(reply,"{\"state\":\"searching\",\"elapsed\":0,\"timeout\":180,\"range\":400,\"ranked\":true}");
-        search_poll(job);
-        assert(!party_return_check && search_server_active && timeout_attempts==requeue_attempts);
-    }
-    /* A real leader cancellation is still applied after server confirmation, on the game thread. */
-    assert(received_party_return((void *)1,(void *)2,(void *)3)==1);
-    struct SearchPoll *idle=calloc(1,sizeof *idle);
-    idle->generation=session_generation;idle->serial=search_poll_serial;
-    strcpy(idle->target,"/ryunet/matchmaking-status?name=LocalHost");
-    strcpy(reply,"{\"state\":\"idle\",\"elapsed\":0,\"timeout\":180,\"range\":0}");
-    search_poll(idle);
-    assert(party_return_check==2 && timeout_attempts==requeue_attempts);
-    search_poll_after=UINT64_MAX;timeout_ready=1;
-    runtime_public_itemless_update();
-    assert(!party_return_check && timeout_attempts==requeue_attempts+1 && timeout_route==2);
-    *(int *)(party+0x54)=0;
-    search_server_active=0;search_poll_after=0;strcpy(reply,"ok");
-    requeued_room=0;matchmaking_search=0;party_at_entry=saved_entry;
     frozen_race=0;timeout_ready=old_ready;timeout_attempts=old_attempts;
     stopped=old_stops;returned=old_returns;
-    unsigned char owner[0x960]={0};
-    uint64_t found=89;
-    memcpy(owner+0x958,&found,sizeof found);
-    const char party_return[]="{\"octr_party_return\":true}";
-    timeout_ready=1;
-    int before_return=timeout_attempts;
-    updated(owner,88,3,"",0,party_return,sizeof party_return-1);
-    assert(timeout_attempts==before_return);
-    matchmaking_search=1;
-    updated(owner,found,3,"",0,party_return,sizeof party_return-1);
-    assert(timeout_attempts==before_return); /* The native object still holds the previous room ID. */
-    matchmaking_search=0;
-    /* Server return updates must not cancel menu UI while a public race is active. */
-    kart_racing=1;
-    updated(owner,found,3,"",0,party_return,sizeof party_return-1);
-    assert(timeout_attempts==before_return);
-    kart_racing=0;
-    updated(owner,found,3,"",0,party_return,sizeof party_return-1);
-    assert(timeout_attempts==before_return+1 && timeout_route==2);
-    timeout_ready=old_ready;timeout_attempts=old_attempts;
     native_party_return_trace=saved_message;native_return_to_lobby=saved_lobby;
     native_stop_matchmaking=saved_stop;network_manager=saved_network;party_manager=saved_party;
 }
@@ -1980,234 +1347,23 @@ static void test_ranked_device_and_search_clock(void) {
     /* Party followers use server elapsed time; stale worker replies cannot restore a cancelled search. */
     runtime_public_itemless_reset();
     snprintf(reply,sizeof reply,"{\"state\":\"searching\",\"elapsed\":45,\"timeout\":180,\"range\":1000,\"ranked\":true}");
-    match_found=1; /* A previous room must not keep a fresh queue in matched state. */
     struct SearchPoll *job=calloc(1,sizeof *job);
     job->generation=session_generation;job->serial=search_poll_serial;
     strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");search_poll(job);
     assert(runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
     assert(elapsed==45 && range==1000 && ranked);
-    assert(!match_found);
-    match_found=1;
-    snprintf(reply,sizeof reply,"{\"state\":\"timed_out\",\"elapsed\":180,\"timeout\":180,\"range\":1000,\"ranked\":true}");
-    job=calloc(1,sizeof *job);job->generation=session_generation;job->serial=search_poll_serial;
-    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");search_poll(job);
-    assert(!match_found);
-    match_found=matchmaking_search=1;
-    const uint64_t pending_mark=search_mark;
-    snprintf(reply,sizeof reply,"{\"state\":\"idle\",\"elapsed\":0,\"timeout\":180,\"range\":0,\"ranked\":false}");
-    job=calloc(1,sizeof *job);job->generation=session_generation;job->serial=search_poll_serial;
-    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");search_poll(job);
-    assert(!match_found && matchmaking_search && search_mark==pending_mark);
-    match_found=1;matchmaking_room=42; /* A poll started before join cannot undo that join. */
-    job=calloc(1,sizeof *job);job->generation=session_generation;job->serial=search_poll_serial;
-    strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");search_poll(job);
-    assert(match_found && matchmaking_room==42);
-    matchmaking_room=0;
     job=calloc(1,sizeof *job);job->generation=session_generation;job->serial=search_poll_serial;
     strcpy(job->target,"/ryunet/matchmaking-status?name=LocalHost");
     runtime_public_itemless_reset();search_poll(job);
     assert(!runtime_matchmaking_view(&elapsed,&timeout,&range,&ranked));
     runtime_public_itemless_reset();
-    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;search_poll_after=0;
-    party_return_check=1;
-    update_search_clock();assert(search_timeout_pending && !rejection[0] && !search_poll_running);
+    matchmaking_search=1;search_mark=check_clock();search_elapsed_base=180;search_poll_after=UINT64_MAX;
+    update_search_clock();assert(search_timeout_pending && !rejection[0]);
     runtime_public_itemless_reset();rejection[0]=0;snprintf(reply,sizeof reply,"ok");
     party_guest=saved_guest;
 }
 
-static int admission_error;
-static unsigned char expected_security[24];
-static uint32_t ABI security_init_mock(void *session,void *id,void *key,int host) {
-    assert(session && host==1);
-    assert(!memcmp(id,expected_security,8) && !memcmp(key,expected_security+8,16));
-    return 1;
-}
-static void test_promoted_host_security(void) {
-    unsigned char owner[0x968]={0}, job[0xa8]={0}, connection[0x120]={0};
-    void *session[3]={NULL,NULL,connection}, *manager[6]={NULL,NULL,owner,job,NULL,NULL};
-    void *root=manager;
-    void **old_manager=match_session_manager;
-    SessionInit old_init=native_session_init;
-    native_session_init=security_init_mock;match_session_manager=&root;
-    runtime_public_itemless_reset();
-    matchmaking_owner=owner;matchmaking_room=pending_host_room=3;
-    void *job_session=session;memcpy(job+0xa0,&job_session,sizeof job_session);
-    unsigned char reserved[24];memset(reserved,0x11,sizeof reserved);
-    memset(owner+0x900,0x22,24);memset(expected_security,0x22,24);
-    assert(traced_session_init(session,reserved,reserved+8,1)==1);
-    assert(!memcmp(owner+0x900,expected_security,24));
-    job_session=owner;memcpy(job+0xa0,&job_session,sizeof job_session);
-    memset(expected_security,0x11,24);
-    assert(traced_session_init(session,reserved,reserved+8,1)==1);
-    job_session=session;memcpy(job+0xa0,&job_session,sizeof job_session);
-    runtime_public_itemless_reset();
-    assert(traced_session_init(session,reserved,reserved+8,1)==1);
-    native_session_init=old_init;match_session_manager=old_manager;
-}
-static void test_failed_race_join_cleanup(void) {
-    unsigned char owner[0x968]={0}, state_call[5]={0x90,0x90,0x90,0x90,0x90};
-    unsigned char *old_call=race_join_state_call;
-    runtime_public_itemless_reset();
-    matchmaking_owner=owner;matchmaking_room=race_join_room=3;
-    race_join_state_call=state_call;
-    retire(owner,0);
-    assert(!matchmaking_room && !race_join_room);
-    assert(!memcmp(state_call,"\xe8\x85\xe8\xff\xff",5));
-    race_join_state_call=old_call;
-}
-static unsigned char ABI admission_mock(void *session,void *peer,int *reason) {
-    assert(session && peer==session);
-    unsigned char *owner=ptr(*match_session_manager,0x10);
-    *reason=owner[0x960] ? admission_error : 0x28;
-    return *reason==0;
-}
-static void test_race_handoff_admission(void) {
-    unsigned char owner[0x968]={0}, connection[0x120]={0};
-    void *session[3]={NULL,NULL,connection}, *manager[6]={NULL,NULL,owner,NULL,NULL,session};
-    void *root=manager;
-    void **old_manager=match_session_manager;
-    SessionAdmission old_admission=native_session_admission;
-    match_session_manager=&root;
-    native_session_admission=admission_mock;
-    runtime_public_itemless_reset();
-    matchmaking_owner=owner;matchmaking_room=3;
-    *(int *)(connection+0x118)=1;
-    kart_racing=1;local_race_quitting=0;
-    int reason=0;
-    assert(!admit_race_rejoin(session,session,&reason) && reason==0x28);
-    host_attempt_until=check_clock()+20000;
-    assert(admit_race_rejoin(session,session,&reason) && reason==0 && !owner[0x960]);
-    admission_error=1; /* Capacity/authentication refusals must still reach the caller. */
-    assert(!admit_race_rejoin(session,session,&reason) && reason==1 && !owner[0x960]);
-    admission_error=0;
-    kart_racing=0;
-    assert(!admit_race_rejoin(session,session,&reason) && reason==0x28);
-    kart_racing=1;local_race_quitting=1;
-    assert(!admit_race_rejoin(session,session,&reason) && reason==0x28);
-    local_race_quitting=0;manager[5]=NULL;
-    assert(!admit_race_rejoin(session,session,&reason) && reason==0x28);
-    manager[5]=session;host_attempt_until=check_clock();
-    assert(!admit_race_rejoin(session,session,&reason) && reason==0x28);
-    owner[0x960]=1;
-    assert(admit_race_rejoin(session,session,&reason) && owner[0x960]);
-    runtime_public_itemless_reset();kart_racing=0;
-    match_session_manager=old_manager;native_session_admission=old_admission;
-}
-
-static int ownership_calls;
-static void ABI host_change_update(void *owner,uint64_t room,uint64_t version,const char *host,unsigned hn,const char *doc,unsigned dn) {
-    (void)owner;(void)room;(void)version;(void)host;(void)hn;(void)doc;(void)dn;
-    assert(race_handoff_departed_pid);
-}
-static void test_handoff_without_departure_field(void) {
-    unsigned char owner[0x968]={0};
-    const char host2[]="{\"listen_server\":{\"host_player_id\":22}}";
-    const char host3[]="{\"listen_server\":{\"host_player_id\":44}}";
-    Join old_update=native_update;
-    native_update=host_change_update;
-    runtime_public_itemless_reset();
-    *(uint64_t *)(owner+0x958)=3;
-    matchmaking_room=3;matchmaking_owner=owner;race_lobby_host_pid=11;kart_racing=1;
-    created(owner,1,3,2,host2,sizeof host2-1,"{}",2);
-    assert(race_handoff_departed_pid==11 && race_lobby_host_pid==22 && !last_departure_pid);
-    updated(owner,3,2,host2,sizeof host2-1,"{}",2);
-    assert(race_handoff_departed_pid==11);
-    updated(owner,3,3,host3,sizeof host3-1,"{}",2);
-    assert(race_handoff_departed_pid==22 && race_lobby_host_pid==44 && !last_departure_pid);
-    runtime_public_itemless_reset();assert(!race_handoff_departed_pid);
-    native_update=old_update;kart_racing=0;race_lobby_host_pid=left_room_pending=0;
-}
-static int removed_racers;
-static unsigned char departed_racer[0xb0], surviving_racer[0xb0];
-static int ABI remove_racer_mock(void *manager,void *player) {
-    (void)manager;(void)player;++removed_racers;return 1;
-}
-static void ABI switch_roster_mock(void *race,void *connection) {
-    (void)race;(void)connection;
-    remove_race_player(NULL,departed_racer);
-    remove_race_player(NULL,surviving_racer);
-}
-static void test_handoff_roster(void) {
-    void *replication[3]={0}, *race[5]={NULL,NULL,NULL,NULL,replication};
-    void (*old_switch)(void *,void *)=native_race_switch_original;
-    int (*old_remove)(void *,void *)=native_remove_player_original;
-    native_race_switch_original=switch_roster_mock;native_remove_player_original=remove_racer_mock;
-    *(uint64_t *)(departed_racer+0xa8)=33;*(uint64_t *)(surviving_racer+0xa8)=22;
-    left_room_pending=matchmaking_room=last_departure_room=3;last_departure_pid=0;
-    race_handoff_departed_pid=33; /* Host-change pushes need not contain octr_departed_pid. */
-    kart_racing=1;local_race_quitting=0;removed_racers=0;
-    race_connection_switch(race,(void *)1);
-    assert(removed_racers==1 && !race_switch_departed);
-    /* Genuine departure outside the synchronous transport switch still runs. */
-    assert(remove_race_player(NULL,surviving_racer)==1 && removed_racers==2);
-    local_race_quitting=1;race_connection_switch(race,(void *)1);assert(removed_racers==4);
-    local_race_quitting=0;kart_racing=0;race_connection_switch(race,(void *)1);assert(removed_racers==6);
-    native_race_switch_original=old_switch;native_remove_player_original=old_remove;
-    runtime_public_itemless_reset();last_departure_room=last_departure_pid=left_room_pending=0;
-}
-static uint64_t ABI take_racer_mock(void *manager,void *entity) {
-    assert(manager);
-    ((unsigned char *)entity)[0x3b]|=1;
-    ++ownership_calls;
-    return 0;
-}
-static void test_handoff_racer_ownership(void) {
-    unsigned char racers[5][0x30]={0}, players[3][0xb0]={0}, entities[5][0x40]={0};
-    void *entity_handles[5][6]={{0}}, *player_handles[3][6]={{0}}, *rows[5];
-    unsigned char list[0x28]={0}, connection[0x120]={0};
-    void *racer_root[3]={NULL,NULL,list}, *racer_manager=racer_root;
-    void *object_root[6]={0}, *object_manager=object_root;
-    object_root[5]=object_root;
-    void *replication[3]={NULL,NULL,connection}, *race[5]={NULL,NULL,NULL,NULL,replication};
-    void *network[16]={0}, *network_root=network;
-    network[15]=race;
-    for (int i=0;i<5;++i) {
-        rows[i]=racers[i];entity_handles[i][5]=entities[i];
-        void *handle=entity_handles[i];memcpy(racers[i]+0x20,&handle,8);
-        if (i>0 && i<4) {
-            player_handles[i-1][5]=players[i-1];handle=player_handles[i-1];
-            memcpy(racers[i]+0x10,&handle,8);
-        }
-    }
-    /* AI, local human, surviving remote, departed host, unresolved human handle. */
-    *(unsigned *)(players[1]+0x20)=9;*(uint64_t *)(players[1]+0xa8)=22;
-    *(unsigned *)(players[2]+0x20)=UINT32_MAX;*(uint64_t *)(players[2]+0xa8)=33;
-    void *unresolved[6]={0}, *handle=unresolved;
-    memcpy(racers[4]+0x10,&handle,8);
-    *(int *)(list+12)=5;void *items=rows;memcpy(list+0x20,&items,8);
-    *(int *)(connection+0x118)=1;
-    race_racers=&racer_manager;race_object_root=&object_manager;network_manager=&network_root;
-    native_take_racer_ownership=take_racer_mock;
-    matchmaking_room=last_departure_room=3;last_departure_pid=0;race_handoff_departed_pid=33;
-    host_attempt_until=100;local_race_quitting=0;kart_racing=1;ownership_calls=0;
-    restore_host_racers(3,50);
-    assert(ownership_calls==3 && entities[0][0x3b] && entities[1][0x3b] && entities[3][0x3b]);
-    assert(!entities[2][0x3b] && !entities[4][0x3b]);
-    restore_host_racers(3,50);assert(ownership_calls==3);
-    entities[0][0x3b]=0; /* A delayed rejoin can reclaim the AI again. */
-    restore_host_racers(3,60);assert(ownership_calls==4);
-    entities[0][0x3b]=0;
-    *(int *)(connection+0x118)=2;restore_host_racers(3,60);assert(ownership_calls==4);
-    *(int *)(connection+0x118)=1;restore_host_racers(3,100);assert(ownership_calls==4);
-    restore_host_racers(4,60);assert(ownership_calls==4);
-    local_race_quitting=1;restore_host_racers(3,60);assert(ownership_calls==4);
-    local_race_quitting=0;kart_racing=0;restore_host_racers(3,60);assert(ownership_calls==4);
-    race_racers=race_object_root=network_manager=NULL;native_take_racer_ownership=NULL;
-    runtime_public_itemless_reset();last_departure_room=last_departure_pid=0;
-}
-
 int main(void) {
-    test_handoff_without_departure_field();
-    test_handoff_roster();
-    test_handoff_racer_ownership();
-    test_failed_race_join_cleanup();
-    test_promoted_host_security();
-    test_race_handoff_admission();
-    assert(lobby_host_pid("{\"listen_server\":{\"host_address\":\"abc\",\"host_player_id\":1817964973}}") == 1817964973);
-    assert(lobby_host_pid("{\"host_player_id\":123,\"listen_server\":{\"host_player_id\":1817964973}}") == 1817964973);
-    matchmaking_room=3; frozen_race=1;
-    assert(in_network_game());
-    matchmaking_room=0; frozen_race=0;
     test_public_content_gate();
     test_ranked_device_and_search_clock();
     test_guest_main_menu_leaves_party();
@@ -2320,16 +1476,6 @@ int main(void) {
     register_client(&result,NULL,info,sizeof info);
     assert(registration_nonce && allow_party);
     confirmation_doc(b,sizeof b,room,registration_nonce);
-    /* The leader snapshots this nonce before the follower reloads its native lobby. */
-    const uint64_t registered=registration_nonce;
-    register_client(&result,NULL,info,sizeof info);
-    assert(registration_nonce==registered);
-    for (int mode=0;mode<2;++mode) {
-        char ranked_doc[160];
-        snprintf(ranked_doc,sizeof ranked_doc,"{\"octr_ranked_v1\":\"2/%" PRIu64 "/%d/%016" PRIx64 "\"}",room,mode,registered);
-        assert(accept(owner,room,ranked_doc,(unsigned)strlen(ranked_doc)));
-        assert(confirmed_ranked);
-    }
     assert(accept(owner,room,b,(unsigned)strlen(b))); /* compatible invited party member */
     assert(runtime_public_itemless_active());
     kicked(owner,room); assert(!runtime_public_itemless_active());
@@ -2342,9 +1488,8 @@ int main(void) {
     memcpy(owner+0x958,&room,8);
     runtime_public_itemless_party_ready();
     assert(accept(owner,room,b,(unsigned)strlen(b)));
-    native_leave=send_leave_observed;leave_saw_active=0;
+    native_leave=send_leave;
     leave_lobby(&result,NULL,room);
-    assert(leave_saw_active);
     assert(!runtime_public_itemless_active());
     assert(!accept(owner,room,b,(unsigned)strlen(b)));
     runtime_public_itemless_update();
@@ -2383,10 +1528,8 @@ int main(void) {
     test_ranked();
     test_takeover_keeps_ranked();
     test_ranked_button_event();
-    test_ranked_pause_quit();
     test_native_return_focus();
     test_timeout_preserves_party_and_mode();
-    test_join_waits_for_native_session();
     test_cancelled_and_duplicate_lobby_entries();
     test_hof_native_ready();
     test_ranked_season_gate();
@@ -2434,77 +1577,6 @@ int main(void) {
     assert(result && sent==searches+2 && !rejection[0]);
     assert(dialogs==notices && stopped==stops && requests==http_requests);
     runtime_public_itemless_reset();
-
-    native_peer_leave_original=peer_leave_mock;
-    matchmaking_room=74;
-    assert(peer_leave_message(NULL)==1 && peer_leave_calls==0);
-    kart_racing=1;
-    assert(peer_leave_message(NULL)==7 && peer_leave_calls==1);
-    kart_racing=0;
-    matchmaking_room=0;
-    unsigned char network_for_quit[0x80]={0}, race_for_quit[0x28]={0}, replication_for_quit[0x18]={0};
-    void *network_pointer=network_for_quit;
-    void *race_pointer=race_for_quit;
-    memcpy(network_for_quit+0x78,&race_pointer,sizeof race_pointer);
-    void *replication_pointer=replication_for_quit;
-    memcpy(race_for_quit+0x20,&replication_pointer,sizeof replication_pointer);
-    network_manager=&network_pointer;
-    native_race_switch_original=race_switch_mock;
-    native_set_race_connection=set_race_connection_mock;
-    left_room_pending=74;
-    lobby_open=0;
-    kart_racing=1;
-    local_race_quitting=0;
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==0);
-    kart_racing=0; /* Loading after a race frame must not drop the room's connection. */
-    had_public_race=0;
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==1);
-    had_public_race=1;
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==1);
-    lobby_open=1;
-    memcpy(race_for_quit+0x18,&network_pointer,sizeof network_pointer);
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==2); /* Back in the lobby: native teardown must run. */
-    lobby_open=0;
-    local_race_quitting=1;
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==3); /* Intentional race exit also releases the native roster. */
-    memset(race_for_quit+0x18,0,sizeof network_pointer);
-    race_switch_calls=1;
-    kart_racing=1;
-    local_race_quitting=1;
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==1);
-    void *stale_connection=(void *)0x1111;
-    memcpy(replication_for_quit+0x10,&stale_connection,sizeof stale_connection);
-    local_race_quitting=0;
-    left_room_pending=0;
-    had_public_race=1;
-    race_connection_switch(race_for_quit,NULL);
-    memcpy(&stale_connection,replication_for_quit+0x10,sizeof stale_connection);
-    assert(!stale_connection && race_switch_calls==1);
-    stale_connection=(void *)0x2222;
-    memcpy(replication_for_quit+0x10,&stale_connection,sizeof stale_connection);
-    network_pointer=NULL; /* Reset detaches the race before clearing its connection. */
-    race_connection_switch(race_for_quit,NULL);
-    memcpy(&stale_connection,replication_for_quit+0x10,sizeof stale_connection);
-    assert(!stale_connection && race_switch_calls==1);
-    stale_connection=(void *)0x3333;
-    memcpy(replication_for_quit+0x10,&stale_connection,sizeof stale_connection);
-    left_room_pending=74;
-    race_connection_switch(race_for_quit,NULL);
-    memcpy(&stale_connection,replication_for_quit+0x10,sizeof stale_connection);
-    assert(!stale_connection && race_switch_calls==1);
-    replication_pointer=NULL;
-    memcpy(race_for_quit+0x20,&replication_pointer,sizeof replication_pointer);
-    race_connection_switch(race_for_quit,NULL);
-    assert(race_switch_calls==1);
-    kart_racing=0;
-    left_room_pending=0;
-    had_public_race=0;
 
     alarm(0);
     puts("Public Itemless request, party rejection, confirmation and lifecycle tests passed");

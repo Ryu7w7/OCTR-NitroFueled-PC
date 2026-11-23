@@ -15,7 +15,7 @@ Install [MSYS2](https://www.msys2.org) into `C:\msys64`, open the **MSYS2 CLANG6
 pacman -S --needed git patch \
   mingw-w64-clang-x86_64-{toolchain,cmake,ninja,pkgconf,python} \
   mingw-w64-clang-x86_64-{vulkan-headers,vulkan-loader,vulkan-memory-allocator,glslang} \
-  mingw-w64-clang-x86_64-{sdl3,fmt,boost,robin-map,xxhash,ffmpeg,zydis} \
+  mingw-w64-clang-x86_64-{sdl3,fmt,boost,robin-map,xxhash,ffmpeg,zydis,pango} \
   mingw-w64-clang-x86_64-{spirv-tools,spirv-headers,spirv-cross}
 ```
 
@@ -96,7 +96,7 @@ moves them).
 | SIGSEGV handler, `sigsetjmp` recovery | Vectored exception handler; `bb_setjmp`/`bb_longjmp` (`src/compat_win.c`). |
 | glibc sleeps, `CLOCK_MONOTONIC` condition variables | High-resolution waitable timers; semaphore and event flag deadlines on `CLOCK_REALTIME` (winpthreads rejects monotonic condition variables). |
 | `libbbgpu.so` | A static `libbbgpu.a` linked into `sacredfire.exe`, with a manifest for UTF-8 and long paths. |
-| `run.sh`, native Linux launcher | `run.py` and the Windows launcher (`CTR-NitroFueled-PC.exe`, above). |
+| `run.sh`, GTK launcher | `run.py` and the Windows launcher (`CTR-NitroFueled-PC.exe`, above). |
 | Save files replaced with `rename` | `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`; all files opened in binary mode. |
 
 Not available on Windows: the PC memory model (`BB_PC_MODEL`/`BB_GUEST_IN_PLACE`, dma-buf guest

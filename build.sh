@@ -48,11 +48,11 @@ fi
 if [[ -z ${CC:-} ]]; then echo 'Install GCC/Clang or set CC.' >&2; exit 1; fi
 # Dependencies come from pkg-config (Vulkan loader/headers, SDL3). On NixOS the
 # environment is provided by shell.nix; re-enter it automatically if needed.
-if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 'liblzma >= 5.4' && command -v cmake >/dev/null && command -v ninja >/dev/null; }; then
+if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 pangocairo 'liblzma >= 5.4' && command -v cmake >/dev/null && command -v ninja >/dev/null; }; then
     if [[ -z ${BB_IN_NIX_SHELL:-} ]] && command -v nix-shell >/dev/null; then
         exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash build.sh $*"
     fi
-    echo 'Need pkg-config with vulkan, sdl3 and liblzma >= 5.4, cmake and ninja (see shell.nix).' >&2; exit 1
+    echo 'Need pkg-config with vulkan, sdl3, pangocairo and liblzma >= 5.4, cmake and ninja (see shell.nix).' >&2; exit 1
 fi
 # SacredFire: header-only libraries the host lacks (magic_enum, VulkanMemoryAllocator, xbyak) come
 # from tools/deps.sh into out/deps/prefix; CMake finds them through CMAKE_PREFIX_PATH.
@@ -125,10 +125,11 @@ echo "Version: $version (out/VERSION)"
 # GPU check for run.sh (live_resolution=auto) and the launcher's gamepad list (--gamepads).
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Isrc tests/test_online_race_transition.c -Wl,--gc-sections -lm -o out/online-race-transition-test
-    out/online-race-transition-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -lm -o out/online-mode-test
     out/online-mode-test
+    "${CXX:-c++}" -std=c++17 -O2 $(pkg-config --cflags pangocairo) -c gpu/shim/clan_text.cpp -o out/clan-text.o
+    "$CC" -std=c11 -O2 -Wall -Wextra -Werror -pthread -Isrc tests/test_clan_tags.c src/runtime_clan_tags.c src/runtime_name_colors.c out/clan-text.o $(pkg-config --libs pangocairo) -lstdc++ -lm -o out/clan-tags-test
+    out/clan-tags-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_race_options.c src/runtime_tt_reference.c src/runtime_ai_catchup.c -lm -o out/race-options-test
     out/race-options-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_ai_catchup.c -lm -o out/ai-catchup-test

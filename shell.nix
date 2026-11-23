@@ -11,9 +11,10 @@ let
   sdl3 = pkgs.sdl3.override { inherit libdecor; };
 in
 pkgs.mkShell {
+  FONTCONFIG_FILE = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts pkgs.noto-fonts pkgs.noto-fonts-cjk-sans ]; };
   packages = (with pkgs; [
     gcc gnumake cmake ninja pkg-config python3 binutils git
-    vulkan-headers vulkan-loader xz libpng freetype openssl fontconfig glib libdbusmenu
+    vulkan-headers vulkan-loader xz libpng freetype pango openssl fontconfig glib libdbusmenu
     directx-shader-compiler  # the native Vulkan engine compiles its shaders with it (scripts/native_shaders.py)
     # GPU library (gpu/): shadPS4 video core dependencies
     ffmpeg-headless libopus boost fmt magic-enum robin-map xxhash vulkan-memory-allocator glslang spirv-cross xbyak zydis spirv-headers miniz libx11 libxcb xorgproto wayland
