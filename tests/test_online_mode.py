@@ -353,6 +353,12 @@ class OnlineModeTests(unittest.TestCase):
             blob = iga.read_entry(f, *entry[1:])
         original = Igz(blob)
         patched = Igz(online_mode.ranked_lobby_icons(blob))
+        sprites = [off for off, kind in patched.objects()
+                   if off >= len(original.data) and kind == 'igGuiSprite']
+        self.assertEqual(len(sprites), 18)
+        for off in sprites:
+            self.assertEqual(patched.u32(off + 0x30), 1)
+            self.assertEqual(struct.unpack_from('<2f', patched.data, off + 0x34), (100, 100))
         for tag in ('RHND', 'RNEX'):
             self.assertEqual(len(patched.read_list(tag, unpack_offsets)),
                              patched.fixup(tag)[1])

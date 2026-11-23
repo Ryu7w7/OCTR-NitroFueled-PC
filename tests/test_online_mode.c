@@ -3975,6 +3975,11 @@ static void test_ranked_mode_root_with_added_assets(void) {
     ranked_mode_select_layout(root, 1);
     assert(*(float *)(first + 0x64) == 137.5f);
     assert(*(float *)(content + 0x64) == 190.0f);
+    *(float *)(first + 0x64) = 47.5f; /* native exit animation between layouts */
+    *(float *)(content + 0x64) = 100.0f;
+    ranked_mode_select_layout(root, 1);
+    assert(*(float *)(first + 0x64) == 137.5f);
+    assert(*(float *)(content + 0x64) == 190.0f);
     ranked_mode_select_layout(root, 0);
     assert(*(float *)(first + 0x64) == -52.5f);
     assert(*(float *)(content + 0x64) == 0.0f);

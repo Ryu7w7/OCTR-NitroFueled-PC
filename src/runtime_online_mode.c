@@ -4490,9 +4490,7 @@ void ranked_mode_select_layout(unsigned char *root, int ranked) {
     float current_first, current_content;
     memcpy(&current_first, first + 0x64, 4);
     memcpy(&current_content, content + 0x64, 4);
-    if (first != cached_first || content != cached_content ||
-        (current_first != first_y && current_first != first_y + 190.0f) ||
-        (current_content != content_y && current_content != content_y + 190.0f)) {
+    if (first != cached_first || content != cached_content) {
         cached_first = first;
         cached_content = content;
         first_y = current_first;
@@ -5384,6 +5382,8 @@ static void ranked_member_icons(unsigned char *self) {
         const int background = label && !strncmp(label, "OCTR_RANK_SHADOW_", 17);
         const int foreground = label && !strncmp(label, "OCTR_RANK_ICON_", 15);
         if (!background && !foreground) continue;
+        /* Rebuild generated sprite draw state during native menu focus animations. */
+        if (!(*(unsigned *)(icon + 12) & 0x400)) name_color_changed(icon);
         ++matched;
         const char *rank = label + (background ? 17 : 15);
         const int icon_mode = rank[0] - '0';
@@ -5411,7 +5411,10 @@ static void ranked_member_icons(unsigned char *self) {
                 if (background) x += 2.0f;
                 float now_x;
                 memcpy(&now_x, icon + 0x60, sizeof now_x);
-                if (now_x != x) memcpy(icon + 0x60, &x, sizeof x);
+                if (now_x != x) {
+                    memcpy(icon + 0x60, &x, sizeof x);
+                    name_color_changed(icon);
+                }
             }
             continue;
         }
