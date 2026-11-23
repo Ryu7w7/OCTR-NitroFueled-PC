@@ -5,6 +5,7 @@ static int32_t guest_errno;
 int32_t *runtime_errno(void) { return &guest_errno; }
 int32_t runtime_guest_errno(int e) { return e; }
 void runtime_cinematic_video(int delta) { (void)delta; }
+void runtime_load_guard_note(const void *buffer, size_t size) { (void)buffer; (void)size; }
 int runtime_online_mode_in_private(void) { return 0; }
 int runtime_online_mode_private_cup_race(void) { return 0; }
 int runtime_public_itemless_active(void) { return 0; }
