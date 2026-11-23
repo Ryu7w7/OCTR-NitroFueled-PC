@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+static void *departed_kart_entity;
+int runtime_online_mode_departed_kart(void *entity) { return entity && entity==departed_kart_entity; }
 static unsigned char timestep_boost[0x70];
 static float timestep_native_dt;
 static int timestep_native_calls;
@@ -2339,7 +2341,41 @@ static void test_all_items(void) {
     apply_item_during_slide(ai,NULL); assert(wire[0x10]==0xc9); /* Stale decisions excluded. */
 }
 
+static int parked_inputs,parked_motion,parked_velocity;
+static void ABI parked_apply(void *self,void *input) {
+    (void)input;
+    unsigned char *wire=ptr(self,0x70);
+    assert(real(wire,0xc)==0 && wire[0x10]==0);++parked_inputs;
+}
+static void ABI parked_set_velocity(void *entity,const float *v) {
+    assert(v[0]==0 && v[1]==0);memcpy((char *)entity+0x60,v,12);++parked_velocity;
+}
+static void ABI parked_native_motion(void *kart,void *entity,void *velocity) {
+    (void)kart;(void)velocity;
+    assert(real(entity,0x60)==0 && real(entity,0x64)==0);
+    float falling=-200;memcpy((char *)entity+0x68,&falling,4);++parked_motion;
+}
+static void test_park_disconnected_kart(void) {
+    unsigned char self[0x78]={0},wire[0x18]={0},entity[0x80]={0},kart[0x30]={0};
+    AiInput saved_apply=native_apply_ai_input;
+    KartMotion saved_motion=native_kart_motion;
+    SetVelocity saved_velocity=native_set_velocity;
+    put_ptr(self,0x18,entity);put_ptr(self,0x70,wire);put_ptr(kart,0x18,entity);
+    entity[0x3b]=1;departed_kart_entity=entity;
+    native_apply_ai_input=parked_apply;native_kart_motion=parked_native_motion;native_set_velocity=parked_set_velocity;
+    for(int i=0;i<8;++i) {
+        float turn=.8f,velocity[3]={1000,500,-100};
+        memcpy(wire+0xc,&turn,4);wire[0x10]=63;memcpy(entity+0x60,velocity,12);
+        ai_input(self,NULL);kart_motion(kart,entity,NULL);
+        assert(real(entity,0x60)==0 && real(entity,0x64)==0 && real(entity,0x68)==-200);
+    }
+    assert(parked_inputs==8 && parked_motion==8 && parked_velocity==16);
+    departed_kart_entity=NULL;native_apply_ai_input=saved_apply;
+    native_kart_motion=saved_motion;native_set_velocity=saved_velocity;
+}
+
 int main(void) {
+    test_park_disconnected_kart();
     assert(runtime_race_options_start(NULL, 0));
     unsigned char *invalid_image = calloc(1, 0x2af2608);
     assert(invalid_image && !runtime_race_options_start(invalid_image, 0x2af2608));

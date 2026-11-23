@@ -4,7 +4,10 @@
 #include "../src/runtime_itemless.c"
 void runtime_race_options_stop_boost(void *b, void (ABI *stop)(void *)) { stop(b); }
 static int active, responses, removals, nested;
-static int private_mode, collision_enabled;
+static int private_mode, collision_enabled, public_match;
+static void *departed;
+int runtime_public_match_active(void) { return public_match; }
+int runtime_online_mode_departed_kart(void *entity) { return entity && entity==departed; }
 static unsigned char owner[32], other[32], ai[32], ai2[32], obstacle[32], human_racer[32], ai_racer[32];
 static unsigned char boost[32], wall_context[40], collision_data[16];
 static int boost_alive;
@@ -268,6 +271,22 @@ static void test_collision_filter(void) {
     filter_contact(self, context, event); assert(!cache[0x25]);
     bodies[0x90+0x42] = 4; put(event, 0x20, NULL);
     filter_contact(self, context, event); assert(!cache[0x25]);
+    /* Public normal mode: only contacts involving the disconnected human are suppressed. */
+    active=0;public_match=1;private_mode=0;collision_enabled=1;
+    put(self,0x18,owner);put(event,0x20,cache);
+    initialize(self);assert(subscriptions==1);
+    for(int side=0;side<2;++side) for(int i=0;i<5;++i) {
+        put(bodies,0x90+0x88,entities[i]);
+        departed=side ? entities[i] : owner;
+        cache[0x25]=0;filter_contact(self,context,event);
+        assert(cache[0x25]==(entities[i]!=owner ? 2 : 0));
+    }
+    departed=NULL;
+    put(bodies,0x90+0x88,ai);cache[0x25]=0;filter_contact(self,context,event);
+    assert(!cache[0x25]); /* Native matchmaking AI still collides. */
+    departed=owner;bodies[0x90+0x42]=0;filter_contact(self,context,event);
+    assert(!cache[0x25]); /* Static track and ground remain solid. */
+    departed=NULL;public_match=0;bodies[0x90+0x42]=4;
     put(self, 0x18, owner);
     active = 0; /* Cleanup must work even after the room/mode flag has reset. */
     uninitialize(self); assert(uninitializations == 1 && !subscriptions && !filter_signal);
@@ -322,6 +341,12 @@ int main(void) {
     contact(self, context, collision_data);
     assert(removals == 4 && !contact_owner); /* Nested wall contact remains native. */
     assert(responses == 9); /* Every collision still reaches native response. */
+    active=0;public_match=1;departed=other;
+    int dc_responses=responses;
+    contact(self,context,collision_data);assert(responses==dc_responses);
+    departed=owner;contact(self,context,collision_data);assert(responses==dc_responses);
+    departed=NULL;public_match=0;active=1;
+
     stop_boost(boost);
     assert(removals == 5); /* No protection leaks into later contacts. */
     private_mode = collision_enabled = 0;

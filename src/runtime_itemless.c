@@ -131,7 +131,7 @@ static int is_racer(void *entity) {
 }
 
 static void ABI filter_contact(void *self, void *context, void *collision) {
-    if (!runtime_itemless_collisions_disabled() || !context || !collision) return;
+    if ((!runtime_itemless_collisions_disabled() && !runtime_public_match_active()) || !context || !collision) return;
     void *world = ptr(context, 0);
     void *bodies = world ? ptr(world, 0x20) : NULL;
     void *cache = ptr(collision, 0x20);
@@ -148,7 +148,8 @@ static void ABI filter_contact(void *self, void *context, void *collision) {
     if (!(body[0x42] & 4)) return;
     void *other = (void *)((uintptr_t)ptr(body, 0x88) & ~(uintptr_t)3);
     void *owner = ptr(self, 0x18);
-    if (owner != other && is_racer(owner) && is_racer(other))
+    if (owner != other && ((runtime_itemless_collisions_disabled() && is_racer(owner) && is_racer(other)) ||
+        runtime_online_mode_departed_kart(owner) || runtime_online_mode_departed_kart(other)))
         disable_contact(cache, world);
 }
 
@@ -172,7 +173,7 @@ static void filter_subscription(void *self, int add) {
 static void ABI initialize(void *self) {
     native_initialize(self);
     /* Event 2 owns the collision cache; event 3 exposes contact data instead. */
-    if (runtime_itemless_collisions_disabled()) filter_subscription(self, 1);
+    if (runtime_itemless_collisions_disabled() || runtime_public_match_active()) filter_subscription(self, 1);
 }
 
 static void ABI uninitialize(void *self) {
@@ -183,7 +184,7 @@ static void ABI uninitialize(void *self) {
 static void ABI contact(void *self, void *context, void *collision) {
     void *previous = contact_owner;
     contact_owner = NULL;
-    if (runtime_speed_race_active() && context && collision) {
+    if ((runtime_speed_race_active() || runtime_public_match_active()) && context && collision) {
         int side;
         memcpy(&side, (unsigned char *)context + 0x20, 4);
         void *world = ptr(context, 0);
@@ -197,6 +198,10 @@ static void ABI contact(void *self, void *context, void *collision) {
                 if (body[0x42] & 4) {
                     void *other = (void *)((uintptr_t)ptr(body, 0x88) & ~(uintptr_t)3);
                     void *owner = ptr(self, 0x18);
+                    if (owner != other && (runtime_online_mode_departed_kart(owner) || runtime_online_mode_departed_kart(other))) {
+                        contact_owner = previous;
+                        return;
+                    }
                     if (owner != other && is_racer(owner) && is_racer(other)) {
                         if (runtime_itemless_collisions_disabled()) {
                             contact_owner = previous;

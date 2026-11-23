@@ -271,6 +271,14 @@ static int driving_level(void) { return peer_decision ? -1 : selected_driving_le
  * produces actions. The already-replicated byte reserves bits 6..7; readers of
  * the six native actions mask bits 0..5. No new packet or native enum value. */
 static void ABI ai_input(void *self, void *input) {
+    unsigned char *departed_wire=ptr(self,0x70);
+    if (departed_wire && native_apply_ai_input && runtime_online_mode_departed_kart(ptr(self,0x18))) {
+        const float straight=0;
+        memcpy(departed_wire+0xc,&straight,4);
+        departed_wire[0x10]=0;
+        native_apply_ai_input(self,input);
+        return;
+    }
     if (!custom_ai_allowed()) {
         followed_ai_profile=followed_ai_base=-1;
         if (ai_data && *ai_data) tune_ai(*ai_data); /* Restore cached private tuning before public AI runs. */
@@ -801,6 +809,17 @@ static float ABI trick_jump_impulse(void *kart) { return native_trick_impulse(ka
 /* e46250 reads the per-kart boost contribution and its native speed limits.
  * Scale all three for this call, then restore them; reserves never change. */
 static void ABI kart_motion(void *kart, void *data, void *velocity) {
+    void *departed_entity=kart ? ptr(kart,0x18) : NULL;
+    if (departed_entity && (((unsigned char *)departed_entity)[0x3b]&1) && native_set_velocity &&
+        runtime_online_mode_departed_kart(departed_entity)) {
+        /* Stop driving on the authority; keep native gravity and ground contact. */
+        float stopped[3]={0,0,real(departed_entity,0x68)};
+        native_set_velocity(departed_entity,stopped);
+        native_kart_motion(kart,data,velocity);
+        stopped[2]=real(departed_entity,0x68);
+        native_set_velocity(departed_entity,stopped);
+        return;
+    }
     const int level = physics_ai_level(kart);
     void *entity = kart ? ptr(kart, 0x18) : NULL;
     const float catchup=catchup_for_kart(kart);

@@ -2415,10 +2415,10 @@ static struct {
 /* The item hides the kart and its driver (0xe26410 -> 0xbd40d0: the entity's render node, entity
  * +0xb0 -> +0x28, flag 2 at +0x20); the wheels are entities of their own and stay. Shown again on this
  * screen only, through the node's own flag setter (0x349530), which changes nothing but the flag. */
-static void invisible_look_show(void *entity) {
+static void entity_visible(void *entity, int visible) {
     void *render = entity ? RR_AT(entity, 0xb0, void *) : 0;
     void *node = render ? RR_AT(render, 0x28, void *) : 0;
-    if (node && (RR_AT(node, 0x20, uint8_t) & 2)) game.node_flags(node, 2, 0);
+    if (node && !!(RR_AT(node, 0x20, uint8_t) & 2) != !visible) game.node_flags(node, 2, !visible);
 }
 
 static void invisible_look_message(void *kart, int start) {
@@ -2464,9 +2464,37 @@ static void invisible_look(int racing_now) {
     }
     if (move && RR_AT(move, 0x260, uint8_t) != IL.ghost) RR_AT(move, 0x260, uint8_t) = IL.ghost;
     /* the kart and its driver (CKartComponent, meta global 0x2ac44e0: +0x30 the driver's handle) */
-    invisible_look_show(kart);
+    entity_visible(kart, 1);
     void *kart_part = rr_component(kart, 0x2ac44e0);
-    invisible_look_show(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0);
+    entity_visible(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0, 1);
+}
+
+static void *departed_blink_karts[8];
+static void departed_look(int racing_now, float seconds) {
+    void *next[8]={0};
+    int used=0;
+    void *manager=rr_ptr(RR_D_RACER_MANAGER);
+    void *list=manager ? RR_AT(manager,0x10,void *) : NULL;
+    int count=rr_count(list);
+    for(int i=0;count<=8 && i<count;++i) {
+        void *racer=rr_item(list,i);
+        void *kart=racer ? rr_handle_object(&RR_AT(racer,0x20,void *)) : NULL;
+        if(!kart) continue;
+        int dc=racing_now && !runtime_replay_playing() && runtime_online_mode_departed_kart(kart);
+        int was=0;
+        for(int j=0;j<8;++j) was|=departed_blink_karts[j]==kart;
+        if(!dc && !was) continue;
+        const int visible=!dc || !isfinite(seconds) || seconds<0 || fmodf(seconds,.8f)<.4f;
+        entity_visible(kart,visible);
+        void *part=rr_component(kart,0x2ac44e0);
+        entity_visible(part ? rr_handle_object(&RR_AT(part,0x30,void *)) : NULL,visible);
+        /* CKartCustomizationComponent::_wheel1..4 are entity references, separate from the kart render node. */
+        void *custom=rr_component(kart,0x2ac49b8);
+        for(int wheel=0;custom && wheel<4;++wheel)
+            entity_visible(RR_AT(custom,0xf0+8*wheel,void *),visible);
+        if(dc) next[used++]=kart;
+    }
+    memcpy(departed_blink_karts,next,sizeof next);
 }
 
 static int racing;                              /* the last frame: a kart and a race clock */
@@ -2486,6 +2514,7 @@ void ABI runtime_replay_tick(void) {
     runtime_online_mode_note_frame();
     runtime_presence_tick();
     invisible_look(racing);
+    departed_look(racing,rr_race_clock());
     runtime_item_lead_tick(racing && !runtime_replay_playing());
     runtime_tips_tick();
     runtime_nsane_tick();

@@ -9,6 +9,10 @@ void runtime_reserves_bar_tick(void) {}
 static _Alignas(16) char frame_data[0x40], hud_data[0x100], project_data[0x100];
 static _Alignas(16) char damage_data[0x40], move_data[0x300], controller_data[0x100], racer_data[0x200];
 static int ghost_calls, loads, damage_calls, test_items;
+static void *dc_kart,*look_kart,*look_part,*look_custom;
+int runtime_online_mode_departed_kart(void *entity) { return entity && entity==dc_kart; }
+float rr_race_clock(void) { return 0; }
+
 unsigned char *rr_game(size_t offset) { return (unsigned char *)(uintptr_t)offset; }
 void *rr_ptr(size_t offset) {
     if (offset == RR_D_FRAME) return frame_data;
@@ -24,6 +28,8 @@ void *rr_find_component(void *entity, void *meta) {
 void *rr_handle_object(void **slot) { return *slot; }
 void *rr_kart_of(int i, int *id) { (void)id; return i == 0 ? project_data : NULL; }
 void *rr_component(void *kart, int meta) {
+    if(kart && kart==look_kart && meta==0x2ac44e0) return look_part;
+    if(kart && kart==look_kart && meta==0x2ac49b8) return look_custom;
     if (!kart || !test_items) return NULL;
     if (meta == RR_D_DAMAGE_META) return damage_data;
     if (meta == RR_D_KART_CONTROLLER_META) return move_data;
@@ -162,7 +168,45 @@ static void recording_windows(int rate) {
     IT.ready = 0;
 }
 
+static int blink_updates;
+static void ABI blink_flags(void *node,uint32_t mask,int set) {
+    assert(mask==2);++blink_updates;
+    uint8_t *flags=(uint8_t *)node+0x20;
+    if(set) *flags|=2;else *flags&=(uint8_t)~2;
+}
+static void test_departed_blink(void) {
+    unsigned char entities[7][0xb8]={{0}},renders[7][0x30]={{0}},nodes[7][0x30]={{0}};
+    unsigned char racers[2][0x28]={{0}},list[0x28]={0},part[0x38]={0},custom[0x110]={0};
+    void *items[]={racers[0],racers[1]};
+    RR_AT(project_data,0x10,void *)=list;RR_AT(list,12,int)=2;RR_AT(list,0x20,void **)=items;
+    RR_AT(racers[0],0x20,void *)=entities[0];RR_AT(racers[1],0x20,void *)=entities[6];
+    for(int i=0;i<7;++i) {
+        RR_AT(entities[i],0xb0,void *)=renders[i];RR_AT(renders[i],0x28,void *)=nodes[i];
+        nodes[i][0x20]=8;
+    }
+    RR_AT(part,0x30,void *)=entities[1];
+    for(int i=0;i<4;++i) RR_AT(custom,0xf0+i*8,void *)=entities[2+i];
+    dc_kart=look_kart=entities[0];look_part=part;look_custom=custom;
+    node_flags_fn *saved=game.node_flags;game.node_flags=blink_flags;
+    P.pending=0;
+    departed_look(1,.1f);assert(!blink_updates);
+    departed_look(1,.5f);assert(blink_updates==6);
+    for(int i=0;i<6;++i) assert(nodes[i][0x20]==10);
+    assert(nodes[6][0x20]==8); /* A normal AI or connected player never blinks. */
+    departed_look(1,.6f);assert(blink_updates==6);
+    departed_look(1,.9f);assert(blink_updates==12);
+    for(int i=0;i<6;++i) assert(nodes[i][0x20]==8);
+    departed_look(1,1.3f);assert(blink_updates==18);
+    departed_look(0,1.3f);assert(blink_updates==24); /* Restore visibility when leaving the race. */
+    for(int i=0;i<7;++i) assert(nodes[i][0x20]==8);
+    departed_look(1,.5f);assert(blink_updates==30);
+    dc_kart=NULL;departed_look(1,.5f);assert(blink_updates==36); /* Next-race identity reset. */
+    look_kart=look_part=look_custom=NULL;game.node_flags=saved;
+    RR_AT(project_data,0x10,void *)=NULL;
+}
+
 int main(void) {
+    test_departed_blink();
     const int rates[] = {30, 60, 72, 90, 120, 144, 240};
     for (unsigned r = 0; r < sizeof rates / sizeof *rates; ++r) {
         const int fps = rates[r];
