@@ -851,6 +851,10 @@ static void test_ranked_season_gate(void) {
     private_room = 0;
     ranked_selected = 1;
     for (selected = 0; selected < 2; ++selected) {
+        expire_check();
+        assert(ranked_lobby_check(0) == -1);
+        await_check();
+        assert(ranked_lobby_check(0) == 1);
         ranked_status_state = 0;
         int before = forwarded;
         placeable_event(button, event);
@@ -869,6 +873,28 @@ static void test_ranked_season_gate(void) {
         runtime_ranked_gate_update(button, 1);
         memcpy(&alpha, button + 0xe0, 4);
         assert(alpha == 1.0f);
+    }
+    /* A refused release stays on Mode Select, including a cold asynchronous check. */
+    {
+        Notice saved_notice = native_notice;
+        native_notice = count_notice;
+        selected = 0; status = 409;
+        snprintf(reply, sizeof reply, "[RyuNET Ranked] required release: v0.9.4");
+        expire_check();
+        int before = forwarded, shown = ranked_notices, stops = stopped, returns = returned;
+        placeable_event(button, event);
+        assert(pending_private.ranked && forwarded == before && ranked_notices == shown);
+        await_check();
+        assert(!runtime_private_party_update());
+        assert(!pending_private.target && handles == 0 && ranked_notices == shown + 1);
+        assert(forwarded == before && stopped == stops && returned == returns && !rejection[0]);
+        placeable_event(button, event);
+        assert(!pending_private.target && forwarded == before && ranked_notices == shown + 2);
+        assert(stopped == stops && returned == returns);
+        status = 200; snprintf(reply, sizeof reply, "ok");
+        expire_check();
+        assert(ranked_lobby_check(0) == -1); await_check();
+        native_notice = saved_notice;
     }
     /* No Discord or Steam account linked: Ranked is open, but Go to Lobby tells the player and
      * stays (dimmed), directly and after a deferred status check. */

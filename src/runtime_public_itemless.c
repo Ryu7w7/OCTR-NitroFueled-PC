@@ -1559,6 +1559,23 @@ unavailable:
     return 0;
 }
 
+static int ranked_lobby_check(int notify) {
+    char ids[192], body[512] = "";
+    const char *name = runtime_np_get_online_name();
+    checked_party[0] = 0;
+    if (!name || !*name || !party_member_ids(ids, sizeof ids)) {
+        if (notify) notice("Cannot verify Ranked server and party compatibility. Please retry.");
+        return 0;
+    }
+    snprintf(checked_party, sizeof checked_party,
+             "/ryunet/ranked-party?name=%s&members=%s&mode=%d", name, ids, selected);
+    const int status = compatibility_check(checked_party, body, sizeof body);
+    if (status == -1) return -1;
+    if (status == 200 && !strcmp(body, "ok")) return 1;
+    if (notify) notice(status == 409 ? body : "Cannot verify Ranked server and party compatibility. Please retry.");
+    return 0;
+}
+
 static const char *private_feature(void) {
     const int difficulty = runtime_private_difficulty_modified();
     if (runtime_online_mode_private_cup()) return difficulty ? "cup,difficulty" : "cup";
@@ -1681,6 +1698,15 @@ int runtime_private_party_update(void) {
         clear_private_pending();
         if (ranked_account_allowed()) (void)public_content_allowed();     /* the notice */
         return 0;
+    }
+    if (pending_private.ranked) {
+        status = ranked_lobby_check(1);
+        if (status == -1 && check_clock() < pending_private.deadline) return 0;
+        if (status != 1) {
+            clear_private_pending();
+            if (status == -1) notice("Ranked status check timed out. Please try again.");
+            return 0;
+        }
     }
     struct PendingPrivate ready=pending_private;
     memset(&pending_private,0,sizeof pending_private);
@@ -2242,6 +2268,13 @@ static void ABI placeable_event(void *self, void *event) {
                     }
                     if (state != 1) return;
                     if (!ranked_account_allowed() || !public_content_allowed()) return;
+                    /* Refuse before native entry can load the matchmaking scene. */
+                    const int compatibility = ranked_lobby_check(1);
+                    if (compatibility == -1) {
+                        defer_private(self, event, NULL);
+                        pending_private.ranked = pending_private.target != NULL;
+                    }
+                    if (compatibility != 1) return;
                 }
                 if (confirm && private_gate && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_PrivateGame_ButtonReady")) {
                     fprintf(stderr, "ITEMLESS: private ready/start gate reached before native transition\n");
