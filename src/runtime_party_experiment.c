@@ -125,9 +125,7 @@ int runtime_party_hosting(void) { return image && party_role() == 1; }
 struct Look {
     unsigned char *party;
     void *pending, *session, *connection;
-    void *conn_session;   /* connection+0x110: the session the native role-setter swaps */
-    void *conn_vtable;    /* *(connection) : vtable, +0xb0 is the role-set method */
-    void *conn_setrole;   /* conn_vtable[0xb0] : the native set-role entry */
+    void *conn_host_peer; /* connection+0x110: host peer retained by native message 0x22 */
     int state, role, peers, roster;
     char names[160];
 };
@@ -144,9 +142,7 @@ static void look(struct Look *l) {
     if (l->connection) {
         memcpy(&l->role, (char *)l->connection + 0x118, sizeof l->role);
         memcpy(&l->peers, (char *)l->connection + 0x30, sizeof l->peers);
-        l->conn_session = at(l->connection, 0x110);
-        l->conn_vtable = at(l->connection, 0);
-        if (l->conn_vtable) l->conn_setrole = at(l->conn_vtable, 0xb0);
+        l->conn_host_peer = at(l->connection, 0x110);
     }
     void *roster = at(party, 0x30);
     int count = roster ? *(int *)((char *)roster + 12) : 0;
@@ -166,9 +162,7 @@ static void print_look(const char *when, const struct Look *l) {
     fprintf(stderr, "Party state: %s state=%d role=%d peers=%d roster=%d [%s] pending=%p session=%p connection=%p\n",
             when, l->state, l->role, l->peers, l->roster, l->names, l->pending, l->session, l->connection);
     if (l->connection)
-        fprintf(stderr, "Party role probe: conn_session=%p conn_vtable=%p setrole=%p (image+%lx)\n",
-                l->conn_session, l->conn_vtable, l->conn_setrole,
-                image ? (unsigned long)((unsigned char *)l->conn_setrole - image) : 0ul);
+        fprintf(stderr, "Party transport: host_peer=%p\n", l->conn_host_peer);
 }
 
 /* The other player of a two-instance test: BB_HOST_EXPERIMENT_JOIN, or Ryu7w7 <-> Ryu7w7_test. */

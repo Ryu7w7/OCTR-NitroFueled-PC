@@ -4,11 +4,13 @@
 
 static char dir[256], requested[600], posted[RC_SEND];
 static int room_on_now = 1, public_now = 0, following = 0, reply_status = 200, peers_now = 0;
+static int public_found_now;
 static const char *reply_text = "ok 0\n";
 
 int runtime_online_mode_room_on(void) { return room_on_now; }
 void runtime_online_team_points_heard(const char *nick, const char *data) { (void)nick; (void)data; }
 int runtime_online_mode_public_on(void) { return public_now; }
+int runtime_public_found_room(void) { return public_found_now; }
 int runtime_replay_chat_allowed(void) { return 1; }
 int runtime_room_mode_following(void) { return following; }
 void runtime_room_mode_host_name(char out[24]) { snprintf(out, 24, "%s", following ? "TheHost" : "Me_1"); }
@@ -132,6 +134,15 @@ int main(void) {
     char said[] = "ok 1\n1\tGuest_1\thi\n";
     apply_reply(said);
     assert(view(out, NULL) == 1);
+    public_now = 0;
+    public_found_now = 1;
+    had_peers = 1;
+    peers_gone_ms = now_ms() - LEFT_MS - 1;
+    assert(worker_step(room) == 1 && !strcmp(room, PUBLIC_ROOM));
+    public_found_now = 0;
+    public_now = 1;
+    had_peers = 0;
+    peers_gone_ms = 0;
     /* out of the room: the panel goes, with what was said there */
     reply_status = 403;
     poll_room("Me_1");

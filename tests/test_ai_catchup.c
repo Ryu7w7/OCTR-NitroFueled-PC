@@ -145,6 +145,14 @@ int main(void) {
     assert(runtime_ai_catchup_results()==-1); /* Invalid valid flag is rejected. */
     runtime_ai_catchup_receive("host",packet,sizeof packet,now);
     assert(runtime_ai_catchup_results()==0);
+    assert(runtime_ai_catchup_rehost("guest",1,0));
+    assert(runtime_ai_catchup_results()==0);
+    assert(sync.map && sync.authority && !strcmp(sync.host,"guest"));
+    assert(sync.received==0 && sync.last_receive==0);
+    assert(runtime_ai_catchup_rehost("successor",0,1));
+    assert(runtime_ai_catchup_results()==0);
+    assert(runtime_ai_catchup_send("host",hello,now)==0);
+    assert(runtime_ai_catchup_send("successor",hello,now)==sizeof hello);
     runtime_ai_catchup_reset(NULL,NULL,0);
     assert(runtime_ai_catchup_send("host",hello,now)==0);
     assert(!runtime_ai_catchup_receive("host",(const uint8_t *)"native game data",16,now));

@@ -11,7 +11,8 @@
 #include <unistd.h>
 
 /* Stubs the module links against. Declare before including the module. */
-static int g_frozen;
+static int g_frozen, g_native_racing;
+static int g_found_room, g_queue_aborts;
 static char g_last_request[512];
 static int g_requests;
 static char g_reply[2048];
@@ -19,6 +20,7 @@ static char g_online_name[24] = "HostA";
 static char g_promote_request[512];
 
 int runtime_room_mode_race_frozen(void) { return g_frozen; }
+int runtime_online_mode_race_running(void) { return g_native_racing; }
 const char *runtime_np_get_online_name(void) { return g_online_name; }
 int runtime_ryunet_request(const char *method, const char *target, char *body, size_t size) {
     ++g_requests;
@@ -35,7 +37,8 @@ int runtime_ryunet_request(const char *method, const char *target, char *body, s
     }
     return 200;
 }
-void runtime_public_itemless_abort_queue(void) { /* no matchmaking in this test */ }
+int runtime_public_found_room(void) { return g_found_room; }
+void runtime_public_itemless_abort_queue(void) { ++g_queue_aborts; }
 #include "../src/runtime_party_server.c"
 
 /* The members poll runs on its own thread: wait for it to finish. */
@@ -51,7 +54,7 @@ static void wait_poll(void) {
 }
 
 static void reset(void) {
-    g_frozen = 0; g_requests = 0;
+    g_frozen = g_native_racing = 0; g_requests = 0;
     g_last_request[0] = 0; g_reply[0] = 0;
     setenv("BB_PARTY_SERVER", "1", 1);
     runtime_party_server_init();
@@ -111,6 +114,33 @@ int main(void) {
     g_requests = 0;
     assert(runtime_party_server_create("cusa13795-session-HostA") == 1);   /* our own: kept */
     assert(g_requests == 0);
+
+    /* A party owner change must only abort a queue, never a found room or race. */
+    wait_poll();
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        g_found_room = scenario == 1;
+        g_frozen = scenario == 2;
+        g_native_racing = scenario == 3;
+        g_queue_aborts = 0;
+        pthread_mutex_lock(&lock);
+        matchmaking_mode = 1;
+        matchmaking_host_lost_done = 0;
+        seen_generation = 1;
+        strcpy(owner_name, "OldHost");
+        strcpy(poll_reply, "{\"owner\":\"NewHost\",\"generation\":2}");
+        poll_ready = 1;
+        poll_next = UINT64_MAX;
+        pthread_mutex_unlock(&lock);
+        runtime_party_server_tick();
+        assert(g_queue_aborts == (scenario == 0));
+        runtime_party_server_tick();
+        assert(g_queue_aborts == (scenario == 0));
+    }
+
+    g_requests = 0;
+    matchmaking_mode = 1;
+    runtime_party_server_matchmaking_leave(1);
+    assert(!matchmaking_mode && !g_requests && !strcmp(session_id, "cusa13795-session-hosta"));
 
     unsetenv("BB_PARTY_SERVER");
     puts("Party server: race-safety tests passed");

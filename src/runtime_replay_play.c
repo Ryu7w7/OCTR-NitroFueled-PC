@@ -2470,6 +2470,10 @@ static void invisible_look(int racing_now) {
 }
 
 static int racing;                              /* the last frame: a kart and a race clock */
+int runtime_replay_race_active(void) {
+    return __atomic_load_n(&racing, __ATOMIC_RELAXED) && !runtime_replay_playing();
+}
+
 int runtime_replay_chat_allowed(void) {
     return !__atomic_load_n(&racing, __ATOMIC_RELAXED) || runtime_replay_local_finished();
 }

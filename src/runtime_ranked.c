@@ -594,9 +594,10 @@ void *ranked_sender(void *arg) {
         const struct runtime_ranked_racer *self = NULL;
         for (int i = 0; i < out->count && used < sizeof body; ++i) {
             used += (size_t)snprintf(body + used, sizeof body - used,
-                                     "%s{\"name\":\"%s\",\"pos\":%d,\"dnf\":%s,\"time\":%d}",
+                                     "%s{\"name\":\"%s\",\"pos\":%d,\"dnf\":%s,\"time\":%d,\"dc\":%s}",
                                      i ? "," : "", out->order[i].name, out->order[i].pos,
-                                     out->order[i].finished ? "false" : "true", out->order[i].time);
+                                     out->order[i].finished ? "false" : "true", out->order[i].time,
+                                     out->order[i].dc ? "true" : "false");
             if (out->order[i].self) self = &out->order[i];
         }
         if (used < sizeof body) used += (size_t)snprintf(body + used, sizeof body - used, "]");

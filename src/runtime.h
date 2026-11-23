@@ -113,6 +113,8 @@ int runtime_online_mode_in_private(void);
 int runtime_online_mode_lobby_open(void);        /* an online lobby is on screen */
 void runtime_online_mode_selector_left(void);
 void runtime_online_mode_note_frame(void);       /* the game's thread, every frame */
+int runtime_online_mode_race_running(void);
+int runtime_replay_race_active(void);
 /* A private room's member, for the overlay's members list by team (bbport_overlay.cpp mirrors it). */
 typedef struct { char name[40]; int team, ready, local; } TeamLobbyMember;
 int runtime_online_team_lobby(TeamLobbyMember *out, int max, int *teams);   /* any thread; -1 none */
@@ -145,7 +147,10 @@ int runtime_public_itemless_active(void);
 int runtime_public_itemless_lobby_mode(void);
 int runtime_public_match_active(void);
 int runtime_public_found_room(void);
+int runtime_public_waiting_for_opponent(void);
 uint64_t runtime_public_room(void);
+uint64_t runtime_public_race_host_pid(void);
+void runtime_public_itemless_poll_race_host(void);
 int runtime_public_ranked_short(void);
 int runtime_public_ranked_min_players(void); /* players a Ranked room needs, as the server said (0 until then: unknown) */
 int runtime_public_ranked_clock(int64_t *since_ms, int *players); /* 1: the server's Ranked countdown clock is fresh; since_ms -1 = short of players */
@@ -178,7 +183,9 @@ int runtime_ranked_session(uint64_t *room, int *mode);
 /* pos: the on-screen finish position (AIs take their own slots, honestly); time: the stamp of the racer's
  * last required lap as this game recorded it, 0 unknown; self: the local player; laps/stamps: the laps
  * this game recorded for them (the local player's own go to the server as its self-report). */
-struct runtime_ranked_racer { char name[32]; int finished; int pos; int time; int self; int laps; int stamps[7]; };
+void runtime_online_mode_racer_left(uint64_t pid);
+int runtime_online_mode_departed_kart(void *entity);
+struct runtime_ranked_racer { char name[32]; int finished; int pos; int time; int self; int laps; int stamps[7]; int dc; };
 /* The finish order of the race just ended, 0 none (runtime_online_mode.c). */
 int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max);
 /* Ranked results: the worker thread, the report at race end, the lobby card's suffix. */
@@ -200,6 +207,9 @@ void *runtime_online_mode_content(void *placeable);
 void runtime_public_itemless_reset(void);
 void runtime_public_itemless_new_session(void);
 void runtime_public_itemless_menu_return(void);
+void runtime_public_itemless_ranked_return(void);
+void runtime_public_itemless_prepare_host_quit(void);
+void runtime_public_itemless_begin_race_quit(void);
 void runtime_public_itemless_guest_left(const char *session_id);
 void runtime_public_itemless_guest_room(int inside);
 void runtime_public_itemless_takeover_host(void);
@@ -319,7 +329,7 @@ int runtime_party_server_promote(const char *successor);  /* host: promote befor
 void runtime_party_server_tick(void);                     /* guest: poll for host change */
 void runtime_party_server_defer_promote(const char *successor); /* host: promote after a race ends */
 void runtime_party_server_matchmaking(int i_am_host, const char *host_name); /* shared session for a queue */
-void runtime_party_server_matchmaking_leave(void); /* queue quit: DELETE me from the shared session */
+void runtime_party_server_matchmaking_leave(int keep_party);
 void runtime_savedata_configure(const char *title);
 const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */

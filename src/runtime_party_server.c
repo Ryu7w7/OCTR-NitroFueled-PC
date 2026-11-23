@@ -40,8 +40,8 @@ static char deferred_successor[24]; /* host: successor to promote once the race 
 static int matchmaking_mode;           /* this session backs a matchmaking queue, not a private room */
 static int matchmaking_host_lost_done; /* requeue once when the queue's host disappears */
 
-/* The members poll runs on a thread of its own. runtime_party_server_tick is called on every lobby frame on the
- * game's thread (runtime_public_itemless_update), and a blocking request there, up to the socket's 8 s timeout,
+/* The members poll runs on a thread of its own. runtime_party_server_tick runs on lobby frames and online race frames;
+ * a blocking request there, up to the socket's 8 s timeout,
  * froze the room (log of 19/11 19:22: a few frames in 5 s). At most one poll every 2 s; the tick reads the latest
  * reply, and what it does with it stays on the game's thread. */
 #define POLL_INTERVAL_NS 2000000000ull
@@ -193,7 +193,7 @@ static void *delete_member(void *arg) {
  * next member or deletes the session. The survivors poll that change and requeue immediately.
  * The request goes to a thread of its own: run on the game's thread (menu_return hook) it
  * stalled the frame for the server's round trip (log 20/11 12:46: 870 ms to 129.151.105.177). */
-void runtime_party_server_matchmaking_leave(void) {
+void runtime_party_server_matchmaking_leave(int keep_party) {
     if (!enabled) return;
     pthread_mutex_lock(&lock);
     const int mm = matchmaking_mode;
@@ -202,7 +202,7 @@ void runtime_party_server_matchmaking_leave(void) {
     snprintf(me, sizeof me, "%s", my_name);
     matchmaking_mode = 0;
     pthread_mutex_unlock(&lock);
-    if (!mm || !sid[0] || !me[0]) return;
+    if (keep_party || !mm || !sid[0] || !me[0]) return;
     struct Leave *job = calloc(1, sizeof *job);
     pthread_t worker;
     if (job) {
@@ -266,7 +266,7 @@ void runtime_party_server_defer_promote(const char *successor) {
  * through the normal host-change path below. This keeps private races bug-free. */
 void runtime_party_server_tick(void) {
     if (!enabled) return;
-    const int racing = runtime_room_mode_race_frozen();
+    const int racing = runtime_online_mode_race_running() || runtime_room_mode_race_frozen();
 
     /* A promotion that arrived during a race is applied on the first frame after it ends. */
     if (was_racing && !racing) {
@@ -277,7 +277,7 @@ void runtime_party_server_tick(void) {
         snprintf(succ, sizeof succ, "%s", deferred_successor);
         deferred_successor[0] = 0;
         pthread_mutex_unlock(&lock);
-        if (deferred) fprintf(stderr, "Party server: race ended, applying deferred host promotion\n");
+        if (deferred) fprintf(stderr, "Party server: race ended; server owner changed during race\n");
         /* A host that left mid-race must promote now that it is safe. */
         if (succ[0]) {
             fprintf(stderr, "Party server: race ended, promoting deferred successor %s\n", succ);
@@ -357,11 +357,11 @@ void runtime_party_server_tick(void) {
             pending_promote = 1;
             pthread_mutex_unlock(&lock);
         }
-        /* The native role flip itself is driven by the game's own lobby-update notice
-         * (ctrCreateLobby) on the next safe frame; this module only records intent. */
+        /* This records the server owner. Native race transport promotion is handled separately. */
         /* A queue has no ctrRoom to push us: when the session owner changes away from the
          * host we were following, the survivor requeues in the same mode instead of bengong. */
-        if (mm && !mm_done && prev_owner[0] && ownern[0] &&
+        if (mm && !mm_done && !racing && !runtime_public_found_room() &&
+            prev_owner[0] && ownern[0] &&
             strcasecmp(prev_owner, ownern)) {   /* "Ryu7w7" (ours) and "ryu7w7" (the server's) are one */
             pthread_mutex_lock(&lock);
             matchmaking_host_lost_done = 1;

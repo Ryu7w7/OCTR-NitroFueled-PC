@@ -104,6 +104,10 @@ static int choose_room(char host[24]) {
         const int allowed = enabled && public_enabled;
         pthread_mutex_unlock(&lock);
         if (!allowed) return 0;
+        if (runtime_public_found_room()) {
+            snprintf(host, 24, "%s", PUBLIC_ROOM);
+            return 1; /* A solo racer remains in the server room without native peers. */
+        }
     }
     if (refusals >= REFUSALS) return 0;
     if (talking) {

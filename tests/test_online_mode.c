@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include "../src/runtime_text.c"
 
 extern unsigned char *ranked_mode_select_root(unsigned char *owner);
@@ -16,6 +17,7 @@ extern void ranked_mode_select_layout(unsigned char *root, int ranked);
 int runtime_name_color(const char *nick, float rgb[3]) { (void)nick, (void)rgb; return 0; }
 
 static int compatibility_ready = 1;
+const char *rr_current_level(void) { return NULL; }
 int runtime_private_party_check(void) { return compatibility_ready; }
 static void *deferred_start;
 static void (ABI *resume_start)(void *);
@@ -23,6 +25,11 @@ void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *)) {
     deferred_start=self; resume_start=resume;
 }
 int runtime_private_party_update(void) { return 0; }
+void runtime_party_server_tick(void) {}
+static int waiting_players;
+int runtime_public_waiting_for_opponent(void) { return waiting_players; }
+int runtime_replay_race_active(void) { return 0; }
+void runtime_public_itemless_poll_race_host(void) {}
 void runtime_private_party_cancel(void) {}
 static int mode_checks;
 void runtime_race_options_map_loading(const char *map) { (void)map; }
@@ -69,6 +76,9 @@ int runtime_public_itemless_selected(void) { return public_selected; }
 void runtime_public_itemless_new_session(void) { public_selected=public_active=public_normal_active=ranked_selected=0; }
 void runtime_public_itemless_reset(void) {}
 void runtime_public_itemless_menu_return(void) {}
+void runtime_public_itemless_ranked_return(void) {}
+void runtime_public_itemless_prepare_host_quit(void) {}
+void runtime_public_itemless_begin_race_quit(void) {}
 void runtime_public_itemless_guest_room(int inside) { (void)inside; }
 /* The results points line lists every team, the winner first: "BLUE 22 / RED 17", "RED 13 (H2H) / BLUE 13".
  * Its first entry: a team name, the winner's points and " (H2H)" only when a tie was decided head to head. */
@@ -92,7 +102,7 @@ int runtime_public_itemless_ranked_request_take(void) { return -1; }
 int runtime_replay_signal_pressed(int signal) { (void)signal; return 0; }
 int runtime_replay_buttons_held(void) { return 0; }
 void runtime_public_itemless_update(void) {}
-int runtime_public_found_room(void) { return 0; }
+int runtime_public_found_room(void) { return waiting_players > 0; }
 uint64_t runtime_public_room(void) { return 0; }
 int runtime_public_ranked_short(void) { return 0; }
 int runtime_public_ranked_min_players(void) { return 6; }
@@ -104,6 +114,7 @@ int runtime_voice_speaking(const char *nick) { (void)nick; return 0; }
 static int search_test_active, search_test_elapsed, search_test_range=400, search_test_ranked=1;
 int runtime_matchmaking_view(int *elapsed,int *timeout,int *range,int *ranked) {
     *elapsed=search_test_elapsed;*timeout=180;*range=search_test_range;*ranked=search_test_ranked;
+    if (waiting_players && !ranked_score_active) { *timeout=*ranked=0; return 1; }
     return search_test_active;
 }
 void runtime_public_itemless_select(int enabled) { public_selected = enabled; }
@@ -713,6 +724,7 @@ static unsigned char ABI native_ahead_mock(unsigned char *a, unsigned char *b) {
 static unsigned char **result_racers;
 static unsigned char *complete_result_racer;
 static int expected_animations_at_result = -1;
+static int result_calls;
 static void *podium_slots[3];
 static int (ABI *podium_branch)(void *, int, void *);
 static void *podium_hook;
@@ -729,6 +741,7 @@ static void ABI sort_cup_mock(void **begin, void **end, size_t count) {
 }
 static void ABI results_mock(void *event) {
     assert(event);
+    ++result_calls;
     if (expected_animations_at_result >= 0) assert(animation_calls == expected_animations_at_result);
     if (complete_result_racer) complete_result_racer[0x8c] = 1;
     if (!result_racers) return;
@@ -874,6 +887,7 @@ static void test_region(size_t shift) {
     memcpy(image + (0xeb7950 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x89\xfb\x48\x8b\x43\x18", 17);
     memcpy(image + (0xeb7961 - shift), "\x58\x5b\x41\x5e\x41\x5f\x5d\xc3", 8);
     memcpy(image + (0xebcd40 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x38", 17);
+    memcpy(image + (0xeba370 - shift), "\x55\x48\x89\xe5\x41\x57\x41\x56\x41\x55\x41\x54\x53\x48\x83\xec\x18", 17);
     memcpy(image + (0xebcd51 - shift), "\xc3", 1);
     memcpy(image + (0x115a740 - shift), "\x55\x48\x89\xe5\x41\x56\x53\x48\x89\xd3\x49\x89\xfe\xe8\xbe\x63\x93\xff", 18);
     image[0x115a74e - shift] += (unsigned char)shift;
@@ -1200,6 +1214,36 @@ static void test_region(size_t shift) {
     assert(*(void **)(image + 0x2423ce0) != image + 0x19f580);
     assert(*(void **)(image + 0x2423ce8) != image + 0x19f7a0);
     assert(image[0x195ac4] == !shift);
+    {
+        unsigned char root[0x100]={0}, table[0x40]={0}, title[0x100]={0}, value[0x100]={0};
+        void *labels[]={title,value};
+        put_pointer(root,0x48,table);
+        put_pointer(table,0x20,labels);
+        *(int *)(table+12)=2;
+        put_pointer(title,0x28,"OCTR_SEARCH_TITLE");
+        put_pointer(value,0x28,"OCTR_SEARCH_TIME");
+        waiting_players=1;
+        for (int ranked=0; ranked<2; ++ranked) {
+            ranked_score_active=ranked;
+            runtime_online_mode_matchmaking_update(root);
+            assert(!strcmp(*(char **)(title+0x30),ranked ? "WAITING" : "SEARCHING"));
+            assert(!strcmp(*(char **)(value+0x30),ranked ? "1/6" : "00:00"));
+        }
+        waiting_players=ranked_score_active=0;
+        search_test_active=1;
+        runtime_online_mode_matchmaking_update(root);
+        assert(!strcmp(*(char **)(title+0x30),"SEARCHING"));
+        assert(!strcmp(*(char **)(value+0x30),"00:00 / 03:00"));
+        search_test_ranked=0;
+        for (int frame=0; frame<120; ++frame) {
+            runtime_online_mode_matchmaking_update(root);
+            assert(!strcmp(*(char **)(value+0x30),"00:00"));
+        }
+        search_test_ranked=1;
+        search_test_active=0;
+        free_string(NULL,*(char **)(title+0x30)-16);
+        free_string(NULL,*(char **)(value+0x30)-16);
+    }
     test_startup(image, shift);
     unsetenv("BB_ONLINE");
     unsetenv("BB_UPNP_PORT");
@@ -2046,7 +2090,9 @@ static void test_region(size_t shift) {
         assert(*(int *)(racers[7] + 0xb4) == 9);
         assert(*(int *)(racers[7] + 0xb8) == 9);
         *(int *)(results + 0x24) = 7; /* Invalid duplicate identity: no partial scoring. */
+        const int calls_before_invalid = result_calls;
         receive_results(results);
+        assert(result_calls == calls_before_invalid + 1); /* Native podium/results flow still runs. */
         assert(*(int *)(racers[7] + 0xb8) == cup_index * awards[7] + awards[0]);
         for (int k = 0; k < 8; ++k) *(int *)(results + 0x20 + 4*k) = k;
         receive_results(results);
@@ -2554,16 +2600,16 @@ static void test_region(size_t shift) {
     assert(selector_native_events == ++before_input);
     assert(!legend_buttons[1] && legend_buttons[2] && !strcmp(current_legend, "UNREADY"));
     assert(legend_adds == 2);
-    direct_stub(image + 0x14a0e30, hof_animation_factory);
+    direct_stub(image + (0x14a0e30 - shift), hof_animation_factory);
     direct_stub(image + 0x9990b0, hof_animation_initialize);
     direct_stub(image + 0x250b20, hof_animation_play);
-    direct_stub(image + 0x149d260, hof_animation_release);
+    direct_stub(image + (0x149d260 - shift), hof_animation_release);
     put_pointer(image, 0x2a21310, (void *)77);
     hof_animation_calls = hof_animation_releases = 0;
     runtime_online_mode_hof_cycle((void *)78, 1);
     runtime_online_mode_hof_cycle((void *)78, -1);
     assert(hof_animation_calls == 2 && hof_animation_releases == 2);
-    direct_stub(image + 0x149d260, release_result_sound_mock);
+    direct_stub(image + (0x149d260 - shift), release_result_sound_mock);
     int before_hof_controls = controls_enabled;
     *(int *)(native_selector_project + 0x48) = 1;
     native_selector_project[0x34] &= ~0x20;
@@ -2672,7 +2718,7 @@ static void test_region(size_t shift) {
         assert(!strcmp(*(char **)(score_mmr+0x30), "PLACEMENT RACES"));
         assert(!strcmp(*(char **)(score_tier+0x30), "UNRANKED"));
     }
-    direct_stub(image + 0x149d260, hof_animation_release);
+    direct_stub(image + (0x149d260 - shift), hof_animation_release);
     for (int scenario = 0; scenario < 3; ++scenario) {
         const int mode = scenario == 1;
         put_pointer(score_icon, 0x28, mode ? "OCTR_RESULT_ICON_1_3" : "OCTR_RESULT_ICON_0_3");
@@ -2712,7 +2758,7 @@ static void test_region(size_t shift) {
         assert(score_animation_calls == 2);
         score_animation_owner = NULL;
     }
-    direct_stub(image + 0x149d260, release_result_sound_mock);
+    direct_stub(image + (0x149d260 - shift), release_result_sound_mock);
     score_result=(struct runtime_ranked_result){.mode=0,.ranked=1,.tier=3,.tier_before=3,.delta=44,.mmr=1234};
     ranked_score_ready=0;
     open_race_ui_project(&score,NULL,"Octane_Race_Ranking",NULL,-1,NULL,0);
@@ -3848,7 +3894,7 @@ static void test_region(size_t shift) {
     search_test_active=0;runtime_online_mode_matchmaking_update(search_root);
     assert(*(unsigned *)(search_panel+12)&0x400);
     assert(!memcmp(countdown_before,labels[3],sizeof countdown_before));
-    direct_stub(image + 0x149d260,hof_animation_release);
+    direct_stub(image + (0x149d260 - shift),hof_animation_release);
     const int timeout_before=timeout_events,release_before=timeout_releases;
     assert(runtime_online_mode_matchmaking_timeout());
     assert(timeout_events==timeout_before+1 && timeout_releases==release_before+1);
@@ -3939,6 +3985,17 @@ static void test_ranked_mode_root_with_added_assets(void) {
 int main(void) {
     test_ranked_mode_root_with_added_assets();
     test_ranked_mode_layout();
-    test_region(0);
-    test_region(0x10);
+    /* Native singleton caches belong to one loaded executable per process. */
+    for (int region = 0; region < 2; ++region) {
+        fflush(NULL);
+        const pid_t child = fork();
+        assert(child >= 0);
+        if (!child) {
+            test_region(region ? 0x10 : 0);
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
 }

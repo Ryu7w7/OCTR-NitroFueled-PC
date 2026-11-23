@@ -70,6 +70,9 @@ class MatchmakingTimerTests(unittest.TestCase):
         self.assertEqual(image.u32(0x7c08+12),4)
         array=image.u64(0x7c08+32)
         self.assertEqual(image.u64(array),0x7c38)
+        # Physical Back must keep the native confirmation branch. Only a confirmed exit bypasses it.
+        self.assertEqual(image.u64(0x7c38+0x30),native.u64(0x7c38+0x30))
+        self.assertNotEqual(image.u64(0x7c38+0x30),0x3c30)
         event=image.u64(array+8)
         leave_event=image.u64(array+16)
         guest_event=image.u64(array+24)

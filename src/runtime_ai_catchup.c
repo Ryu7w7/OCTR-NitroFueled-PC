@@ -51,6 +51,21 @@ void runtime_ai_catchup_reset(const char *map,const char *host,int authority) {
     }
     give();
 }
+int runtime_ai_catchup_rehost(const char *host,int authority,int required_peers) {
+if (!host || !*host || strlen(host)>=sizeof sync.host || required_peers<0 || required_peers>7) return 0;
+take();
+if (!sync.map) { give(); return 0; }
+if (strcmp(sync.host,host) || sync.authority!=!!authority) {
+memcpy(sync.host,host,strlen(host)+1);
+sync.authority=!!authority;
+sync.received=sync.last_receive=0;
+memset(sync.peers,0,sizeof sync.peers);
+++sync.sequence;
+}
+sync.require_peers=required_peers;
+give();
+return 1;
+}
 void runtime_ai_catchup_require_peers(int required) {
     take(); sync.require_peers=required; give();
 }

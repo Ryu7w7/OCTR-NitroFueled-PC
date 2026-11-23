@@ -6,6 +6,8 @@
 #define AI_CATCHUP_PACKET 48
 uint64_t runtime_ai_catchup_now(void);
 void runtime_ai_catchup_reset(const char *map, const char *host, int authority);
+/* Change authority within the same race without discarding bonuses or final results. */
+int runtime_ai_catchup_rehost(const char *host, int authority, int required_peers);
 /* Required remote participants; zero for an offline/local-only race. */
 void runtime_ai_catchup_require_peers(int required);
 int runtime_ai_catchup_ready(void);

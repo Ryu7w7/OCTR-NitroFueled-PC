@@ -37,6 +37,7 @@ int runtime_online_mode_ranked_order(struct runtime_ranked_racer *out, int max) 
     out[0].self = 1; /* the local player: its laps go out as "self" */
     out[0].time = 900, out[0].laps = 3, out[0].stamps[0] = 300, out[0].stamps[1] = 600, out[0].stamps[2] = 900;
     snprintf(out[1].name, sizeof out[1].name, "SecondRacer");
+    out[1].dc = 1;
     out[1].finished = 0; /* DNF: the report's dnf list */
     snprintf(out[2].name, sizeof out[2].name, "ThirdRacer");
     out[2].finished = 1;
@@ -198,12 +199,12 @@ static void test_resolution(void) {
     assert(strstr(sent_body, "\"room\":42"));
     assert(strstr(sent_body, "\"mode\":0"));
     assert(strstr(sent_body, "\"track\":\"electron_avenue\""));
-    if (!strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900},"))
+    if (!strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900,\"dc\":false},"))
         fprintf(stderr, "ACTUAL BODY: %s\n", sent_body);
     assert(strstr(sent_body, "{\"v\":2,"));
-    assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900},"
-                 "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true,\"time\":0},"
-                 "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false,\"time\":1200}]"));
+    assert(strstr(sent_body, "\"order\":[{\"name\":\"HostRacer\",\"pos\":1,\"dnf\":false,\"time\":900,\"dc\":false},"
+                 "{\"name\":\"SecondRacer\",\"pos\":4,\"dnf\":true,\"time\":0,\"dc\":true},"
+                 "{\"name\":\"ThirdRacer\",\"pos\":3,\"dnf\":false,\"time\":1200,\"dc\":false}]"));
     /* the local player's own result: its laps up to its finish stamp */
     assert(strstr(sent_body, "\"self\":{\"finished\":true,\"time\":900,\"laps\":[300,600,900]}}"));
     struct runtime_ranked_result result;
