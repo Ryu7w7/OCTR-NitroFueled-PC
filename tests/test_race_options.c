@@ -303,8 +303,17 @@ static void test_ground_speed_timestep(void) {
     }
     memset(ground_speed_steps,0,sizeof ground_speed_steps);ground_speed_next=0;
     ground_lateral_pending=0;motion_lateral_cap=2;timestep_set_frame(1.f/120);
-    assert(fabsf(lateral_retention(.8f,1.f/120)-2*powf(.4f,.25f))<1e-6f);
+    const float decay=powf(.4f,.25f);
+    assert(fabsf(lateral_retention(.8f,1.f/120)-decay)<1e-6f);
     assert(motion_lateral_cap==1);
+    /* Four 120 FPS steps must equal the native 30 FPS retention/divisor. */
+    motion_lateral_cap=2;timestep_set_frame(1.f/120);
+    float composed=1;
+    for (unsigned i=0;i<4;++i) {
+        motion_lateral_cap=2;
+        composed*=lateral_retention(.8f,1.f/120);
+    }
+    assert(fabsf(composed-.4f)<1e-6f);
     motion_lateral_cap=2;timestep_set_frame(273.f/8192);
     assert(lateral_retention(.8f,273.f/8192)==.8f && motion_lateral_cap==1);
     unsigned char boost[0x80]={0};const float amount=1000,ceiling=3000,floor=1200;

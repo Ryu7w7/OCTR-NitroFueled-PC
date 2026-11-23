@@ -3048,7 +3048,9 @@ static float ABI lateral_retention(float retention, float dt) {
     const float frames=timestep_frames();
     if (!(dt>0) || !isfinite(dt) || !(frames<1)) return retention;
     if (cap>1 && isfinite(cap) && retention>=0 && isfinite(retention))
-        return cap*powf(retention/cap,frames);
+        /* The native divisor was removed in ground_speed_project; fold it into the
+         * per-frame decay once, otherwise cap is re-applied every frame and speed grows. */
+        return powf(retention/cap,frames);
     return retention>0 && retention<1 ? powf(retention,frames) : retention;
 }
 
