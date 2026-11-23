@@ -128,6 +128,11 @@ LOG_LIMIT = LogLimit()
 
 
 def emit(text):
+    if ((text.startswith('Guest write check:') and os.environ.get('BB_GUEST_WRITE_TRACE') != '1') or
+        (text.startswith('Perf: frames ') and os.environ.get('BB_PERF_LOG') != '1') or
+        (text.startswith('Presenter: per second:') and os.environ.get('BB_PRESENTER_TRACE') != '1') or
+        (text.startswith(('Graphics tab: show ', 'Graphics tab: hide ')) and os.environ.get('BB_GRAPHICS_TAB_TRACE') != '1')):
+        return
     try:
         sys.stdout.write(text)
         sys.stdout.flush()
@@ -726,7 +731,6 @@ def setup_online(env, config, data):
         return
 
     env['BB_ONLINE'] = '1'
-    env['BB_NET_TRACE'] = '1'
     server = env.get('BB_ONLINE_SERVER', ini_values.get('online_server', 'octr.ryu7w7.xyz'))
     if not server or server.strip() == '':
         server = 'octr.ryu7w7.xyz'
@@ -1070,15 +1074,15 @@ def launch(args, restarted=False):
     missing = parse_cpu_features(features.stdout)
 
     # The output of every launch also goes to last_run.log (an in-game restart appends to it);
-    # BB_SAVE_LOG=1 (with frame statistics) writes logs/<time>.log instead.
+    # BB_SAVE_LOG=1 writes logs/<time>.log instead.
     global LOG
     if env.get('BB_SAVE_LOG') == '1':
         logs = data / 'logs'
         logs.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime('%Y%m%d_%H%M%S')
-        env['BB_FRAME_STATS'] = '1'
-        env.setdefault('BB_FRAME_LOG', str(logs / f'{stamp}.frames.csv'))
-        env.setdefault('BB_READBACK_LOG', str(logs / f'{stamp}.readbacks.csv'))
+        if env.get('BB_FRAME_STATS') == '1':
+            env.setdefault('BB_FRAME_LOG', str(logs / f'{stamp}.frames.csv'))
+            env.setdefault('BB_READBACK_LOG', str(logs / f'{stamp}.readbacks.csv'))
         LOG = open(logs / f'{stamp}.log', 'w', encoding='utf-8', errors='replace')
         LOG_LIMIT.SAME = LOG_LIMIT.MAX = float('inf')  # asked for everything
         say(f'Log: {logs / (stamp + ".log")}')

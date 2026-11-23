@@ -52,6 +52,11 @@ void runtime_net_trace(const char *fmt, ...) {
     fflush(stdout);
 }
 
+static int packet_trace_enabled(void) {
+    const char *trace = getenv("BB_NET_TRACE");
+    return trace && strcmp(trace, "1") == 0;
+}
+
 int32_t runtime_net_init(void) {
     if (!g_net_initialized) {
 #ifdef _WIN32
@@ -859,9 +864,9 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
         sin.sin_family = in->sin_family;
         sin.sin_port = in->sin_port;
         memcpy(&sin.sin_addr, &in->sin_addr, sizeof(sin.sin_addr));
-        runtime_net_trace("sceNetSendto(fd=%d, len=%zu, to=%s:%u)", s, len, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));
+    if (packet_trace_enabled()) runtime_net_trace("sceNetSendto(fd=%d, len=%zu, to=%s:%u)", s, len, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));
     } else {
-        runtime_net_trace("sceNetSendto(fd=%d, len=%zu)", s, len);
+    if (packet_trace_enabled()) runtime_net_trace("sceNetSendto(fd=%d, len=%zu)", s, len);
     }
 
     int ret;
@@ -1099,7 +1104,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
     if (tunnel) note_game_peer(vs, &sin);
     if (fromlen) *fromlen = sizeof(OrbisNetSockaddrIn);
 
-    runtime_net_trace("sceNetRecvfrom(fd=%d, len=%d, from=%s:%u)", s, ret, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));
+    if (packet_trace_enabled()) runtime_net_trace("sceNetRecvfrom(fd=%d, len=%d, from=%s:%u)", s, ret, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));
     return ret;
 }
 

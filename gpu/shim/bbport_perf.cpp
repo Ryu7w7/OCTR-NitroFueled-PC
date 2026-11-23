@@ -21,7 +21,7 @@ struct Window {
 bool Enabled() {
     static const bool on = [] {
         const char* v = std::getenv("BB_PERF_LOG");
-        return !(v && v[0] == '0');
+    return v && v[0] == '1';
     }();
     return on;
 }

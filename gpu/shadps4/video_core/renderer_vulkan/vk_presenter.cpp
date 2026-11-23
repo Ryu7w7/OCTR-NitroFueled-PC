@@ -65,6 +65,8 @@ u64 NsSince(std::chrono::steady_clock::time_point t0) {
 }
 
 void ReportPresentStats(u32 images, vk::PresentModeKHR mode) {
+    static const bool trace = std::getenv("BB_PRESENTER_TRACE") != nullptr;
+    if (!trace) return;
     using Clock = std::chrono::steady_clock;
     static Clock::time_point last = Clock::now();
     const auto now = Clock::now();

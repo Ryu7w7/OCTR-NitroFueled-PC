@@ -209,7 +209,8 @@ bool IsTab(void* object, const char* what) {
         if (tab && i < 5 && current == parent) tab = false;
     }
     tab = tab && current == parent;
-    if (placeable_logged.fetch_add(1) < 80 || tab) {
+    static const bool trace = std::getenv("BB_GRAPHICS_TAB_TRACE") != nullptr;
+    if (trace && (placeable_logged.fetch_add(1) < 80 || tab)) {
         std::printf("Graphics tab: %s %p at (%g, %g) flags %x alpha %g%s\n", what, object,
                     p.position[0], p.position[1], flags, alpha, tab ? " <- the tab" : "");
         std::fflush(stdout);

@@ -215,8 +215,10 @@ void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, 
     if (!hit) {
         return;
     }
+    if (hit->seq > decoding_now) AskForReport();
     const std::uint64_t n = hits.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n > 24 && n % 500 != 0) {
+    static const bool trace = std::getenv("BB_GUEST_WRITE_TRACE") != nullptr;
+    if (!trace || (n > 24 && n % 500 != 0)) {
         return;
     }
     const char* where = hit->seq == decoding_now ? "the buffer being decoded"
@@ -234,9 +236,6 @@ void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, 
                  (unsigned long long)hit->seq, (unsigned long long)(address - hit->base), where,
                  (unsigned long long)decoding_now, (now - hit->ns) / 1e6, thread,
                  (unsigned long long)n);
-    if (late) {
-        AskForReport();
-    }
 }
 
 void DumpWritesInto(std::uint64_t address, std::uint64_t bytes) {
