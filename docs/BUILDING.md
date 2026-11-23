@@ -143,7 +143,15 @@ every AppImage release.
 ### Timing and diagnostics
 
 - `BB_FPS=30|60`: virtual vblank; the 60 FPS patch sets 480 Hz by itself.
-- `BB_FRAME_STATS=1`: frame statistics in the log, including VRAM, GTT and RSS.
+- `BB_SAVE_LOG=1`: save console output under the data directory's `logs/`. This no longer
+  enables frame statistics implicitly.
+- `BB_FRAME_STATS=1`: explicitly enable frame statistics, including VRAM, GTT and RSS.
+  Combined with `BB_SAVE_LOG=1`, the launchers also choose frame/readback CSV paths.
+- `BB_NET_TRACE=1`: opt into packet send/receive logging; online setup no longer forces it.
+- `BB_PERF_LOG=1`, `BB_PRESENTER_TRACE=1`, `BB_GRAPHICS_TAB_TRACE=1`, and
+  `BB_GUEST_WRITE_TRACE=1`: opt into their respective verbose diagnostics. Use `=1` so
+  native emission and launcher filtering agree. Guest-write report requests remain active
+  even when their textual trace is disabled.
 - `BB_TIMEOUT=N`: stop after N seconds with thread stacks; 0 never stops.
 - `BB_PRESENT_DUMP_TRIGGER=file` with `BB_PRESENT_DUMP_COUNT=N`: dump presented frames.
 - `BB_CAPTURE_TRIGGER=file`: frame analysis.
@@ -186,7 +194,7 @@ Use `BB_NO_SERVER=1` to never start one, and `BB_DATA_DIR` as usual for another 
 Tests:
 
 ```bash
-bash build.sh --test
+bash build.sh --test              # includes test_online_race_transition.c
 python3 -m unittest discover -s tests
 ninja -C out/gpu motion-history-test ui-composition-test scene-resolution-test \
   motion-shader-test settings-test
@@ -199,3 +207,11 @@ FSR 4 tooling were removed the same day
 ([docs/sacredfire/09-bloodborne-strip.md](../docs/sacredfire/09-bloodborne-strip.md)). bbport's
 temporal upscalers and motion vectors remain in `gpu/`, off; its libGnm hook code remains without
 a function table (the table was generated from Bloodborne's executable and is not distributed).
+
+## Online regression coverage
+
+See [migration status](HOST_MIGRATION_PROGRESS.md) and the [Ranked roadmap](RANKED_ROADMAP.md).
+Client hardening bounds friend/voice names, invite and session strings, metadata paths
+and reconstructed member lines, and enlarges the native trophy-name buffer. Friends,
+file-mods, chat, party and Ranked tests cover these paths. `test_online_race_transition.c`
+checks race-to-menu detection so stale network state cannot retain race-only behavior.

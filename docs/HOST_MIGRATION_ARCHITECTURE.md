@@ -1,105 +1,100 @@
-# Host migration: root cause and target architecture
+# Host migration: implemented transport and race identity
 
-Status: DESIGN — not implemented. Read this before changing takeover code again.
+This replaces the earlier in-place role-flip proposal. See [implementation status](HOST_MIGRATION_PROGRESS.md)
+and [race reporting](RANKED_ENDRACE_DESYNC_FIX.md).
 
-## Why it keeps crashing
+## Scope and authority
 
-Every crash in logs `20261119_*` is the same root cause, at different addresses:
+Public and Ranked use the server's found-room host, which can differ from the
+premade party leader. Private party-session ownership is a separate path from found-room promotion.
+HTTP polling stays on worker threads. Lobby and race frames drive native work.
 
-- `0x1490000` — virtual call through a freed lobby-player's vtable (poison value).
-- `0x1590e5d`, `0x1590f46` — "bailing corrupt free", the game freeing a block twice.
-- `0x1590b82` — TLSF free-list unlink writing to a corrupted `next` pointer
-  (`0x5400001` = a refcount written where a pointer belongs).
+The client uses the host supplied by the found-room update. It does not elect a
+successor from the premade leader. Server election and room retention are documented
+in RyuNET's backend specification.
 
-All of them are downstream of one thing: **when the host leaves, the game tears down
-and recreates the native party session on every remaining guest.** Each teardown
-frees session / connection / roster / lobby-player objects; native callbacks retained
-by the teardown touch them again; the allocator's free lists get corrupted. Guards
-added at individual call sites (`object_valid` in `traced_party_reset`/`quit`, the
-`0x1490000` fault skip in `probe.c`) only move the fault to the next unlink.
+## Native reconnection
 
-The pristine state (before those guards) had exactly one known site, `0x1490000`,
-handled by commit `dd0b87b`. That guard was removed in `f681680` when the takeover
-was rewritten to rely on native teardown — which is what introduced the churn.
+1. The successor creates a real native host session. A same-room promotion during
+   a race uses the room update path rather than the ordinary create path, which
+   enters lobby state 8. Native session work waits for the manager to become idle.
+2. Guests join the successor using the room's existing credentials. Ordinary joins
+   also wait for pending native HostSession work; otherwise its late completion
+   can replace the connection just joined.
+3. Both roles run the native race connection bind at `0xa44190`. This performs
+   peer cleanup and object ownership rebinding. Merely replacing the replication
+   connection left guests with heavy steering, broken jumping/items and stale rosters.
+4. Departure cleanup targets the departing PID. Replacing a transport must not
+   remove every participant formerly reached through that transport.
+5. AI catchup updates host authority and required peers without discarding the
+   race's accumulated bonuses or results.
 
-## Why there is no one-line fix
+This uses native transport creation and ownership operations. It does not flip
+connection role bytes or synthesize a connection-ready event without a connection.
 
-The native game has **no host-migration primitive**. "Host" is whoever *created* the
-Demonware session (`connection + 0x118 == 1`, set at session creation). Every path
-that changes host today does it by destroying the old session and creating a new one:
+## Preserve race IDs across native reconnect
 
-- client (`runtime_party_experiment.c`): waits for native teardown, then elects a
-  successor whose own teardown recreated it as host;
-- server (`ctr_hostleft.go:takeOver`): only runs when `r.hostLeft != 0`, i.e. after the
-  host is already gone, and only for a player who has a search of their own to host
-  with — party followers do not.
+The native reconnect path re-registers local players and can replace their active
+race network IDs with controller/join slots. That creates duplicate IDs, corrupts
+result permutations and can crash podium processing.
 
-The only in-place path in the native client is `CGuiEventLobbyBecomeHost` → `0xa57350`,
-and it *installs a new session object* (reads one from `rbx+0xa8`, writes it to
-`party+0x18`, releases the old one). That is the churn, just triggered from a hook.
+- `0xc23120` teardown copies player `+0xb0` to `+0xc8`.
+- `0xbd0ad0` re-registers local players. The actual
+  join-slot write at `0xbd0cad`: player `+0xb4` is copied to `+0xc8`.
+- The hooks save and restore valid local-player race IDs around those operations
+  during an active public race. Native registration still runs.
+- The speculative `0xc21f70` guard is not the solution and was removed.
 
-## Target architecture: promote-before-leave
+Per-race human identity is captured incrementally: original PID, network ID,
+nickname and local `self` ownership. Departure freezes finish/lap evidence before
+native conversion to AI. Ownership transfer must not turn a remote racer into a
+second `(me)` or replace its name with the AI character name.
 
-Principle: **never tear down the party objects of the players who stay.**
+The native result handler still runs if custom permutation validation rejects an
+order. Swallowing that handler suppresses the Public podium. Ranked intentionally
+uses its own results flow and returns to the online menu.
 
-1. Host wants to leave a room with members. Before it quits the session, the server
-   promotes the successor while `r.hostLeft == 0` and the room is fully alive.
-2. The successor's game receives the promotion and flips to host **in place**: role
-   `1`, same session/connection/roster objects, host message handlers installed.
-3. The other guests keep their party objects entirely untouched.
-4. Only now does the old host leave, as a normal guest (its own objects torn down,
-   nobody else's).
+## Disconnected human karts
 
-No teardown on the staying players ⇒ no allocator churn ⇒ no corruption. It also
-fixes the Ranked→Casual regression at its root: the search/mode state is never reset.
+Only a racer recorded as a human and subsequently marked DC receives these rules:
 
-## What must exist for this to work (unverified assumptions)
+- AI actions, steering and horizontal velocity are stopped; gravity remains active.
+- Dynamic entity contacts are filtered when either side is the departed kart.
+  Static ground contact remains intact.
+- Kart, driver and four wheel entities blink for 400 ms visible, 400 ms hidden.
+  Visibility is restored when the current racer no longer qualifies.
+- Detection resolves current racers against cached identity, not just stale entity
+  pointers or reusable slots. Ordinary matchmaking AI and replay playback are excluded.
 
-These are the two things I cannot confirm from static analysis. Confirm them on a
-two-instance live rig before implementing:
+## Room and party lifecycle
 
-- **A1 — in-place host flip.** Is there a native entry point that makes the local
-  player the host of an *existing* session without releasing/recreating it? If
-  `0xa57350` is the only one and it always swaps the session object, A1 is false and
-  promote-before-leave cannot work with the current binary — the only remaining
-  option is hardening the allocator recovery in `probe.c` to cover the unlink site
-  (`0x1590b82`) as well as the free site.
-- **A2 — server promotion while active.** Can `ctrMatchmaker` reassign `r.host` to a
-  player who is currently state 2 in that room, send `ctrCreateLobby` to the new host
-  and `ctrUpdateLobby` to the others, and keep `hostLeft == 0`? The current `takeOver`
-  does this only after host loss; the primitive is nearly identical and is a small,
-  well-tested change to `ctr_hostleft.go`.
+Room departure is distinct from premade departure. Post-race notifications must
+not claim a retained party member left. Re-registration retains the capability
+nonce used by a pending confirmation. Old return/update/cancel packets must not
+cancel a replacement search or overwrite a different room.
 
-## Server-side change (A2) — small and independently testable
+Public followers clear stale Private state. Leaving a room releases its native
+roster, peers and countdown even after racing. A lone survivor retains the room's
+waiting/chat context; a premade alone is not an outside opponent. Join failures retain the client’s ability to retry using refreshed room state.
 
-Add `ctrMatchmaker.promoteHost(roomID, successorPID)` mirroring `takeOver` but for an
-active room:
+## Verified native facts and rejected assumptions
 
-- require `r.hostLeft == 0`, successor present with state 2;
-- `r.host = successor`, `r.notified[successor.conn] = true`;
-- rewrite `hostDoc.player_state`: old host → removed/2, successor → 1;
-- rewrite `listen_server` to the successor's `info.Listen`;
-- bump `r.version`, emit `ctrCreateLobby` to the successor and `ctrUpdateLobby` to the
-  rest via `sendCTRNotices`;
-- expose `POST /ryunet/room-promote` (signed, host-only), route in `auth.go`.
+- Connection `+0x110` is the host peer, not a session pointer.
+- `0x4082b0` initializes the connection role at `+0x118` while `+0xf0` is clear.
+- Event `0xe` reports real connection initialization/teardown. It cannot itself
+  establish transport or ownership.
+- `0x1538380` and `0x152ec50` are IGB file I/O functions, not network role setters.
+- `0x3ee5a0` / `0x4332f0` implement conditional object ownership transfer;
+  their existence does not prove all race objects support arbitrary transfer.
+- `0xa57350` installs a new session and emits LobbyBecomeHost; it is not proof
+  of a safe in-place role flip.
 
-This is self-contained, has direct unit tests (`ctr_hostleft_test.go`), and does not
-depend on A1. It should be implemented first regardless.
+Earlier claims that migration was impossible, that all observed crashes shared
+one proven allocator cause, or that allocator recovery was the only remaining
+option are superseded. Do not restore those assumptions as implementation guidance.
 
-## Client-side change (A1) — gated on the live check
+## Regression coverage
 
-Originally planned for `runtime_public_itemless_menu_return` (role 1, members present):
-1. call `/ryunet/room-promote` with the elected successor;
-2. on success, leave as a normal guest through `leave_party_as_guest`'s path;
-3. if A1 is false, keep the current native-teardown takeover and the `probe.c`
-   recovery, and document that the corruption is inherent to the binary.
-
-Status: step 1 was removed as dead wiring — private rooms never had a `matchmaking_room`, and
-found rooms now notify the server on leave and let the found-room sweep decide. The server
-endpoint remains, unused by the client.
-
-## Decision needed
-
-Confirm A1 on the live rig. If true, implement the full promote-before-leave path.
-If false, the ceiling is allocator recovery hardening; the architecture change cannot
-remove the crashes with this binary.
+Fixtures cover 2–8 racers, host and guest departure, sequential departures,
+controller-slot changes, original AI exclusion, collision/blink state and new-race
+reset. Reporting verifies stable original identities and sender-only finish evidence.

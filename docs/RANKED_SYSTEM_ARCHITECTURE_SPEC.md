@@ -2,10 +2,10 @@
 
 ## Implementation status
 
-Reviewed on 2026-11-13 (Asia/Jakarta). The [Ranked roadmap](RANKED_ROADMAP.md) separates
-implemented features, outstanding live QA, and unimplemented work. Implemented does not
-imply production deployment. The current branch includes device-based admission and elapsed
-matchmaking status; latest UI/device changes still need live multi-client validation.
+The [roadmap](RANKED_ROADMAP.md) separates implemented behavior from future features.
+See [migration status](HOST_MIGRATION_PROGRESS.md) for transport and identity handling.
+The client displays ratings returned by RyuNET. Server policy and deployment belong
+to the RyuNET repository’s `docs/RANKED_SYSTEM_ARCHITECTURE_BACKEND_SPEC.md`.
 
 ## 1. SYSTEM OVERVIEW
 
@@ -17,7 +17,7 @@ feature already uses.
 ### How the pieces actually talk
 
 * **The native mod (C, `src/`)** owns race telemetry and the ranked HTTP traffic. At the
-  validated host results event it reads the finish order and posts it, signed, straight to the
+  results event it captures race identity and finish evidence and posts them, signed, to the
   RyuNET server (`runtime_ryunet_transfer`, the same path as chat, spectate and name colors).
 * **The RyuNET service** validates race reports and provides authoritative ratings,
   seasons, match history, and archived ladders.
@@ -27,24 +27,16 @@ feature already uses.
 There is no launcher-to-game IPC. The launcher prepares files and environment variables before
 boot; the mod talks to the server itself, from a worker thread, exactly like spectate does.
 
-## 2. CORE RULES
+## 2. CLIENT MODE AND PROFILE STATE
 
-1. **Exactly two ratings**, chosen by the queue's mode, never by party size:
-   * **NORMAL** — item-enabled races.
-   * **ITEMLESS** — pure racing.
-2. **Both start at 1000** with **5 placement matches** each. Placements use K = 180;
-   subsequent races use K = 90. A profile opens with its first ranked race. Until a mode
-   completes placements, its profile reports `ranked:false`, remaining `placements`, and
-   `races`, without `mmr`, `tier`, or `rank`. An untouched mode has five placements and zero races.
-3. **Solo FFA is the only queue in v1.** The matchmaking server forces the Race playlist and
-   builds 2–8 player rooms; team formats (4v4, 2v2v2v2) need a team queue that does not exist
-   yet (roadmap).
-4. **Seasons.** Seasons last 30 days by default. Automatic or manual closure starts a
-   15-minute drain: new Ranked searches stop, while confirmed rooms can still submit
-   results to the closing season. After the drain, old-room reports are rejected.
-   The final placed ladder is archived and
-   every rating **soft-resets halfway back to 1000** — `new = 1000 + (mmr − 1000) × 0.5` — with
-   the 5 placement matches restored. Career totals (races, wins) are never reset.
+The selected queue chooses Normal or Itemless profile data. Never mix ratings,
+tiers, placement progress or result generations between modes. An unfinished
+placement profile can omit `mmr`, `tier` and `rank`; the client still displays
+`ranked:false`, remaining `placements` and `races` correctly.
+
+Parties race as individuals. The client reads admission and countdown readiness
+from RyuNET rather than hardcoding start minimums or calculating MMR. Season-status
+responses gate new Ranked entry; an already-running race retains its result flow.
 
 ## 3. MATCHMAKING (already shipped)
 
@@ -61,47 +53,28 @@ Normal keeps native racer collisions and the native grid. Itemless also requires
 rules capability 1 and confirmation version 2. Older Ranked contracts are rejected.
 These fixed race rules do not change private, unranked public, or offline races.
 
-### Device admission and search timer
+### Admission and search timer
 
-Ranked allows parties of at most four, and at most four active Ranked accounts per device
-across solo searches, parties, and rooms. Every member registers its own SHA-256 hash of
-Linux machine ID or Windows MachineGuid with a SacredFire-specific prefix. Raw OS IDs are
-not transmitted. The server reserves slots atomically and releases matching reservations
-on cancel, room leave, or disconnect. IP addresses do not affect this rule, and local testing
-uses the same four-account limit. Older clients need an update for Ranked.
+The client registers its own SHA-256 hash of Linux machine ID or Windows MachineGuid
+with a SacredFire-specific prefix; raw OS identifiers are not sent. It advertises
+its release and Ranked capabilities on the current connection and uses signed
+party preflight. Rejected admission displays the server's response.
 
-Members still race as solo opponents and receive individual MMR changes. Ranked must find
-a non-overlapping outside search. Public solo players and parties of two through seven
-also need an outside search; a full eight-member Public party can form a room immediately.
-Private can play without outside opponents. Room capacity remains eight. The Ranked party
-limit applies across devices, independently of the per-device limit; Public supports eight
-without the Ranked device cap. The client blocks Ranked entry for five or more members
-with a native host notice. If a fifth member joins during search or a confirmed Ranked
-lobby, it cancels Ranked through the native menu path, preserves the party, and notifies
-the host. Search cancellation and confirmed-room leave use separate native input routes.
-Only members in a validated server search receive Ranked confirmation.
+The client blocks Ranked entry for parties above four with a native host notice.
+If a fifth member joins during search or a confirmed lobby, it cancels Ranked through
+the appropriate native navigation route and preserves the party. Search cancellation
+and confirmed-room exit use separate native inputs.
 
-Public Matchmaking and Ranked show elapsed search time up to 03:00, then cancel through
-the native matchmaking path. A background worker polls signed `/ryunet/matchmaking-status`
-once per second while the Public lobby is visible, so followers share the leader's elapsed
-time without HTTP on the game thread. Timeout dispatches a private native GUI input signal
-to a dedicated search-cancel graph. It skips `quitParty` and lobby disband/reload, preserves
-the Ranked/Public context and selected mode, and uses the native Back animation/destination.
-Party guests retain the native party waiting route and registration needed to follow a new search.
-The generic rejection path remains separate. Ranked shows the server's available range: 400 MMR,
-700 after 20 seconds, 1000 after 45 seconds, and no hard cap after 90 seconds. Both sides
-still need the threshold to match. Stale range data displays a checking message. Public
-shows elapsed time only. A matched room hides this panel and uses the native countdown.
+A background worker polls signed `/ryunet/matchmaking-status` once per second while
+the lobby is visible. Followers use the leader's reported elapsed time. Ranked shows
+elapsed time and the server-provided range; stale data shows a checking message.
+The timeout route uses a dedicated native search-cancel graph, preserves mode and
+party, and follows native Back animation. Public suppresses the Ranked timeout/range
+route. Confirmed rooms hide the search panel and use the native countdown.
 
-The passive panel reuses the native countdown artwork and anchor without copying its
-behavior graph. Text uses the artwork's anchors, the original native text rotation, larger closely spaced
-centered fitted boxes, and a
-complete native traversal chain. These layout/traversal corrections follow a live report
-of overflow and flicker; their live retest remains pending. Its generated archive patch uses the existing preparation cache, including
-source invalidation and stale-file removal; warm boots reuse prepared output.
-
-The OS identifier is client-reported, not hardware attestation. Modified clients can spoof
-it, so this limit reduces ordinary multi-client boosting without proving distinct humans.
+The passive panel reuses native countdown artwork and anchors, original text rotation,
+fitted text boxes and the native traversal chain. Generated assets reuse the preparation
+cache, including invalidation and stale-output removal.
 
 ### Party-preserving menu navigation
 
@@ -119,19 +92,18 @@ frozen race; it must not be used to send menu guests to Start Screen. The domain
 uses the modern update2 matchmaking graph/UI pair because its original graph lacks this route.
 The guest branch registers `Octane_Lobby_WaitingRoom` with native `setLobbyMenuName_VSC`
 before opening it. Otherwise the next `CGuiEventEnterLobby` targets the closed matchmaking
-project and the guest remains waiting. Ranked/Public/Ranked re-entry is live-confirmed.
+project and the guest remains waiting. Ranked/Public/Ranked re-entry preserves the party.
 Private focus rearms the lifecycle and retains its GUI handle for the native
 `CGuiEventPrivateLobbyClose` route. This avoids treating an active Private session as an
-already-returned guest and avoids the scene reload fallback. Repeated Private entry/exit
-is live-confirmed. The Private close route also updates the registered menu name at
+already-returned guest and avoids the scene reload fallback. Repeated Private entry/exit retains the native close route. The Private close route also updates the registered menu name at
 race manager `+0xdf0` to Waiting Room before dispatch, matching native enter-lobby lookup.
-Private-to-Public/Ranked re-entry is also live-confirmed in the two-client setup.
+Private-to-Public/Ranked re-entry uses the same registered menu destination.
 
 Lobby graphs replace `CNetworkNodes::stopMatchMaking_VSC` and Private's `disconnectAll_VSC`
 with `resetNetworkSessionManager_VSC`; the Private reset alias is normalized too. The named
 matchmaking stop calls the asynchronous disconnect path, whose callback at `0xa181e0`
-resets the party. Live diagnostics captured its reset call at `0xa181fd` with a connected
-guest, followed by zero connections and no inbound return notification at the guest.
+resets the party. Its reset call at `0xa181fd` clears connected peers without delivering the expected
+return notification to the guest.
 Unrelated native sync-stop functions and their call sites are left unchanged.
 
 Menu lobby-closed status and native UI cleanup remain. Main's explicit offline-exit graph,
@@ -140,109 +112,64 @@ race-session cleanup preserves host-follow state and session records while nativ
 `hasActiveParty_VSC` transport count remains positive; race roster size is not sufficient.
 Old status replies cannot revive cancelled searches, and polling stays suspended until
 lobby re-entry. Both update2 and Online-domain graph copies use the existing preparation
-cache with source invalidation. Repeated menu transitions are live-confirmed in the
-two-client setup; 180-second timeout party retention and explicit Leave Party/offline
-cleanup still require dedicated live checks.
+cache with source invalidation. Menu transitions retain the party; explicit Leave Party and offline cleanup keep their
+separate native behavior.
 
-## 4. RACE-END REPORTING (the mod's job)
+## 4. RACE-END REPORTING
 
-The host's game builds the finish order and broadcasts it; **every client's mod holds the same
-host-validated permutation** (`runtime_online_mode.c capture_finish_order` plus the finished
-mask from `team_racer_finished` / the host's AI-catchup mask for guests). At that event, when
-`runtime_ranked_active()`:
+Every client submits its view of the race through signed `POST /ryunet/ranked-result`.
+The payload contains `v:2`, room, mode, track, and an `order` array with each original
+human's `name`, `pos`, `dnf`, `time`, and `dc`. `self` contains only the original local
+human's `finished`, `time`, and cumulative lap timestamps. See
+[RANKED_ENDRACE_DESYNC_FIX.md](RANKED_ENDRACE_DESYNC_FIX.md) for capture and trust rules.
 
-1. `runtime_online_mode_ranked_order` flattens the order into `{name, finished}` pairs — the
-   in-game name of every human racer. Ranked never spawns AI.
-2. `runtime_ranked_race_end` hands them to the worker thread (`runtime_ranked.c`, started from
-   `runtime_net.c`), which posts:
+Identity is cached incrementally during the race and frozen before a departure becomes
+native AI. Rehost must not change names to character names, overwrite race IDs with local
+join slots, or mark transferred remote racers as `(me)`. Survivors report the departed
+human with `dc:true`; the departed client does not need to submit its own report.
 
-   ```
-   POST /ryunet/ranked-result?name=<me>          (X-RyuNET-Proof signed)
-   {"room":42,"mode":0,"track":"electron_avenue",
-    "order":[{"name":"A","pos":1,"dnf":false},{"name":"B","pos":2,"dnf":true},
-             {"name":"C","pos":3,"dnf":false}]}
-   ```
+Responses can be `pending`, `resolved`, or `void`. The client must not assume the
+host reports first or that a result is immediately available. Server validation and
+consensus policy are documented in RyuNET's `docs/RANKED_ENDRACE_DESYNC_FIX.md`.
 
-   `pos` is the on-screen finish position and cannot exceed the confirmed human roster size.
+The client worker posts at most eight times, with 3-second waits between retries, and
+accepts responses up to 16 KiB. Server wait/network time adds to this budget. It stops on
+a resolved result or a nonzero non-200 HTTP status. Response generation and mode checks
+prevent an old reply from changing a newer result card. There is no guaranteed instant
+MMR result: missing reports can require the consensus window.
 
-3. The server scores the race when **the room's own host reports** — the same authority the
-   game itself uses. Guest reports wait (pending) and corroborate or contradict the host's
-   order; a race whose host never reports is void. A race is identified by
-   (room, mode, the set of finish-order PIDs), so a guest that posted moments before the host
-   learns its own delta by retrying.
-4. The response is an authoritative snapshot of this race, including `mode`, `race`,
-   `season`, the reporter's outcome, and a `participants` array. A placed reporter receives:
+Resolved responses freeze `race`, `season`, `mode`, `delta`, `delta_applied`,
+`ranked_before`, old rating/tier when qualified, placement progress, and the new rating/tier
+when qualified. `participants` includes each racer's position, DNF/DC, delta and placement
+state. Placement responses without public MMR are valid. Retrying returns the same race
+snapshot rather than a later profile. Expired-season reports are rejected.
 
-   ```json
-   {"status":"resolved","race":7,"season":1,"mode":0,"delta":45,"delta_applied":45,
-    "ranked_before":true,"mmr_before":1000,"tier_before":"Gold Mask",
-    "ranked":true,"mmr":1045,"tier":"Gold Mask","placements":0,
-    "participants":[{"name":"A","pos":1,"dnf":false,"dc":false,"delta":45,
-                     "ranked":true,"placements":0,"mmr":1045,"tier":"Gold Mask"},
-                    {"name":"B","pos":2,"dnf":false,"dc":false,"delta":-35,
-                     "ranked":true,"placements":0,"mmr":965,"tier":"Silver Nitro"}]}
-   ```
+## 5. AUTHORITATIVE RESULT DISPLAY
 
-   Before placements finish, `ranked` is false and `mmr`/`tier` are omitted; this is still
-   a valid resolved result. `mmr_before`/`tier_before` appear only when `ranked_before`
-   is true. Each participant includes `name`, `pos`, `dnf`, `dc`, `delta`, `ranked`, and
-   remaining `placements`, with `mmr`/`tier` only for placed participants. `delta` is the
-   scoring delta; `delta_applied` is the actual rating change after the zero floor.
-   Accepted retries return the same race snapshot, even after later races. Reports from
-   an expired season are rejected rather than rewritten with the new season's profile.
-   Clients must not require MMR during placements or assume a fixed small response size.
+The client does not calculate MMR. Display `delta_applied` when present, otherwise
+`delta`, and use the response's placement and old/new tier fields. Zero is a valid
+applied delta. Never substitute a locally estimated award or penalty.
 
-5. The worker retries a `pending` answer a few times over ~16 s, then stops polling.
-   A pending guest report does not guarantee scoring: the host report must still resolve the race. The last scored delta joins the lobby card:
-   `RANKED - NORMAL  +45 (1045 Gold Mask)`.
+Scoring formulas, penalty settings, tier eligibility and season rollover are defined
+in the server repository's `docs/RANKED_MMR_V5.md` and backend specification.
 
-Disconnects are not reported by the client: the server derives them (a confirmed room member
-missing from the finish order, or one whose connection is gone at scoring time).
+## 6. TIER DISPLAY
 
-## 5. SCORING RULES
+The client maps the server-provided tier name to the corresponding native badge.
+Eligibility and MMR thresholds are server-owned; do not infer a tier from MMR locally.
 
-Solo FFA compares each finisher with every other confirmed human racer:
+| Badge | NORMAL | ITEMLESS |
+| --- | --- | --- |
+| 1 | Bronze | Sapphire Relic |
+| 2 | Silver | Gold Relic |
+| 3 | Golden Wumpa | Platinum Relic |
+| 4 | Power Crystal | Sacred Fire |
+| 5 | Mythic Gem | Ultimate Sacred Fire |
+| 6 | Uka's Chosen | Time Crusher |
+| 7 | Ancient Spirit | Master Driver |
 
-* `expected = 1 / (1 + 10^((opponent_MMR - player_MMR) / 800))`.
-* `actual` is 1 for finishing ahead of that opponent, otherwise 0. A finisher always beats
-  a DNF or disconnected opponent, regardless of the opponent's reported position.
-* The skill delta is `K × mean(actual - expected)`, with K = 180 during placements and
-  K = 90 afterward. Winning against weaker opponents pays less; losing to stronger opponents
-  costs less.
-
-AI retains its on-screen finish slots. Add `BasePoints(screen_position) - BasePoints(human_position)`
-to the skill delta, where human position counts reported humans ahead of the racer:
-
-| Pos | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-|-----|---|---|---|---|---|---|---|---|
-| Base | +45 | +30 | +15 | +5 | −5 | −15 | −25 | −35 |
-
-Round half away from zero, then clamp a finisher's delta to **−35 through +45**. Two equally
-rated humans finishing P1/P2 receive +45/−35. The asymmetric caps allow mild inflation.
-
-* **DNF** (still connected): flat −45 Normal / −55 Itemless.
-* **Disconnect**: flat −40 Normal / −60 Itemless. This includes a confirmed member missing
-  from the report or a DNF racer no longer connected at scoring time.
-* Finishing always loses less than DNF or disconnect. Ratings never fall below 0.
-* Normal and Itemless ratings, placements, and records remain independent. Team formats
-  and their penalties wait for team queues.
-* The **USF full-lap bonus** (+5 Itemless) remains a roadmap item and is not awarded.
-
-## 6. TIERS
-
-| Tier | NORMAL | ITEMLESS | MMR |
-|------|--------|----------|-----|
-| 1 | Bronze Wumpa | Sapphire Relic | 0–499 |
-| 2 | Silver Nitro | Gold Relic | 500–999 |
-| 3 | Gold Mask | Platinum Relic | 1000–1499 |
-| 4 | Platinum Trophy | Sacred Fire | 1500–1999 |
-| 5 | Aku Master | Ultimate Sacred Fire | 2000–2499 |
-| 6 | Uka Legend | Time Crusher | 2500–2999 |
-| 7 | Chaos Grand Prix | Master Driver | 3000+ **and** the mode's top 100 |
-
-A 3000+ rating outside the top 100 shows the tier 6 name. Lobby Members uses seven distinct stock
-kart-decal sprites for the seven tiers; the server returns tier names, and the client maps them to
-those sprites.
+Lobby Members uses seven stock kart-decal sprites. Placement players display Unranked;
+profiles without a fetched result do not receive a fabricated badge.
 
 ## 7. WHAT THE CLIENT SHOWS
 
@@ -257,7 +184,7 @@ those sprites.
 - **Hall of Fame:** mode, Everyone/Friends, and season selection; tier names and badges;
   fitted MMR columns for leaderboard entries and the local player; native scrolling and Back.
 - **Matchmaking:** elapsed search time up to 03:00, then native cancellation. Ranked shows
-  server-owned range expansion; Public shows elapsed time only. Confirmed rooms use the
+  server-owned range expansion; Public suppresses the Ranked timer route. Confirmed rooms use the
   original pre-race countdown.
 - **Launchers:** Linux and Windows omit Ranked/MMR information. Placement progress,
   ratings, and tiers remain available in the native game UI.
@@ -269,14 +196,11 @@ native Matchmaking source orientation. The texture compiler flips PNGs verticall
 BC3 encoding; do not apply an additional flip or rotation when editing the reference.
 The native pattern quad has no rotation or negative scale; Matchmaking and Private use
 identical animation curves. Custom materials retain the native animation.
-The extracted authoring reference is generated locally at
-`out/research/native-online-pattern/matchmaking-png-source.png` (not a tracked asset).
 Both updated PNGs are 256×256, non-interlaced 8-bit RGBA. PNG edits invalidate the existing
 archive preparation cache; subsequent warm preparation reuses the output.
-USA/EU texture compilation passes. In-game background pattern correctness was confirmed
-on 2026-11-13.
+USA/EU texture compilation covers the background assets.
 
-Recent UI fixes have automated coverage; outstanding live checks are listed in the roadmap.
+UI regression tests cover native preparation and navigation.
 
 ## 8. TESTS
 
@@ -312,3 +236,14 @@ participate in the existing Online preparation cache and stale-output cleanup.
 Imported native badge animations keep `RNEX` field references separate from `EXID`
 material references. Both shrink and grow tracks resolve `igGuiPlaceable::_scale`;
 an invalid field reference can crash native track creation when the result card opens.
+
+### Batch tier fetching and HOF compatibility
+
+Batch tier lookup requests `mode=all` (`tiers0`, `mmr0`, `tiers1`, `mmr1`) and falls back
+to separate mode requests for older servers. Mode switches reuse the appropriate cached
+values and refresh them without mixing ratings. The client consumes the normal/itemless
+profile sections without requiring country-rank or rating-history enrichment.
+
+HOF tier validation permits apostrophes so `Uka's Chosen` does not reject the entire
+Normal Everyone response. All 14 canonical tier names and invalid markup have fixture
+coverage. Response parsing covers both Everyone boards without rejecting valid tiers.

@@ -58,10 +58,7 @@ Search generations invalidate old replies, polling stays suspended until lobby r
 and elapsed time resets. Duplicate lobby entries and cancelled-host callbacks are ignored.
 PSN race-session cleanup retains a party while native transport connections still exist.
 
-Live diagnostic evidence located the teardown callback; the corrected graph paths have
-USA/EU asset and C regression coverage. Two-client testing confirms Waiting for Host,
-repeated Private entry/exit, Ranked/Public switching, and Private-to-Public/Ranked re-entry.
-Party retention at the 180-second timeout still requires live retesting.
+The corrected graph paths have USA/EU asset and C regression coverage. Waiting for Host, repeated Private entry/exit and Public/Ranked re-entry retain the party.
 The client advertises `collision_rules: 1`; the server requires it from the search
 and every party member. The server's `octr_itemless_v1` field uses confirmation
 version 2 for these rules. Older confirmation versions are rejected, so the client
@@ -84,54 +81,41 @@ matchmaking. See [private race modes](PRIVATE_RACE_MODES.md) for those features.
 
 ## Ranked queue
 
-The main lobby has a Ranked button below Matchmaking. Ranked offers Race Normal
-and Race Itemless; Battle is disabled. It uses the `octr_ranked` version 1 search
-extension and a server-owned queue filter, so neither Ranked mode joins a casual
-room. Before sending the search, the client checks the signed
-`/ryunet/ranked-party` endpoint. An older server cannot silently place a Ranked
-search in a casual queue. The client verifies `octr_ranked_v1` in the backend
-lobby document before accepting a room. At the validated results event every
-client's mod posts the finish order to `/ryunet/ranked-result`
-(docs/RANKED_SYSTEM_ARCHITECTURE_SPEC.md): the server scores the race when the
-room's host reports and the lobby card shows the rating it answered with.
+Ranked Normal and Itemless use `octr_ranked` version 2 and a server-owned filter.
+Members preflight through signed `/ryunet/ranked-party`; `octr_ranked_v1` room
+confirmation must match mode and registered nonce. Registration preserves that nonce
+across native reloads. Joining waits for pending native session work.
+Ranked uses five laps and human-only fields; start minimums come from server ENV.
+
+Every client submits original human identity, finish evidence and DC through
+`/ryunet/ranked-result`. The client handles the authoritative response without requiring a host-first report.
+See [Ranked specification](RANKED_SYSTEM_ARCHITECTURE_SPEC.md).
 
 ## Elapsed matchmaking
 
-Public and Ranked show a native-style elapsed search timer, capped at 180 seconds.
-At the cap a dedicated native UI route cancels the search without quitting the party or
-reloading the scene. It returns the leader to the previous Ranked/Matchmaking selector,
-retaining the selected mode; guests retain their party and the native party waiting route.
-Ranked also shows server-owned range expansion; Public has no rank-range message.
-Followers wait for the host's native party-return notification rather than dispatching their
-own timeout Back. The previous independent timeout path split parties in two-client live
-testing; the latest correction has regression coverage but still needs live retesting.
-A confirmed match hides elapsed time and retains the native pre-race countdown.
-The timer artwork is prepared once through the existing archive cache.
+Ranked shows elapsed time up to 180 seconds and server-owned range expansion.
+The native timeout path preserves the party and selected mode. Followers wait for
+the host's return notification. Public suppresses the client Ranked timeout/range
+route; reservation expiry remains server-owned. Confirmed rooms
+use the native countdown. Timer assets reuse the archive preparation cache.
 
-Ranked parties and active accounts per device are each capped at four. No IP restriction
-or localhost bypass applies. The party limit applies even when every member uses a different
-device. Public Matchmaking does not use these Ranked admission limits. A party of five or
-more is blocked at Ranked entry with a native host notice. If a fifth member joins during
-Ranked search or its confirmed lobby, the client cancels Ranked and notifies the host while
-keeping the party together. See the Ranked architecture spec for device identity limits.
+## Room and party lifecycle
 
-## Implementation status
+Room departure and premade departure are separate. Old returns, updates and
+cancellations cannot replace a new search. Public followers clear stale Private
+state. Post-race room notifications preserve the premade party.
+A premade alone waits for an outside search. Solo survivors retain room chat and
+waiting context; actual exits release native peers, roster and countdown.
 
-Implemented in the current branch: queue separation, room confirmation, device-based Ranked
-admission, elapsed timer, server range messages, native timeout cancellation, and cached timer
-assets. See [Ranked roadmap](RANKED_ROADMAP.md) for shipped features and remaining work.
+Ranked parties and active accounts per device are capped at four, without an IP
+restriction or localhost bypass. Growing beyond four cancels Ranked while retaining
+the party. Public does not use Ranked admission limits.
 
-The latest timer/device changes have automated coverage but still require live multi-client
-validation. Their implementation does not imply production server deployment.
+Host migration uses native reconnection and ownership binding with race-ID
+preservation. See [migration architecture](HOST_MIGRATION_ARCHITECTURE.md).
 
 ## Verification
 
-I tested public matchmaking on a local server with two clients: Itemless matched
-with Itemless, and Normal did not match with Itemless. I also tested the public
-Itemless compatibility gate with an outdated client.
-
-Automated tests cover queue-mode confirmation, party compatibility, lobby labels, device
-serialization, party growth, elapsed/range display, stale status replies, and timeout.
-USA/EU native asset and widescreen checks cover the generated timer panel. Eight-client gameplay has not been verified. Automated coverage does not
-establish full multiplayer behavior for every party, rematch, or host-change
-combination.
+Regression tests cover queue-mode confirmation, party compatibility, device
+serialization, party growth, stale replies, timeout, USA/EU hooks, native assets,
+race transitions and host/guest departure with 2–8 racers.
