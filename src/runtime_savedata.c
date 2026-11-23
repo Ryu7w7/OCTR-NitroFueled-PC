@@ -125,13 +125,17 @@ static int write_atomic(const char *path, const void *data, size_t size) {
     return 0;
 }
 static void write_param(const char *meta, const Param *p) {
-    char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
+    char path[700];
+    int length=snprintf(path,sizeof(path),"%s/param.bin",meta);
+    if (length<0 || length>=(int)sizeof path) return;
     Param copy=*p; copy.mtime=time(NULL);
     write_atomic(path,&copy,sizeof(copy));
 }
 static int read_param(const char *meta, Param *p) {
-    char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
+    char path[700];
+    int length=snprintf(path,sizeof(path),"%s/param.bin",meta);
     memset(p,0,sizeof(*p));
+    if (length<0 || length>=(int)sizeof path) return -1;
     FILE *f=fopen(path,"rb");
     if (!f) return -1;
     size_t n=fread(p,sizeof(*p),1,f); fclose(f);

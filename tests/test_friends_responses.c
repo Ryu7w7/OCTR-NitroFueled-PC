@@ -6,6 +6,8 @@ static char current_host[24];
 static int frozen_race, left_room, connected_party;
 int runtime_online_party_active(void) { return connected_party; }
 int runtime_party_hosting(void) { return 0; }
+int runtime_party_server_create(const char *sid) { (void)sid; return 1; }
+int runtime_party_server_join(const char *sid) { (void)sid; return 1; }
 void runtime_room_mode_joined(const char *sid) { (void)sid; }
 void runtime_room_mode_hosting(void) {}
 void runtime_public_itemless_guest_left(const char *sid) { (void)sid; }
@@ -25,6 +27,9 @@ int main(void) {
     char sessions[] = "/tmp/ctr-session-test-XXXXXX";
     assert(mkdtemp(sessions));
     assert(!setenv("BB_SESSIONS_DIR", sessions, 1));
+    char short_path[8], member_path[512];
+    assert(!session_members_path("HostPlayer", short_path, sizeof short_path));
+    assert(session_members_path("HostPlayer", member_path, sizeof member_path));
     private_room_active(1); connected_party=1;
     write_active_session("cusa13795-session-HostPlayer");
     char session_path[512];snprintf(session_path,sizeof session_path,"%s/LocalPlayer.session",sessions);

@@ -198,8 +198,8 @@ static void poll_invite_file(void) {
     long long written=0;
     while (fgets(line,sizeof line,f)) {
         line[strcspn(line,"\r\n")]=0;
-        if (!strncmp(line,"session=",8)) snprintf(session,sizeof session,"%s",line+8);
-        else if (!strncmp(line,"host=",5)) snprintf(host,sizeof host,"%s",line+5);
+        if (!strncmp(line,"session=",8)) snprintf(session,sizeof session,"%.63s",line+8);
+        else if (!strncmp(line,"host=",5)) snprintf(host,sizeof host,"%.31s",line+5);
         else if (!strncmp(line,"time=",5)) written=atoll(line+5);
     }
     fclose(f);
@@ -272,13 +272,13 @@ static ABI int32_t system_event(void *event) {
     memset(e,0,4+0xB0);
     *(int32_t *)e=SYSTEM_EVENT_SESSION_INVITATION;
     unsigned char *param=e+4;
-    snprintf((char *)param+0x00,45+1,"%s",s_invite.session);
+    snprintf((char *)param+0x00,45+1,"%.45s",s_invite.session);
     snprintf((char *)param+0x30,60+1,"inv-%s",s_invite.host);
     *(uint32_t *)(param+0x70)=1; /* SCE_NP_SESSION_INVITATION_EVENT_FLAG_INVITATION */
     const char *me=runtime_np_get_online_name();
     snprintf((char *)param+0x78,16+1,"%s",me ? me : "");
     *(int32_t *)(param+0x8C)=(int32_t)USER_ID; /* accepting local user: 0 reads as "not the active user" */
-    snprintf((char *)param+0x90,16+1,"%s",s_invite.host); /* referral = inviter */
+    snprintf((char *)param+0x90,16+1,"%.16s",s_invite.host); /* referral = inviter */
     *(uint64_t *)(param+0xA8)=runtime_np_calculate_account_id(s_invite.host);
     printf("Runtime: SESSION_INVITATION offered to the game (session %s, from %s)\n",s_invite.session,s_invite.host);
     pthread_mutex_unlock(&s_invite_lock);
@@ -500,8 +500,8 @@ static int session_members_path(const char *sid, char *out, size_t out_size) {
     }
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
-    snprintf(out, out_size, "%s/members-%s.txt", dir, sid);
-    return 1;
+    int written = snprintf(out, out_size, "%s/members-%s.txt", dir, sid);
+    return written >= 0 && (size_t)written < out_size;
 }
 
 /* Records the local user as a member of sid. Returns total members. */
@@ -523,7 +523,7 @@ static int record_session_member(const char *sid) {
             *bar = 0;
             int dup = 0;
             for (int i = 0; i < count; ++i) dup = dup || strcmp(seen[i], line) == 0;
-            if (!dup) snprintf(seen[count++], sizeof(seen[0]), "%s", line);
+            if (!dup) snprintf(seen[count++], sizeof(seen[0]), "%.63s", line);
         }
         fclose(f);
     }
@@ -556,7 +556,7 @@ static int read_session_members(const char *sid, char names[][64], uint64_t *acc
             char *bar = strchr(line, '|');
             if (!line[0] || !bar) continue;
             *bar = 0;
-            snprintf(names[count], 64, "%s", line);
+            snprintf(names[count], 64, "%.63s", line);
             accs[count] = strtoull(bar + 1, NULL, 10);
             if (accs[count] == 0) accs[count] = runtime_np_calculate_account_id(names[count]);
             count++;
@@ -586,7 +586,8 @@ static void forget_session_member(const char *sid) {
             if (!bar) continue;
             *bar = 0;
             if (!strcmp(line, me)) continue;
-            snprintf(kept[count++], sizeof(kept[0]), "%s|%s", line, bar + 1);
+            *bar = '|';
+            memcpy(kept[count++], line, strlen(line) + 1);
         }
         fclose(f);
         if (count == 0) {
@@ -622,7 +623,7 @@ static void write_active_session(const char *session_id) {
     if (!my_name || !*my_name) return;
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s.session", dir, my_name);
+    if (snprintf(path, sizeof(path), "%s/%s.session", dir, my_name) >= (int)sizeof path) return;
     FILE *f = fopen(path, "w");
     if (f) {
         uint64_t acc_id = runtime_np_calculate_account_id(my_name);
@@ -650,7 +651,7 @@ static void remove_active_session(void) {
     if (!my_name || !*my_name) return;
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s.session", dir, my_name);
+    if (snprintf(path, sizeof(path), "%s/%s.session", dir, my_name) >= (int)sizeof path) return;
     remove(path);
     /* Joins recorded for our own session end with it (no stale members). */
     {
@@ -897,8 +898,8 @@ static char *generate_invitations_json(void) {
             *end = '\0';
             if (*token && (!my_name || strcmp(token, my_name) != 0)) {
                 char path[512];
-                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
-                FILE *f = fopen(path, "r");
+                const int path_len = snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = path_len >= 0 && path_len < (int)sizeof path ? fopen(path, "r") : NULL;
                 if (f) {
                     char sid[128] = {0};
                     uint64_t acc_id = 0;
@@ -908,7 +909,7 @@ static char *generate_invitations_json(void) {
                             char *nl = line + 10;
                             while (*nl && *nl != '\r' && *nl != '\n') nl++;
                             *nl = '\0';
-                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                            snprintf(sid, sizeof sid, "%.*s", (int)sizeof sid - 1, line + 10);
                         } else if (strncmp(line, "accountId=", 10) == 0) {
                             acc_id = strtoull(line + 10, NULL, 10);
                         }
@@ -996,8 +997,8 @@ static char *generate_friend_sessions_json(void) {
             *end = '\0';
             if (*token && (!my_name || strcmp(token, my_name) != 0)) {
                 char path[512];
-                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
-                FILE *f = fopen(path, "r");
+                const int path_len = snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = path_len >= 0 && path_len < (int)sizeof path ? fopen(path, "r") : NULL;
                 if (f) {
                     char sid[128] = {0};
                     uint64_t acc_id = 0;
@@ -1007,7 +1008,7 @@ static char *generate_friend_sessions_json(void) {
                             char *nl = line + 10;
                             while (*nl && *nl != '\r' && *nl != '\n') nl++;
                             *nl = '\0';
-                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                            snprintf(sid, sizeof sid, "%.*s", (int)sizeof sid - 1, line + 10);
                         } else if (strncmp(line, "accountId=", 10) == 0) {
                             acc_id = strtoull(line + 10, NULL, 10);
                         }
@@ -1075,8 +1076,8 @@ static char *generate_multiuser_sessions_json(void) {
             *end = '\0';
             if (*token && (!my_name || strcmp(token, my_name) != 0)) {
                 char path[512];
-                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
-                FILE *f = fopen(path, "r");
+                const int path_len = snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = path_len >= 0 && path_len < (int)sizeof path ? fopen(path, "r") : NULL;
                 if (f) {
                     char sid[128] = {0};
                     uint64_t acc_id = 0;
@@ -1086,7 +1087,7 @@ static char *generate_multiuser_sessions_json(void) {
                             char *nl = line + 10;
                             while (*nl && *nl != '\r' && *nl != '\n') nl++;
                             *nl = '\0';
-                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                            snprintf(sid, sizeof sid, "%.*s", (int)sizeof sid - 1, line + 10);
                         } else if (strncmp(line, "accountId=", 10) == 0) {
                             acc_id = strtoull(line + 10, NULL, 10);
                         }
@@ -1133,7 +1134,7 @@ static char *generate_session_info_json(const char *session_id) {
     uint64_t acc_id = 0;
 
     if (session_id && strncmp(session_id, "cusa13795-session-", 18) == 0) {
-        strncpy(host_name, session_id + 18, sizeof(host_name) - 1);
+        snprintf(host_name, sizeof host_name, "%.*s", (int)sizeof host_name - 1, session_id + 18);
         host_name[sizeof(host_name) - 1] = '\0';
     } else {
         const char *my_name = runtime_np_get_online_name();
@@ -1146,8 +1147,8 @@ static char *generate_session_info_json(const char *session_id) {
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s.session", dir, host_name);
-    FILE *f = fopen(path, "r");
+    const int path_len = snprintf(path, sizeof(path), "%s/%s.session", dir, host_name);
+    FILE *f = path_len >= 0 && path_len < (int)sizeof path ? fopen(path, "r") : NULL;
     if (f) {
         char line[256];
         while (fgets(line, sizeof(line), f)) {
@@ -1792,7 +1793,7 @@ static int trophy_trp(int id, unsigned char **png, uint64_t *png_size) {
     if (fd<0) return -1;
     unsigned char header[0x60];
     int count=-1;
-    char want[16]="";
+    char want[32]="";
     if (id>=0) snprintf(want,sizeof(want),"TROP%03d.PNG",id);
     if (runtime_file_read(fd,header,sizeof(header))==sizeof(header) && header[0]==0xDC && header[1]==0xA2) {
         const uint32_t entries=(uint32_t)header[16]<<24|header[17]<<16|header[18]<<8|header[19];

@@ -286,7 +286,8 @@ static void search(const char *me, const char *query) {
             if (sscanf(line, "player %d %15s %63s", &online, relation, name) == 3) {
                 clean_name(found[count].name, name);
                 found[count].online = online;
-                snprintf(found[count].relation, sizeof found[count].relation, "%s", relation);
+                snprintf(found[count].relation, sizeof found[count].relation, "%.*s",
+                         (int)sizeof found[count].relation - 1, relation);
                 count++;
             }
         }

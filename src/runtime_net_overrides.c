@@ -69,8 +69,7 @@ static void parse_entry(const char *key, const char *val) {
     char *slash = strchr(host_part, '/');
     if (slash) *slash = '\0';
 
-    strncpy(o->target_ip, host_part, sizeof(o->target_ip) - 1);
-    o->target_ip[sizeof(o->target_ip) - 1] = '\0';
+    snprintf(o->target_ip, sizeof o->target_ip, "%s", host_part);
     trim(o->target_ip);
 
     override_count++;

@@ -900,7 +900,7 @@ static void voice_karts_tick(int racing) {
                        now[i].effects & RUNTIME_VOICE_INVISIBLE ? " invisible" : "",
                        now[i].effects & RUNTIME_VOICE_TNT ? " tnt" : "",
                        now[i].effects & RUNTIME_VOICE_CRUSHED ? " squashed" : now[i].effects ? "" : " none");
-            snprintf(told[i].name, sizeof told[i].name, "%s", now[i].name);
+            snprintf(told[i].name, sizeof told[i].name, "%.*s", (int)sizeof told[i].name - 1, now[i].name);
             told[i].fx = now[i].effects;
         }
     }
