@@ -6,13 +6,23 @@
 #include "../src/runtime_ranked.c"
 #include <assert.h>
 
+static void tier_cache_reset(uint64_t room, int mode) {
+    memset(tier_members, 0, sizeof tier_members);
+    tier_member_count = 0;
+    tier_room = room;
+    tier_mode = mode;
+    tier_changed_ms = tier_fetched_ms = 0;
+    tier_dirty = 0;
+    ++tier_generation;
+}
+
 void runtime_hof_season_changed(int season) { (void)season; }
 
 static char sent_target[256], sent_body[1024];
 static int sent;
 static int transfer_status = 200;
 static char transfer_reply[16384] = "{\"status\":\"resolved\",\"race\":7,\"delta\":45,\"mmr\":1045,\"placements\":4,\"tier\":\"Golden Wumpa\"}";
-static int tier_fetch_enabled, tier_revision, tier_gets;
+static int tier_fetch_enabled, tier_revision, tier_gets, tier_legacy;
 static const char *status_reply = "{\"season\":2,\"enabled\":false,\"retry_after\":895}";
 static int status_http = 200, status_gets;
 static int session_room = 42;
@@ -66,13 +76,15 @@ int runtime_ryunet_transfer(const char *method, const char *target, const void *
             return 200;
         }
         assert(strstr(target, "/ryunet/ranked-tiers?names=HostRacer&mode="));
-        const int itemless = strstr(target, "&mode=1") != NULL;
         const int updated = __atomic_load_n(&tier_revision, __ATOMIC_RELAXED);
-        const char *body = updated
-            ? (itemless ? "{\"tiers\":{\"hostracer\":\"Sacred Fire\"},\"mmr\":{\"hostracer\":1600}}"
-                        : "{\"tiers\":{\"hostracer\":\"Ancient Spirit\"},\"mmr\":{\"hostracer\":3100}}")
-            : (itemless ? "{\"tiers\":{\"hostracer\":\"Master Driver\"},\"mmr\":{\"hostracer\":3000}}"
-                        : "{\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}");
+        const int legacy = __atomic_load_n(&tier_legacy, __ATOMIC_RELAXED);
+        const int itemless = strstr(target, "&mode=1") != NULL;
+        const char *body = legacy
+            ? (itemless ? "{\"tiers\":{\"hostracer\":\"Master Driver\"},\"mmr\":{\"hostracer\":3000}}"
+                        : "{\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}")
+            : updated
+            ? "{\"tiers0\":{\"hostracer\":\"Ancient Spirit\"},\"mmr0\":{\"hostracer\":3100},\"tiers1\":{\"hostracer\":\"Sacred Fire\"},\"mmr1\":{\"hostracer\":1600}}"
+            : "{\"tiers0\":{\"hostracer\":\"Golden Wumpa\"},\"mmr0\":{\"hostracer\":1045},\"tiers1\":{\"hostracer\":\"Master Driver\"},\"mmr1\":{\"hostracer\":3000}}";
         *reply = strdup(body);
         assert(*reply);
         *reply_size = strlen(*reply);
@@ -257,6 +269,14 @@ static void test_rejected_report_drops_out(void) {
 }
 
 static void test_tier_batch_response(void) {
+    char combined_tier[40];
+    int combined_mmr = 0;
+    const char *combined = "{\"tiers0\":{},\"tiers1\":{\"guest\":\"Sacred Fire\"},\"mmr0\":{},\"mmr1\":{\"guest\":1600}}";
+    assert(!ranked_mode_field(combined, "tiers", 0, "guest", combined_tier, sizeof combined_tier, NULL));
+    assert(ranked_mode_field(combined, "tiers", 1, "guest", combined_tier, sizeof combined_tier, NULL));
+    assert(!strcmp(combined_tier, "Sacred Fire"));
+    assert(!ranked_mode_field(combined, "mmr", 0, "guest", NULL, 0, &combined_mmr));
+    assert(ranked_mode_field(combined, "mmr", 1, "guest", NULL, 0, &combined_mmr) && combined_mmr == 1600);
     char tier[40];
     const char *reply = "{\"mode\":0,\"tiers\":{\"hostracer\":\"Golden Wumpa\"},\"mmr\":{\"hostracer\":1045}}";
     assert(ranked_tier_reply(reply, "hostracer", tier, sizeof tier));
@@ -336,11 +356,19 @@ static void test_tier_worker_refresh(void) {
         nanosleep(&(struct timespec){0, 10000000}, NULL);
     }
     assert(runtime_ranked_badge("HostRacer", &mode) == 7);
+    __atomic_store_n(&tier_legacy, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&tier_revision, 0, __ATOMIC_RELAXED);
+    for (int i = 0; i < 300; ++i) {
+        if (runtime_ranked_badge("HostRacer", &mode) == 7 && mode == 1) break;
+        nanosleep(&(struct timespec){0, 10000000}, NULL);
+    }
+    assert(runtime_ranked_badge("HostRacer", &mode) == 7 && mode == 1);
+    __atomic_store_n(&tier_legacy, 0, __ATOMIC_RELAXED);
     session_mode = 1;
     assert(runtime_ranked_badge("HostRacer", &mode) == 7);
     session_mode = 0;
     assert(runtime_ranked_badge("HostRacer", &mode) == 7);
-    assert(__atomic_load_n(&tier_gets, __ATOMIC_RELAXED) >= 4);
+    assert(__atomic_load_n(&tier_gets, __ATOMIC_RELAXED) >= 2);
     pthread_cancel(thread);
     pthread_join(thread, NULL);
 }
@@ -387,6 +415,22 @@ static void test_tier_cache_replaces_departed_players(void) {
     assert(tier_members[1].best_tier==-1 && !tier_members[1].mode_ready[0]);
 }
 
+static void test_tier_survives_room_change(void) {
+    tier_cache_reset(UINT64_MAX, 0);
+    session_room = 0;
+    runtime_ranked_tier("HostRacer", NULL);
+    tier_members[0].best_tier = 6;
+    tier_members[0].best_mode = 1;
+    tier_members[0].mode_ready[0] = tier_members[0].mode_ready[1] = 1;
+    tier_members[0].mode_tier[0] = 5;
+    tier_members[0].mode_tier[1] = 6;
+    session_room = 42;
+    session_mode = 1;
+    assert(runtime_ranked_tier("HostRacer", NULL) == 6);
+    session_room = 0;
+    assert(runtime_ranked_badge("HostRacer", NULL) == 6);
+}
+
 int main(void) {
     test_status_contract();
     test_status_refresh();
@@ -401,6 +445,7 @@ int main(void) {
     test_best_badge();
     test_tier_worker_refresh();
     test_tier_cache_replaces_departed_players();
+    test_tier_survives_room_change();
     puts("ranked-test: ok");
     return 0;
 }

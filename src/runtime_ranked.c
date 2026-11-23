@@ -191,6 +191,28 @@ static int ranked_mmr_reply(const char *reply, const char *name, int *out) {
     return mmrs && json_int(mmrs, name, out);
 }
 
+static int ranked_mode_field(const char *reply, const char *field, int mode, const char *name,
+                             char *tier, size_t size, int *mmr) {
+    char key[32], player[40];
+    snprintf(key, sizeof key, "\"%s%d\":{", field, mode);
+    const char *start = reply ? strstr(reply, key) : NULL;
+    const char *end = start ? strchr(start, '}') : NULL;
+    if (!end) return 0;
+    snprintf(player, sizeof player, "\"%s\":", name);
+    const char *value = strstr(start, player);
+    if (!value || value >= end) return 0;
+    value += strlen(player);
+    if (tier) {
+        if (*value++ != '"') return 0;
+        size_t length = 0;
+        while (value < end && *value != '"' && length + 1 < size) tier[length++] = *value++;
+        tier[length] = 0;
+        return value < end && *value == '"';
+    }
+    *mmr = (int)strtol(value, NULL, 10);
+    return 1;
+}
+
 static int ranked_profile_detail(const char *reply, const char *section, int *placements, int *position) {
     char key[24];
     snprintf(key, sizeof key, "\"%s\":{", section);
@@ -239,13 +261,16 @@ static int ranked_best_mode(int normal_tier, int normal_mmr, int itemless_tier, 
         (itemless_tier == normal_tier && itemless_mmr > normal_mmr);
 }
 
-static void tier_cache_reset(uint64_t room, int mode) {
-    memset(tier_members, 0, sizeof tier_members);
-    tier_member_count = 0;
+static void tier_cache_switch(uint64_t room, int mode) {
     tier_room = room;
     tier_mode = mode;
-    tier_changed_ms = tier_fetched_ms = 0;
-    tier_dirty = 0;
+    for (unsigned i = 0; i < tier_member_count; ++i) {
+        tier_members[i].tier = tier_members[i].mode_ready[mode] ? tier_members[i].mode_tier[mode] : 0;
+        tier_members[i].mmr = tier_members[i].mode_ready[mode] ? tier_members[i].mode_mmr[mode] : 0;
+        tier_members[i].mode = mode;
+    }
+    tier_dirty = 1;
+    tier_changed_ms = monotonic_ms();
     ++tier_generation;
 }
 
@@ -263,7 +288,7 @@ int runtime_ranked_tier(const char *name, int *badge_mode) {
     ranked_tier_context(&room, &mode);
     const uint64_t now = monotonic_ms();
     pthread_mutex_lock(&lock);
-    if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
+    if (tier_room != room || tier_mode != mode) tier_cache_switch(room, mode);
     unsigned i = 0;
     while (i < tier_member_count && !same_nick(name, tier_members[i].name)) ++i;
     if (i == tier_member_count) {
@@ -351,7 +376,7 @@ static void *ranked_tier_worker(void *unused) {
         uint64_t generation = 0;
         const uint64_t now = monotonic_ms();
         pthread_mutex_lock(&lock);
-        if (tier_room != room || tier_mode != mode) tier_cache_reset(room, mode);
+        if (tier_room != room || tier_mode != mode) tier_cache_switch(room, mode);
         const int due = tier_member_count &&
             ((tier_dirty && now - tier_changed_ms >= 250) || now - tier_fetched_ms >= 1000);
         if (due) {
@@ -370,39 +395,61 @@ static void *ranked_tier_worker(void *unused) {
         int fetched_placements[2] = {-1, -1};
         int fetched_positions[2] = {0, 0};
         char profile_name[17] = "";
+        char target[384];
+        size_t used = (size_t)snprintf(target, sizeof target, "/ryunet/ranked-tiers?names=");
+        for (unsigned i = 0; i < count && used < sizeof target; ++i)
+            used += (size_t)snprintf(target + used, sizeof target - used,
+                                     "%s%s", i ? "," : "", names[i]);
         int answered = 0;
-        for (int request_mode = 0; request_mode < 2; ++request_mode) {
-            char target[384];
-            size_t used = (size_t)snprintf(target, sizeof target, "/ryunet/ranked-tiers?names=");
-            for (unsigned i = 0; i < count && used < sizeof target; ++i)
-                used += (size_t)snprintf(target + used, sizeof target - used,
-                                         "%s%s", i ? "," : "", names[i]);
-            if (used >= sizeof target) break;
-            snprintf(target + used, sizeof target - used, "&mode=%d", request_mode);
+        if (used < sizeof target) {
+            snprintf(target + used, sizeof target - used, "&mode=all");
             char *reply = NULL;
             size_t reply_size = 0;
             const int status = runtime_ryunet_transfer("GET", target, NULL, 0,
                                                        &reply, &reply_size, 4096);
             static unsigned fetch_logs;
             if (fetch_logs++ < 8)
-                fprintf(stderr, "Ranked tiers: mode=%d status=%d reply=%.160s\n",
-                        request_mode, status, reply ? reply : "(none)");
-            if (status == 200 && reply) {
-                ++answered;
-                for (unsigned i = 0; i < count; ++i) {
-                    char lower[17], tier_name[40];
-                    for (size_t j = 0; names[i][j]; ++j)
-                        lower[j] = (char)tolower((unsigned char)names[i][j]);
-                    lower[strlen(names[i])] = 0;
-                    const int tier = ranked_tier_reply(reply, lower, tier_name, sizeof tier_name)
-                                   ? tier_index(tier_name, request_mode) : 0;
-                    int mmr = 0;
-                    ranked_mmr_reply(reply, lower, &mmr);
-                    fetched[request_mode][i] = tier;
-                    fetched_mmr[request_mode][i] = mmr;
-                }
+                fprintf(stderr, "Ranked tiers: mode=all status=%d reply=%.160s\n",
+                        status, reply ? reply : "(none)");
+            if (status == 200 && reply && strstr(reply, "\"tiers0\":{") && strstr(reply, "\"tiers1\":{") &&
+                strstr(reply, "\"mmr0\":{") && strstr(reply, "\"mmr1\":{")) {
+                answered = 2;
+                for (int request_mode = 0; request_mode < 2; ++request_mode)
+                    for (unsigned i = 0; i < count; ++i) {
+                        char lower[17], tier_name[40];
+                        for (size_t j = 0; names[i][j]; ++j)
+                            lower[j] = (char)tolower((unsigned char)names[i][j]);
+                        lower[strlen(names[i])] = 0;
+                        const int tier = ranked_mode_field(reply, "tiers", request_mode, lower,
+                                                           tier_name, sizeof tier_name, NULL)
+                                       ? tier_index(tier_name, request_mode) : 0;
+                        int mmr = 0;
+                        ranked_mode_field(reply, "mmr", request_mode, lower, NULL, 0, &mmr);
+                        fetched[request_mode][i] = tier;
+                        fetched_mmr[request_mode][i] = mmr;
+                    }
             }
             free(reply);
+            if (answered != 2) {
+                for (int request_mode = 0; request_mode < 2; ++request_mode) {
+                    snprintf(target + used, sizeof target - used, "&mode=%d", request_mode);
+                    reply = NULL;
+                    reply_size = 0;
+                    if (runtime_ryunet_transfer("GET", target, NULL, 0, &reply, &reply_size, 4096) == 200 && reply) {
+                        ++answered;
+                        for (unsigned i = 0; i < count; ++i) {
+                            char lower[17], tier_name[40];
+                            for (size_t j = 0; names[i][j]; ++j)
+                                lower[j] = (char)tolower((unsigned char)names[i][j]);
+                            lower[strlen(names[i])] = 0;
+                            fetched[request_mode][i] = ranked_tier_reply(reply, lower, tier_name, sizeof tier_name)
+                                ? tier_index(tier_name, request_mode) : 0;
+                            ranked_mmr_reply(reply, lower, &fetched_mmr[request_mode][i]);
+                        }
+                    }
+                    free(reply);
+                }
+            }
         }
         const char *local = runtime_np_get_online_name();
         if (local && valid_chars(local))
