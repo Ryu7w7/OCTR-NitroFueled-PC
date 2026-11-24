@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 
 import archive_patch
+import clan_tag_menu
 import hall_of_fame
 import octr_texts
 from octr_texts import text as tr
@@ -1820,6 +1821,29 @@ def _prepare(game, out, elf, bases):
     archive_patch.write_entries_patch(target, label_pak, guest, replacements, label_base,
                                       override={update_material_index})
     patches[guest] = target
+    # The base game and the two updates ship different copies of the same menu.
+    # Compose with each active replacement so the newest mounted copy has the row.
+    for name in ('juicedomain_startscreen', 'juicedomain_onlinemenus', 'update', 'update2'):
+        archive = resolve(Path(game) / 'archives' / (name + '.pak'))
+        table = iga.pak_entries(archive)
+        guest_path = '/app0/archives/' + name + '.pak'
+        previous = patches.get(guest_path)
+        changed = {}
+        for i, entry in enumerate(table):
+            asset = entry[0].lower().removeprefix(PACKAGE_PREFIX)
+            if asset == 'ui/guisharedassets/buttonlegendhorizontal.igz':
+                layout = current_entry(archive, table, i, previous)
+                changed[i] = clan_tag_menu.style_signed_in_footer(layout)
+            elif asset == clan_tag_menu.ASSET:
+                layout = current_entry(archive, table, i, previous)
+                try:
+                    changed[i] = clan_tag_menu.add_clan_tag(layout)
+                except (ValueError, KeyError, IndexError, struct.error) as error:
+                    print(f'Clan tag: keeping existing customization menu in {name}: {error}')
+        if changed:
+            target = out / ('clan-tag-' + name + '.bbpatch')
+            archive_patch.write_entries_patch(target, archive, guest_path, changed, previous, override=set(changed))
+            patches[guest_path] = target
     permanent_ui_package(game, out, patches, mapped)
     file_map(game, out / 'cup-files.map', out / 'cup-file-dirs',
              [(Path(relative), source) for relative, source in mapped.items()])

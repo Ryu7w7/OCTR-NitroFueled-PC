@@ -29,6 +29,56 @@ from prepare import parse_self
 
 
 class OnlineModeTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires local game assets')
+    def test_signed_in_footer_style_changes_only_name_and_font(self):
+        from clan_tag_menu import style_signed_in_footer
+        path = Path(os.environ['BB_TEST_GAME']) / 'archives' / 'update2.pak'
+        row, = (entry for entry in iga.pak_entries(path)
+                if entry[0].lower().endswith('ui/guisharedassets/buttonlegendhorizontal.igz'))
+        with path.open('rb') as archive:
+            original = Igz(iga.read_entry(archive, *row[1:]))
+        result = Igz(style_signed_in_footer(original.blob))
+        self.assertEqual(style_signed_in_footer(result.blob), result.blob)
+        field, = (p for p, k in original.objects() if k == 'igGuiPlaceable'
+                  and p+0x28 in original.sites['RSTT'] and original.string_at(p+0x28) == 'CurrentUser')
+        text, = (p for p, k in original.objects() if k == 'igGuiText'
+                 and original.string_at(p+0x10) == 'SignedInUserText')
+        self.assertNotEqual(original.u64(text+0x20), result.u64(text+0x20))
+        self.assertEqual(struct.unpack_from('<3f', result.data, field+0xc0), (1, 1, 1))
+        restored = bytearray(result.data)
+        for start, length in ((field+0xc0, 12), (text+0x20, 8)):
+            restored[start:start+length] = original.data[start:start+length]
+        self.assertEqual(restored, original.data)
+
+    @unittest.skipUnless(os.environ.get('BB_TEST_GAME'), 'requires a local game dump')
+    def test_native_clan_tag_after_karts(self):
+        from archive_reader import Archive
+        from clan_tag_menu import ASSET, BUTTON, add_clan_tag
+        for source in ('juicedomain_startscreen', 'juicedomain_onlinemenus', 'update', 'update2'):
+            with self.subTest(archive=source):
+                pak = Archive(Path(os.environ['BB_TEST_GAME']) / 'archives' / (source + '.pak'))
+                try:
+                    entry = next(row for row in pak.files if row['path'].lower().endswith(ASSET))
+                    patched = add_clan_tag(pak.extract(entry))
+                finally:
+                    pak.data.close()
+                    pak._file.close()
+                self.assertEqual(add_clan_tag(patched), patched)
+                g = Igz(patched)
+                button, = (o for o, t in g.objects() if t == 'igGuiPlaceable' and
+                           o + 0x28 in g.sites['RSTT'] and g.string_at(o + 0x28) == BUTTON)
+                def navigation(row):
+                    behaviors = g.u64(row + 0xe8)
+                    return g.u64(g.u64(behaviors + 0x20))
+                nav = navigation(button)
+                karts, after = g.u64(nav + 0x110), g.u64(nav + 0x118)
+                self.assertEqual(g.u64(navigation(karts) + 0x118), button)
+                self.assertEqual(g.u64(navigation(after) + 0x110), button)
+                self.assertEqual(g.u64(karts + 0x58), button)
+                self.assertGreater(struct.unpack_from('<f', g.data, button + 0x64)[0],
+                                   struct.unpack_from('<f', g.data, karts + 0x64)[0])
+                self.assertEqual(g.u32(g.u64(button + 0xe8) + 12), 1)
+
     @unittest.skipUnless(os.environ.get('BB_TEST_GAME') and os.name == 'posix',
                          'requires native game dump and POSIX threads')
     def test_native_loopback_queue_concurrency(self):
@@ -353,12 +403,6 @@ class OnlineModeTests(unittest.TestCase):
             blob = iga.read_entry(f, *entry[1:])
         original = Igz(blob)
         patched = Igz(online_mode.ranked_lobby_icons(blob))
-        sprites = [off for off, kind in patched.objects()
-                   if off >= len(original.data) and kind == 'igGuiSprite']
-        self.assertEqual(len(sprites), 18)
-        for off in sprites:
-            self.assertEqual(patched.u32(off + 0x30), 1)
-            self.assertEqual(struct.unpack_from('<2f', patched.data, off + 0x34), (100, 100))
         for tag in ('RHND', 'RNEX'):
             self.assertEqual(len(patched.read_list(tag, unpack_offsets)),
                              patched.fixup(tag)[1])

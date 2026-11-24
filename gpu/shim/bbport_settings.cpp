@@ -118,6 +118,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.async_pipelines = i != 0;
     } else if (key == "msaa") {
         v.msaa = i != 0;
+    } else if (key == "starting_camera") {
+        if (value == "-1" || value == "0" || value == "1") v.starting_camera = i;
     } else if (key == "graphics_tab") {
         v.graphics_tab = i != 0;
     } else if (key == "fullscreen") {
@@ -566,6 +568,7 @@ static std::vector<std::pair<std::string, std::string>> Snapshot(const Values& v
     put("fps_limit", std::to_string(v.fps_limit.load()));
     put("async_pipelines", flag(v.async_pipelines));
     put("msaa", flag(v.msaa));
+    put("starting_camera", std::to_string(v.starting_camera.load()));
     put("graphics_tab", flag(v.graphics_tab));
     put("fullscreen", flag(v.fullscreen));
     put("borderless", flag(v.borderless));

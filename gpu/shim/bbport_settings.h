@@ -197,6 +197,8 @@ struct Values {
     /// The game's Options menu gets a "Graphics" tab (the hidden Language Select tab, relabelled
     /// by scripts/graphics_tab.py) with the port's settings. Read once at start.
     std::atomic<bool> graphics_tab{true};
+    // -1 inherits the installed camera preset until the player makes a choice.
+    std::atomic<int> starting_camera{-1};
     /// SacredFire: exclusive fullscreen on the game's display (BB_DISPLAY). Applies at once;
     /// BB_FULLSCREEN=1 at start. Saved to bbport.ini by the menu.
     std::atomic<bool> fullscreen{false};

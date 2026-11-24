@@ -39,28 +39,17 @@ if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1
 if ! "$PYTHON" scripts/launch_lock.py --check "$data"; then
     exec "$PYTHON" scripts/launch_lock.py --run "$data" "$BASH" "$PWD/run.sh" "$@"
 fi
-# BB_SAVE_LOG=1: this run's output goes to the data directory.
+# BB_SAVE_LOG=1: this run's output and per-frame statistics go to the data directory.
 if [[ ${BB_SAVE_LOG:-} == 1 ]]; then
     logs=$data/logs
     mkdir -p "$logs"
     printf -v stamp '%(%Y%m%d_%H%M%S)T' -1
-    if [[ ${BB_FRAME_STATS:-} == 1 ]]; then
-        export BB_FRAME_LOG=${BB_FRAME_LOG:-$logs/$stamp.frames.csv}
-        export BB_READBACK_LOG=${BB_READBACK_LOG:-$logs/$stamp.readbacks.csv}
-    fi
+    export BB_FRAME_STATS=1 BB_FRAME_LOG=${BB_FRAME_LOG:-$logs/$stamp.frames.csv}
+    export BB_READBACK_LOG=${BB_READBACK_LOG:-$logs/$stamp.readbacks.csv}
     echo "Log: $logs/$stamp.log"
     exec {log_fd}>"$logs/$stamp.log"
     # Allocate a descriptor instead of overwriting the inherited launch lock.
-    exec > >(while IFS= read -r line || [[ -n $line ]]; do
-        case $line in
-            'Guest write check:'*) [[ ${BB_GUEST_WRITE_TRACE:-0} == 1 ]] || continue ;;
-            'Perf: frames '*) [[ ${BB_PERF_LOG:-0} == 1 ]] || continue ;;
-            'Presenter: per second:'*) [[ ${BB_PRESENTER_TRACE:-0} == 1 ]] || continue ;;
-            'Graphics tab: show '*|'Graphics tab: hide '*) [[ ${BB_GRAPHICS_TAB_TRACE:-0} == 1 ]] || continue ;;
-        esac
-        printf '%s\n' "$line"
-        printf '%s\n' "$line" >&"$log_fd"
-    done) 2>&1
+    exec > >(while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; printf '%s\n' "$line" >&"$log_fd"; done) 2>&1
 fi
 # Timings go to stderr so command-substitution protocols remain unchanged.
 startup_python() {
@@ -187,6 +176,7 @@ while IFS= read -r patch; do
 done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
 # ...and the voice chat's loudspeaker character in them: the nickname over a talking racer shows it.
 unset BB_VOICE_GLYPH
+if grep -q '"clan_tiles": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_CLAN_TILES=1; fi
 if grep -q '"speaker": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_VOICE_GLYPH=1; fi
 # Then, as run.py (scripts/startup_extras.py): the seasonal title screen, the nickname bottom left
 # of the menus online, the CTR TV logo and Pack Tacho's files (its executable patches need them:

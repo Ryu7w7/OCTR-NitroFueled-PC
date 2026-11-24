@@ -2,6 +2,7 @@
 #include "bbport_gnm_hooks.h"
 #include "bbport_engine_probe.h"
 #include "bbport_graphics_tab.h"
+#include "bbport_gameplay_camera.h"
 #include "bbport_d3d11.h"
 #include "bbport_live_graphics.h"
 #include "bbport_native_vk.h"
@@ -354,6 +355,7 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
 }
 
 extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
+    BbGameplayCamera::Install(image, size);
     BbGnmHooks::PatchImage(image, size);
     BbEngineProbe::PatchImage(image, size);
     const char* native = std::getenv("BB_NATIVE_VK");

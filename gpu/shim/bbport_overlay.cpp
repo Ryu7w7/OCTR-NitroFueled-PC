@@ -35,12 +35,14 @@
 #include "../../src/runtime_http.h"
 #include "../../src/runtime_spectate.h"
 #include "../../src/runtime_chat.h"
+#include "../../src/runtime_clan_tags.h"
 #include "../../src/runtime_name_colors.h"
 #include "../../src/runtime_replay_list.h"
 #include "../../src/runtime_net_ping.h"
 #include "../../src/runtime_avatars.h"
 #include <cctype>
 #include <map>
+#include "clan_labels.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -96,6 +98,18 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+std::atomic<bool> clan_editor{false};
+bool clan_focus, clan_prefill, clan_feedback;
+char clan_draft[CLAN_TAG_CAP]{};
+int clan_swatch = -1;
+
+void OpenClanEditor() {
+    clan_editor = true;
+    clan_focus = true;
+    clan_swatch = runtime_clan_swatch(runtime_np_get_online_name());
+    clan_prefill = !runtime_clan_lookup(runtime_np_get_online_name(), clan_draft);
+    clan_feedback = false;
+}
 // OpenMenu (a game thread): opened on the window thread.
 std::atomic<bool> open_request{false};
 bool quit_dialog_open = false; // guarded by imgui_mutex
@@ -238,6 +252,21 @@ void TakeAvatars() {
         }
         runtime_avatar_free(png);
     }
+}
+
+std::string PlayerLabel(const char* name) {
+    char label[CLAN_LABEL_CAP];
+    runtime_clan_label(name, label, sizeof label);
+    return label;
+}
+
+ImVec4 PlayerLabelColor(const char* name, ImVec4 fallback) {
+    float rgb[3];
+    return runtime_clan_color(name, rgb) ? ImVec4(rgb[0], rgb[1], rgb[2], fallback.w) : fallback;
+}
+
+void PlayerNameText(const char* name) {
+    ClanLabels::Text(PlayerLabel(name), PlayerLabelColor(name, ImGui::GetStyleColorVec4(ImGuiCol_Text)), name);
 }
 
 /// The player's picture in a circle of `size` pixels at the cursor (a line's height when 0), then
@@ -496,7 +525,14 @@ void SetOpen(bool value) {
     }
 }
 
+// SDL owns the system clipboard on the window thread. ImGui draws on the
+// render thread. Both touch these buffers under imgui_mutex.
+std::string clipboard_read, clipboard_write;
+bool clipboard_write_pending = false;
+
 ImGuiKey KeyFromSdl(SDL_Keycode key) {
+    if (key >= SDLK_A && key <= SDLK_Z)
+        return static_cast<ImGuiKey>(ImGuiKey_A + (key - SDLK_A));
     switch (key) {
     case SDLK_TAB: return ImGuiKey_Tab;
     case SDLK_LEFT: return ImGuiKey_LeftArrow;
@@ -838,17 +874,20 @@ int PingLines(bool pictures = false) {
             ++older;
             continue;
         }
-        const char* name = p.name[0] ? p.name : "...";
+        const std::string player = PlayerLabel(p.name);
+        const char* name = player.empty() ? "..." : player.c_str();
         if (pictures && p.name[0]) {   // Tacho: la foto de Discord del jugador (menu, apartado Sala)
             ImGui::AlignTextToFramePadding();
             Avatar(p.name);
         }
         if (p.ms == PING_NO_ANSWER) {
-            ImGui::TextColored(kMenuGrey, "%s  -", name);
+            ClanLabels::Text(name, PlayerLabelColor(p.name,kMenuGrey), p.name);
+            ImGui::SameLine();
+            ImGui::TextColored(kMenuGrey, "-");
             continue;
         }
         const ImVec4 color = p.ms < 80 ? kFriendGreen : p.ms < 150 ? kMenuYellow : ImVec4{1.0f, 0.42f, 0.38f, 1.0f};
-        ImGui::Text("%s", name);
+        ClanLabels::Text(name, PlayerLabelColor(p.name, ImGui::GetStyleColorVec4(ImGuiCol_Text)), p.name);
         ImGui::SameLine();
         ImGui::TextColored(color, "%d ms", p.ms);
     }
@@ -894,15 +933,9 @@ const char* ChatOwnName() {
 
 void ChatLine(const RcLine& line) {
     const bool mine = !SDL_strcasecmp(line.nick, ChatOwnName());
-    float own[3];
-    const ImVec4 color = runtime_name_color(line.nick, own) ? ImVec4(own[0], own[1], own[2], 1.0f)
-                         : mine                             ? kFriendGreen
-                                                            : kMenuYellow;
+    const ImVec4 color = PlayerLabelColor(line.nick, mine ? kFriendGreen : kMenuYellow);
     // The room's host: a crown before the name (DejaVu has the glyph; the room list shows one too).
-    if (runtime_room_host_is(line.nick))
-        ImGui::TextColored(color, "♛ %s:", line.nick);
-    else
-        ImGui::TextColored(color, "%s:", line.nick);
+    ClanLabels::Text((runtime_room_host_is(line.nick) ? "♛ " : "") + PlayerLabel(line.nick) + ":", color, line.nick);
     ImGui::SameLine();
     ImGui::TextWrapped("%s", line.text);
 }
@@ -1043,7 +1076,7 @@ void ChatSection() {
     }
     for (const std::string& nick : players) {
         ImGui::PushID(nick.c_str());
-        ImGui::TextUnformatted(nick.c_str());
+        PlayerNameText(nick.c_str());
         ImGui::SameLine(em * 11.0f);
         const bool muted = runtime_chat_muted(nick.c_str());
         if (ImGui::SmallButton(muted ? BbSettings::MenuText("Unmute", "Включить звук") : BbSettings::MenuText("Mute", "Заглушить"))) {
@@ -1461,7 +1494,7 @@ void FriendsTab() {
     if (const char* me = runtime_np_get_online_name(); me && *me) {
         Avatar(me, ImGui::GetFrameHeight() * 1.6f);
         ImGui::BeginGroup();
-        ImGui::TextUnformatted(me);
+        PlayerNameText(me);
         ImGui::TextColored(kMenuGrey, "%s", BbSettings::MenuText("Your picture is the one on your Discord account.",
                                                                  "Ваше фото — из вашего аккаунта Discord."));
         ImGui::EndGroup();
@@ -1484,7 +1517,8 @@ void FriendsTab() {
                               ImGuiWindowFlags_NoScrollbar);
             ImGui::AlignTextToFramePadding();
             Avatar(inv.from);
-            ImGui::Text(BbSettings::MenuText("%s invites you to their room", "%s зовёт вас в комнату"), inv.from);
+            ClanLabels::Text(PlayerLabel(inv.from) + BbSettings::MenuText(" invites you to their room", " зовёт вас в комнату"),
+                             PlayerLabelColor(inv.from, ImGui::GetStyleColorVec4(ImGuiCol_Text)), inv.from);
             char join[64];
             std::snprintf(join, sizeof join, "\xE2\x96\xB6  %s###join", BbSettings::MenuText("Join", "Войти"));
             ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(join, nullptr, true).x -
@@ -1576,7 +1610,7 @@ void FriendsTab() {
                 Avatar(f.name);
                 StatusDot(f.online);
                 ImGui::SameLine();
-                ImGui::TextUnformatted(f.name);
+                PlayerNameText(f.name);
                 ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding();
                 if (!f.online) {
@@ -1665,7 +1699,7 @@ void FriendsTab() {
                     ImGui::TableNextColumn();
                     ImGui::AlignTextToFramePadding();
                     Avatar(view.incoming[i]);
-                    ImGui::TextUnformatted(view.incoming[i]);
+                    PlayerNameText(view.incoming[i]);
                     ImGui::TableNextColumn();
                     std::snprintf(label, sizeof label, "\xE2\x9C\x94  %s###accept", BbSettings::MenuText("Accept", "Принять"));
                     if (ImGui::Button(label)) act("accept", view.incoming[i]);
@@ -1683,7 +1717,7 @@ void FriendsTab() {
                 ImGui::PushID(2000 + i);
                 ImGui::AlignTextToFramePadding();
                 Avatar(view.outgoing[i]);
-                ImGui::TextUnformatted(view.outgoing[i]);
+                PlayerNameText(view.outgoing[i]);
                 ImGui::SameLine();
                 if (ImGui::SmallButton(BbSettings::MenuText("Cancel", "Отменить"))) act("remove", view.outgoing[i]);
                 ImGui::PopID();
@@ -1716,7 +1750,7 @@ void FriendsTab() {
             Avatar(p.name);
             StatusDot(p.online);
             ImGui::SameLine();
-            ImGui::TextUnformatted(p.name);
+            PlayerNameText(p.name);
             ImGui::SameLine();
             if (relation == "friend") {
                 ImGui::TextDisabled("%s", BbSettings::MenuText("Friend", "Друг"));
@@ -2703,7 +2737,7 @@ void ReplayResults(const RrView& v) {
         const int place = r.finished > 0 ? r.finished : (r.rank > 0 ? r.rank : k + 1);
         ImGui::TextColored(colour, "%d", place);
         ImGui::SameLine(46.0f * s);
-        ImGui::TextColored(colour, "%s", r.name[0] ? r.name : "-");
+        ClanLabels::Text(r.name[0] ? PlayerLabel(r.name) : "-", PlayerLabelColor(r.name, colour), r.name);
         ImGui::SameLine(time_x);
         if (r.finished > 0 && r.time > 0.0f) {
             const int cs = static_cast<int>(r.time * 100.0f + 0.001f);   // cut, as the game shows it
@@ -2806,6 +2840,85 @@ ImFont* banner_title_font = nullptr;
 /// A private room with teams: the game's "Lobby members" list grouped by team, where the game's flat list was
 /// (ui/Octane_LobbyMembers, 1920x1080 canvas: header at y 112, rows from x 80 / y 160). Each team a slanted bar in
 /// its color with its name, its members under it with the ready tick; the local player in orange, as the game does.
+void ClanCustomization() {
+    const int request = runtime_clan_take_editor();
+    if (request > 0) OpenClanEditor();
+    if (request < 0 || menu_open || prompt_active || ultrawide_prompt) clan_editor = false;
+    if (!clan_editor) return;
+    const auto size = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::Begin("Clan Tag##customization", nullptr, ImGuiWindowFlags_AlwaysAutoResize |
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    char tag[CLAN_TAG_CAP];
+    const bool profile_known = runtime_clan_lookup(runtime_np_get_online_name(), tag);
+    if (clan_prefill && profile_known) {
+        std::snprintf(clan_draft, sizeof clan_draft, "%s", tag);
+        clan_prefill = false;
+    }
+    ImGui::TextUnformatted("Up to 6 characters in your language. Leave empty to clear.");
+    ImGui::SetNextItemWidth(160);
+    if (clan_focus) {
+        ImGui::SetKeyboardFocusHere();
+        clan_focus = false;
+    }
+    if (ImGui::InputText("##clan-tag", clan_draft, sizeof clan_draft, ImGuiInputTextFlags_AutoSelectAll)) {
+        clan_prefill = false;
+        clan_feedback = false;
+    }
+    // ImGui edits the original UTF-8 (including IME commits and clipboard
+    // text). Preview the shaped form that other players will actually see.
+    if (std::any_of(clan_draft, clan_draft+std::strlen(clan_draft), [](unsigned char c) { return c >= 128; }))
+        ClanLabels::Text(std::string("[")+clan_draft+"]", ImGui::GetStyleColorVec4(ImGuiCol_Text));
+    const char* account = runtime_np_get_online_name();
+    if (clan_swatch < 0) clan_swatch = runtime_clan_swatch(account);
+    float reserved[3];
+    const bool server_colour = runtime_name_color(account, reserved);
+    ImGui::BeginDisabled(server_colour || clan_swatch < 0);
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("Name colour", runtime_swatch_label(clan_swatch))) {
+        for (int id = 0; id < NAME_SWATCH_COUNT; ++id) {
+            ImGui::PushID(id);
+            if (id) {
+                const unsigned rgb = runtime_swatch_rgb(id);
+                if (ImGui::ColorButton("##sample", ImVec4(((rgb>>16)&255)/255.f,((rgb>>8)&255)/255.f,
+                                                     (rgb&255)/255.f,1), ImGuiColorEditFlags_NoTooltip)) {
+                    clan_swatch = id;
+                    clan_feedback = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+            }
+            if (ImGui::Selectable(runtime_swatch_label(id), clan_swatch == id)) {
+                clan_swatch = id;
+                clan_feedback = false;
+            }
+            if (clan_swatch == id) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (server_colour) ImGui::TextUnformatted("Your name uses a server-assigned colour.");
+    auto state = runtime_clan_status();
+    ImGui::BeginDisabled(state == CLAN_SAVING || !profile_known);
+    if (ImGui::Button("Save")) {
+        state = runtime_clan_save_profile(clan_draft, server_colour ? -1 : clan_swatch);
+        clan_feedback = true;
+        clan_prefill = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) clan_editor = false;
+    if (clan_feedback) {
+        if (state == CLAN_SAVING) ImGui::TextUnformatted("Saving...");
+        if (state == CLAN_SAVED) ImGui::TextUnformatted("Saved.");
+        if (state == CLAN_INVALID) ImGui::TextUnformatted("Choose a different tag.");
+        if (state == CLAN_OWNER) ImGui::TextUnformatted("Sign in with your online nickname.");
+        if (state == CLAN_UNAVAILABLE) ImGui::TextUnformatted("Server unavailable. Try again.");
+    }
+    ImGui::End();
+}
+
 void TeamLobbyList() {
     TeamLobbyMember rows[8];
     int teams = 0;
@@ -2877,14 +2990,17 @@ void TeamLobbyList() {
                 dl->AddLine(ImVec2(c.x - r * 0.8f, c.y), ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), colors[team], 4.0f * s);
                 dl->AddLine(ImVec2(c.x - r * 0.15f, c.y + r * 0.7f), ImVec2(c.x + r, c.y - r * 0.8f), colors[team], 4.0f * s);
             }
+            const auto clan_label = PlayerLabel(rows[i].name);
             const float name_size = 28.0f * s;
             const ImVec2 np = at(x + 40.0f, y + 2.0f);
-            const ImU32 name_color = rows[i].local ? IM_COL32(255, 150, 28, 255) : IM_COL32(255, 255, 255, 255);
+            const ImVec4 fallback = rows[i].local ? ImVec4(1.0f, 150 / 255.0f, 28 / 255.0f, 1.0f)
+                                                  : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+            const ImU32 name_color = ImGui::ColorConvertFloat4ToU32(PlayerLabelColor(rows[i].name, fallback));
             for (int ox = -1; ox <= 1; ++ox)
                 for (int oy = -1; oy <= 2; ++oy)
-                    dl->AddText(font, name_size, ImVec2(np.x + ox * 1.5f * s, np.y + oy * 1.5f * s), IM_COL32(10, 20, 45, 230),
-                                rows[i].name);
-            dl->AddText(font, name_size, np, name_color, rows[i].name);
+                    ClanLabels::Draw(dl, font, name_size, ImVec2(np.x + ox * 1.5f * s, np.y + oy * 1.5f * s), IM_COL32(10, 20, 45, 230),
+                                clan_label);
+            ClanLabels::Draw(dl, font, name_size, np, name_color, clan_label, rows[i].name);
             y += row_h;
         }
         column_bottom[column] = y;
@@ -2903,7 +3019,7 @@ void TeamLobbyList() {
 
 // Tacho: the CTR title font (<BB_ART_DIR>/ctr-title.ttf) for the members list by team, DejaVu merged under it for
 // what it lacks (accents). Called after MakeContext(), before the backend builds the font atlas.
-static void AddTeamFont() {
+void AddTeamFont() {
     ImGuiIO& io = ImGui::GetIO();
     banner_title_font = nullptr;
     // BB_TEAM_FONT (run.py/run.sh: art/ctr-title.ttf) names the file; BB_ART_DIR (Tacho's launcher) its folder.
@@ -3182,6 +3298,13 @@ void SetTextPrompt(bool active, const std::string& prompt, const std::string& te
 static void MakeContext() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ClanLabels::Reset();
+    auto& platform = ImGui::GetPlatformIO();
+    platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return clipboard_read.c_str(); };
+    platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
+        clipboard_write = text ? text : "";
+        clipboard_write_pending = true;
+    };
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; // window positions are not kept
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
@@ -3279,10 +3402,18 @@ void UpdateTextInput(SDL_Window* window) {
         }
     }
     bool want = false;
+    bool copy = false;
+    std::string text;
     {
         std::scoped_lock lock{imgui_mutex};
-        want = initialized && (menu_open || chat_typing) && ImGui::GetIO().WantTextInput;
+        if (clipboard_write_pending) {
+            clipboard_write_pending = false;
+            copy = true;
+            text.swap(clipboard_write);
+        }
+        want = initialized && (menu_open || chat_typing || clan_editor) && ImGui::GetIO().WantTextInput;
     }
+    if (copy) SDL_SetClipboardText(text.c_str());
     if (want != SDL_TextInputActive(window)) {
         if (want) {
             SDL_StartTextInput(window);
@@ -3298,7 +3429,11 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
-    const bool is_open = menu_open || ultrawide_prompt;
+    if (clan_editor && event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
+        clan_editor = false;
+        return true;
+    }
+    const bool is_open = menu_open || ultrawide_prompt || clan_editor;
     const bool typing = chat_typing;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
@@ -3309,7 +3444,7 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
-        if (down && !event.key.repeat && !typing && event.key.key == SDLK_M && (event.key.mod & SDL_KMOD_CTRL)) {
+        if (down && !event.key.repeat && !clan_editor && !typing && event.key.key == SDLK_M && (event.key.mod & SDL_KMOD_CTRL)) {
             auto& s = BbSettings::Get();
             const bool muted = !s.muted.load();
             s.muted = muted;
@@ -3330,12 +3465,20 @@ bool HandleEvent(const SDL_Event& event) {
             }
             return false;
         }
-        io.AddKeyEvent(ImGuiMod_Ctrl, (event.key.mod & SDL_KMOD_CTRL) != 0);
+        const bool ctrl = (event.key.mod & SDL_KMOD_CTRL) != 0;
+        io.AddKeyEvent(ImGuiMod_Ctrl, ctrl);
         io.AddKeyEvent(ImGuiMod_Shift, (event.key.mod & SDL_KMOD_SHIFT) != 0);
         io.AddKeyEvent(ImGuiMod_Alt, (event.key.mod & SDL_KMOD_ALT) != 0);
-        if (const ImGuiKey key = KeyFromSdl(event.key.key); key != ImGuiKey_None) {
-            io.AddKeyEvent(key, down);
+        ImGuiKey key = KeyFromSdl(event.key.key);
+        // A non-Latin keyboard can send a non-Latin keycode for the V key.
+        if (key == ImGuiKey_None && event.key.scancode >= SDL_SCANCODE_A && event.key.scancode <= SDL_SCANCODE_Z)
+            key = static_cast<ImGuiKey>(ImGuiKey_A + (event.key.scancode - SDL_SCANCODE_A));
+        if (key == ImGuiKey_V && ctrl && down && !event.key.repeat && io.WantTextInput) {
+            char* text = SDL_GetClipboardText();
+            clipboard_read = text ? text : "";
+            SDL_free(text);
         }
+        if (key != ImGuiKey_None) io.AddKeyEvent(key, down);
         return true;
     }
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
@@ -3417,7 +3560,7 @@ bool Visible() {
         std::scoped_lock lock{notice_mutex};
         notice = !notices.empty();
     }
-    return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+    return initialized && (clan_editor || runtime_clan_editor_pending() || menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
                            BbSettings::Get().muted ||
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
                            runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing() ||
@@ -3453,7 +3596,7 @@ void QuitGame() {
 }
 
 bool MenuOpen() {
-    return menu_open;
+    return menu_open || clan_editor;
 }
 
 bool TakePadRescan() {
@@ -3487,7 +3630,7 @@ bool ChatHoldsKeyboard() {
 
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active || ultrawide_prompt || ChatHoldsKeyboard();
+    return clan_editor || menu_open || prompt_active || ultrawide_prompt || ChatHoldsKeyboard();
 }
 
 /// The time since the last picture, for the FPS readout and the performance diagnostic
@@ -3562,6 +3705,7 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
         }
     }
     AnnouncementBanner();
+    ClanCustomization();
     if (!menu_open) TeamLobbyList();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();

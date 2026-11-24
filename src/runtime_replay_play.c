@@ -11,6 +11,7 @@
  * Onur), play.c: this first part has the race, the ghosts, the inputs, the camera and the controls; the HUD
  * lines, sounds and the recorded items and hits come next. Started from the in-game menu's Replays tab
  * (runtime_replay_play_file), run on the game's thread by the pad read hook (runtime_replay_play_tick). */
+#include "runtime_clan_tags.h"
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
 #include "runtime_replay_list.h"
@@ -2415,10 +2416,10 @@ static struct {
 /* The item hides the kart and its driver (0xe26410 -> 0xbd40d0: the entity's render node, entity
  * +0xb0 -> +0x28, flag 2 at +0x20); the wheels are entities of their own and stay. Shown again on this
  * screen only, through the node's own flag setter (0x349530), which changes nothing but the flag. */
-static void entity_visible(void *entity, int visible) {
+static void invisible_look_show(void *entity) {
     void *render = entity ? RR_AT(entity, 0xb0, void *) : 0;
     void *node = render ? RR_AT(render, 0x28, void *) : 0;
-    if (node && !!(RR_AT(node, 0x20, uint8_t) & 2) != !visible) game.node_flags(node, 2, !visible);
+    if (node && (RR_AT(node, 0x20, uint8_t) & 2)) game.node_flags(node, 2, 0);
 }
 
 static void invisible_look_message(void *kart, int start) {
@@ -2464,44 +2465,12 @@ static void invisible_look(int racing_now) {
     }
     if (move && RR_AT(move, 0x260, uint8_t) != IL.ghost) RR_AT(move, 0x260, uint8_t) = IL.ghost;
     /* the kart and its driver (CKartComponent, meta global 0x2ac44e0: +0x30 the driver's handle) */
-    entity_visible(kart, 1);
+    invisible_look_show(kart);
     void *kart_part = rr_component(kart, 0x2ac44e0);
-    entity_visible(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0, 1);
-}
-
-static void *departed_blink_karts[8];
-static void departed_look(int racing_now, float seconds) {
-    void *next[8]={0};
-    int used=0;
-    void *manager=rr_ptr(RR_D_RACER_MANAGER);
-    void *list=manager ? RR_AT(manager,0x10,void *) : NULL;
-    int count=rr_count(list);
-    for(int i=0;count<=8 && i<count;++i) {
-        void *racer=rr_item(list,i);
-        void *kart=racer ? rr_handle_object(&RR_AT(racer,0x20,void *)) : NULL;
-        if(!kart) continue;
-        int dc=racing_now && !runtime_replay_playing() && runtime_online_mode_departed_kart(kart);
-        int was=0;
-        for(int j=0;j<8;++j) was|=departed_blink_karts[j]==kart;
-        if(!dc && !was) continue;
-        const int visible=!dc || !isfinite(seconds) || seconds<0 || fmodf(seconds,.8f)<.4f;
-        entity_visible(kart,visible);
-        void *part=rr_component(kart,0x2ac44e0);
-        entity_visible(part ? rr_handle_object(&RR_AT(part,0x30,void *)) : NULL,visible);
-        /* CKartCustomizationComponent::_wheel1..4 are entity references, separate from the kart render node. */
-        void *custom=rr_component(kart,0x2ac49b8);
-        for(int wheel=0;custom && wheel<4;++wheel)
-            entity_visible(RR_AT(custom,0xf0+8*wheel,void *),visible);
-        if(dc) next[used++]=kart;
-    }
-    memcpy(departed_blink_karts,next,sizeof next);
+    invisible_look_show(kart_part ? rr_handle_object(&RR_AT(kart_part, 0x30, void *)) : 0);
 }
 
 static int racing;                              /* the last frame: a kart and a race clock */
-int runtime_replay_race_active(void) {
-    return __atomic_load_n(&racing, __ATOMIC_RELAXED) && !runtime_replay_playing();
-}
-
 int runtime_replay_chat_allowed(void) {
     return !__atomic_load_n(&racing, __ATOMIC_RELAXED) || runtime_replay_local_finished();
 }
@@ -2514,7 +2483,6 @@ void ABI runtime_replay_tick(void) {
     runtime_online_mode_note_frame();
     runtime_presence_tick();
     invisible_look(racing);
-    departed_look(racing,rr_race_clock());
     runtime_item_lead_tick(racing && !runtime_replay_playing());
     runtime_tips_tick();
     runtime_nsane_tick();
@@ -2842,7 +2810,7 @@ static void *marker_project, *marker_manager;
 /* The loudspeaker as a character of the game's fonts (U+E013, scripts/button_prompts.py puts it there and
  * sets BB_VOICE_GLYPH=1): while a racer talks, the nickname over its kart ends with it, so the game draws it
  * as part of the name. The marker keeps its text meanwhile (+0x8a _keepDisplayTextUpdated off). */
-static const char VOICE_GLYPH[] = " \xee\x80\x93";
+static const char VOICE_GLYPH[] = RUNTIME_NAME_SPEAKER_SUFFIX;
 static struct { void *marker; uint8_t keep; } glyph_on[8];
 
 int runtime_voice_glyph(void) {
@@ -2858,7 +2826,9 @@ int runtime_voice_glyph(void) {
 static void voice_glyph(void *marker, void *tag, const char *text, char *name, size_t size) {
     const size_t len = strlen(text), suffix = sizeof VOICE_GLYPH - 1;
     const int has = len > suffix && !strcmp(text + len - suffix, VOICE_GLYPH);
-    snprintf(name, size, "%.*s", (int)(has ? len - suffix : len), text);
+    char display[CLAN_MARKER_CAP], account[17];
+    snprintf(display, sizeof display, "%.*s", (int)(has ? len - suffix : len), text);
+    snprintf(name, size, "%s", runtime_clan_identity(display, account));
     if (!game.set_text || !runtime_voice_glyph()) return;
     const int talking = runtime_voice_speaking(name);
     if (talking == has) return;
@@ -2874,12 +2844,12 @@ static void voice_glyph(void *marker, void *tag, const char *text, char *name, s
             glyph_on[slot].marker = marker;
             glyph_on[slot].keep = RR_AT(marker, 0x8a, uint8_t);
         }
-        char with[96];
-        snprintf(with, sizeof with, "%s%s", name, VOICE_GLYPH);
+        char with[CLAN_MARKER_CAP];
+        snprintf(with, sizeof with, "%.*s%s", (int)(sizeof with - sizeof VOICE_GLYPH), display, VOICE_GLYPH);
         RR_AT(marker, 0x8a, uint8_t) = 0;
         game.set_text(tag, with);
     } else {
-        game.set_text(tag, name);
+        game.set_text(tag, display);
         if (slot >= 0) {
             RR_AT(marker, 0x8a, uint8_t) = glyph_on[slot].keep;
             glyph_on[slot].marker = 0;
