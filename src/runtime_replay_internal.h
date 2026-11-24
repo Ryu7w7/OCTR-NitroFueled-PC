@@ -55,6 +55,8 @@ void runtime_item_lead_tick(int racing);
 /* loading-screen tips from RyuNET (runtime_tips.c) */
 void runtime_tips_install(int eu);
 void runtime_tips_tick(void);
+/* active skin portraits in race leaders and minimap (runtime_hud_skin.c) */
+int runtime_hud_skin_install(int eu);
 
 /* the player (runtime_replay_play.c) */
 int runtime_replay_play_install(int eu);

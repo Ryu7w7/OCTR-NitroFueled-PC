@@ -229,7 +229,17 @@ class Copier:
                 ref = value & MASK
                 if ref in s.typed:
                     ref = self.object(ref)
-                elif kind.endswith('List') and site - off == 0x20:  # a list's data
+                elif kind == 'igMemoryCommandStream' and site - off == 0x48:
+                    length = s.u64(off + 0x50)
+                    block = t.append(bytes(s.data[ref:ref + length]))
+                    self.fix(ref, block, length, '')
+                    ref = block
+                elif kind == 'igGraphicsMaterial' and site - off == 0x48:
+                    length = s.u64(off + 0x40) & 0xFFFFFFFF
+                    block = t.append(bytes(s.data[ref:ref + length]))
+                    self.fix(ref, block, length, '')
+                    ref = block
+                elif (kind.endswith('List') or kind == 'igGraphicsObjectSet') and site - off == 0x20:
                     length = s.u64(off + 0x18) & 0xFFFFFFFF
                     block = t.append(bytes(s.data[ref:ref + length]))
                     self.fix(ref, block, length, '')

@@ -1095,6 +1095,7 @@ int runtime_replay_start(unsigned char *base, size_t size) {
     if (player && ai_t && !items) printf("Native Replay: the item hooks are not there: items in replays are the game's own\n");
     runtime_item_lead_install(eu);
     runtime_tips_install(eu);
+    runtime_hud_skin_install(eu);
 #ifdef _WIN32
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #endif
