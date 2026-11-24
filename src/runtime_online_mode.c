@@ -3030,6 +3030,28 @@ static void refresh_ranked_score(void) {
 }
 
 static void team_lobby_frame(void);
+
+
+/* Case-insensitive substring test: strcasestr is not in the MinGW C library (Windows build). */
+static int contains_nocase(const char *text, const char *word) {
+    const size_t n = strlen(word);
+    for (; *text; ++text)
+        if (!strncasecmp(text, word, n)) return 1;
+    return 0;
+}
+
+int runtime_online_mode_race_running(void) {
+    if (!network_state || !network_race) return 0;
+    /* Native state 16 survives Ranked return; its predicate excludes only OnlineLobby. */
+    const char *level = rr_current_level();
+    if (level && (contains_nocase(level, "octane_startscreen") ||
+                  contains_nocase(level, "octane_onlinelobby"))) return 0;
+    unsigned char *state = network_state();
+    if (!state) return 0;
+    int state_id;
+    memcpy(&state_id, state + 0x144, sizeof state_id);
+    return network_race(state_id);
+}
 void runtime_online_mode_note_frame(void) {
     team_lobby_frame();
     runtime_public_itemless_poll_ranked_request();
