@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Custom Cup: Copas Extendidas. While choosing a custom cup's tracks, L1 / R1 ("Cantidad") take
+     the number of tracks down / up by 2, from 4 to 16. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA13795</ID>
+    </TitleID>
+    <Metadata Title="Crash Team Racing Nitro-Fueled"
+              Name="Custom Cup: Copas Extendidas"
+              Note="Custom cups of 4 to 16 tracks: L1 / R1 while choosing."
+              Author="Kyouko8"
+              PatchVer="2.1.4"
+              AppVer="01.21"
+              AppElf="eboot.bin"
+              isEnabled="false">
+        <PatchList>
+            <!-- Custom Cup: Copas Extendidas on -->
+            <Line Type="bytes" Address="0x273bf00" Value="01"
+                  ExpectedSHA256="6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"/>
+        </PatchList>
+    </Metadata>
+</Patch>

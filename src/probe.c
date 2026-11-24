@@ -252,6 +252,16 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         if (shown) fprintf(stderr,"\n");
     }
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
+    /* BB_LEAK_DUMP=1 (diagnostics): the objects the registers point to, each word named (their
+     * Alchemy class, text): what a crash in game code was working on. */
+    {
+        const char *e=getenv("BB_LEAK_DUMP");
+        if (e && e[0]=='1') {
+            static const char *const names[]={"rax","rbx","rcx","rdx","rsi","rdi","rbp","r8","r9","r10","r11","r12","r13","r14","r15"};
+            const uint64_t values[]={c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->R8,c->R9,c->R10,c->R11,c->R12,c->R13,c->R14,c->R15};
+            runtime_leak_registers(names,values,15);
+        }
+    }
     /* SacredFire: the thread's name and its native call chain from the unwind tables (drivers and
      * system DLLs keep no frame pointers; this names the call into them). Guest frames have no
      * unwind data: the walk stops there and the rbp chain below continues. */

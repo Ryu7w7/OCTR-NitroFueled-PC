@@ -32,6 +32,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 EBOOT_BASE=0x400000
+WRITE_LIMIT=4096  # bytes per write the loader takes (src/probe.c: apply_patches)
 TITLE_ID='CUSA13795'
 APP_VERSION='01.21'
 # bbport.ini keys (the in-game menu, the launcher) -> "<file>/<patch name>". The patches are
@@ -634,9 +635,18 @@ def applied_game_patches(out):
 
 def write_blob(out, writes):
     """out/patches.bin (BBPATCH2: the patch base, so the loader can rebase pointers written into
-    relocated slots)."""
-    blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(writes))
-    for offset,data in writes: blob+=struct.pack('<QQ',offset,len(data))+data
+    relocated slots). The loader (src/probe.c) takes writes of at most WRITE_LIMIT bytes: a
+    longer one (a mod's whole code block) goes in parts, cut at 8-byte aligned addresses so no
+    pointer slot is split."""
+    parts=[]
+    for offset,data in writes:
+        at=0
+        while at<len(data):
+            end=min(len(data),at+WRITE_LIMIT)
+            if end<len(data):end-=(offset+end)%8
+            parts.append((offset+at,data[at:end]));at=end
+    blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,len(parts))
+    for offset,data in parts: blob+=struct.pack('<QQ',offset,len(data))+data
     (out/'patches.bin').write_bytes(blob)
 
 

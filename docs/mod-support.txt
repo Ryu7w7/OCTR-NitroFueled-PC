@@ -120,6 +120,142 @@ Legacy full-game profiles under mod-state/extensions/profiles are never reused.
 New state lives in extensions/overlays and contains mod data/metadata, not a game
 copy. Separate user saves/shader caches remain, and are not original game content.
 
+BUILT-IN MODS
+scripts/builtin_mods holds format 2 packages that ship with the launcher, listed with
+the built-in mods and on by default (catalog isEnabled="true", ModBuiltin="1"); one wins
+over a copy of the same mod ID in the mods folder, and they cannot be removed, only
+turned off. Their assets are copy deltas (copy-delta-v1, payloads/*.delta.json), rebuilt
+from the player's own game files, so no game file is in the repository.
+  ultimate-customizer  Ultimate Customizer (Kyouko8; formerly Race and Battle Options):
+                  laps to 250, three-digit HUD and menus, the long race clock, battle
+                  points/time/lives (Capture the Flag and Steal the Bacon
+                  points too: 5.1.1), the random cup. Option Copas Adicionales (off by
+                  default): 25 new Arcade cups (8 easy, 9 medium, 8 hard) and their stars,
+                  kept in rbo_cups.bin (5.1.4: 5.1.0 hooked five of the six ways to the save
+                  data unmount, not the one the game takes after saving; a win also saves
+                  them when the save is mounted). Cups ask for laps keeping their own branch
+                  of the race settings script (5.1.5: their collage and track names; 5.1.0
+                  sent them to the single race branch, which hides the names and shows a
+                  track's picture): only the cup's hideLaps animation is taken out.
+  custom-cup      Custom Cup 2 (Kyouko8): a cup of 4 to 16 tracks of the player's choice.
+                  A track can be chosen more than once. Option Miniaturas en ajustes de
+                  carrera (on by default): the race settings of a custom cup show its
+                  tracks' pictures (ui/Octane_MainMenu_RaceSetting.igz and its materials).
+                  The game's cups and the Copas Adicionales show their own picture there
+                  (2.0.2); a custom cup hides the cup branch's four track names over its
+                  first track's picture (2.0.3).
+                  Option Copas Extendidas (on by default): cups of 4 to 16 tracks, L1 / R1
+                  (Cantidad) while choosing; the thumbnails are a grid of 4 x 4.
+                  Reiniciar (2.1.3, every cup): the end race menu between a cup's races shows
+                  Siguiente carrera, Reiniciar, Salir. Its cup group's Restart
+                  ("Reintentar", now "Reiniciar" in its texts) was hidden in a cup, and its
+                  script only retried the race: its unreached branch calling
+                  CLoadMapNodes::restartCup_VSC (race 0 of the cup's own zone list; the kart
+                  records' reset clears the cup points at a cup's first race) now runs in a
+                  cup. The root script shows the button and links the three; its chain for
+                  the last race (copies of the game's nodes) does not show there, and after
+                  the last race the menu stays the game's. The Adventure keeps its Continue
+                  only. Online and in private rooms Custom Cup's buttons are off (2.1.4: the
+                  game's network check, or CPartyManager +0x6c, the private session).
+  extra-cups-art  The Copas Adicionales' pictures. Not shipped (they are collages of the
+                  game's own track pictures): "Prepare" on Ultimate Customizer draws them
+                  from the player's game files (scripts/cup_art.py, about a minute; numpy,
+                  which the portable build bundles) into mod-state/builtin. Copas
+                  Adicionales can be turned on only after that, and the pictures are used
+                  only with them.
+Two built-ins changing one game file (Custom Cup's race settings thumbnails and Ultimate
+Customizer's lap list) become one merged entry the same way (merge_builtins); a change
+that cannot be merged is left out of that session, the first built-in's version stays.
+A community mod never stops on a built-in mod (scripts/builtin_coexist.py):
+- A game file (a .pak entry) both change: the built-in's change is merged over the
+  community mod's version (scripts/igz_rebase.py: the named objects the built-in changed
+  or added are copied over the other version, in place; the result is checked object by
+  object). A community archive_asset of the same entry becomes one merged entry; a whole
+  archive of a mod (a racer mod's update3.pak with its systemData.igz, a classic track
+  mod's with the track menu) is written again into the session profile with the merged
+  entry. Texts (localized_strings) go over the built-in's version.
+- When both change the same object (or the merge does not check out): Ultimate
+  Customizer leaves the online lobby menu (ui/Octane_Lobby_PrivateGameSettings.igz) to
+  the other mod and keeps the rest; for any other file the built-in is frozen.
+- Executable patches writing the same code, or a mod either one declares incompatible
+  (Ultimate Customizer: custom-lap-number-selector, -16): the built-in is frozen.
+Frozen: not applied in that session (a frozen Ultimate Customizer takes extra-cups-art
+with it); its switch stays on and it comes back when the other mod is off. The session's
+launch.json and mod-state/builtin-status.txt (shown on the built-in's card) say what was
+merged, left or frozen, and why.
+tools/make_builtin_mods.py rebuilds them from the authors' release ZIPs and the game:
+  python tools/make_builtin_mods.py GAME_FOLDER ULTIMATE_CUSTOMIZER.zip CUSTOM_CUP.zip
+BB_BUILTIN_MODS names another folder, or none when empty.
+
+EXTERNAL CONTENT (TRACKS)
+Tracks added to the game, never replacing it, go in the custom_content folder beside
+the launcher (not in mods): ZIPs in the OCTR content format (scripts/content_package.py:
+octr-content.required, content.json, archives/<id>*.pak, files/<new game files>,
+shared/<unchanged copies of game files the track needs loaded with it, which the game keeps
+only in archives it loads for one track or menu: checked to be the game's bytes; streamed
+with the track only when content.json "stream" names them, as the converted mod had them>). A
+package cannot replace a game file or archive, ship update archives or executable
+patches, or change the registration files itself. The launcher builds one
+archives/update3.pak for the session (scripts/content_build.py): the game's track
+registration files with the enabled mods' entry changes applied (Custom Cup's track
+menu, ...), every enabled track registered in them (scripts/track_registry.py), the
+packages' own files, and the Options menu's Graphics tab. The tracks get a page of their
+own after the game's, "External Tracks", or go at the end of Bonus Tracks with
+"page": "bonus" in content-state/selection.json, which also turns packages, or all
+external content, off. Several tracks are on at once; a mod shipping a whole
+update3.pak cannot be on with external content.
+The launcher's Mods tab has an "External content" section, apart from the mods: the
+packages with a switch each, a switch for all external content, where the tracks go (their
+own page or the end of the last one), Add packages, Convert a track mod, Remove (moved to
+content-state/removed) and the folder. It reads the folder with scripts/content_cli.py
+(list, remove, convert) and writes content-state/selection.json itself.
+A classic track mod (its archives and a whole update3.pak) converts into a package:
+  python scripts/content_convert.py GAME_FOLDER MOD.zip OUTPUT_FOLDER --zip
+It keeps the track's archives and new files and leaves out, and names, its changes to
+game files every track uses. A mod with several new tracks (CTR Track Editor exports all the
+tracks of a project in one mod) becomes one package per track, named from its zone info: each
+takes the archives and new files named after it. Formats worked out from Neo Bowser City (PanchoPewPew),
+Suzuka (CTRNFModding) and the Nitro Creator Handbook (venvs and collaborators).
+The conversion also fixes the reference counts of the track's map files (maps/*.igz:
+each object's count, the u32 at +0x08). Wrong counts let a track play, but the next level
+loaded after it crashes the game (guest offset 0x14a94e9, igStreamingChunkManager), or the
+track's memory stays allocated and the game can hang on the loading screen. A track keeps
+the convention most of its own counts follow, made exact: every pointer to the object (CTR
+Track Editor's rule; Backrooms and Suzuka had 12 600 wrong) or only the pointers from what
+the file reaches from its root lists (Neo Bowser City: 531 wrong; the editor's rule there
+leaves 35 674 blocks allocated). The game's map files match both. The fixed files are
+appended to the track's archive; nothing else in it changes. Convert again a track
+converted before this fix. Check or fix an archive by hand with
+  python scripts/track_editor.py counts ARCHIVE.pak [--fix]
+Packages whose archives hold files of one name with different contents clash: the game
+keeps one version for all, so a track can show another one's textures (CTR Track Editor saves
+the game textures a track changes under their own names). The listing names each pair
+(content_compat.clashes, hashes kept in content-state/archive-hashes.json) and the launcher
+warns when both are on: their cards say partial compatibility (minor visual problems: another
+track's road or minimap) while the other one is on. It comes from tracks exported together (several
+in one mod); converting one says so and recommends exporting each track on its own.
+Unpacked copies of ZIPs no longer in custom_content or mods (an older version, a removed
+package) are removed when the launcher reads its folders, and only the latest three prepared
+sessions are kept (scripts/state_cleanup.py); nothing is removed while a game session runs.
+Each converted package states its compatibility (scripts/content_compat.py), shown on its
+card. Partial: the track plays, but the next level can crash or memory stays allocated;
+found when its own archive carries changed copies of the game's scripts (vsc/), menus
+(ui/) or other game data, or its counts were kept by another tool than CTR Track Editor
+(Suzuka 0.7.2 and Neo Bowser City 1.2.0, both tried in game). Full: none of that (changed
+textures, sounds and models are the track's own look). Tracks made with CTR Track Editor
+for Nitro-Fueled 0.6 and later were tried in game with full compatibility.
+
+TRACKS MADE WITH CTR TRACK EDITOR
+CTR Track Editor (https://github.com/Boooing/CTR-Nitro-Fueled-Track-Editor) makes new
+tracks. Use its OCTR mod export, then Convert track mod: the export writes nothing to the
+game folder. Its "Install in the game" (and CTR Track Installer) writes into the game's own
+archives instead (t9xx_*.pak, update3.pak, update.pak and update2.pak changed in place,
+*.ctrmod.json records): mods and external content are then made against changed game
+files, and folders sharing those files through hard links (the base game, the update)
+change too. The launcher names such a game folder in the log at each modded launch, and
+refuses to convert a track against it (scripts/track_editor.py traces GAME_FOLDER):
+restore the game folder from a backup.
+
 CURRENT VERIFICATION SCOPE
 Windows official OCTR v0.6 engine, current official source frontend. PAK/ZIP/
 folder imports, composition, conflict rejection, sparse overlays, hash validation,
@@ -130,6 +266,7 @@ game and official v0.6 engine, including its seven executable writes and the sto
 arbitrary character/track mods and all DPI/resolution combinations are not claimed.
 The HUD package and proprietary game resources are not included in this change.
 No arbitrary character/track mod is certified merely because it imports.
-No multiplayer asset syncing, hot reload or registry merger beyond racers is included.
+No multiplayer asset syncing or hot reload is included; registrations are merged for
+racers and built for external tracks only.
 This implementation is for OCTR; no separate Nitro Launcher product is required.
 Linux run.sh integration and equivalent EU package authoring are not yet claimed.

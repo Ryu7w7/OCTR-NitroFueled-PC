@@ -6,3 +6,5 @@
 run.py text eol=lf
 # Layout payload checksums cover exact bytes on every checkout platform.
 scripts/widescreen_data/** text eol=lf
+# Built-in mod packages (tools/make_builtin_mods.py): their inventories checksum exact bytes.
+scripts/builtin_mods/** -text

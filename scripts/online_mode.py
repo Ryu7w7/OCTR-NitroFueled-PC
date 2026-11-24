@@ -856,6 +856,17 @@ def cup_package(game, blob, source_blob, assets=None, race_blob=None):
     return g.build()
 
 
+def online_menus_package(game, blob, source_blob, assets=None, race_blob=None):
+    """The Online menus' package as Online mode ships it: the private rooms' CUP menu files
+    (cup_package) and the ranked, Hall of Fame and tier assets. External content's update3.pak
+    copy of this package is built with it too (scripts/content_build.py)."""
+    return package_with_rows(cup_package(game, blob, source_blob, assets, race_blob),
+                             [('effect', 'vfx/ctr/gui/ctr_gui_wumpa_juiced.igz')] + [
+        ('texture', path.lower()) for path in (
+            RANKED_BACKGROUND_TEXTURE, HOF_BACKGROUND_TEXTURE, menu_icon('hof')[2],
+            *(tier_icon(mode, tier)[2] for mode, tier in LOBBY_ICONS))])
+
+
 def package_with_rows(blob, additions):
     g = Igz(blob)
     chunk, rows = package_rows(g)
@@ -1591,13 +1602,9 @@ def _prepare(game, out, elf, bases):
         source_index = next(i for i, e in enumerate(entries) if e[0].lower() == START_PACKAGE)
         race_package_index = next(i for i, e in enumerate(entries) if e[0].lower().endswith('/juicedomain_race_pkg.igz'))
         race_package = iga.read_entry(f, *entries[race_package_index][1:])
-        package = cup_package(game, iga.read_entry(f, *entries[package_index][1:]),
-                              iga.read_entry(f, *entries[source_index][1:]), assets,
-                              race_package)
-        package = package_with_rows(package, [('effect', 'vfx/ctr/gui/ctr_gui_wumpa_juiced.igz')] + [
-            ('texture', path.lower()) for path in (
-                RANKED_BACKGROUND_TEXTURE, HOF_BACKGROUND_TEXTURE, menu_icon('hof')[2],
-                *(tier_icon(mode, tier)[2] for mode, tier in LOBBY_ICONS))])
+        package = online_menus_package(game, iga.read_entry(f, *entries[package_index][1:]),
+                                       iga.read_entry(f, *entries[source_index][1:]), assets,
+                                       race_package)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     _, mapped = records()

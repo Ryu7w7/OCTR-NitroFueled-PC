@@ -49,6 +49,13 @@ ICED_X86_URL = ('https://files.pythonhosted.org/packages/04/9e/'
                 'ab21c70472b605bbcaca5a181cfda56b0750b061f4a946192888142ec37c/'
                 f'iced_x86-{ICED_X86_VERSION}-cp38-abi3-win_amd64.whl')
 ICED_X86_SHA256 = '04e04a8cc49ca7d89448fb78e3bab4ae364cf1fc888c996540a791c9999077c1'
+# numpy: "Prepare" on Ultimate Customizer draws the Copas Adicionales' pictures from the player's
+# game files (scripts/cup_art.py). The cp314 wheel matches the bundled Python. Pinned by SHA-256.
+NUMPY_VERSION = '2.4.3'
+NUMPY_URL = ('https://files.pythonhosted.org/packages/48/39/'
+             'c56ef87af669364356bb011922ef0734fc49dad51964568634c72a009488/'
+             f'numpy-{NUMPY_VERSION}-cp314-cp314-win_amd64.whl')
+NUMPY_SHA256 = '0448e7f9caefb34b4b7dd2b77f21e8906e5d6f0365ad525f9f4f530b13df2afc'
 # Windows' own DLLs: never bundled.
 SYSTEM_DLLS = {'kernel32', 'user32', 'gdi32', 'advapi32', 'shell32', 'ole32', 'oleaut32', 'ws2_32',
                'msvcrt', 'ntdll', 'bcrypt', 'bcryptprimitives', 'crypt32', 'secur32', 'winmm',
@@ -146,6 +153,11 @@ def third_party(dlls, python=None, dlss=False):
                   '  license: MIT (https://github.com/icedland/iced/blob/master/LICENSE.txt)',
                   '  home:    https://github.com/icedland/iced',
                   f'  source:  https://pypi.org/project/iced-x86/{ICED_X86_VERSION}/#files', '']
+        lines += [f'numpy {NUMPY_VERSION}, in python\\Lib\\site-packages\\ (scripts/cup_art.py: the extra',
+                  '  cups\' pictures; it bundles OpenBLAS in numpy.libs)',
+                  '  license: BSD-3-Clause and others (numpy-*.dist-info/LICENSE.txt)',
+                  '  home:    https://numpy.org/',
+                  f'  source:  https://pypi.org/project/numpy/{NUMPY_VERSION}/#files', '']
     if dlss:
         lines += DLSS_THIRD_PARTY
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
@@ -182,6 +194,26 @@ def bundle_python(folder, cache):
     zipped = next(target.glob('python3*.zip')).name
     pth.write_bytes(f'{zipped}\r\n.\r\n..\\scripts\r\n..\\tools\r\nLib\\site-packages\r\n'.encode())
     return f'Python {PYTHON_VERSION} (python.org embeddable package)'
+
+
+def bundle_wheel(folder, cache, url, expected, tops):
+    """The top-level folders `tops` of a pinned wheel into python/Lib/site-packages (a wheel is a
+    zip: no pip needed)."""
+    wheel = cache / Path(url).name
+    if not wheel.is_file():
+        cache.mkdir(parents=True, exist_ok=True)
+        print(f'Downloading {url}')
+        with urllib.request.urlopen(url, timeout=300) as response:
+            wheel.write_bytes(response.read())
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if digest != expected:
+        wheel.unlink()
+        sys.exit(f'{wheel.name}: SHA-256 {digest}, expected {expected}')
+    target = folder / 'python' / 'Lib' / 'site-packages'
+    with zipfile.ZipFile(wheel) as z:
+        for name in z.namelist():
+            if name.split('/')[0] in tops:
+                z.extract(name, target)
 
 
 def bundle_iced_x86(folder, cache):
@@ -291,6 +323,8 @@ def main():
         print('EOS bridge not included: build it with eosbridge/build.sh (with eosbridge/eosbridge.ini)')
     python = bundle_python(folder, a.dist / 'pycache')
     bundle_iced_x86(folder, a.dist / 'pycache')
+    bundle_wheel(folder, a.dist / 'pycache', NUMPY_URL, NUMPY_SHA256,
+                 ('numpy', 'numpy.libs', f'numpy-{NUMPY_VERSION}.dist-info'))
     shutil.copy2(ROOT / 'run.py', folder)
     (folder / 'launcher').mkdir(exist_ok=True)
     shutil.copy2(ROOT / 'launcher/io.github.sacredfire.Launcher.png', folder / 'launcher')
@@ -301,9 +335,13 @@ def main():
     # game files (scripts/tacho_pack.py)
     for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts', 'assets', 'tacho_pack'):
         shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
+    # Built-in mods (tools/make_builtin_mods.py); extra-cups-art only when it was built here.
+    if (ROOT / 'scripts' / 'builtin_mods').is_dir():
+        shutil.copytree(ROOT / 'scripts' / 'builtin_mods', folder / 'scripts' / 'builtin_mods', dirs_exist_ok=True)
     # lang/: the port's translations, read by scripts/octr_texts.py at start-up (online_mode.py, tacho_pack.py)
     shutil.copytree(ROOT / 'lang', folder / 'lang', dirs_exist_ok=True)
-    shutil.copy2(ROOT / 'tools' / 'gen_import_names.py', folder / 'tools')
+    for tool in ('gen_import_names.py', 'merge_update.py'):
+        shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its
     # driver script and DXC. Only dxc.exe and dxcompiler.dll: SPIR-V needs no dxil.dll.
     (folder / 'tools' / 'shaders').mkdir()
