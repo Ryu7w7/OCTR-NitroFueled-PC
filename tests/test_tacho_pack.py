@@ -59,10 +59,26 @@ class TachoPackTests(unittest.TestCase):
                 self.assertTrue(line.get('Signature') or line.get('ExpectedSHA256'), name)
         self.assertEqual(patches.tacho_pack_patches({}, '01.00', 'CUSA14876'), [])
 
-    def test_no_setting_turns_it_off(self):
-        with mock.patch.dict(os.environ, {'BB_TACHO_PACK': '0', 'BB_TACHO_PACK_MENU': '1'}):
+    def test_online_no_setting_turns_it_off(self):
+        with mock.patch.dict(os.environ, {'BB_ONLINE': '1', 'BB_TACHO_PACK': '0', 'BB_TACHO_PACK_MENU': '1'}):
             self.assertEqual(len(patches.tacho_pack_patches({'tacho_pack': '0'})), 6)
+            self.assertTrue(tacho_pack.wanted({'tacho_pack': '0'}))
             self.assertEqual(len(tacho_pack.operations()), 9)  # the Options > Game page always in
+
+    def test_offline_tacho_pack_0_leaves_it_out(self):
+        offline = {k: v for k, v in os.environ.items() if k != 'BB_ONLINE'}
+        with mock.patch.dict(os.environ, offline, clear=True):
+            self.assertEqual(len(patches.tacho_pack_patches({})), 6)  # on unless asked
+            self.assertEqual(len(patches.tacho_pack_patches({'tacho_pack': '1'})), 6)
+            self.assertEqual(patches.tacho_pack_patches({'tacho_pack': '0'}), [])
+            with tempfile.TemporaryDirectory() as folder:
+                ini = Path(folder) / 'bbport.ini'
+                ini.write_text('tacho_pack=0\n', encoding='utf-8')
+                self.assertFalse(tacho_pack.wanted(ini))
+                with mock.patch.object(tacho_pack, 'operations', side_effect=AssertionError('read')):
+                    self.assertEqual(tacho_pack.prepare(folder, folder, ini, {}, {}), ({}, {}))
+                self.assertTrue(tacho_pack.wanted(ini, {'BB_ONLINE': '1'}))
+                self.assertTrue(tacho_pack.wanted(Path(folder) / 'missing.ini'))
 
     def test_a_changed_file_stops_the_launch(self):
         with tempfile.TemporaryDirectory() as folder:
