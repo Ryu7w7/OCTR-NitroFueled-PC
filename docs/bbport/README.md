@@ -2,7 +2,7 @@
      builds on, as it was when the Bloodborne profile was removed (2026-10-09).
      Kept for reference; the Bloodborne-specific parts do not apply to SacredFire. -->
 
-THIS PROJECT IS NOT RELATED TO SHADPS4. ALL QUESTIONS RELATED TO THIS PROJECT SHOULD BE SENT TO THE DISCORD SERVER https://discord.gg/KYZRKk9CB, NOT TO THE SHADPS4 SERVER.
+THIS PROJECT IS NOT RELATED TO SHADPS4. ALL QUESTIONS RELATED TO THIS PROJECT SHOULD BE SENT TO THE DISCORD SERVER https://discord.gg/PAT5SJzdXw, NOT TO THE SHADPS4 SERVER.
 
 
 # bbport — a native Linux port of Bloodborne
