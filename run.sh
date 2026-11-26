@@ -486,7 +486,20 @@ fi
 # cache clearing above would miss (seen on the first launch from a fresh data directory).
 export BB_GPU_USER_DIR=${BB_USER_DIR:-$data/user}
 mkdir -p "$BB_GPU_USER_DIR"
-probe_args=("$boot/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
+# Instruction sets this CPU lacks (MOVBE, BMI1, LZCNT): the ISA rewrite covers them (run.py).
+# BB_ISA_REWRITE=1 forces the table, 0 disables it; otherwise the CPU decides. A failed
+# rewrite prints its reason and the game starts without the table.
+isa_args=()
+if [[ ${BB_ISA_REWRITE:-} != 0 ]]; then
+    features=$("$probe" --cpu-features 2>/dev/null || true)
+    if [[ ${BB_ISA_REWRITE:-} == 1 || $features == *"missing"* ]]; then
+        isa_out=$boot/isa
+        if startup_python scripts/isa_rewrite.py "$boot/boot-linked.bin" --out "$isa_out"; then
+            isa_args=(--isa-rewrite "$isa_out/isa-rewrite.bin")
+        fi
+    fi
+fi
+probe_args=("$boot/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "${isa_args[@]}" "$@")
 if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     "$probe" "${probe_args[@]}" &
     mod_pid=$!
