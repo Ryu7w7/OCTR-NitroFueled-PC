@@ -40,7 +40,8 @@ struct Desired {
         return enabled == o.enabled && app_id == o.app_id && has_activity == o.has_activity &&
                (!has_activity ||
                 (a.details == b.details && a.state == b.state && a.start == b.start &&
-                 a.large_image == b.large_image && a.large_text == b.large_text && a.party_id == b.party_id &&
+                 a.large_image == b.large_image && a.large_text == b.large_text &&
+                 a.small_image == b.small_image && a.small_text == b.small_text && a.party_id == b.party_id &&
                  a.party_size == b.party_size && a.party_max == b.party_max && a.join_secret == b.join_secret));
     }
 };
@@ -262,6 +263,9 @@ private:
         if (!a.large_image.empty()) {
             j += ",\"assets\":{\"large_image\":\"" + Escape(a.large_image) + "\"";
             if (!a.large_text.empty()) j += ",\"large_text\":\"" + Escape(a.large_text) + "\"";
+            if (!a.small_image.empty()) j += ",\"small_image\":\"" + Escape(a.small_image) + "\"";
+            if (!a.small_image.empty() && !a.small_text.empty())
+                j += ",\"small_text\":\"" + Escape(a.small_text) + "\"";
             j += "}";
         }
         if (!a.party_id.empty() && a.party_size > 0 && a.party_max >= a.party_size) {

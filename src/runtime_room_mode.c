@@ -46,7 +46,7 @@ static void start(void *(*run)(void *), void *arg) {
 
 static pthread_mutex_t publish_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned publish_generation;
-static int publish_running, publish_speed; /* the room mode: 0 normal, 1 speed (Itemless), 2 nsane */
+static int publish_running, publish_speed; /* the room mode: 0 normal, 1 speed (Itemless), 2 nsane, 3 elimination */
 static int publish_ok;
 
 static void *publish(void *arg) {
@@ -62,11 +62,11 @@ static void *publish(void *arg) {
             runtime_public_itemless_announce();
             char target[128], body[128];
             snprintf(target, sizeof target, "/ryunet/room-mode?name=%s&mode=%s&format=text", me,
-                     speed == 1 ? "speed" : speed == 2 ? "nsane" : "normal");
+                     speed == 1 ? "speed" : speed == 2 ? "nsane" : speed == 3 ? "elimination" : "normal");
             const int status = runtime_ryunet_request("POST", target, body, sizeof body);
             accepted = status == 200 && !strcmp(body, "status ok\n");
             printf("Native Online mode: this private room is %s for the players who join (RyuNET %d)\n",
-                   speed == 1 ? "ITEMLESS" : speed == 2 ? "N.SANE" : "NORMAL", status);
+                   speed == 1 ? "ITEMLESS" : speed == 2 ? "N.SANE" : speed == 3 ? "ELIMINATION" : "NORMAL", status);
             fflush(stdout);
         }
         pthread_mutex_lock(&publish_lock);
@@ -110,7 +110,8 @@ __attribute__((constructor)) static void install(void) { runtime_online_mode_cho
 void runtime_room_mode_hosting(void) {
     runtime_room_mode_left();
     publish_mode(!runtime_online_mode_in_private() ? 0 : runtime_online_mode_private_speed() ? 1 :
-                 runtime_online_mode_private_nsane() ? 2 : 0);
+                 runtime_online_mode_private_nsane() ? 2 :
+                 runtime_online_mode_private_elimination() ? 3 : 0);
 }
 
 /* The joining player follows the host's room while in it: the host can pick Normal or Speed again
@@ -139,9 +140,9 @@ int runtime_room_mode_ready(void) {
     return ready;
 }
 
-/* This player's room mode as RyuNET names it: 0 normal, 1 speed (Itemless), 2 nsane. */
+/* This player's room mode as RyuNET names it: 0 normal, 1 speed (Itemless), 2 nsane, 3 elimination. */
 static int current_mode(void) {
-    return runtime_speed_mode_enabled() ? 1 : runtime_nsane_mode_enabled() ? 2 : 0;
+    return runtime_speed_mode_enabled() ? 1 : runtime_nsane_mode_enabled() ? 2 : runtime_elimination_mode_enabled() ? 3 : 0;
 }
 
 static int read_mode(const char *host) {
@@ -149,7 +150,8 @@ static int read_mode(const char *host) {
     snprintf(target, sizeof target, "/ryunet/room-mode?host=%s&format=text", host);
     const int status = runtime_ryunet_request("GET", target, body, sizeof body);
     if (status != 200 || sscanf(body, "mode %15s %c", word, &extra) != 1) return -1;
-    return !strcmp(word, "speed") ? 1 : !strcmp(word, "nsane") ? 2 : !strcmp(word, "normal") ? 0 : -1;
+    return !strcmp(word, "speed") ? 1 : !strcmp(word, "nsane") ? 2 : !strcmp(word, "elimination") ? 3 :
+           !strcmp(word, "normal") ? 0 : -1;
 }
 
 typedef struct { char host[24]; unsigned generation, publication, epoch; int guest; } VerifyMode;
@@ -275,6 +277,7 @@ void runtime_room_mode_left(void) {
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
     runtime_nsane_mode_set(runtime_online_mode_private_nsane());
+    runtime_elimination_mode_set(runtime_online_mode_private_elimination());
     pthread_mutex_unlock(&follow_lock);
     runtime_race_options_leave_room();
     runtime_online_mode_request_leave(0);
@@ -288,10 +291,12 @@ void runtime_room_mode_takeover(void) {
     __atomic_add_fetch(&follow_generation, 1, __ATOMIC_ACQ_REL);
     runtime_speed_mode_set(runtime_online_mode_private_speed());
     runtime_nsane_mode_set(runtime_online_mode_private_nsane());
+    runtime_elimination_mode_set(runtime_online_mode_private_elimination());
     pthread_mutex_unlock(&follow_lock);
     runtime_race_options_leave_room();
     publish_mode(!runtime_online_mode_in_private() ? 0 : runtime_online_mode_private_speed() ? 1 :
-                 runtime_online_mode_private_nsane() ? 2 : 0);
+                 runtime_online_mode_private_nsane() ? 2 :
+                 runtime_online_mode_private_elimination() ? 3 : 0);
 }
 
 void runtime_room_mode_host_name(char out[24]) {

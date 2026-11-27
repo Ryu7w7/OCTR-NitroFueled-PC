@@ -57,6 +57,31 @@ static int packet_trace_enabled(void) {
     return trace && strcmp(trace, "1") == 0;
 }
 
+/* Windows asks whether to let a program through its firewall the first time it listens on the network. The
+ * game only does when it becomes a match's host, so the question came up in the middle of a race after a host
+ * handoff (27/11). A listening socket on every interface for a moment at start asks it then: whatever the
+ * player answers is kept for this program, and the race is never interrupted by it. */
+#ifdef _WIN32
+static DWORD WINAPI firewall_prompt_close(LPVOID s) {
+    Sleep(5000);
+    closesocket((SOCKET)(uintptr_t)s);
+    return 0;
+}
+static void firewall_prompt_now(void) {
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 1) != 0) { closesocket(s); return; }
+    HANDLE t = CreateThread(NULL, 0, firewall_prompt_close, (LPVOID)(uintptr_t)s, 0, NULL);
+    if (t) CloseHandle(t); else closesocket(s);
+}
+#else
+static inline void firewall_prompt_now(void) {}
+#endif
+
 int32_t runtime_net_init(void) {
     if (!g_net_initialized) {
 #ifdef _WIN32
@@ -67,6 +92,7 @@ int32_t runtime_net_init(void) {
         }
 #endif
         net_overrides_init();
+        if (runtime_net_is_online()) firewall_prompt_now();   /* online: ask at start */
         g_net_initialized = 1;
         runtime_net_trace("sceNetInit completed");
     }
@@ -344,6 +370,65 @@ static uint64_t now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 #endif
+}
+
+/* The game's datagrams with each peer (ip:port) since the last runtime_net_peer_stats call, and the
+ * path the last one came by (D direct, E Epic Online Services, T through the server, R a relay): the host
+ * handoff's diagnostics (runtime_public_itemless.c handoff_diag), which peers this game still hears. */
+#define NET_PEER_STATS 12
+static pthread_mutex_t peer_stats_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint32_t ip; uint16_t port; char via; unsigned rx, tx, rx_bytes; uint64_t last_rx; } peer_stats[NET_PEER_STATS];
+
+static void peer_stat(uint32_t ip, uint16_t port, int received, unsigned bytes, char via) {
+    pthread_mutex_lock(&peer_stats_lock);
+    int at = -1, oldest = 0;
+    for (int i = 0; i < NET_PEER_STATS; ++i) {
+        if (peer_stats[i].ip == ip && peer_stats[i].port == port) { at = i; break; }
+        if (peer_stats[i].last_rx < peer_stats[oldest].last_rx) oldest = i;
+    }
+    if (at < 0) {
+        at = oldest;
+        memset(&peer_stats[at], 0, sizeof peer_stats[at]);
+        peer_stats[at].ip = ip;
+        peer_stats[at].port = port;
+        peer_stats[at].last_rx = 1;   /* known, never heard */
+    }
+    if (received) {
+        peer_stats[at].rx++;
+        peer_stats[at].rx_bytes += bytes;
+        peer_stats[at].last_rx = now_ms();
+        peer_stats[at].via = via;
+    } else {
+        peer_stats[at].tx++;
+    }
+    pthread_mutex_unlock(&peer_stats_lock);
+}
+
+int runtime_net_peer_stats(char *out, size_t cap) {
+    if (!out || !cap) return 0;
+    out[0] = 0;
+    size_t used = 0;
+    int peers = 0;
+    const uint64_t now = now_ms();
+    pthread_mutex_lock(&peer_stats_lock);
+    for (int i = 0; i < NET_PEER_STATS; ++i) {
+        if (!peer_stats[i].ip) continue;
+        if (peer_stats[i].last_rx > 1 && now - peer_stats[i].last_rx > 120000 && !peer_stats[i].tx) continue;
+        struct in_addr a;
+        a.s_addr = peer_stats[i].ip;
+        char last[24];
+        if (peer_stats[i].last_rx > 1) snprintf(last, sizeof last, "%llu ms ago", (unsigned long long)(now - peer_stats[i].last_rx));
+        else snprintf(last, sizeof last, "never");
+        const int n = snprintf(out + used, cap - used, "%s%s:%u rx %u (%u B, %c, last %s) tx %u", peers ? "; " : "",
+                               inet_ntoa(a), (unsigned)peer_stats[i].port, peer_stats[i].rx, peer_stats[i].rx_bytes,
+                               peer_stats[i].via ? peer_stats[i].via : '-', last, peer_stats[i].tx);
+        if (n < 0 || (size_t)n >= cap - used) break;
+        used += (size_t)n;
+        ++peers;
+        peer_stats[i].rx = peer_stats[i].tx = peer_stats[i].rx_bytes = 0;
+    }
+    pthread_mutex_unlock(&peer_stats_lock);
+    return peers;
 }
 
 /* The server's NAT port (UDP 3074, BB_ONLINE_NAT_PORT); 0 when the tunnel is off
@@ -629,6 +714,9 @@ static void ping_after_send(VSocket *vs, const struct sockaddr_in *to) {
     if (ping_peer_name(to->sin_addr.s_addr,ntohs(to->sin_port),now,peer_name)) {
         size_t n=runtime_ai_catchup_send(peer_name,catchup,now);
         if (n) ping_send(vs,catchup,n,to);
+        /* Elimination mode: the host's list of the racers out (runtime_elimination.c) */
+        n=runtime_elimination_net_send(peer_name,catchup,now);
+        if (n) ping_send(vs,catchup,n,to);
     }
     uint8_t packet[PING_PACKET_MAX];
     uint32_t ip;
@@ -644,6 +732,7 @@ static int ping_take(VSocket *vs, const uint8_t *data, int len, const struct soc
     if (len < PING_MAGIC_LEN || memcmp(data, PING_MAGIC, PING_MAGIC_LEN) != 0 ) return 0;
     char peer_name[PING_NAME];
     ping_peer_name(from->sin_addr.s_addr,ntohs(from->sin_port),now_ms(),peer_name);
+    if (runtime_elimination_net_receive(peer_name,data,(size_t)len,now_ms())) return 1;
     if (runtime_ai_catchup_receive(peer_name,data,(size_t)len,now_ms())) return 1;
     if (!ping_enabled() && !runtime_ai_catchup_discovery()) return 0;
     uint8_t reply[PING_PACKET_MAX];
@@ -899,6 +988,7 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
                 fflush(stdout);
                 since = now, sent = bytes = 0;
             }
+            peer_stat(sin.sin_addr.s_addr, ntohs(sin.sin_port), 0, (unsigned)len, 0);
         }
         peer_copies(vs, msg, len, &sin);
         ping_after_send(vs, &sin);
@@ -1016,6 +1106,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             sin.sin_port = htons(from_port);
         }
     }
+    char via = 0;   /* a peer's datagram's path (peer_stat); 0 the server's own */
     if (tunnel) {
         tunnel_keepalive(vs, &server);
         const uint8_t *payload = wrapped;
@@ -1025,11 +1116,13 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
         int relay = -1;
         if (from_eos) {
             /* a peer's datagram through EOS (above): neither direct nor tunnelled */
+            via = 'E';
         } else if (from_server(&sin, &server)) {
             /* The server's pass and relay list. */
             if (tun_on_offer(wrapped, (size_t)ret, now_ms())) goto next_datagram;
             /* The server's own NAT replies (0x15, 0x1F, 0x0B...) go to the game unchanged. */
             if (tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
+                via = 'T';
                 tun_on_tunnelled(ip, port, tflags, 0, now_ms());
                 if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
                 if (tflags & TUN_FLAG_EOS) eosp_on_capable(ip, port, now_ms());
@@ -1045,6 +1138,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
                 tun_on_register_reply(relay, wrapped, (size_t)ret, now_ms());
                 goto next_datagram;
             }
+            via = 'R';
             tun_on_tunnelled(ip, port, tflags, 1, now_ms());
             if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
             if (tflags & TUN_FLAG_EOS) eosp_on_capable(ip, port, now_ms());
@@ -1063,6 +1157,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             }
             if (direct_off && tun_candidate(sin.sin_addr.s_addr, server.sin_addr.s_addr)) goto next_datagram;
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
+            via = 'D';
         }
         {
             /* A peer's announce (runtime_net_eos.h): never the game's. */
@@ -1102,6 +1197,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
     }
 
     if (tunnel) note_game_peer(vs, &sin);
+    if (tunnel && via) peer_stat(sin.sin_addr.s_addr, ntohs(sin.sin_port), 1, (unsigned)ret, via);
     if (fromlen) *fromlen = sizeof(OrbisNetSockaddrIn);
 
     if (packet_trace_enabled()) runtime_net_trace("sceNetRecvfrom(fd=%d, len=%d, from=%s:%u)", s, ret, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));

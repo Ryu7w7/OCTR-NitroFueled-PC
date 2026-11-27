@@ -16,6 +16,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <time.h>
+#include <math.h>
 #ifdef _WIN32
 #include "compat_win.h"
 #include <windows.h>
@@ -94,7 +95,25 @@ static void (ABI *native_join_match_host)(void *, uint64_t, const char *, const 
 static unsigned char *race_join_state_call;
 static void *race_join_old_connection;
 static uint64_t race_join_room, race_join_until, race_lobby_host_pid;
+/* A guest joining the promoted host during a race (updated): the lobby, its host and document, to ask again.
+ * The game gives a join about 5 s; a guest that reaches the new host only through the server's tunnel needs
+ * longer, and when the join fails the game makes the guest the host of a session of its own: from then on it
+ * races alone (26/11, TachoGHC: every other kart frozen). While the join is on (race_join_until), the game
+ * may not start hosting (start_match_host); the join is asked again instead, at most every 2 s. */
+static void *race_join_self;
+static char *race_join_host, *race_join_doc;
+static uint64_t race_join_retry_at;
+static int race_join_blocked, race_join_attempts;
+/* text up to n bytes (or its end), its own copy */
+static char *copy_text(const char *s, unsigned n) {
+    if (!s) return NULL;
+    size_t len=strnlen(s,n);
+    char *out=malloc(len+1);
+    if (out) { memcpy(out,s,len); out[len]=0; }
+    return out;
+}
 static uint64_t race_handoff_departed_pid;
+static int handoff_host_lost;   /* the race connection is held after a host loss; the next bind is a handoff */
 static int confirmed_itemless, confirmed_ranked;
 static uint64_t request_nonce, registration_nonce, confirmed_room;
 static unsigned char *room_owner;
@@ -209,6 +228,7 @@ static int itemless_client_available(void) {
 static uint64_t check_clock(void);
 static void *ptr(const void *,size_t);
 static void *resolve_private_target(void **slot);
+static void handoff_racers(const char *tag, int reclaim);
 static void notice(const char *message);
 static uint64_t capability_next;
 static int capability_running, capability_supported;
@@ -243,6 +263,7 @@ static void reset_locked(void) {
     pending_host_room = 0;
     host_attempt_until = 0;
     race_handoff_departed_pid = 0;
+    handoff_host_lost = 0;
     prepare_requeue_host = 0;
     free(pending_lobby_create);
     pending_lobby_create = NULL;
@@ -596,9 +617,40 @@ static void notice(const char *message) {
  * ranked_account.go): said before the Ranked lobby opens. The server's admission check refuses a
  * search without one anyway, with this same text (translated by it: scripts/octr_texts.py). */
 #define RANKED_ACCOUNT_NOTICE "Ranked needs a Discord or Steam account linked to every player. Link yours in the launcher and try again."
+static int ranked_ban_allowed(void);
 static int ranked_account_allowed(void) {
+    if (!ranked_ban_allowed()) return 0;
     if (runtime_ranked_account() != 0) return 1;
     notice(RANKED_ACCOUNT_NOTICE);
+    return 0;
+}
+
+/* A ban from Ranked only (runtime_ranked_ban, the server's ranked_bans.go): "You are banned from Ranked for
+ * 3 hours. Reason: cheating" in the game's language (scripts/octr_texts.py), the time left rounded up as the
+ * server says it; the reason as the moderator wrote it. */
+static void ranked_ban_span(long seconds, char *out, size_t size) {
+    long n;
+    const char *one, *many;
+    if (seconds >= 2 * 86400) n = (seconds + 86399) / 86400, one = "1 day", many = "%d days";
+    else if (seconds >= 3600) n = (seconds + 3599) / 3600, one = "1 hour", many = "%d hours";
+    else n = (seconds + 59) / 60, one = "1 minute", many = "%d minutes";
+    if (n < 1) n = 1;
+    if (n == 1) snprintf(out, size, "%s", runtime_text(one));
+    else snprintf(out, size, runtime_text(many), (int)n);
+}
+
+static int ranked_ban_allowed(void) {
+    char reason[256] = "", span[64] = "", message[512];
+    long left = 0;
+    if (!runtime_ranked_ban(reason, sizeof reason, &left)) return 1;
+    if (!left) {
+        snprintf(message, sizeof message, runtime_text("You are permanently banned from Ranked. Reason: %s"), reason);
+    } else {
+        ranked_ban_span(left, span, sizeof span);
+        snprintf(message, sizeof message, runtime_text("You are banned from Ranked for %s. Reason: %s"), span, reason);
+    }
+    fprintf(stderr, "Public ITEMLESS: %s\n", message);
+    if (native_notice) native_notice(message, NULL);
     return 0;
 }
 
@@ -607,9 +659,13 @@ static int ranked_account_allowed(void) {
 #define PUBLIC_CONTENT_NOTICE "Public matchmaking and Ranked allow only character, sound and HUD mods. Your game has other mods or patches: play them in private rooms."
 /* A public search refused for its content: 1 the notice is up, 2 its Continue was pressed (go back) */
 static int content_return;
+#define TRACKS_MISSING_NOTICE "The new tracks are not loaded in your game. Public matchmaking and Ranked need them: restart the game, and if this stays, turn your mods off."
+static const char *public_refusal_notice(void) {
+    return runtime_port_content_ok() ? PUBLIC_CONTENT_NOTICE : TRACKS_MISSING_NOTICE;
+}
 static int public_content_allowed(void) {
     if (strcmp(runtime_online_content(), "modified")) return 1;
-    notice(PUBLIC_CONTENT_NOTICE);
+    notice(public_refusal_notice());
     return 0;
 }
 
@@ -886,7 +942,11 @@ static void *room_alive_worker(void *arg) {
     const char *me = runtime_np_get_online_name();
     char target[512], body[256];
     if (me && *me) {
-        snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu&race=%d", me, (unsigned long long)room,room_alive_racing);
+        /* host_lost=1 while this game holds the race after losing its host: a host whose internet died
+         * keeps its TCP to the server for minutes, so the guests' word is what lets the server promote
+         * the next one (server ctr_foundroom.go hostLostByGuests). */
+        snprintf(target, sizeof target, "/ryunet/room-alive?name=%s&room=%llu&race=%d%s", me, (unsigned long long)room,
+                 room_alive_racing,room_alive_racing && __atomic_load_n(&handoff_host_lost,__ATOMIC_ACQUIRE) ? "&host_lost=1" : "");
         const uint64_t sent = check_clock();
         const int status = runtime_ryunet_request("GET", target, body, sizeof body);
         const uint64_t answered = check_clock();
@@ -1037,6 +1097,601 @@ static int ABI remove_race_player(void *manager,void *player) {
     return native_remove_player_original(manager,player);
 }
 
+/* Binding a race to another connection drops every peer of the old one, and the native drop
+ * (0x433090 -> 0x432e60) takes every object a dropped peer owned: on a host handoff each game took
+ * the karts of players who are still racing, from its own copy of them, 3-5 s old after the outage.
+ * Both sides then claimed the same kart and the stale one won (test 25/11: the new host's kart went
+ * back to where it had been seconds before; earlier, the new host saw everyone frozen). During a
+ * handoff bind the karts of players still racing are left without owner until their real owner
+ * syncs them over the new connection; on a guest so are the AI and the departed host's kart, which
+ * the new host takes. BB_HANDOFF_NATIVE_OWNERS=1 keeps the native behaviour (to compare). */
+/* ---- The host handoff's behaviour, from RyuNET (26/11: the server's handoff.go, its admin panel's "Relevo de
+ * host" card): GET /ryunet/handoff once online and every minute, so it changes without a new build. Until an
+ * answer (or with an older server), these defaults: the behaviour of test3 + the guest sync fix.
+ *   enabled     hold the race connection when the host is lost (the handoff at all); 0 the game's own
+ *   bind_keep   while binding, leave racing players' karts to their owners (0: the game takes them)
+ *   guest_sync  a guest's first sync to the new host: 0 everything, 1 not its stale copy of the new host's
+ *               kart (given to it), 2 also not the other karts it does not drive, 3 those given to it too
+ *               (the new host relays them: without an owner they stayed still on every guest)
+ *   host_sync   the new host's first sync to a guest: 0 everything, 1 not its owner-less copies of racing
+ *               players' karts (handoff3 froze everyone with guest_sync 1, when those karts had no owner on
+ *               the guests either; with guest_sync 3 they are the new host's there. 1 since 27/11: the new host's
+ *               stale copy of TachoGHC's kart reached him before his own sync reached the host, took his kart
+ *               from him and threw it 9000 units back)
+ *   sync_ms     how long after the bind those first syncs are filtered
+ *   reclaim     after the bind, this PC's players take their karts back at once
+ *   watch_ms    the per-frame "handoff watch" log after a host loss (0 none)
+ *   give_up_ms  no new host this long after the loss: let the game drop the race connection (0 never) */
+/*   diag_ms     the detailed "HO diag" snapshots: from the host loss until this long after the bind (0 none)
+ *   diag_every_ms  one snapshot every so often in that span (and one every 15 s of a matchmaking race before) */
+static struct {
+    int enabled, bind_keep, guest_sync, host_sync, sync_ms, reclaim, watch_ms, give_up_ms, diag_ms, diag_every_ms;
+} HO = {1, 1, 3, 1, 15000, 1, 20000, 0, 30000, 1000};
+int runtime_net_is_online(void);   /* runtime_net.c */
+int runtime_net_peer_stats(char *out, size_t cap);   /* runtime_net.c */
+int runtime_host_readable(const void *p, size_t n);  /* runtime_hero_guard.c */
+void runtime_host_readable_cache(int on);           /* runtime_hero_guard.c: one region asked once while on */
+static pthread_mutex_t handoff_settings_lock = PTHREAD_MUTEX_INITIALIZER;
+static int handoff_settings_asking;
+
+static int handoff_value(const char *body, const char *key, int fallback, int lo, int hi) {
+    char pattern[32];
+    snprintf(pattern, sizeof pattern, "\n%s=", key);
+    const char *at = strstr(body, pattern);
+    if (!at) return fallback;
+    char *end;
+    const long v = strtol(at + strlen(pattern), &end, 10);
+    return end != at + strlen(pattern) && v >= lo && v <= hi ? (int)v : fallback;
+}
+
+static void *handoff_settings_worker(void *unused) {
+    (void)unused;
+    char body[512];
+    for (;;) {
+        if (runtime_ryunet_request("GET", "/ryunet/handoff", body, sizeof body) == 200 && !strncmp(body, "ok\n", 3)) {
+            pthread_mutex_lock(&handoff_settings_lock);
+            const int old[10] = {HO.enabled, HO.bind_keep, HO.guest_sync, HO.host_sync, HO.sync_ms, HO.reclaim,
+                                 HO.watch_ms, HO.give_up_ms, HO.diag_ms, HO.diag_every_ms};
+            HO.enabled = handoff_value(body, "enabled", HO.enabled, 0, 1);
+            HO.bind_keep = handoff_value(body, "bind_keep", HO.bind_keep, 0, 1);
+            HO.guest_sync = handoff_value(body, "guest_sync", HO.guest_sync, 0, 3);
+            HO.host_sync = handoff_value(body, "host_sync", HO.host_sync, 0, 1);
+            HO.sync_ms = handoff_value(body, "sync_ms", HO.sync_ms, 0, 120000);
+            HO.reclaim = handoff_value(body, "reclaim", HO.reclaim, 0, 1);
+            HO.watch_ms = handoff_value(body, "watch_ms", HO.watch_ms, 0, 120000);
+            HO.give_up_ms = handoff_value(body, "give_up_ms", HO.give_up_ms, 0, 600000);
+            HO.diag_ms = handoff_value(body, "diag_ms", HO.diag_ms, 0, 300000);
+            HO.diag_every_ms = handoff_value(body, "diag_every_ms", HO.diag_every_ms, 100, 60000);
+            const int now[10] = {HO.enabled, HO.bind_keep, HO.guest_sync, HO.host_sync, HO.sync_ms, HO.reclaim,
+                                 HO.watch_ms, HO.give_up_ms, HO.diag_ms, HO.diag_every_ms};
+            pthread_mutex_unlock(&handoff_settings_lock);
+            if (memcmp(old, now, sizeof old))
+                fprintf(stderr, "Matchmaking handoff settings from RyuNET: enabled=%d bind_keep=%d guest_sync=%d host_sync=%d "
+                        "sync_ms=%d reclaim=%d watch_ms=%d give_up_ms=%d diag_ms=%d diag_every_ms=%d\n", now[0], now[1],
+                        now[2], now[3], now[4], now[5], now[6], now[7], now[8], now[9]);
+        }
+#ifdef _WIN32
+        Sleep(60000);
+#else
+        sleep(60);
+#endif
+    }
+    return NULL;
+}
+
+/* once online (runtime_public_itemless_poll_race_host, every frame) */
+static void handoff_settings_start(void) {
+    if (handoff_settings_asking || !runtime_net_is_online()) return;
+    handoff_settings_asking = 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, handoff_settings_worker, NULL) == 0) pthread_detach(thread);
+}
+
+static int handoff_setting(const int *field) {
+    pthread_mutex_lock(&handoff_settings_lock);
+    const int v = *field;
+    pthread_mutex_unlock(&handoff_settings_lock);
+    return v;
+}
+
+static uint64_t (ABI *take_ownership_original)(void *, void *);
+static void (ABI *racer_world_position)(float *, void *);
+static int handoff_bind_role;   /* connection role (1 host, 2 guest) while a handoff bind runs */
+static int handoff_kept, handoff_taken;
+
+static unsigned char *racer_of_entity(void *entity, unsigned char **player_out) {
+    void *list=race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    const int count=list ? *(int *)((char *)list+12) : 0;
+    void **rows=list ? ptr(list,0x20) : NULL;
+    *player_out=NULL;
+    for (int i=0;rows && count<=8 && i<count;++i) {
+        unsigned char *racer=rows[i];
+        if (!racer || resolve_private_target((void **)(racer+0x20))!=entity) continue;
+        if (ptr(racer,0x10)) *player_out=resolve_private_target((void **)(racer+0x10));
+        return racer;
+    }
+    return NULL;
+}
+
+/* ---- "HO diag": what each game sees around a host handoff (26/11: with 4 players each game saw the others
+ * barely move after the bind, a different race on each PC; with 3 it worked). From the host loss until
+ * HO.diag_ms after the bind, every HO.diag_every_ms: this game's role and connection, the datagrams it got
+ * from each peer (runtime_net_peer_stats: who it still hears, and by which path), and for each kart whose it
+ * is, who owns it here (entity +0x3b), its replication record's owner (the peer this game takes it from:
+ * record +0x48 -> peer +0x10 -> net peer +0x10 key), its laps, place and how far it moved. Also the
+ * replication manager's records by owner, every peer added, and each kart record of a new peer's sync.
+ * Replication manager (0x432710): +0x28 record count, +0x38 records; record: +0x10 object (+0x18 entity),
+ * +0x48 owner (0: none / this game). Before a host loss, one snapshot every 15 s of a matchmaking race. */
+static void *diag_manager;            /* the replication manager the last peer was added to */
+static uint64_t diag_start, diag_until, diag_next, diag_baseline_next;
+static int diag_phase;                /* 0 none, 1 host lost (no new host yet), 2 bound */
+static void *diag_entity[8];
+static float diag_at[8][3];
+
+static uint64_t diag_key(void *owner) {   /* an owner peer's net peer key (0 unknown) */
+    if (!owner || !runtime_host_readable(owner,0x18)) return 0;
+    void *net=ptr(owner,0x10);
+    if (!net || !runtime_host_readable(net,0x18)) return 0;
+    return (uint64_t)ptr(net,0x10);
+}
+
+static const char *diag_name_of(uint64_t pid) {   /* a racer's name by pid, "" if none */
+    void *list=race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    const int count=list ? *(int *)((char *)list+12) : 0;
+    void **rows=list ? ptr(list,0x20) : NULL;
+    for (int i=0;pid && rows && count<=8 && i<count;++i) {
+        unsigned char *racer=rows[i];
+        unsigned char *player=racer && ptr(racer,0x10) ? resolve_private_target((void **)(racer+0x10)) : NULL;
+        uint64_t p=0;
+        if (player) memcpy(&p,player+0xa8,sizeof p);
+        const char *name=player && p==pid ? ptr(player,0x68) : NULL;
+        if (name && runtime_host_readable(name,1)) return name;
+    }
+    return "";
+}
+
+static void diag_owner_text(void *owner, char *out, size_t cap) {
+    if (!owner) { snprintf(out,cap,"none"); return; }
+    const uint64_t key=diag_key(owner);
+    const char *name=diag_name_of(key);
+    snprintf(out,cap,"peer %p key %" PRIx64 "%s%s",owner,key,*name ? " = " : "",name);
+}
+
+/* The record of entity in the replication manager, or NULL; *n the manager's record count. */
+static void *diag_record_of(void *entity, int *n) {
+    void *m=diag_manager;
+    *n=-1;
+    if (!m || !runtime_host_readable(m,0x40)) return NULL;
+    const int count=*(int *)((char *)m+0x28);
+    void **records=ptr(m,0x38);
+    *n=count;
+    if (count<0 || count>4096 || !records || !runtime_host_readable(records,(size_t)count*8)) return NULL;
+    for (int i=0;i<count;++i) {
+        void *rec=records[i];
+        if (!rec || !runtime_host_readable(rec,0x50)) continue;
+        void *object=ptr(rec,0x10);
+        if (!object || !runtime_host_readable(object,0x20)) continue;
+        if (resolve_private_target((void **)((char *)object+0x18))==entity) return rec;
+    }
+    return NULL;
+}
+
+static void diag_records_by_owner(char *out, size_t cap) {
+    void *m=diag_manager;
+    out[0]=0;
+    if (!m || !runtime_host_readable(m,0x40)) return;
+    const int count=*(int *)((char *)m+0x28);
+    void **records=ptr(m,0x38);
+    if (count<0 || count>4096 || !records || !runtime_host_readable(records,(size_t)count*8)) return;
+    void *owners[8]={0};
+    int counts[8]={0}, owners_n=0, none=0, other=0;
+    for (int i=0;i<count;++i) {
+        void *rec=records[i];
+        if (!rec || !runtime_host_readable(rec,0x50)) { ++other; continue; }
+        void *owner=ptr(rec,0x48);
+        if (!owner) { ++none; continue; }
+        int k=0;
+        while (k<owners_n && owners[k]!=owner) ++k;
+        if (k==owners_n) { if (owners_n==8) { ++other; continue; } owners[owners_n++]=owner; }
+        ++counts[k];
+    }
+    size_t used=(size_t)snprintf(out,cap,"%d records: %d none/here",count,none);
+    for (int k=0;k<owners_n && used<cap;++k) {
+        const uint64_t key=diag_key(owners[k]);
+        const char *name=diag_name_of(key);
+        used+=(size_t)snprintf(out+used,cap-used,", %d %p(%s)",counts[k],owners[k],*name ? name : "?");
+    }
+    if (other && used<cap) snprintf(out+used,cap-used,", %d unreadable/more",other);
+}
+
+static void diag_snapshot_inner(uint64_t now, const char *tag);
+/* A snapshot asks whether many objects can be read: the regions found are remembered meanwhile (each look at
+ * the system is slow here), and one that still takes long is told. */
+static void diag_snapshot(uint64_t now, const char *tag) {
+    const uint64_t started=check_clock();
+    runtime_host_readable_cache(1);
+    diag_snapshot_inner(now,tag);
+    runtime_host_readable_cache(0);
+    const uint64_t took=check_clock()-started;
+    if (took>=8) fprintf(stderr,"HO diag: the snapshot took %" PRIu64 " ms\n",took);
+}
+
+static void diag_snapshot_inner(uint64_t now, const char *tag) {
+    void *network=network_manager ? *network_manager : NULL;
+    void *race=network ? ptr(network,0x78) : NULL;
+    void *replication=race ? ptr(race,0x20) : NULL;
+    void *connection=replication ? ptr(replication,0x10) : NULL;
+    int role=0;
+    if (connection && runtime_host_readable((char *)connection+0x118,4)) memcpy(&role,(char *)connection+0x118,sizeof role);
+    char peers[1024], owners[512];
+    runtime_net_peer_stats(peers,sizeof peers);
+    diag_records_by_owner(owners,sizeof owners);
+    const uint64_t host=__atomic_load_n(&race_lobby_host_pid,__ATOMIC_ACQUIRE);
+    fprintf(stderr,"HO diag +%" PRIu64 " ms %s: role=%s conn=%p repl=%p manager=%p host pid=%" PRIu64 " (%s); %s\n",
+            diag_start ? now-diag_start : 0,tag,role==1 ? "host" : role==2 ? "guest" : "none",connection,replication,
+            diag_manager,host,diag_name_of(host),owners);
+    fprintf(stderr,"HO diag   net: %s\n",*peers ? peers : "no peer traffic");
+    void *list=race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    const int count=list ? *(int *)((char *)list+12) : 0;
+    void **rows=list ? ptr(list,0x20) : NULL;
+    for (int i=0;rows && count<=8 && i<count;++i) {
+        unsigned char *racer=rows[i];
+        if (!racer) continue;
+        unsigned char *player=ptr(racer,0x10) ? resolve_private_target((void **)(racer+0x10)) : NULL;
+        unsigned char *entity=resolve_private_target((void **)(racer+0x20));
+        uint64_t pid=0;
+        unsigned slot=UINT32_MAX;
+        if (player) { memcpy(&pid,player+0xa8,sizeof pid); memcpy(&slot,player+0x20,sizeof slot); }
+        const char *name=player ? ptr(player,0x68) : NULL;
+        if (name && !runtime_host_readable(name,1)) name=NULL;
+        float at[3]={0,0,0};
+        if (entity && racer_world_position) racer_world_position(at,entity);
+        float moved=-1.0f;
+        if (entity && diag_entity[i]==entity) {
+            const float dx=at[0]-diag_at[i][0], dy=at[1]-diag_at[i][1], dz=at[2]-diag_at[i][2];
+            moved=sqrtf(dx*dx+dy*dy+dz*dz);
+        }
+        diag_entity[i]=entity;
+        memcpy(diag_at[i],at,sizeof at);
+        unsigned char *laps=ptr(racer,0x90);
+        int lap=-1, place=0;
+        if (laps && runtime_host_readable(laps,0x10)) memcpy(&lap,laps+12,sizeof lap);
+        memcpy(&place,racer+0x58,sizeof place);
+        int records=-1;
+        void *rec=entity ? diag_record_of(entity,&records) : NULL;
+        char owner[160];
+        if (rec) diag_owner_text(ptr(rec,0x48),owner,sizeof owner);
+        else snprintf(owner,sizeof owner,"no record");
+        fprintf(stderr,"HO diag   r%d %-16s pid=%" PRIu64 " %s owned=%d rec=%p owner=%s lap=%d place=%d fin=%d moved=%.0f "
+                "at %.0f,%.0f,%.0f\n",i,name ? name : !ptr(racer,0x10) ? "(AI)" : "?",pid,
+                !ptr(racer,0x10) ? "AI" : !player ? "unresolved" : slot<=7 ? "local" : "remote",
+                entity ? (entity[0x3b]&1) : -1,rec,owner,lap,place,racer[0x8c],moved,at[0],at[1],at[2]);
+    }
+}
+
+static void diag_begin(uint64_t now, int phase, const char *tag) {
+    if (!handoff_setting(&HO.diag_ms)) return;
+    if (phase==1 && diag_phase!=1) {
+        diag_start=now;
+        memset(diag_entity,0,sizeof diag_entity);
+    }
+    if (!diag_start) diag_start=now;
+    diag_phase=phase;
+    diag_until=now+(uint64_t)(phase==1 ? 60000 : handoff_setting(&HO.diag_ms));
+    diag_next=now+(uint64_t)handoff_setting(&HO.diag_every_ms);
+    diag_snapshot(now,tag);
+}
+
+static void handoff_diag(uint64_t now) {
+    if (diag_phase) {
+        if (now>diag_until) {
+            diag_snapshot(now,"last");
+            fprintf(stderr,"HO diag ended at +%" PRIu64 " ms\n",now-diag_start);
+            diag_phase=0;
+            diag_start=0;
+        } else if (now>=diag_next) {
+            diag_next=now+(uint64_t)handoff_setting(&HO.diag_every_ms);
+            diag_snapshot(now,diag_phase==1 ? "host lost" : "bound");
+        }
+        return;
+    }
+    /* A matchmaking race: one snapshot 5 s in, how it looks before any handoff (every 15 s cost frames, 26/11).
+     * diag_baseline_next stays set for the race (the add-peer lines are told during one). */
+    const int racing=matchmaking_room && (runtime_online_mode_race_running() || runtime_replay_race_active());
+    if (!racing || !handoff_setting(&HO.diag_ms)) { diag_baseline_next=0; return; }
+    if (!diag_baseline_next) diag_baseline_next=now+5000;
+    if (diag_baseline_next!=UINT64_MAX && now>=diag_baseline_next) {
+        diag_baseline_next=UINT64_MAX;
+        diag_start=0;
+        diag_snapshot(now,"race");
+    }
+}
+
+static uint64_t ABI handoff_take_ownership(void *objects, void *entity) {
+    const int role=handoff_bind_role;
+    if (!role || !entity) return take_ownership_original(objects,entity);
+    unsigned char *player=NULL;
+    unsigned char *racer=racer_of_entity(entity,&player);
+    int keep=0;
+    uint64_t pid=0;
+    if (racer) {
+        unsigned slot=UINT32_MAX;
+        if (player) { memcpy(&pid,player+0xa8,sizeof pid); memcpy(&slot,player+0x20,sizeof slot); }
+        const int ai=!ptr(racer,0x10);
+        const int live_remote=player && slot>7 && pid && pid!=race_handoff_departed_pid;
+        keep=live_remote || (role==2 && (ai || (player && slot>7)));
+        fprintf(stderr,"Matchmaking handoff bind (%s): %s pid=%" PRIu64 " %s\n",role==1 ? "host" : "guest",
+                ai ? "AI kart" : !player ? "unresolved kart" : slot<=7 ? "local kart" :
+                pid==race_handoff_departed_pid ? "departed host's kart" : "racing player's kart",
+                pid,keep ? "left to its owner" : "taken");
+    }
+    if (keep) { ++handoff_kept; return 0; }   /* 0 = handled: the native drop neither takes nor deletes it */
+    ++handoff_taken;
+    return take_ownership_original(objects,entity);
+}
+
+/* A new peer gets a full sync of every record (0x432710 queues each with 0x432c40), owned or not.
+ * That exchange is also what gives the records left without owner above an owner again (test 25/11
+ * 20:03: holding all of them back left every kart frozen). One of them must not go: the guest's
+ * stale copy of the new host's own kart, which the new host applied to its kart (test 19:53: thrown
+ * back 10240 units, onto the spot where the guest still saw it). On a guest that copy is held back
+ * and given straight to the peer being added, the new host, whose updates then move it. */
+static void (ABI *add_peer_original)(void *, void *);
+static void (ABI *queue_record_original)(void *, void *, int);
+static void *sync_manager, *sync_peer;
+static void *sync_held_records[8];
+/* guest_sync 3: the other karts not driven here, held back and then given to the new host too (26/11, 5 players:
+ * before the handoff a guest gets every other kart through the host, 8 of its 15 records the host's; after it,
+ * only the new host's kart had an owner again, and each other guest's kart stayed still on every guest's screen
+ * for good: the new host relays them, so it is their owner). */
+static void *sync_other_records[16];
+static int sync_other_count;
+static uint64_t handoff_sync_until, sync_host_pid;
+static int handoff_sync_role, sync_sent, sync_held, sync_held_other;
+
+/* Test 26/11 with players (S_97, TachoGHC, new host Ryu7w7): each guest also sent the new host its stale copy
+ * of the OTHER guest's kart; the new host kept the first copy it got and gave that kart to its sender, so ~2.5 s
+ * after the handoff each guest lost its own kart (owned 1->0) and it was thrown onto the other guest's old copy.
+ * So a guest sends the new host only the karts it drives: every other kart without an owner here (another
+ * racing player's, the departed host's, the AI's) is held back too, and comes back with its owner in the new
+ * host's own full sync (the host side is never filtered: that sync is what gives owners back, handoff3). */
+static int sync_guest_level, sync_host_level;   /* HO.guest_sync / host_sync for the sync in progress */
+/* HO diag: each kart record of a handoff sync, what became of it. */
+static void diag_sync_record(void *peer, void *record, const char *what) {
+    if (!diag_phase || !record || !runtime_host_readable(record,0x50)) return;
+    void *object=ptr(record,0x10);
+    void *entity=object && runtime_host_readable(object,0x20) ? resolve_private_target((void **)((char *)object+0x18)) : NULL;
+    unsigned char *player=NULL;
+    unsigned char *racer=entity ? racer_of_entity(entity,&player) : NULL;
+    if (!racer) return;
+    uint64_t pid=0;
+    if (player) memcpy(&pid,player+0xa8,sizeof pid);
+    char owner[160];
+    diag_owner_text(ptr(record,0x48),owner,sizeof owner);
+    fprintf(stderr,"HO diag   sync to peer %p: kart pid=%" PRIu64 " %s (record %p, owner %s, owned here %d) %s\n",peer,pid,
+            player ? diag_name_of(pid) : "(AI)",record,owner,entity ? (((unsigned char *)entity)[0x3b]&1) : -1,what);
+}
+static void handoff_queue_record_inner(void *peer, void *record, int sender) {
+    if (sync_manager && sync_host_level && record && !ptr(record,0x48)) {   /* the new host's sync to a guest */
+        void *object=ptr(record,0x10);
+        void *entity=object ? resolve_private_target((void **)((char *)object+0x18)) : NULL;
+        unsigned char *player=NULL;
+        unsigned char *racer=entity ? racer_of_entity(entity,&player) : NULL;
+        unsigned slot=UINT32_MAX;
+        if (player) memcpy(&slot,player+0x20,sizeof slot);
+        if (racer && player && slot>7) {   /* a racing player's kart, not this PC's, not the AI's */
+            ++sync_held_other;
+            return;
+        }
+    }
+    if (sync_manager && sync_host_pid && sync_guest_level && record && !ptr(record,0x48)) {
+        void *object=ptr(record,0x10);
+        void *entity=object ? resolve_private_target((void **)((char *)object+0x18)) : NULL;
+        unsigned char *player=NULL;
+        uint64_t pid=0;
+        unsigned char *racer=entity ? racer_of_entity(entity,&player) : NULL;
+        if (racer && player) memcpy(&pid,player+0xa8,sizeof pid);
+        if (pid==sync_host_pid && sync_held<(int)(sizeof sync_held_records/sizeof *sync_held_records)) {
+            sync_held_records[sync_held++]=record;
+            sync_peer=peer;
+            return;
+        }
+        unsigned slot=UINT32_MAX;
+        if (player) memcpy(&slot,player+0x20,sizeof slot);
+        if (sync_guest_level>=2 && racer && !(player && slot<=7)) {   /* not a kart of this PC's players */
+            ++sync_held_other;
+            if (sync_guest_level>=3 && sync_other_count<(int)(sizeof sync_other_records/sizeof *sync_other_records)) {
+                sync_other_records[sync_other_count++]=record;
+                sync_peer=peer;
+            }
+            return;
+        }
+    }
+    if (sync_manager) ++sync_sent;
+    queue_record_original(peer,record,sender);
+}
+
+static void ABI handoff_queue_record(void *peer, void *record, int sender) {
+    if (!sync_manager) {
+        queue_record_original(peer,record,sender);
+        return;
+    }
+    const int sent_before=sync_sent, held_before=sync_held, other_before=sync_held_other;
+    handoff_queue_record_inner(peer,record,sender);
+    diag_sync_record(peer,record,sync_held!=held_before ? "held back, given to the new host" :
+                     sync_held_other!=other_before ? "held back" : sync_sent!=sent_before ? "sent" : "?");
+}
+
+static void ABI handoff_add_peer(void *manager, void *net_peer) {
+    diag_manager=manager;
+    if (diag_phase || diag_baseline_next) {
+        const uint64_t key=net_peer && runtime_host_readable(net_peer,0x18) ? (uint64_t)ptr(net_peer,0x10) : 0;
+        fprintf(stderr,"HO diag +%" PRIu64 " ms: peer added to replication %p: net peer %p key %" PRIx64 " %s; sync %s\n",
+                diag_start ? check_clock()-diag_start : 0,manager,net_peer,key,diag_name_of(key),
+                handoff_sync_until && check_clock()<=handoff_sync_until ? "filtered (handoff)" : "native");
+    }
+    if (!handoff_sync_until || check_clock()>handoff_sync_until) {
+        add_peer_original(manager,net_peer);
+        return;
+    }
+    /* No mode_lock: the native caller may run under it. */
+    sync_host_pid=handoff_sync_role==2 ? __atomic_load_n(&race_lobby_host_pid,__ATOMIC_ACQUIRE) : 0;
+    sync_guest_level=handoff_sync_role==2 ? handoff_setting(&HO.guest_sync) : 0;
+    sync_host_level=handoff_sync_role==1 ? handoff_setting(&HO.host_sync) : 0;
+    sync_sent=sync_held=sync_held_other=sync_other_count=0;
+    sync_peer=NULL;
+    sync_manager=manager;
+    add_peer_original(manager,net_peer);
+    sync_manager=NULL;
+    for (int i=0;i<sync_held && sync_peer;++i)
+        memcpy((char *)sync_held_records[i]+0x48,&sync_peer,sizeof sync_peer);   /* owner: the new host */
+    for (int i=0;i<sync_other_count && sync_peer;++i)
+        memcpy((char *)sync_other_records[i]+0x48,&sync_peer,sizeof sync_peer);  /* relayed by the new host */
+    fprintf(stderr,"Matchmaking handoff sync to a new peer (%s): %d record(s) sent; %d stale copies of the new host's "
+            "kart (pid=%" PRIu64 ") held back and given to it; %d other karts not driven here held back, %d of them "
+            "given to the new host\n",
+            handoff_sync_role==2 ? "guest" : "host",sync_sent,sync_held,sync_host_pid,sync_held_other,
+            sync_peer ? sync_other_count : 0);
+    if (sync_held || sync_other_count) handoff_sync_until=0;   /* once: the host peer is in */
+    sync_guest_level=sync_host_level=0;
+}
+
+/* Every frame from the host loss until a few seconds after the bind: each kart whose owner changes
+ * or that moves more than a kart can in one frame (a snap), with the time since the host loss. */
+static uint64_t handoff_watch_start, handoff_watch_until;
+static void *watch_entity[8];
+static float watch_at[8][3];
+static int watch_owned[8];
+
+static void handoff_watch_begin(uint64_t now, uint64_t span) {
+    const uint64_t most=(uint64_t)handoff_setting(&HO.watch_ms);
+    if (span>most) span=most;
+    if (!span) return;
+    if (!handoff_watch_until) {
+        handoff_watch_start=now;
+        memset(watch_entity,0,sizeof watch_entity);
+    }
+    if (now+span>handoff_watch_until) handoff_watch_until=now+span;
+}
+
+static void handoff_watch(uint64_t now) {
+    if (!handoff_watch_until) return;
+    if (now>handoff_watch_until || !racer_world_position) {
+        fprintf(stderr,"Matchmaking handoff watch ended at +%" PRIu64 " ms\n",now-handoff_watch_start);
+        handoff_watch_until=0;
+        return;
+    }
+    void *list=race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    const int count=list ? *(int *)((char *)list+12) : 0;
+    void **rows=list ? ptr(list,0x20) : NULL;
+    for (int i=0;rows && count<=8 && i<count;++i) {
+        unsigned char *racer=rows[i];
+        unsigned char *entity=racer ? resolve_private_target((void **)(racer+0x20)) : NULL;
+        if (!entity) continue;
+        unsigned char *player=ptr(racer,0x10) ? resolve_private_target((void **)(racer+0x10)) : NULL;
+        uint64_t pid=0;
+        unsigned slot=UINT32_MAX;
+        if (player) { memcpy(&pid,player+0xa8,sizeof pid); memcpy(&slot,player+0x20,sizeof slot); }
+        float at[3]={0,0,0};
+        racer_world_position(at,entity);
+        const int owned=entity[0x3b]&1;
+        if (watch_entity[i]!=entity) {
+            watch_entity[i]=entity;
+            memcpy(watch_at[i],at,sizeof at);
+            watch_owned[i]=owned;
+            continue;
+        }
+        const float dx=at[0]-watch_at[i][0], dy=at[1]-watch_at[i][1], dz=at[2]-watch_at[i][2];
+        const float moved=sqrtf(dx*dx+dy*dy+dz*dz);
+        if (owned!=watch_owned[i] || moved>400.0f) {
+            fprintf(stderr,"Matchmaking handoff watch +%" PRIu64 " ms: racer %d kart %p pid=%" PRIu64 " %s owned %d->%d, "
+                    "jumped %.0f from %.1f,%.1f,%.1f to %.1f,%.1f,%.1f\n",now-handoff_watch_start,i,(void *)entity,pid,
+                    !ptr(racer,0x10) ? "AI" : !player ? "unresolved" : slot<=7 ? "local" : "remote",
+                    watch_owned[i],owned,moved,watch_at[i][0],watch_at[i][1],watch_at[i][2],at[0],at[1],at[2]);
+            /* Test 27/11 (4 players, new host Ryu7w7): ~1-2.5 s after TachoGHC's game bound to the new host, its own
+             * kart went owned 1->0, its record's owner the new host: the new host's full sync reached it before its
+             * own had reached the new host, which then had that kart without an owner. Nobody drove it: frozen on
+             * every screen until the next handoff gave it back. A kart of this PC's players that loses its owner
+             * while the watch runs is taken back (the native transfer, which tells the peers too), at most 4 times. */
+            static uint64_t reclaim_watch;
+            static int reclaims;
+            if (reclaim_watch!=handoff_watch_start) { reclaim_watch=handoff_watch_start; reclaims=0; }
+            if (player && slot<=7 && watch_owned[i] && !owned && reclaims<4 && native_take_racer_ownership &&
+                handoff_setting(&HO.reclaim)) {
+                void *root=race_object_root ? *race_object_root : NULL;
+                void *objects=root ? ptr(root,0x28) : NULL;
+                if (objects) {
+                    native_take_racer_ownership(objects,entity);
+                    ++reclaims;
+                    fprintf(stderr,"Matchmaking handoff watch +%" PRIu64 " ms: this PC's kart pid=%" PRIu64 " lost its owner; "
+                            "taken back (owned=%d now, %d of 4)\n",now-handoff_watch_start,pid,entity[0x3b]&1,reclaims);
+                }
+            }
+            /* Where everyone else is in that frame: whose spot a kart of this PC was thrown onto. */
+            if (player && slot<=7 && moved>400.0f)
+                for (int j=0;j<count;++j) {
+                    unsigned char *other=rows[j];
+                    unsigned char *kart=other && j!=i ? resolve_private_target((void **)(other+0x20)) : NULL;
+                    if (!kart) continue;
+                    unsigned char *who=ptr(other,0x10) ? resolve_private_target((void **)(other+0x10)) : NULL;
+                    uint64_t other_pid=0;
+                    if (who) memcpy(&other_pid,who+0xa8,sizeof other_pid);
+                    float there[3]={0,0,0};
+                    racer_world_position(there,kart);
+                    fprintf(stderr,"Matchmaking handoff watch   meanwhile racer %d kart %p pid=%" PRIu64 " owned=%d at %.1f,%.1f,%.1f\n",
+                            j,(void *)kart,other_pid,kart[0x3b]&1,there[0],there[1],there[2]);
+                }
+        }
+        memcpy(watch_at[i],at,sizeof at);
+        watch_owned[i]=owned;
+    }
+}
+
+/* "<name> is now the host": told once by the overlay (bbport_overlay.cpp PollFriends) when a
+ * mid-race handoff has bound this game to its new host, or made this game the host. */
+static pthread_mutex_t host_change_lock = PTHREAD_MUTEX_INITIALIZER;
+static char host_change_name[24];
+static int host_change_self, host_change_pending;
+
+static void announce_host(uint64_t pid, int self) {
+    const char *name = NULL;
+    void *list = race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    const int count = list ? *(int *)((char *)list+12) : 0;
+    void **rows = list ? ptr(list,0x20) : NULL;
+    for (int i=0; !self && rows && count<=8 && i<count; ++i) {
+        unsigned char *racer = rows[i];
+        unsigned char *player = racer && ptr(racer,0x10) ? resolve_private_target((void **)(racer+0x10)) : NULL;
+        uint64_t player_pid = 0;
+        if (player) memcpy(&player_pid,player+0xa8,sizeof player_pid);
+        if (player && pid && player_pid==pid) name = ptr(player,0x68);
+    }
+    if (self) name = runtime_np_get_online_name();
+    if (!name || !*name) return;
+    pthread_mutex_lock(&host_change_lock);
+    snprintf(host_change_name,sizeof host_change_name,"%s",name);
+    host_change_self = self;
+    host_change_pending = 1;
+    pthread_mutex_unlock(&host_change_lock);
+    fprintf(stderr,"Matchmaking: %s is now the host%s\n",host_change_name,self ? " (this game)" : "");
+}
+
+int runtime_public_itemless_take_host_change(char name[24], int *self) {
+    pthread_mutex_lock(&host_change_lock);
+    const int pending = host_change_pending;
+    if (pending) {
+        memcpy(name,host_change_name,sizeof host_change_name);
+        if (self) *self = host_change_self;
+        host_change_pending = 0;
+    }
+    pthread_mutex_unlock(&host_change_lock);
+    return pending;
+}
+
+/* The race held during a host loss and since when (HO.give_up_ms); handoff_given_up until the next race. */
+static void *handoff_held_race;
+static uint64_t handoff_held_since;
+static int handoff_given_up;
+
 static void ABI race_connection_switch(void *race, void *connection) {
     void *network=network_manager ? *network_manager : NULL;
     void *replication=race ? ptr(race,0x20) : NULL;
@@ -1046,9 +1701,16 @@ static void ABI race_connection_switch(void *race, void *connection) {
     /* Lobby teardown must release the old roster even after this room raced. */
     if (!connection && (seen || runtime_replay_race_active())) {
         const int keep=!__atomic_load_n(&local_race_quitting,__ATOMIC_ACQUIRE) &&
-            !runtime_online_mode_lobby_open() && room && network && ptr(network,0x78)==race;
+            !runtime_online_mode_lobby_open() && room && network && ptr(network,0x78)==race &&
+            handoff_setting(&HO.enabled) && !handoff_given_up;
         if (keep) {
             fprintf(stderr,"Matchmaking: holding race connection during host loss\n");
+            if (!handoff_held_race) handoff_held_since=check_clock();
+            handoff_held_race=race;
+            handoff_racers("host lost",0);
+            handoff_watch_begin(check_clock(),20000);
+            diag_begin(check_clock(),1,"host lost");
+            handoff_host_lost=1;
             return;
         }
         if (!ptr(race,0x18)) {
@@ -1061,12 +1723,42 @@ static void ABI race_connection_switch(void *race, void *connection) {
         }
     }
     const uint64_t previous=race_switch_departed;
+    int handoff=0;
     pthread_mutex_lock(&mode_lock);
     if (connection && room && room==matchmaking_room &&
-        !local_race_quitting && (seen || runtime_replay_race_active()))
+        !local_race_quitting && (seen || runtime_replay_race_active())) {
         race_switch_departed=race_handoff_departed_pid;
+        handoff=1;
+    }
     pthread_mutex_unlock(&mode_lock);
+    const char *native_owners=getenv("BB_HANDOFF_NATIVE_OWNERS");
+    handoff=handoff && handoff_host_lost;
+    int role=0;   /* read only for a handoff: any other switch's connection is left alone */
+    if (handoff) memcpy(&role,(unsigned char *)connection+0x118,sizeof role);
+    if (handoff && take_ownership_original && (role==1 || role==2) && !(native_owners && *native_owners=='1') &&
+        handoff_setting(&HO.bind_keep)) {
+        handoff_kept=handoff_taken=0;
+        handoff_bind_role=role;
+    }
     native_race_switch_original(race,connection);
+    if (handoff_bind_role) {
+        fprintf(stderr,"Matchmaking handoff bind (%s): %d kart(s) left to their owners, %d taken\n",
+                handoff_bind_role==1 ? "host" : "guest",handoff_kept,handoff_taken);
+        handoff_bind_role=0;
+        const int sync_ms=handoff_setting(&HO.sync_ms);
+        if (add_peer_original && sync_ms) {
+            handoff_sync_until=check_clock()+(uint64_t)sync_ms;
+            handoff_sync_role=role;
+        }
+    }
+    if (handoff) {
+        handoff_host_lost=0;
+        handoff_held_race=NULL;
+        handoff_watch_begin(check_clock(),8000);
+        handoff_racers(role==1 ? "host bound" : "guest bound",0);
+        diag_begin(check_clock(),2,role==1 ? "host bound" : "guest bound");
+        announce_host(role==1 ? 0 : __atomic_load_n(&race_lobby_host_pid,__ATOMIC_ACQUIRE),role==1);
+    }
     race_switch_departed=previous;
 }
 
@@ -1115,7 +1807,45 @@ static void restore_host_racers(uint64_t room, uint64_t now) {
     }
 }
 
+/* The racers around a host handoff in a race: which kart is whose, who owns it and where it is (the
+ * log), and this PC's own karts kept by this PC. A handoff took 3-4 s (test 25/11, 3 instances) and
+ * everyone was then thrown back to where they had been when the host left (stuck in walls, the old
+ * host's videos): the new connection's copy of a kart is the last state it had then. A local player
+ * (+0x20 controller slot <= 7) whose kart the bind left to another owner takes it back at once, before
+ * any packet of the new connection is applied (native transfer, as restore_host_racers). */
+static void handoff_racers(const char *tag, int reclaim) {
+    void *root=race_object_root ? *race_object_root : NULL;
+    void *objects=root ? ptr(root,0x28) : NULL;
+    void *list=race_racers && *race_racers ? ptr(*race_racers,0x10) : NULL;
+    int count=list ? *(int *)((char *)list+12) : 0;
+    void **rows=list ? ptr(list,0x20) : NULL;
+    if (!rows || count<1 || count>8) return;
+    for (int i=0;i<count;++i) {
+        unsigned char *racer=rows[i];
+        if (!racer) continue;
+        unsigned char *player=ptr(racer,0x10) ? resolve_private_target((void **)(racer+0x10)) : NULL;
+        unsigned char *entity=resolve_private_target((void **)(racer+0x20));
+        uint64_t pid=0;
+        unsigned slot=UINT32_MAX;
+        if (player) {
+            memcpy(&pid,player+0xa8,sizeof pid);
+            memcpy(&slot,player+0x20,sizeof slot);
+        }
+        float at[3]={0,0,0};
+        if (entity && racer_world_position) racer_world_position(at,entity);
+        int took=0;
+        if (reclaim && objects && entity && player && slot<=7 && !(entity[0x3b]&1) && native_take_racer_ownership) {
+            native_take_racer_ownership(objects,entity);
+            took=1;
+        }
+        fprintf(stderr,"Matchmaking handoff %s: racer %d pid=%" PRIu64 " %s owned=%d%s at %.1f,%.1f,%.1f\n",tag,i,pid,
+                !ptr(racer,0x10) ? "AI" : !player ? "unresolved" : slot<=7 ? "local" : "remote",
+                entity ? (entity[0x3b]&1) : -1,took ? " (reclaimed)" : "",at[0],at[1],at[2]);
+    }
+}
+
 void runtime_public_itemless_poll_race_host(void) {
+    int race_join_retry=0;
     pthread_mutex_lock(&mode_lock);
     uint64_t room=matchmaking_room;
     const uint64_t now=check_clock();
@@ -1132,13 +1862,19 @@ void runtime_public_itemless_poll_race_host(void) {
             race && ptr(race,0x18) && ptr(race,0x20) && native_bind_race_connection) {
             race_network=race;
             host_connection=connection;
-            fprintf(stderr,"Matchmaking: room %" PRIu64 " guest reconnected to promoted host\n",room);
+            fprintf(stderr,"Matchmaking: room %" PRIu64 " guest reconnected to promoted host (join %d)\n",room,race_join_attempts);
             memcpy(race_join_state_call,"\xe8\x85\xe8\xff\xff",5);
             race_join_room=0;
         } else if (now>=race_join_until) {
-            fprintf(stderr,"Matchmaking: room %" PRIu64 " guest host reconnect timed out\n",room);
+            fprintf(stderr,"Matchmaking: room %" PRIu64 " guest host reconnect timed out after %d join(s)\n",room,race_join_attempts);
             memcpy(race_join_state_call,"\xe8\x85\xe8\xff\xff",5);
             race_join_room=0;
+        } else if (race_join_blocked && now>=race_join_retry_at && race_join_self && race_join_host &&
+                   race_join_self==matchmaking_owner) {
+            race_join_retry=1;
+            race_join_blocked=0;
+            race_join_retry_at=now+2000;
+            ++race_join_attempts;
         }
     }
     if (pending_host_room && pending_host_room==room) {
@@ -1171,11 +1907,35 @@ void runtime_public_itemless_poll_race_host(void) {
             }
         }
     }
+    const uint64_t retry_room=race_join_room;
     pthread_mutex_unlock(&mode_lock);
+    if (race_join_retry && native_join_match_host) {
+        fprintf(stderr,"Matchmaking: room %" PRIu64 " guest joins the promoted host again (join %d)\n",retry_room,race_join_attempts);
+        native_join_match_host(race_join_self,retry_room,race_join_host,race_join_doc);
+    }
     if (manager) native_start_match_host(manager);
     /* Both roles need native peer cleanup and ownership rebinding; a transport swap skips them. */
-    if (race_network) native_bind_race_connection(race_network,host_connection);
+    if (race_network) {
+        handoff_racers("before bind",0);
+        native_bind_race_connection(race_network,host_connection);
+        handoff_racers("after bind",handoff_setting(&HO.reclaim));
+    }
     restore_host_racers(room,now);
+    handoff_watch(now);
+    handoff_diag(now);
+    handoff_settings_start();
+    /* No new host in time (HO.give_up_ms): the game's own path, as without the handoff. */
+    const int give_up=handoff_setting(&HO.give_up_ms);
+    if (handoff_held_race && handoff_host_lost && give_up && now-handoff_held_since>=(uint64_t)give_up &&
+        native_race_switch_original) {
+        fprintf(stderr,"Matchmaking: no new host %d ms after the host loss: the race connection is let go\n",give_up);
+        void *race_held=handoff_held_race;
+        handoff_held_race=NULL;
+        handoff_host_lost=0;
+        handoff_given_up=1;
+        race_connection_switch(race_held,NULL);
+    }
+    if (!handoff_held_race && !runtime_replay_race_active() && !runtime_online_mode_race_running()) handoff_given_up=0;
     poll_room_alive(room ? room : __atomic_load_n(&left_room_pending, __ATOMIC_SEQ_CST), now);
 }
 
@@ -1694,7 +2454,8 @@ int runtime_private_party_update(void) {
         else if (feature) (void)early_party_check(feature,1);
         return 0;
     }
-    if (pending_private.ranked && (runtime_ranked_account() == 0 || !strcmp(runtime_online_content(), "modified"))) {
+    if (pending_private.ranked && (runtime_ranked_account() == 0 || runtime_ranked_ban(NULL, 0, NULL) ||
+                                   !strcmp(runtime_online_content(), "modified"))) {
         clear_private_pending();
         if (ranked_account_allowed()) (void)public_content_allowed();     /* the notice */
         return 0;
@@ -1787,7 +2548,8 @@ static void ranked_gate_walk(void *node, int ranked, int state, int depth) {
 
 void runtime_ranked_gate_update(void *root, int ranked) {
     int state = ranked ? runtime_ranked_status(0) : 1;
-    if (ranked && state == 1 && runtime_ranked_account() == 0) state = 0;   /* no linked account: dimmed */
+    if (ranked && state == 1 && (runtime_ranked_account() == 0 || runtime_ranked_ban(NULL, 0, NULL)))
+        state = 0;   /* no linked account, or banned from Ranked: dimmed */
     ranked_gate_walk(root, ranked, state, 0);
 }
 
@@ -2387,7 +3149,7 @@ static void *ABI start_search(void **result, void *self, const char *raw, unsign
      * (placeable_event, then runtime_public_itemless_update). */
     if (!strcmp(runtime_online_content(), "modified")) {
         fprintf(stderr, "Public ITEMLESS: search refused: online content is modified (private rooms only)\n");
-        notice(PUBLIC_CONTENT_NOTICE);
+        notice(public_refusal_notice());
         __atomic_store_n(&content_return, 1, __ATOMIC_SEQ_CST);
         *result = NULL;
         return result;
@@ -2810,6 +3572,38 @@ static void ABI created(void *self, uint64_t search, uint64_t room, uint64_t ver
         native_create(self,search,room,version,host,hn,confirmation_doc,bn);
     }
 }
+/* 0xa53d70, the game's "start hosting the match session": its config's flag (+0x10 of [config]+0x40), two
+ * states of 0x4316d0's object (+0x2b, +0x2d), then 0xa4f2f0(manager, 0). Its addresses are read from its own
+ * code at start (USA and EU). */
+static unsigned char **start_host_config;
+static unsigned char *(ABI *start_host_state)(void);
+static void (ABI *start_host_begin)(void *, int);
+static void ABI start_match_host_original(void *manager) {
+    unsigned char *config=start_host_config && *start_host_config ? *(unsigned char **)(*start_host_config+0x40) : NULL;
+    if (!config || !config[0x10]) return;
+    unsigned char *state=start_host_state();
+    if (state[0x2b] || state[0x2d]) return;
+    start_host_begin(manager,0);
+}
+static void ABI start_match_host_guarded(void *manager) {
+    pthread_mutex_lock(&mode_lock);
+    const int joining=race_join_room && race_join_room==matchmaking_room && check_clock()<race_join_until &&
+                      !local_race_quitting;
+    int tell=0;
+    if (joining) {
+        tell=!race_join_blocked;
+        race_join_blocked=1;
+    }
+    const uint64_t room=race_join_room;
+    pthread_mutex_unlock(&mode_lock);
+    if (joining) {
+        if (tell) fprintf(stderr,"Matchmaking: room %" PRIu64 " the game would host a session of its own while joining "
+                                 "the promoted host: kept a guest, joining again\n",room);
+        return;
+    }
+    start_match_host_original(manager);
+}
+
 static void ABI updated(void *self, uint64_t room, uint64_t version, const char *host, unsigned hn, const char *confirmation_doc, unsigned bn) {
     uint64_t current = 0;
     memcpy(&current, (unsigned char *)self + 0x958, 8);
@@ -2848,6 +3642,14 @@ static void ABI updated(void *self, uint64_t room, uint64_t version, const char 
                 memcpy(race_join_state_call,"\x90\x90\x90\x90\x90",5);
                 race_join_room=room;
                 race_join_until=check_clock()+20000;
+                race_join_self=self;
+                free(race_join_host);
+                free(race_join_doc);
+                race_join_host=copy_text(host,hn);
+                race_join_doc=copy_text(confirmation_doc,bn);
+                race_join_blocked=0;
+                race_join_attempts=1;
+                race_join_retry_at=0;
                 fprintf(stderr,"Matchmaking: room %" PRIu64 " guest joining promoted host pid=%" PRIu64 " during race\n",room,new_host);
                 native_join_match_host(self,room,host,confirmation_doc);
             }
@@ -3095,9 +3897,9 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     }
     for (int i=0;i<6;++i) if (ptr(image,slots[i])!=image+targets[i]) return 0;
 #ifdef _WIN32
-    unsigned char *stubs=VirtualAlloc(NULL,624,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    unsigned char *stubs=VirtualAlloc(NULL,768,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
 #else
-    unsigned char *stubs=mmap(NULL,624,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    unsigned char *stubs=mmap(NULL,768,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (stubs==MAP_FAILED) stubs=NULL;
 #endif
     if (!stubs) return 0;
@@ -3202,6 +4004,18 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         !memcmp(image+0xa53dad,host_tail,sizeof host_tail)) {
         match_session_manager=(void **)(image+0x2accab0);
         native_start_match_host=(void (ABI *)(void *))(image+0xa53d70);
+        /* the guard: 0xa53d70 re-made (its globals and calls read from its code), our calls to it unguarded */
+        int32_t r_config, r_state, r_begin;
+        memcpy(&r_config,image+0xa53d76+3,4);
+        memcpy(&r_state,image+0xa53d8a+1,4);
+        memcpy(&r_begin,image+0xa53dad+1,4);
+        if (image[0xa53d8a]==0xe8 && image[0xa53dad]==0xe9 && writable(image+0xa53d70,14)) {
+            start_host_config=(unsigned char **)(image+0xa53d76+7+r_config);
+            start_host_state=(unsigned char *(ABI *)(void))(image+0xa53d8a+5+r_state);
+            start_host_begin=(void (ABI *)(void *,int))(image+0xa53dad+5+r_begin);
+            native_start_match_host=start_match_host_original;
+            jump(image+0xa53d70,(void *)start_match_host_guarded);
+        }
         if (!memcmp(image+0xa44190,bind_prefix,sizeof bind_prefix))
             native_bind_race_connection=(void (ABI *)(void *,void *))(image+0xa44190);
         if (native_bind_race_connection)
@@ -3227,6 +4041,7 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
     race_racers=(void **)(image+0x2ad4b70);
     race_object_root=(void **)(image+0x2a30500);
     native_take_racer_ownership=(uint64_t (ABI *)(void *,void *))(image+0x4332f0);
+    racer_world_position=(void (ABI *)(float *, void *))(image+0x3dc720);
     participants=(void **)(image+0x2ad1160);
     party_manager=(void **)(image+0x2acf700);
     native_placeable_event=(void (ABI *)(void *, void *))(stubs+160);
@@ -3246,6 +4061,33 @@ int runtime_public_itemless_start(unsigned char *image, size_t size) {
         native_race_switch_original=(void (ABI *)(void *,void *))(stubs+288);
         jump(image+0xa44190,race_connection_switch);
         puts("Matchmaking: race host-loss guard installed");
+    }
+    /* Take ownership (0x4332f0): push rbp; mov rbp,rsp; push r15,r14,r12,rbx; sub rsp,0x20. */
+    const unsigned char take_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x83,0xec,0x20};
+    if (native_race_switch_original && !memcmp(image+0x4332f0,take_prefix,sizeof take_prefix) &&
+        writable(image+0x4332f0,14)) {
+        memcpy(stubs+640,take_prefix,sizeof take_prefix);
+        jump(stubs+640+sizeof take_prefix,image+0x4332f0+sizeof take_prefix);
+        take_ownership_original=(uint64_t (ABI *)(void *,void *))(stubs+640);
+        native_take_racer_ownership=take_ownership_original;
+        jump(image+0x4332f0,handoff_take_ownership);
+        puts("Matchmaking: host handoff keeps racing players' karts with their owners");
+        /* Add peer 0x432710 (push rbp..r12,rbx; sub rsp,0x48) and queue record 0x432c40 (pushes + push rax). */
+        const unsigned char add_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x48};
+        const unsigned char queue_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+        if (!memcmp(image+0x432710,add_prefix,sizeof add_prefix) && !memcmp(image+0x432c40,queue_prefix,sizeof queue_prefix) &&
+            !memcmp(image+0x432960,"\xe8\xdb\x02\x00\x00",5) &&
+            writable(image+0x432710,14) && writable(image+0x432c40,14)) {
+            memcpy(stubs+672,add_prefix,sizeof add_prefix);
+            jump(stubs+672+sizeof add_prefix,image+0x432710+sizeof add_prefix);
+            memcpy(stubs+704,queue_prefix,sizeof queue_prefix);
+            jump(stubs+704+sizeof queue_prefix,image+0x432c40+sizeof queue_prefix);
+            add_peer_original=(void (ABI *)(void *,void *))(stubs+672);
+            queue_record_original=(void (ABI *)(void *,void *,int))(stubs+704);
+            jump(image+0x432c40,handoff_queue_record);
+            jump(image+0x432710,handoff_add_peer);
+            puts("Matchmaking: host handoff sends no stale kart copies to the new peer");
+        }
     }
     const unsigned char leave_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
     if (!memcmp(image+0xa54060,leave_prefix,sizeof leave_prefix) && writable(image+0xa54060,sizeof leave_prefix)) {

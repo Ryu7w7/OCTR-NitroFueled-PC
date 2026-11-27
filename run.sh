@@ -19,6 +19,9 @@ data=${BB_DATA_DIR:-.}
 out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
+# The port's new tracks (scripts/track_content.py): a content/ folder in the data directory (the
+# AppImage's own files are read-only: ~/.local/share/sacredfire/content), else the one beside scripts/.
+if [[ -z ${BB_CONTENT_DIR:-} ]] && mkdir -p "$data/content"; then export BB_CONTENT_DIR=$(cd "$data/content" && pwd); fi
 export BB_WINDOW_ICON=${BB_WINDOW_ICON:-$PWD/launcher/io.github.sacredfire.Launcher.png}
 # the game's title font for the room's members by team (run.py does the same)
 export BB_TEAM_FONT=${BB_TEAM_FONT:-$PWD/art/ctr-title.ttf}
@@ -136,21 +139,34 @@ if [[ -z ${BB_MOD_SESSION:-} ]]; then
     if [[ -n ${BB_MOD_SESSION:-} ]]; then mod_session_owner=1; fi
 fi
 original_game=$game
-# The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py, as in
-# run.py): an extra archive the runtime serves as archives/update3.pak. USA/EU 1.21.
-unset BB_GRAPHICS_TAB_ARCHIVE
-if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
-    while IFS= read -r line; do
-        case $line in
-            archives/update3.pak=*) export BB_GRAPHICS_TAB_ARCHIVE=${line#archives/update3.pak=} ;;
-            ?*) echo "$line" ;;
-        esac
-    done < <(startup_python scripts/graphics_tab.py "$game" --out "$out" --settings "$BB_CONFIG" ||
-             echo "Graphics tab: off (scripts/graphics_tab.py stopped)")
-fi
+# The port's new tracks come from the server, not in the download (scripts/track_content.py, as in
+# run.py): what is missing or changed, before anything reads the content folder.
+# They are part of the game: without all of them, whole, it does not start (track_content.py says why).
+startup_python scripts/track_content.py --sync --settings "$BB_CONFIG" || exit 1
 game=$(startup_python scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
     --enabled "${BB_MODS_ENABLED:-1}")
+# The Options menu's Graphics tab, the main menu's Quit Game and the new tracks' lists
+# (scripts/graphics_tab.py, as in run.py): an extra archive the runtime serves as
+# archives/update3.pak, or after a mod's own update archives (BB_GRAPHICS_TAB_SLOT: update4.pak...),
+# made from the mods' view so a track mod keeps its tracks and gets the port's. USA/EU 1.21.
+unset BB_GRAPHICS_TAB_ARCHIVE BB_GRAPHICS_TAB_SLOT
+if [[ ( $title_id == CUSA13795 || $title_id == CUSA14876 ) && $app_version == 01.21 ]]; then
+    while IFS= read -r line; do
+        if [[ $line =~ ^archives/(update[0-9]+\.pak)=(.+)$ ]]; then
+            export BB_GRAPHICS_TAB_SLOT=${BASH_REMATCH[1]} BB_GRAPHICS_TAB_ARCHIVE=${BASH_REMATCH[2]}
+        elif [[ -n $line ]]; then
+            echo "$line"
+        fi
+    done < <(startup_python scripts/graphics_tab.py "$game" --out "$out" --settings "$BB_CONFIG" ||
+             echo "Graphics tab: off (scripts/graphics_tab.py stopped)")
+fi
+# The port's tracks are in that archive: without it the game would start without them (as run.py, 26/11).
+if [[ -z ${BB_GRAPHICS_TAB_ARCHIVE:-} ]] && compgen -G "${BB_CONTENT_DIR:-content}/tracks/*/track.json" > /dev/null; then
+    echo "The game could not add its tracks (graphics_tab.py). It does not start without them." >&2
+    echo "El juego no pudo añadir sus pistas (graphics_tab.py). No arranca sin ellas." >&2
+    exit 1
+fi
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game

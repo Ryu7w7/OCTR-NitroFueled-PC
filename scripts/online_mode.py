@@ -1036,9 +1036,10 @@ def rebuild(blob):
     g = Igz(blob)
     add_race_type(g)
     # The native selector consumes the same option/availability lists as other selectors.
-    # N.SANE MODE (index 3, private rooms only: src/runtime_nsane.c); BATTLE keeps index 2.
+    # N.SANE MODE (index 3, private rooms only: src/runtime_nsane.c), ELIMINATION (index 4, private rooms only:
+    # src/runtime_elimination.c); BATTLE keeps index 2.
     # In the game's language (scripts/octr_texts.py); the runtime knows them in both.
-    set_options(g, 0x1880, 0x18a8, tuple(map(tr, ('NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE'))))
+    set_options(g, 0x1880, 0x18a8, tuple(map(tr, ('NORMAL', 'ITEMLESS', 'BATTLE', 'N.SANE MODE', 'ELIMINATION'))))
     return g.build()
 
 

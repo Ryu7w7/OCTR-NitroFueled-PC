@@ -44,6 +44,7 @@ static int last_no_cache;
 
 /* What src/runtime_net.c and runtime_net_overrides.c give runtime_http.c. */
 int runtime_net_is_online(void) { return 1; }
+int runtime_port_content_ok(void) { return 1; }
 int32_t runtime_net_init(void) { return 0; }
 void runtime_net_trace(const char *fmt, ...) {
     va_list args;

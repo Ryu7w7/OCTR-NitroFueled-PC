@@ -26,6 +26,7 @@ int runtime_chat_available() { return 0; }
 int runtime_chat_racing() { return 0; }
 unsigned runtime_chat_serial() { return 0; }
 unsigned runtime_chat_view(RcLine*, int, int* count, int* status) { *count = *status = 0; return 0; }
+int runtime_public_itemless_take_host_change(char*, int*) { return 0; }
 int runtime_chat_send(const char*) { std::abort(); }
 void runtime_chat_mute(const char*, int) { std::abort(); }
 int runtime_chat_muted(const char*) { return 0; }

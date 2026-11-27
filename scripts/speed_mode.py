@@ -169,8 +169,14 @@ def build(game, output, base_patches):
         finally:
             archive.data.close()
             archive._file.close()
-    if len(tracks) != 40:
-        raise ValueError(f'Speed test resources incomplete: {len(tracks)}/40 tracks, '
+    # The game's 40 race tracks; the port's new tracks (scripts/track_content.py) come on top of them.
+    try:
+        import track_content
+        added = {track_content.zone(m) for _folder, m in track_content.packages()}
+    except (ImportError, OSError, ValueError):
+        added = set()
+    if len(tracks - added) != 40:
+        raise ValueError(f'Speed test resources incomplete: {len(tracks - added)}/40 tracks, '
                          f'{sorted(entries)}')
     normal_view, speed_view = current.copy(), current.copy()
     nsane_view_files = []

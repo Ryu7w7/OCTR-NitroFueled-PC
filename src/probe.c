@@ -1414,6 +1414,7 @@ int main(int argc, char **argv) {
     if (!runtime_friends_native_start(image, size)) fail("native Friends refresh callback could not be installed");
     if (!runtime_online_mode_start(image, size)) fail("native Online mode callback could not be installed");
     if (!runtime_race_options_start(image, size)) fail("native race option callback could not be installed");
+    runtime_elimination_start(image, size); /* elimination mode (test): never fatal */
     runtime_profile_item_guard_start(image, size); /* a save's equipped item missing here: no stop in a room */
     runtime_meta_dump_start(image, size); /* BB_META_DUMP=1 (lab) */
     if (!runtime_public_itemless_start(image, size)) fail("native public Itemless callbacks could not be installed");

@@ -231,6 +231,16 @@ def main():
     parser.add_argument('--enabled', choices=('0', '1'), default='1')
     args = parser.parse_args()
     layers = []
+    # The port's new tracks (scripts/track_content.py): each package's level archive, always (their
+    # registration is in the port's update3.pak, scripts/graphics_tab.py).
+    content = []
+    try:
+        import track_content
+        content = track_content.level_archives()
+        for relative, _source in content:
+            print(f'Tracks: {relative.name}', file=sys.stderr)
+    except (ImportError, OSError, ValueError) as error:
+        print(f'Tracks: none ({error})', file=sys.stderr)
     if args.enabled == '1':
         # shadPS4's loose overlay convention, beside the original game.
         legacy = Path(str(args.game.resolve()) + '-mods')
@@ -242,7 +252,7 @@ def main():
         else:
             for name in selected(args.mods_dir, args.config):
                 layers.append((name, args.mods_dir / name))
-    print(build_overlay(args.game, args.out, layers))
+    print(build_overlay(args.game, args.out, layers, content))
 
 
 if __name__ == '__main__':

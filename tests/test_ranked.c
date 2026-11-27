@@ -17,6 +17,12 @@ static void tier_cache_reset(uint64_t room, int mode) {
 }
 
 void runtime_hof_season_changed(int season) { (void)season; }
+/* the rules notice's fetch (runtime_ranked_rules): offline here, rules_parse is fed directly */
+int runtime_net_is_online(void) { return 0; }
+int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
+    (void)method; (void)target; (void)body; (void)body_size;
+    return 0;
+}
 
 static char sent_target[256], sent_body[1024];
 static int sent;
@@ -125,6 +131,34 @@ static void test_status_contract(void) {
     assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,"
                                 "\"account_required\":true,\"account_linked\":false}") == 0);
     assert(ranked_account_reply("{\"season\":1,\"enabled\":true,\"retry_after\":0,\"account_required\":true}") == 0);
+    /* a ban from Ranked only (ranked_bans.go): the reason unescaped, accents and quotes too */
+    {
+        char reason[64];
+        assert(status_text("{\"ranked_ban_reason\":\"hacer \\\"trampas\\\" \\u00e1 \\ud83d\\ude00 \\u003c\",\"x\":1}",
+                           "ranked_ban_reason", reason, sizeof reason));
+        assert(!strcmp(reason, "hacer \"trampas\" \xc3\xa1 \xf0\x9f\x98\x80 <"));
+        assert(!status_text("{\"x\":1}", "ranked_ban_reason", reason, sizeof reason));
+        assert(status_text("{\"r\":\"abcdefghij\"}", "r", reason, 5) && !strcmp(reason, "abcd"));
+    }
+    /* the rules notice (ranked_rules.go): kinds, texts, and "off" */
+    {
+        char body[256] = "ok\ntitle\tAVISO\nsubtitle\tRANKED\nrule\tno\tNo atajos\nrule\tok\tExcepcion: cesped\nrule\tbad\tOtra\n";
+        rules_parse(body);
+        char title[32], subtitle[32], texts[6][1280];
+        int kinds[6];
+        pthread_mutex_lock(&rules_lock);
+        rules.next = UINT64_MAX;   /* no ask from the test */
+        pthread_mutex_unlock(&rules_lock);
+        assert(runtime_ranked_rules(title, sizeof title, subtitle, sizeof subtitle, kinds, texts, 6) == 3);
+        assert(!strcmp(title, "AVISO") && !strcmp(subtitle, "RANKED") && kinds[0] == 0 && kinds[1] == 2 && kinds[2] == 1);
+        assert(!strcmp(texts[1], "Excepcion: cesped"));
+        char off[] = "off\n";
+        rules_parse(off);
+        assert(runtime_ranked_rules(NULL, 0, NULL, 0, NULL, NULL, 6) == 0);
+        char junk[] = "<html>";
+        rules_parse(junk);   /* not an answer: the last one stays */
+        assert(runtime_ranked_rules(NULL, 0, NULL, 0, NULL, NULL, 6) == 0);
+    }
     /* Normal tiers by their names since 2026-11-18, and by the older ones an older server says */
     assert(tier_index("Bronze", 0) == 1 && tier_index("Golden Wumpa", 0) == 3 && tier_index("Uka's Chosen", 0) == 6);
     assert(tier_index("Ancient Spirit", 0) == 7 && tier_index("Gold Mask", 0) == 3 && tier_index("Chaos Grand Prix", 0) == 7);

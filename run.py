@@ -53,6 +53,7 @@ import signed_in_name  # noqa: E402
 import ctr_tv_logo  # noqa: E402
 import tacho_pack  # noqa: E402
 import track_names  # noqa: E402
+import track_content  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
 import online_mode  # noqa: E402
@@ -1052,6 +1053,13 @@ def launch(args, restarted=False):
             env['BB_ASYNC_SUBMIT'] = v
 
     setup_online(env, config, data)
+    # The port's new tracks come from the server, not in the download (scripts/track_content.py):
+    # what is missing or changed, before anything reads the content folder.
+    # They are part of the game: without all of them, whole, it does not start.
+    try:
+        startup_call('track_content.sync', track_content.sync, config, log=say)
+    except (track_content.RequiredContent, OSError, ValueError, KeyError) as error:
+        fail(track_content.REQUIRED_MESSAGE.format(error, error))
 
     probe = Path(env['BB_PROBE']) if env.get('BB_PROBE') else find_executable('sacredfire.exe')
     if not probe or not probe.is_file():
@@ -1133,25 +1141,43 @@ def launch(args, restarted=False):
     original_game = game.resolve()
     import mod_file_paths
     mod_file_paths.configure(env)
-    # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py): an
-    # extra archive of relabelled menus, served by the runtime as archives/update3.pak (no copy of
-    # the game folder). USA/EU 1.21: the engine validates the region's hooks
-    # (gpu/shim/bbport_graphics_tab.cpp), and without them the runtime leaves the menus alone.
-    env.pop('BB_GRAPHICS_TAB_ARCHIVE', None)
-    if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
-        result = run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
-                            capture=True, check=False)
-        for line in result.stdout.splitlines():
-            if line.startswith('archives/update3.pak='):
-                env['BB_GRAPHICS_TAB_ARCHIVE'] = line.partition('=')[2].strip()
-            elif line.strip():
-                say(line.strip())
-        if result.returncode:
-            say(f'Graphics tab: off (scripts/graphics_tab.py stopped with code {result.returncode})')
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).stdout.strip())
+    # The Options menu's Graphics tab, the main menu's Quit Game and the new tracks' lists
+    # (scripts/graphics_tab.py): an extra archive the runtime serves as archives/update3.pak (no copy
+    # of the game folder), or after a mod's own update archives (update4.pak...): made from the mods'
+    # view, so a track mod's lists keep its tracks and get the port's (25/11: a mod's update3.pak turned
+    # the tab and the new tracks off). USA/EU 1.21: the engine validates the region's hooks
+    # (gpu/shim/bbport_graphics_tab.cpp), and without them the runtime leaves the menus alone.
+    env.pop('BB_GRAPHICS_TAB_ARCHIVE', None)
+    env.pop('BB_GRAPHICS_TAB_SLOT', None)
+    if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
+        result = run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
+                            capture=True, check=False)
+        for line in result.stdout.splitlines():
+            name, sep, value = line.partition('=')
+            if sep and re.fullmatch(r'archives/update[0-9]+\.pak', name):
+                env['BB_GRAPHICS_TAB_ARCHIVE'] = value.strip()
+                env['BB_GRAPHICS_TAB_SLOT'] = name.partition('/')[2]
+            elif line.strip():
+                say(line.strip())
+        if result.returncode:
+            say(f'Graphics tab: off (scripts/graphics_tab.py stopped with code {result.returncode})')
+    # The port's tracks are in that archive: without it the game would start without them (26/11: a player
+    # entered online without Neo Bowser City). They are part of the game, as track_content.sync says.
+    if track_content.packages() and not env.get('BB_GRAPHICS_TAB_ARCHIVE'):
+        fail(track_content.NOT_ADDED_MESSAGE.format('graphics_tab.py', 'graphics_tab.py'))
+    # The tracks' own files are served before any mod's of the same name (runtime_file.c), and without
+    # them (or the archive with their lists) the game is "modified" online: every player has the same
+    # tracks, whatever mods are on (26/11: a character mod's update3.pak hid Neo Bowser City).
+    env.pop('BB_CONTENT_FILES', None)
+    env.pop('BB_CONTENT_REQUIRED', None)
+    content_files = [(r.as_posix(), str(s)) for r, s in track_content.level_archives()]
+    if content_files:
+        env['BB_CONTENT_FILES'] = '|'.join(f'{r}={s}' for r, s in content_files if '|' not in r + s)
+        env['BB_CONTENT_REQUIRED'] = '1'
     mod_view = game if game.resolve() != original_game else None
     try:
         try:
@@ -1216,6 +1242,12 @@ def launch(args, restarted=False):
             base_patches.update(startup_call('ctr_tv_logo.prepare', ctr_tv_logo.prepare, game, out, config, env, base_patches))
         except (OSError, ValueError) as error:
             say(f"CTR TV logo: {error}; the game's own")
+        # The port's new tracks (scripts/track_content.py): their names in their own level archives,
+        # by archive patch (their lists and files are in the port's update3.pak).
+        try:
+            base_patches.update(startup_call('track_content.prepare', track_content.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError, KeyError) as error:
+            say(f'Tracks: {error}; their names as their authors left them')
         # Pack Tacho (scripts/tacho_pack.py): its HUD, leaders list and Options page files by
         # archive patch; the 21:9 and 32:9 layouts change its Options page over them (issue #267).
         # It has no off switch; a changed pack stops the launch (every player has the same rules).
@@ -1234,6 +1266,11 @@ def launch(args, restarted=False):
             startup_call('track_names.prepare', track_names.prepare, game, presence.parent)
         except (OSError, ValueError, KeyError) as error:
             say(f'Track names for Discord: {error}')
+        # and the tracks' pictures (the content bucket's presence/ folder)
+        try:
+            startup_call('track_names.presence_images', track_names.presence_images, presence.parent)
+        except (OSError, ValueError, KeyError) as error:
+            say(f'Track pictures for Discord: {error}')
         env.setdefault('BB_NEO', '0')
         # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
         # path and the patches read its settings (the player's, with the ones it was made for),

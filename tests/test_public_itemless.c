@@ -63,8 +63,16 @@ static int ranked_status_state = 1;
 int runtime_ranked_status(int fresh) { (void)fresh; return ranked_status_state; }
 static int ranked_account_state = 1;
 int runtime_ranked_account(void) { return ranked_account_state; }
+/* runtime_net.c: offline here, so the host handoff keeps its built-in settings (no /ryunet/handoff ask) */
+int runtime_net_is_online(void) { return 0; }
+int runtime_net_peer_stats(char *out, size_t cap) { if (out && cap) out[0] = 0; return 0; }
+int runtime_host_readable(const void *p, size_t n) { (void)n; return p != NULL; }
+void runtime_host_readable_cache(int on) { (void)on; }
+/* runtime_ranked.c: a ban from Ranked only (none here) */
+int runtime_ranked_ban(char *reason, size_t size, long *left) { (void)reason; (void)size; (void)left; return 0; }
 static const char *online_content_state = "clean";
 const char *runtime_online_content(void) { return online_content_state; }
+int runtime_port_content_ok(void) { return 1; }
 int runtime_private_difficulty_modified(void) { return modified_difficulty; }
 int runtime_online_mode_private_cup(void) { return private_cup; }
 int runtime_online_mode_private_teams(void) { return private_teams; }

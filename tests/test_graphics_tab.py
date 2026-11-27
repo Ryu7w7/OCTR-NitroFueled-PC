@@ -28,7 +28,7 @@ class GraphicsCacheTests(unittest.TestCase):
             archive.write_bytes(b'original')
             made = []
 
-            def build(game, dest, dump):
+            def build(game, dest, dump, **_):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(b'generated')
                 made.append(dest)

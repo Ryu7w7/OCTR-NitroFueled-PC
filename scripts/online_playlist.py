@@ -46,14 +46,28 @@ def track_key(name):
     return name.rsplit('/', 1)[-1].lower()
 
 
+def content_tracks():
+    """The port's new tracks (scripts/track_content.py) kept out of public votes: a track goes in only
+    once every player has it (BB_TRACKS_ONLINE=1, set when the server requires the content)."""
+    if os.environ.get('BB_TRACKS_ONLINE') == '1':
+        return set()
+    try:
+        import track_content
+        return {track_content.zone(m) for _folder, m in track_content.packages()}
+    except (ImportError, OSError, ValueError):
+        return set()
+
+
 def game_tracks(archives):
-    """Race tracks of the game (folder names), from every archive's names."""
+    """Race tracks of the game (folder names), from every archive's names; the port's new tracks
+    only when every player has them (content_tracks)."""
     found = set()
+    hold = content_tracks()
     for pak in mod_file_paths.archives(archives):
         try:
             for name, *_ in iga.pak_entries(pak):
                 m = TRACK.search(name.lower())
-                if m:
+                if m and m.group(1) not in hold:
                     found.add(m.group(1))
         except (OSError, struct.error, ValueError, UnicodeDecodeError):
             continue
@@ -152,7 +166,7 @@ def build(game, out, weight):
         target.unlink(missing_ok=True)
         return 0
     import hashlib
-    stamp = {'format': FORMAT, 'weight': weight,
+    stamp = {'format': FORMAT, 'weight': weight, 'held': sorted(content_tracks()),
              'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
              'archives': [[str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns] for p in paks]}
     try:
@@ -160,7 +174,8 @@ def build(game, out, weight):
             return 0
     except (OSError, ValueError, KeyError):
         pass
-    for name in ARCHIVES:
+    # A mod's own update3.pak... first: the game reads its copy last (scripts/graphics_tab.py slot).
+    for name in list(reversed(mod_file_paths.extra_updates(game))) + list(ARCHIVES):
         pak = mod_file_paths.resolve(archives / name)
         if not pak.is_file():
             continue
@@ -174,7 +189,7 @@ def build(game, out, weight):
         new, report = rebuild(blob, game_tracks(archives), weight)
         Igz(new)  # it must read back
         out.mkdir(parents=True, exist_ok=True)
-        archive_patch.write_entry_patch(target, pak, f'/app0/archives/{pak.name}', index, new)
+        archive_patch.write_entry_patch(target, pak, f'/app0/archives/{name}', index, new)
         stamp_file.write_text(json.dumps({'stamp': stamp, 'report': report}))
         print(f'Online playlist: {len(report["tracks"])} race tracks at the same weight'
               + (f', added {", ".join(report["added"])}' if report['added'] else ''))

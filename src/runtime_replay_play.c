@@ -13,6 +13,11 @@
  * (runtime_replay_play_file), run on the game's thread by the pad read hook (runtime_replay_play_tick). */
 #include "runtime_replay.h"
 #include "runtime_replay_internal.h"
+uint64_t runtime_stutter_clock_us(void);               /* runtime_online_mode.c */
+void runtime_stutter_note(const char *what, uint64_t us);
+void runtime_stutter_frame(const char *where);
+#define STUTTER_TIMED(name, call) do { const uint64_t t0_ = runtime_stutter_clock_us(); call; \
+    runtime_stutter_note(name, runtime_stutter_clock_us() - t0_); } while (0)
 #include "runtime_replay_list.h"
 #include "runtime_net_ping.h"
 #include "runtime.h"
@@ -848,6 +853,94 @@ static void unghost(float dt) {
 
 enum { S_UP = 0, S_DOWN = 1, S_LEFT = 2, S_RIGHT = 3, S_SQUARE = 5, S_TRIANGLE = 6, S_L1 = 8, S_L2 = 9, S_R1 = 10, S_R2 = 11 };
 
+/* Elimination mode's spectator (runtime_elimination.c): the race camera on `kart` (an entity, as CRacer +0x20),
+ * as follow() does for a replay. Returns the local controller's presses since the last call: +1 for d-pad right,
+ * -1 for d-pad left, 0 none (R2/L2 stay the game's: R2 looks back). */
+int runtime_replay_spectate(void *kart) {
+    static void *camera_seen, *target_seen;
+    static uint64_t buttons;
+    int step = 0;
+    void *ctrl = local_controller(NULL);
+    if (ctrl) {
+        const uint64_t now = RR_AT(ctrl, 0xe8, uint64_t), pressed = now & ~buttons;
+        buttons = now;
+#define SPECTATE_PRESSED(s) (bit_of(ctrl, s) >= 0 && (pressed >> bit_of(ctrl, s) & 1))
+        if (SPECTATE_PRESSED(S_RIGHT)) step = 1;
+        else if (SPECTATE_PRESSED(S_LEFT)) step = -1;
+#undef SPECTATE_PRESSED
+    }
+    if (!kart || !game.camera_instance || !game.active_camera || !game.make_handle || !game.camera_refresh) return step;
+    void *instance = game.camera_instance();
+    void *boxes = instance ? RR_AT(instance, 0x58, void *) : 0;
+    void *camera = boxes ? game.active_camera(boxes) : 0;
+    void *meta = rr_ptr(D_KART_CAMERA_META);
+    if (!camera || !meta || (*(meta_of_fn ***)camera)[0](camera) != meta) return step;
+    if (camera == camera_seen && kart == target_seen) return step;
+    game.make_handle((char *)camera + 0x278, kart);
+    game.camera_refresh(camera);
+    RR_AT(camera, 0x11d, uint8_t) = 1;
+    camera_seen = camera;
+    target_seen = kart;
+    return step;
+}
+
+/* Elimination mode's spectator, L3: a wide view of the racer watched. The kart camera (CKartCamera, meta
+ * D_KART_CAMERA_META) keeps its distances in CKartCameraSettings objects (+0x258 _nearSettings, +0x260 _farSettings,
+ * +0x268 _reverseSettings, +0x270 _reverseFarSettings); each has _positionOffsetFromPlayer at +0x1c (two floats:
+ * how far behind and how high). The wide view scales those offsets (and puts them back, unless the level changed
+ * and the camera with them). 1 = on. */
+#define WIDE_SCALE 2.6f
+static struct { void *camera; void *settings[4]; float offset[4][2]; int on; } wide;
+
+static void *settings_object(void *camera, size_t off) {
+    void *p = RR_AT(camera, off, void *);
+    if (!p || (uintptr_t)p < 0x10000 || ((uintptr_t)p & 7)) return 0;
+    const uintptr_t vtable = (uintptr_t)RR_AT(p, 0, void *), lo = (uintptr_t)rr_game(0x2400000), hi = (uintptr_t)rr_game(0x2c00000);
+    if (vtable >= lo && vtable < hi) return p;          /* an object */
+    return rr_handle_object(&RR_AT(camera, off, void *));   /* else a handle */
+}
+
+static void *kart_camera_now(void) {
+    if (!game.camera_instance || !game.active_camera) return 0;
+    void *instance = game.camera_instance();
+    void *boxes = instance ? RR_AT(instance, 0x58, void *) : 0;
+    void *camera = boxes ? game.active_camera(boxes) : 0;
+    void *meta = rr_ptr(D_KART_CAMERA_META);
+    return camera && meta && (*(meta_of_fn ***)camera)[0](camera) == meta ? camera : 0;
+}
+
+/* The kart camera the wide view is on, 0 none (runtime_elimination.c turns it around the racer). */
+void *runtime_replay_wide_camera(void) { return wide.on ? wide.camera : 0; }
+
+int runtime_replay_spectate_wide(int on) {
+    void *camera = kart_camera_now();
+    if (wide.on && (!on || camera != wide.camera)) {     /* back to the game's own offsets */
+        int same = camera == wide.camera;
+        for (int i = 0; same && i < 4; i++) same = settings_object(camera, 0x258 + 8 * i) == wide.settings[i];
+        for (int i = 0; same && i < 4; i++)
+            if (wide.settings[i]) memcpy((char *)wide.settings[i] + 0x1c, wide.offset[i], 8);
+        printf("Elimination: wide view off%s\n", same ? "" : " (the camera changed: nothing to put back)");
+        memset(&wide, 0, sizeof wide);
+    }
+    if (!on || wide.on || !camera) return wide.on;
+    wide.camera = camera;
+    for (int i = 0; i < 4; i++) {
+        float *offset = 0;
+        void *s = wide.settings[i] = settings_object(camera, 0x258 + 8 * i);
+        for (int k = 0; s && k < i; k++)
+            if (wide.settings[k] == s) s = wide.settings[i] = 0;   /* one object in two slots: scaled once */
+        if (!s) continue;
+        offset = (float *)((char *)s + 0x1c);
+        memcpy(wide.offset[i], offset, 8);
+        printf("Elimination: wide view, camera settings %d at %p: offset %.2f %.2f -> %.2f %.2f\n", i, s, offset[0],
+               offset[1], offset[0] * WIDE_SCALE, offset[1] * WIDE_SCALE);
+        offset[0] *= WIDE_SCALE;
+        offset[1] *= WIDE_SCALE;
+    }
+    wide.on = 1;
+    return 1;
+}
+
 /* The local controller's button for a game signal (S_R1 = 10 ...) pressed since the last call for that signal. */
 int runtime_replay_signal_pressed(int signal) {
     static uint64_t seen[64];
@@ -1004,7 +1097,16 @@ static void camera_triggers(void) {
  * freed memory (runtime_replay.c's item stubs), crates give nothing, the HUD's lap is ours. */
 int ABI runtime_replay_on(void) { return P.pending == 2; }
 int ABI runtime_replay_crate(void) { return P.pending != 2; }
-int ABI runtime_replay_hud_lap(void) { return P.pending != 2 || !P.started || P.setting_lap; }
+/* 0xe63f20 (hud, lap): the gate stub calls this with the game's own arguments still in rdi/rsi */
+int ABI runtime_replay_hud_lap(unsigned char *hud, int lap) {
+    (void)lap;
+    runtime_elimination_hud_lap(hud);
+    return P.pending != 2 || !P.started || P.setting_lap;
+}
+
+/* Elimination mode's spectator (runtime_elimination.c): the track shows what the camera's place needs, as in a
+ * replay. */
+void runtime_replay_camera_triggers(void) { camera_triggers(); }
 
 /* ---- the race HUD shows the watched racer ---- */
 static void *asset_of(void *placeable) { return rr_handle_object(&RR_AT(placeable, 0x38, void *)); }
@@ -1218,6 +1320,170 @@ static void show_pad(void *project, void *root) {
     for (int i = 0; i < PAD_COUNT; i++)
         if (((pieces ^ P.pad_shown) >> i & 1) || P.pad_shown == (uint32_t)-1) show_button(i, pieces >> i & 1);
     P.pad_shown = pieces;
+}
+
+/* ---- elimination mode (runtime_elimination.c): the local player's race HUD ---- */
+/* The local player's race HUD component, 0 none. */
+static void *local_hud_component(void) {
+    int id = -1;
+    local_controller(&id);
+    char *karts = rr_ptr(RR_D_KART_MANAGER);
+    void *kart = id >= 0 && karts && game.player_kart ? game.player_kart(karts, id, 1) : 0;
+    void *meta = rr_ptr(D_HUD_META);
+    void *component = kart && meta ? rr_find_component(kart, meta) : 0;
+    return component && RR_AT(component, 0x80, uint8_t) ? component : 0;   /* _isInitialized */
+}
+
+/* The local player's race HUD root (Octane_Racer_HUD), 0 none; its project in *project_out. */
+static void *local_hud_root_of(void **project_out) {
+    void *component = local_hud_component();
+    void *project = component ? rr_handle_object(&RR_AT(component, 0x38, void *)) : 0;
+    if (project_out) *project_out = project;
+    return project && RR_AT(project, 0x10, void *) ? content(RR_AT(project, 0x10, void *)) : 0;
+}
+
+static void *local_hud_root(void) { return local_hud_root_of(0); }
+
+/* Elimination mode's spectator: the race HUD shows `racer` (its item, speed...), as the replay player does (+0x28),
+ * and its race position and lap: the HUD's script keeps the local player's own place and lap in those texts, so
+ * [PositionNumber] / [PositionText] are written every frame from the racer (CRacer +0x58 _racePosition), and the lap
+ * counter is set through the HUD's own lap call (0xe63f20) from CRacer +0x4c _currentLap when it changes. */
+void runtime_replay_hud_racer(void *racer) {
+    static void *root_seen, *place, *suffix, *racer_seen;
+    static int lap_shown;
+    void *component = local_hud_component();
+    if (!component || !racer || !game.make_handle) return;
+    if (rr_handle_object(&RR_AT(component, 0x28, void *)) != racer) game.make_handle(&RR_AT(component, 0x28, void *), racer);
+    void *root = local_hud_root();
+    if (!root) return;
+    if (root != root_seen) {
+        root_seen = root;
+        place = find(root, "[PositionNumber]", 0);
+        suffix = find(root, "[PositionText]", 0);
+        lap_shown = 0;
+    }
+    const int rank = RR_AT(racer, 0x58, int32_t), lap = RR_AT(racer, 0x4c, int32_t);
+    char number[16];
+    snprintf(number, sizeof number, "%d", rank);
+    if (rank >= 1 && rank <= 8) {
+        show_text(place, number);
+        show_text(suffix, runtime_text(rank == 1 ? "ST" : rank == 2 ? "ND" : rank == 3 ? "RD" : "TH"));
+    }
+    if (racer != racer_seen) racer_seen = racer, lap_shown = 0;
+    if (lap >= 1 && lap < 100 && lap != lap_shown && game.hud_set_lap) {
+        lap_shown = lap;
+        game.hud_set_lap(component, lap);
+    }
+}
+
+/* Elimination mode: a big text near the top of the screen (a copy of the HUD's "[LapCounterText]", as the
+ * replay's lines are); 0 hides it. */
+void runtime_replay_banner(const char *text) {
+    static void *piece, *root_seen;
+    static char shown[96];
+    void *project = 0;
+    void *root = local_hud_root_of(&project);
+    if (!root || !project) return;
+    if (root != root_seen) {
+        root_seen = root;
+        shown[0] = 0;
+        void *template = find(root, "[LapCounterText]", 0);
+        void *source = template ? RR_AT(template, 0x18, void *) : 0;
+        piece = template ? game.spawn_placeable(project, source ? source : template, root) : 0;
+        if (piece) {
+            RR_AT(piece, 0xa0, int32_t) = RR_AT(piece, 0xa4, int32_t) = 0;
+            float pivot[3], position[3], scale[3];
+            v3(pivot, 0.5f, 0.5f, 0.5f);
+            v3(position, 960.0f, 300.0f, 0.0f);
+            v3(scale, 1.6f, 1.6f, 1.0f);
+            game.set_pivot(piece, pivot);
+            game.set_position(piece, position);
+            game.set_scale(piece, scale);
+            RR_AT(piece, 0x90, float) *= 8.0f;               /* a wide box: one long line */
+            game.set_opacity(piece, 1.0f);
+            game.set_hidden(piece, 1);
+        }
+    }
+    if (!piece) return;
+    if (!text || !*text) {
+        if (shown[0]) game.set_hidden(piece, 1);
+        shown[0] = 0;
+        return;
+    }
+    game.set_hidden(piece, 0);   /* every frame: nothing else hides it */
+    if (!strcmp(shown, text)) return;
+    snprintf(shown, sizeof shown, "%s", text);
+    game.set_text(piece, shown);
+}
+
+/* A text placeable's text (+0x30), "" when it has none that reads as one. */
+static const char *elim_text_of(void *piece) {
+    const char *text = piece ? RR_AT(piece, 0x30, const char *) : 0;
+    if (!text || (uintptr_t)text < 0x10000 || ((uintptr_t)text & 7)) return "";
+    for (int i = 0; i < 8; i++) if (!text[i]) return text;
+    return "";
+}
+
+/* Elimination mode: the lap counter without its total. "[TotalLap]" gets no text (runtime_elimination.c) and the
+ * "/" before it, a sibling text, is hidden; the HUD's script shows pieces again, so this runs every frame. */
+void runtime_replay_hide_lap_total(int hide) {
+    static void *root_seen, *slash, *total;
+    static int shown = -1, told;
+    void *root = local_hud_root();
+    if (!root) return;
+    if (root != root_seen) {
+        root_seen = root;
+        shown = -1;
+        slash = 0;
+        total = find(root, "[TotalLap]", 0);
+        void *parent = total ? RR_AT(total, 0x40, void *) : 0;
+        void *children = parent ? RR_AT(parent, 0x48, void *) : 0;
+        for (int i = 0; i < rr_count(children); i++) {
+            void *child = rr_item(children, i);
+            if (!child || child == total) continue;
+            const char *text = elim_text_of(child);
+            if (!told) {
+                const char *name = RR_AT(child, 0x28, const char *);
+                printf("Elimination HUD: lap counter piece \"%s\" text \"%s\"\n",
+                       name && (uintptr_t)name >= 0x10000 ? name : "?", text);
+            }
+            if (!strcmp(text, "/") || !strcmp(text, " /") || !strcmp(text, "/ ")) slash = child;
+        }
+        if (!told) printf("Elimination HUD: [TotalLap] %s, its \"/\" %s\n", total ? "found" : "not found",
+                          slash ? "found" : "not found");
+        told = 1;
+    }
+    if (!slash) return;
+    if (hide) game.set_hidden(slash, 1);   /* every frame: the script shows it again */
+    else if (shown == 1) game.set_hidden(slash, 0);
+    shown = hide;
+}
+
+/* Elimination mode (runtime_elimination.c): the local player's race timer ([Timer] in Octane_Racer_HUD) red or in its
+ * own colour. A placeable's colour is four floats at +0xc0 (0..1), +0xd bit 0x10 = draw again (0x269460). */
+void runtime_replay_timer_warning(int red) {
+    static void *piece, *root_seen;
+    static float original[4];
+    static int saved, shown = -1;
+    void *root = local_hud_root();
+    if (!root) return;
+    if (root != root_seen) {   /* another race's HUD */
+        root_seen = root;
+        piece = find(root, "[Timer]", 0);
+        saved = 0;
+        shown = -1;
+    }
+    if (!piece) return;
+    if (!saved) {
+        memcpy(original, (char *)piece + 0xc0, sizeof original);
+        saved = 1;
+    }
+    if (red == shown) return;
+    shown = red;
+    float colour[4] = {1.0f, 0.12f, 0.08f, original[3]};
+    if (!red) memcpy(colour, original, sizeof colour);
+    memcpy((char *)piece + 0xc0, colour, sizeof colour);
+    RR_AT(piece, 0xd, uint8_t) |= 0x10;
 }
 
 static void hud(void) {
@@ -2497,6 +2763,36 @@ static void departed_look(int racing_now, float seconds) {
     memcpy(departed_blink_karts,next,sizeof next);
 }
 
+/* Elimination mode: a kart out blinks (kart, driver and its four wheels, 0.4 s shown / 0.4 s hidden), as Ryu's
+ * departed players do; shown again when it no longer is one. CKartCustomizationComponent (meta 0x2ac49b8)
+ * +0xf0.. the wheels' entities (entity_visible, above). */
+
+static void *out_blink_karts[8];
+static void out_look(int racing_now, float seconds) {
+    void *next[8] = {0};
+    int used = 0;
+    void *manager = rr_ptr(RR_D_RACER_MANAGER);
+    void *list = manager ? RR_AT(manager, 0x10, void *) : NULL;
+    const int count = rr_count(list);
+    for (int i = 0; count <= 8 && i < count; ++i) {
+        void *racer = rr_item(list, i);
+        void *kart = racer ? rr_handle_object(&RR_AT(racer, 0x20, void *)) : NULL;
+        if (!kart) continue;
+        const int out = racing_now && !runtime_replay_playing() && runtime_elimination_ghost_kart(kart);
+        int was = 0;
+        for (int j = 0; j < 8; ++j) was |= out_blink_karts[j] == kart;
+        if (!out && !was) continue;
+        const int visible = !out || !isfinite(seconds) || seconds < 0 || fmodf(seconds, .8f) < .4f;
+        entity_visible(kart, visible);
+        void *part = rr_component(kart, 0x2ac44e0);
+        entity_visible(part ? rr_handle_object(&RR_AT(part, 0x30, void *)) : NULL, visible);
+        void *custom = rr_component(kart, 0x2ac49b8);
+        for (int wheel = 0; custom && wheel < 4; ++wheel) entity_visible(RR_AT(custom, 0xf0 + 8 * wheel, void *), visible);
+        if (out && used < 8) next[used++] = kart;
+    }
+    memcpy(out_blink_karts, next, sizeof next);
+}
+
 static int racing;                              /* the last frame: a kart and a race clock */
 int runtime_replay_race_active(void) {
     return __atomic_load_n(&racing, __ATOMIC_RELAXED) && !runtime_replay_playing();
@@ -2511,15 +2807,16 @@ void ABI runtime_replay_tick(void) {
     left_level();
     skip_intro();
     __atomic_store_n(&racing, rr_kart_of(0, 0) && race_timer(), __ATOMIC_RELAXED);
-    runtime_online_mode_note_frame();
-    runtime_presence_tick();
-    invisible_look(racing);
-    departed_look(racing,rr_race_clock());
-    runtime_item_lead_tick(racing && !runtime_replay_playing());
-    runtime_tips_tick();
-    runtime_nsane_tick();
-    runtime_reserves_bar_tick();
-    apply_look();                               /* every frame, loads too: the map start reads them */
+    runtime_stutter_frame(racing ? "in a race" : "in the menus or a lobby");   /* runtime_online_mode.c */
+    STUTTER_TIMED("online menus and rooms", runtime_online_mode_note_frame());
+    STUTTER_TIMED("Discord presence", runtime_presence_tick());
+    STUTTER_TIMED("elimination", runtime_elimination_tick());
+    STUTTER_TIMED("kart looks", (invisible_look(racing), departed_look(racing,rr_race_clock()), out_look(racing, rr_race_clock())));
+    STUTTER_TIMED("item lead", runtime_item_lead_tick(racing && !runtime_replay_playing()));
+    STUTTER_TIMED("loading tips", runtime_tips_tick());
+    STUTTER_TIMED("N.Sane", runtime_nsane_tick());
+    STUTTER_TIMED("reserves bar", runtime_reserves_bar_tick());
+    STUTTER_TIMED("apply looks", apply_look());   /* every frame, loads too: the map start reads them */
     char *frame = rr_ptr(RR_D_FRAME);
     const int number = frame ? RR_AT(frame, 0x20, int32_t) : 0;
     if (number == P.last_frame) return;

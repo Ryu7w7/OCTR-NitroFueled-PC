@@ -176,6 +176,12 @@ int runtime_ranked_selected(void);
 /* -1 checking, 0 closed/unavailable, 1 open; fresh rechecks before entry. */
 int runtime_ranked_status(int fresh);
 int runtime_ranked_account(void); /* 1 may enter Ranked, 0 must link Discord or Steam first, -1 not known yet */
+/* A ban from Ranked only (the server's ranked_bans.go): 1 banned, its reason and seconds left (0 permanent) */
+int runtime_ranked_ban(char *reason, size_t size, long *left_seconds);
+/* The Ranked screen's rules notice from the server (runtime_ranked.c): its rules (count), 0 none to show, -1 no
+ * answer yet (the built-in notice). kinds: 0 not allowed, 1 penalty, 2 allowed; texts of 1280 bytes. */
+int runtime_ranked_rules(char *title, size_t title_size, char *subtitle, size_t subtitle_size, int *kinds,
+                         char (*texts)[1280], int max);
 void runtime_ranked_gate_update(void *root, int ranked);
 /* The confirmed ranked room and its queue (0 Normal, 1 Itemless), 0 not ranked. */
 int runtime_ranked_session(uint64_t *room, int *mode);
@@ -226,6 +232,22 @@ int runtime_speed_race_active(void);
 void runtime_race_options_leave_room(void);
 void runtime_race_options_map_loading(const char *map);
 int runtime_race_options_start(unsigned char *image, size_t size);
+int runtime_elimination_start(unsigned char *image, size_t size); /* runtime_elimination.c (private rooms' ELIMINATION mode) */
+void runtime_elimination_mode_set(int enabled);
+int runtime_elimination_ghost_kart(void *entity);   /* a kart out of the race: no collisions, it blinks (any thread) */
+int runtime_elimination_mode_enabled(void);
+int runtime_elimination_available(void);    /* its hooks are in: the selector offers it */
+int runtime_online_mode_private_elimination(void);   /* runtime_online_mode.c: this player's own pick */
+int runtime_online_racer_id(void *racer);            /* the host's id of a racer, -1 unknown */
+int runtime_online_private_single_race(void);        /* a private room's single race is on */
+/* runtime_net.c: the host's list of racers out, in a RYUPN1 packet (kind 6) next to the game's packets */
+size_t runtime_elimination_net_send(const char *peer, uint8_t *out, uint64_t now);
+int runtime_elimination_net_receive(const char *peer, const uint8_t *in, size_t len, uint64_t now);
+void runtime_elimination_tick(void);                             /* the game's thread, every frame */
+void runtime_elimination_map_loading(const char *map);
+int runtime_elimination_holds_race(void *rules); /* 0xf34430 (runtime_online_mode.c): 1 = the race goes on */
+void runtime_elimination_hud_lap(unsigned char *hud); /* 0xe63f20 (runtime_replay_play.c) */
+int runtime_elimination_blocks_item(void *controller); /* 0xf0b070 (runtime_replay.c): 1 = refuse */
 int runtime_profile_item_guard_start(unsigned char *image, size_t size); /* runtime_profile_guard.c */
 void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
 int runtime_itemless_start(unsigned char *image, size_t size);
@@ -279,6 +301,8 @@ void runtime_pad_report(void);
  * 2..4 take the gamepad named in bbport.ini (port.N=<GUID or part of the name>, written by the
  * in-game menu) and appear to the game as logged-in users 2..4 while that gamepad is connected. */
 int runtime_pad_user_present(int user);
+uint32_t runtime_pad_host_buttons(void);   /* runtime_pad.c: the first port's BTN_* bits at its last read */
+uint32_t runtime_pad_host_right_stick(void);   /* runtime_pad.c: right stick x | y << 8 (128 centred) */
 void runtime_services_user_change(int user, int login);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);

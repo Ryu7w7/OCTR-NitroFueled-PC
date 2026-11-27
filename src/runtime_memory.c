@@ -121,6 +121,10 @@ static void add_region(uint64_t phys, uint64_t size) {
     ++region_count;
 }
 #endif
+/* Counts every change of the guest's mappings (a range unmapped, mapped over or given new protection), before
+ * it is made: a cache of readable regions (runtime_hero_guard.c, the type name hash) is good while it stays. */
+volatile unsigned runtime_memory_changes;
+#define MEMORY_CHANGED() __atomic_add_fetch(&runtime_memory_changes, 1, __ATOMIC_SEQ_CST)
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
 /* GPU hooks (bbgpu): notified outside the lock, in order, after each operation. */
@@ -298,6 +302,7 @@ static int host_commit(uint64_t phys, uint64_t size) {
     return -1;
 }
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    MEMORY_CHANGED();
     if (!reserved && host_commit(phys,size)) return -1; /* before carving: the old mapping stays */
     size_t i=carve_host(address,address+size);
     if (reserved) return 0;
@@ -305,9 +310,10 @@ static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, ui
     view_map(&regions[i],win_prot(prot));
     return 0;
 }
-static int host_unmap(uintptr_t address, uint64_t size) { carve_host(address,address+size); return 0; }
+static int host_unmap(uintptr_t address, uint64_t size) { MEMORY_CHANGED(); carve_host(address,address+size); return 0; }
 static int host_protect(uintptr_t address, uint64_t size, int prot) {
     DWORD protect=win_prot(prot), old;
+    if (protect==PAGE_NOACCESS || protect==PAGE_EXECUTE) MEMORY_CHANGED();   /* the GPU's write tracking keeps pages readable */
     uintptr_t end=address+size;
     for (size_t i=region_index(address); i<region_count && regions[i].start<end; ++i) {
         if (!regions[i].mapped) continue;
@@ -449,13 +455,14 @@ static void zero_phys(uint64_t phys, uint64_t size) {
 }
 void runtime_memory_reserve(void) {}
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    MEMORY_CHANGED();
     void *mapped = !reserved
         ? map_phys(address,size,prot,phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
-static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
-static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
+static int host_unmap(uintptr_t address, uint64_t size) { MEMORY_CHANGED(); return munmap((void *)address,size); }
+static int host_protect(uintptr_t address, uint64_t size, int prot) { if (!(prot & PROT_READ)) MEMORY_CHANGED(); return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) { zero_phys(phys,size); }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {

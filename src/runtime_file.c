@@ -166,22 +166,7 @@ void runtime_file_configure(const char *app0,const char *user) {
     }
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
-/* The Options menu's Graphics tab and the main menu's Quit Game (PR #117): their relabelled menu
- * files are an extra archive, archives/update3.pak (scripts/graphics_tab.py, path in
- * BB_GRAPHICS_TAB_ARCHIVE), which the game loads after update2.pak. Served here instead of a copy
- * of the game folder, and only when the engine hooks are in (gpu/shim/bbport_graphics_tab.cpp
- * sets the flag) and the game has no update3.pak of its own. */
 int runtime_graphics_tab_ready;
-static void graphics_tab_archive(const char *guest,char *out,size_t size) {
-    if (!__atomic_load_n(&runtime_graphics_tab_ready,__ATOMIC_ACQUIRE) ||
-        strcasecmp(guest,"/app0/archives/update3.pak")) return;
-    const char *archive=getenv("BB_GRAPHICS_TAB_ARCHIVE");
-    struct stat s;
-    if (!archive || !*archive || !stat(out,&s) || stat(archive,&s)) return;
-    if ((size_t)snprintf(out,size,"%s",archive)>=size) return;
-    static int logged;
-    if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) printf("Runtime: Graphics tab menus from %s\n",archive);
-}
 #ifdef _WIN32
 /* A host path of MAX_PATH or more is not found by the CRT's open/stat (ENOENT), unless it is in
  * extended-length form: \\?\C:\... with backslashes only (v0.8.5). The files the Online menus
@@ -212,13 +197,55 @@ static int long_host_path(char *path,size_t size) {
     return e;
 }
 #endif
-static int translate(const char *guest,char *out,size_t size) {
-    if (!guest || !*guest) return ENOENT;
-    char buffer[1024];
-    if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
-    else snprintf(buffer,sizeof(buffer),"%s",guest);
-    for (const char *p=buffer;(p=strstr(p,".."));p+=2)
-        if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
+/* ---- The port's new tracks: the same for every player, whatever mods are on (26/11) ----
+ * Online, every player must have them: a mod that dropped one would break the races that use it. Their
+ * files (scripts/track_content.py: each package's level archive and preview; BB_CONTENT_FILES from run.py,
+ * "archives/t929_....pak=<host file>|...") are served before any mod's file of the same name. */
+typedef struct { char *guest, *host; } ContentFile;
+static ContentFile *content_files;
+static int content_file_count, content_files_missing;
+static pthread_once_t content_files_once=PTHREAD_ONCE_INIT;
+static void load_content_files(void) {
+    const char *list=getenv("BB_CONTENT_FILES");
+    if (!list || !*list) return;
+    int cap=1;
+    for (const char *p=list;*p;++p) cap+=*p=='|';
+    char *copy=strdup(list), *save=NULL;
+    content_files=calloc((size_t)cap,sizeof(*content_files));
+    if (!copy || !content_files) { free(copy); return; }
+    for (char *item=strtok_r(copy,"|",&save); item && content_file_count<cap; item=strtok_r(NULL,"|",&save)) {
+        char *eq=strchr(item,'=');
+        if (!eq || eq==item || !eq[1]) continue;
+        *eq=0;
+        if (!mod_safe_relative(item)) continue;
+        HostStat st;
+        if (host_stat(eq+1,&st) || !S_ISREG(st.st_mode)) {
+            ++content_files_missing;
+            printf("Content: %s is missing (%s)\n",item,eq+1);
+            continue;
+        }
+        ContentFile *f=&content_files[content_file_count];
+        f->guest=strdup(item); f->host=strdup(eq+1);
+        if (f->guest && f->host) ++content_file_count;
+    }
+    free(copy);
+    if (content_file_count) printf("Content: %d file(s) of the port's tracks, served before any mod's\n",content_file_count);
+}
+/* 1: out is the track's file; 0: not one of them; -(errno) */
+static int content_file(const char *guest,char *out,size_t size) {
+    const char *relative=mod_relative(guest);
+    if (!relative) return 0;
+    pthread_once(&content_files_once,load_content_files);
+    for (int i=0;i<content_file_count;++i)
+        if (!strcasecmp(relative,content_files[i].guest)) {
+            if ((size_t)snprintf(out,size,"%s",content_files[i].host)>=size) return -ENAMETOOLONG;
+            return 1;
+        }
+    return 0;
+}
+
+/* A guest path (absolute, "..": checked) to its host file: the mounts, the tracks' files, the mods' files. */
+static int translate_base(const char *buffer,char *out,size_t size) {
     pthread_mutex_lock(&lock);
     size_t best=0; const Mount *m=NULL;
     for (size_t i=0;i<mount_count;++i) {
@@ -230,9 +257,76 @@ static int translate(const char *guest,char *out,size_t size) {
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
     if (!result) {
-        int redirected=mod_file_translate(buffer,out,size);
-        if (redirected<0) result=-redirected;
+        int own=content_file(buffer,out,size);
+        if (own<0) result=-own;
+        else if (!own) {
+            int redirected=mod_file_translate(buffer,out,size);
+            if (redirected<0) result=-redirected;
+        }
     }
+    return result;
+}
+
+/* The Options menu's Graphics tab, the main menu's Quit Game (PR #117) and the new tracks' lists: an
+ * extra archive (scripts/graphics_tab.py, path in BB_GRAPHICS_TAB_ARCHIVE) served after the game's
+ * update archives, only when the engine hooks are in (gpu/shim/bbport_graphics_tab.cpp sets the flag).
+ * The game loads update.pak, update2.pak, ... until one is missing: the port's archive is that first
+ * missing number, found here from what the game will see (26/11: a mod session's update3.pak was missed
+ * by the script, the port's archive was given the same number, and the game never loaded it: no Neo
+ * Bowser City online). BB_GRAPHICS_TAB_SLOT is the number the script chose, for the log. */
+static int port_archive_slot, port_archive_served;
+static pthread_once_t port_archive_once=PTHREAD_ONCE_INIT;
+static void find_port_archive_slot(void) {
+    for (int n=3;n<20;++n) {
+        char guest[64], out[1024];
+        HostStat st;
+        snprintf(guest,sizeof(guest),"/app0/archives/update%d.pak",n);
+        if (translate_base(guest,out,sizeof(out))) return;
+#ifdef _WIN32
+        if (long_host_path(out,sizeof(out))) return;
+#endif
+        if (host_stat(out,&st)) { port_archive_slot=n; break; }
+    }
+    const char *slot=getenv("BB_GRAPHICS_TAB_SLOT");
+    int wanted=slot && !strncasecmp(slot,"update",6) ? atoi(slot+6) : 3;
+    if (port_archive_slot && port_archive_slot!=wanted)
+        printf("Runtime: the port's archive (new tracks, Graphics tab) goes as update%d.pak, not update%d.pak: "
+               "the update archives before it are a mod's\n",port_archive_slot,wanted);
+}
+static void graphics_tab_archive(const char *guest,char *out,size_t size) {
+    if (!__atomic_load_n(&runtime_graphics_tab_ready,__ATOMIC_ACQUIRE) ||
+        strncasecmp(guest,"/app0/archives/update",21)) return;
+    const char *archive=getenv("BB_GRAPHICS_TAB_ARCHIVE");
+    struct stat s;
+    if (!archive || !*archive || stat(archive,&s)) return;
+    pthread_once(&port_archive_once,find_port_archive_slot);
+    char name[32];
+    snprintf(name,sizeof(name),"update%d.pak",port_archive_slot);
+    if (!port_archive_slot || strcasecmp(guest+15,name)) return;
+    if ((size_t)snprintf(out,size,"%s",archive)>=size) return;
+    if (!__atomic_exchange_n(&port_archive_served,1,__ATOMIC_ACQ_REL))
+        printf("Runtime: Graphics tab menus and the new tracks' lists from %s (archives/%s)\n",archive,name);
+}
+
+/* Whether the port's tracks are in this game as in everyone else's (BB_CONTENT_REQUIRED=1 from run.py when
+ * track packages are installed): each file there and the archive with their lists served. Without them
+ * the game is "modified" online (runtime_online_content: public matchmaking and Ranked refused). */
+int runtime_port_content_ok(void) {
+    const char *required=getenv("BB_CONTENT_REQUIRED");
+    if (!required || required[0]!='1') return 1;
+    pthread_once(&content_files_once,load_content_files);
+    return content_file_count>0 && !content_files_missing &&
+           __atomic_load_n(&port_archive_served,__ATOMIC_ACQUIRE);
+}
+
+static int translate(const char *guest,char *out,size_t size) {
+    if (!guest || !*guest) return ENOENT;
+    char buffer[1024];
+    if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
+    else snprintf(buffer,sizeof(buffer),"%s",guest);
+    for (const char *p=buffer;(p=strstr(p,".."));p+=2)
+        if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
+    int result=translate_base(buffer,out,size);
     if (!result) graphics_tab_archive(buffer,out,size);
 #ifdef _WIN32
     if (!result) result=long_host_path(out,size);
@@ -897,12 +991,12 @@ static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t si
         if (lo<hi) {
             if (r->data) memcpy((char *)buffer+(lo-off),r->data+(lo-r->offset),hi-lo);
             else if (!read_exact(p->fd,(char *)buffer+(lo-off),hi-lo,r->file_at+(lo-r->offset))) return -EIO;
-            /* The log says once that the game read each range (the patch is in use). */
-            static unsigned char seen[MAX_ARCHIVE_PATCHES*2][64];
+            /* The log says once that the game read the patch's ranges (the patch is in use). */
+            static unsigned char seen[MAX_ARCHIVE_PATCHES*3];
             const int k=p->slot;
-            if (k>=0 && k<MAX_ARCHIVE_PATCHES*2 && i<64 && !seen[k][i]) {
-                seen[k][i]=1;
-                printf("Runtime: archive patch %s: the game read range %d (%u bytes at %llu)\n",p->guest,i,r->length,(unsigned long long)r->offset);
+            if (k>=0 && k<MAX_ARCHIVE_PATCHES*3 && !seen[k]) {
+                seen[k]=1;
+                printf("Runtime: archive patch %s in use (the game read its range %d, %u bytes at %llu)\n",p->guest,i,r->length,(unsigned long long)r->offset);
             }
         }
     }
@@ -975,7 +1069,19 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
-    if (fd==1 || fd==2) runtime_load_guard_note(buffer,(size_t)size);
+    if (fd==1 || fd==2) {
+        runtime_load_guard_note(buffer,(size_t)size);
+        /* "NOTICE: *** 102bfe0018 [40 bytes] still allocated": one line per block a level leaves behind when its
+         * memory is given back (Neo Bowser City: ~1100 each time). The game's summary line before them stays
+         * ("WARNING: *** GlobalChunk [76]: 1116 block(s) [...] still allocated."); these are left out. */
+        static const char leftover[]="NOTICE: *** ";
+        if (size>=sizeof(leftover)+16 && size<128 && !memcmp(buffer,leftover,sizeof(leftover)-1)) {
+            char line[128];
+            memcpy(line,buffer,(size_t)size);
+            line[size]=0;
+            if (strstr(line,"] still allocated")) return (int64_t)size;
+        }
+    }
     FD_IO_LOCK(h);
     ssize_t n=host_write(h,buffer,size);
     const int write_errno=errno;

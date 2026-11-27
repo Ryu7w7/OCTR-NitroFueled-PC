@@ -74,6 +74,31 @@ class OnlineContentTests(unittest.TestCase):
         # a systemData with no game copy to compare with is not taken on trust
         self.assertTrue(oc.entry_reasons('looseData/systemData.igz', b'x', game))
 
+    def test_a_character_archive_inside_update_pak(self):
+        """Mod packages replace a racer's archives/DriverX.pak, an entry of update.pak, whole (Hatsune
+        Megumi, the Motorsport skins): checked entry by entry, not refused for being an archive."""
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import graphics_tab
+
+        class Template:
+            flags = 0
+
+        def pak(files):
+            with tempfile.TemporaryDirectory() as d:
+                dest = Path(d) / 'x.pak'
+                graphics_tab.write_archive(dest, [(p, p, 0, data) for p, data in files], Template)
+                return dest.read_bytes()
+
+        game = _Game({'vsc/common/common_driver_vo_component.igz': b'script'})
+        skin = pak([('textures/Megumi_Hair`tga,111.igz', b'turquoise'), ('outfits/megumi.igz', b'outfit'),
+                    ('vsc/common/common_driver_vo_component.igz', b'script')])
+        self.assertEqual(oc.entry_reasons('archives/DriverMegumi.pak', skin, game), [])
+        cheat = pak([('textures/Megumi_Hair`tga,111.igz', b'turquoise'),
+                     ('vsc/common/common_driver_vo_component.igz', b'changed script')])
+        reasons = oc.entry_reasons('archives/DriverMegumi.pak', cheat, game)
+        self.assertTrue(reasons and 'common_driver_vo_component' in reasons[0], reasons)
+        self.assertTrue(oc.entry_reasons('archives/DriverMegumi.pak', b'not an archive', game))
+
     def test_the_ports_own_files_are_not_mods(self):
         """online_mode.py's menus reach the game through the same file map as mods, from out/"""
         with tempfile.TemporaryDirectory() as d:

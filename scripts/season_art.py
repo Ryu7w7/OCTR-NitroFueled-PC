@@ -14,7 +14,8 @@ and so does the customization background in the title's level (the garage keeps 
 and the icons become the trees of Gingerbread Joyride (its race select pattern,
 octane_ui_raceselect_bg_pattern_luminous in update2.pak, of the same size and format), as the game's
 start screen looked in December 2019. The logo stays the game's own. The gradient is the menus' own
-background too, so they take the colours as well.
+background too, so they take the colours as well. The title's music (the menus' too) becomes the adventure
+map's Glacier Park loop (see TITLE_MUSIC).
 
 The textures are the player's own, changed when the game starts: archive patches carry them (the
 archives stay as they are), made once and kept while the archives are the same. Pure Python, since the
@@ -82,6 +83,20 @@ PACKAGE_TYPES = {'textures': 'texture', 'materialinstances': 'material_instances
 SNOW_FILE = 'vfx/ctr/podium/ctr_h100_pod_gp6_falling_snow.igz'
 SNOW_EFFECT = 'ctr_h100_pod_GP6_falling_snow'
 SNOW_SPOTS = tuple((-100.0, y, z) for z in (140.0, 70.0, 0.0, -70.0) for y in (-220.0, -110.0, 0.0, 110.0, 220.0))
+# Christmas music: the title's loop (mus_frontscreen_menu_lp, 24 s, also the menus' music) becomes the
+# adventure map's Glacier Park zone. Both are FSB5 streams of the same shape: MPEG-1 layer III, 128 kbps,
+# 48 kHz, 10 channels as 5 stereo MP3 streams whose frames (384 bytes) alternate one by one. The map's
+# stream (mus_h100_hub, 150 s) holds its five zones' loops one after another, 30 s each; Glacier Park is
+# the 4th. Its frames are copied as they are (no re-encoding) into a stream with the title's name and
+# beat markers ("beat" sync points every 1.5 s, the title's own spacing: both loops are 80 BPM).
+TITLE_MUSIC = 'sound_streams/wavs/music/mus_frontscreen_menu_lp,music_bank,noloc,48000,40,0,1.snd'
+MAP_MUSIC = 'sound_streams/wavs/music/mus_h100_hub,mus_h100_hub_bank,noloc,48000,40,0,1.snd'
+MAP_MUSIC_ARCHIVE = 'h100_hub.pak'
+# every archive with a copy of the title's music (the game reads whichever level it is in)
+MUSIC_ARCHIVES = ('octane_startscreen.pak', 'update2.pak', 'h100_hub.pak', 'octane_onlinelobby.pak',
+                  'octane_credits.pak', 'octane_scrapbook.pak')
+MUSIC_FRAME, MUSIC_STREAMS, MUSIC_ZONE_FRAMES, MUSIC_ZONE = 384, 5, 1250, 3   # 1250 x 1152 samples = 30 s
+MUSIC_BEAT_FIRST, MUSIC_BEAT_EVERY = 67500, 72000
 # Christmas: the gradients' dark ends to a soft red-pink, their light ends to a light pink (by brightness).
 DARK, LIGHT = (215, 95, 140), (255, 170, 195)
 DARK_AT, LIGHT_AT = 70.0, 160.0   # the blue gradient's brightness (0..255) at its ends
@@ -464,6 +479,45 @@ def with_decoration(blob, models, snow=None, layout=None):
     return g.build()
 
 
+def _fsb_frames(blob):
+    """(name table bytes, [MP3 frames]) of a one-sample MPEG FSB5 stream like the game's music."""
+    if blob[:4] != b'FSB5':
+        raise ValueError('not an FSB5 stream')
+    version, samples, header_size, names_size, data_size, mode = struct.unpack_from('<6I', blob, 4)
+    if version != 1 or samples != 1 or mode != 11 or data_size % MUSIC_FRAME:
+        raise ValueError('not the expected MPEG stream')
+    names = blob[60 + header_size:60 + header_size + names_size]
+    data = blob[60 + header_size + names_size:60 + header_size + names_size + data_size]
+    frames = [data[i:i + MUSIC_FRAME] for i in range(0, len(data), MUSIC_FRAME)]
+    for frame in frames:
+        h, = struct.unpack_from('>I', frame)
+        # MPEG-1 layer III, 128 kbps, 48 kHz, no padding: every frame 384 bytes
+        if h >> 21 != 0x7ff or (h >> 17) & 0xf != 0xd or (h >> 12) & 0xf != 9 or (h >> 10) & 3 != 1 or (h >> 9) & 1:
+            raise ValueError('an MP3 frame of another kind')
+    return names, frames
+
+
+def glacier_music(map_music, title_music):
+    """The title's music stream with the map's Glacier Park loop in it (see TITLE_MUSIC)."""
+    _, frames = _fsb_frames(map_music)
+    names, _ = _fsb_frames(title_music)
+    if len(frames) < (MUSIC_ZONE + 1) * MUSIC_ZONE_FRAMES * MUSIC_STREAMS:
+        raise ValueError('the map music is shorter than expected')
+    first = MUSIC_ZONE * MUSIC_ZONE_FRAMES * MUSIC_STREAMS
+    data = b''.join(frames[first:first + MUSIC_ZONE_FRAMES * MUSIC_STREAMS])
+    samples = MUSIC_ZONE_FRAMES * 1152
+    # sample header: more chunks, 48000 Hz (index 9), data at 0, the sample count; then the channel
+    # count chunk (type 1) and the sync points chunk (type 4: offset + 256-byte name each)
+    beats = range(MUSIC_BEAT_FIRST, samples, MUSIC_BEAT_EVERY)
+    points = b''.join(struct.pack('<I', b) + b'beat'.ljust(256, b'\0') for b in beats)
+    header = (struct.pack('<Q', 1 | 9 << 1 | samples << 34)
+              + struct.pack('<IB', 1 | 1 << 1 | 1 << 25, 10)
+              + struct.pack('<I', len(points) << 1 | 4 << 25) + points)
+    top = bytearray(title_music[:60])
+    struct.pack_into('<6I', top, 4, 1, 1, len(header), len(names), len(data), 11)
+    return bytes(top) + header + names + data
+
+
 def find(archive, name):
     for f in archive.files:
         if name in f['path'].replace('\\', '/').lower():
@@ -504,7 +558,8 @@ def prepare(game, out, config, env, base):
         return {}
     from mod_file_paths import resolve
     folder = Path(out) / 'title_theme'
-    names = sorted(set(GRADIENT_ARCHIVES + ICON_ARCHIVES + TREE_ARCHIVES + tuple(BACKDROPS) + (CRASH_ARCHIVE,)))
+    names = sorted(set(GRADIENT_ARCHIVES + ICON_ARCHIVES + TREE_ARCHIVES + tuple(BACKDROPS) + (CRASH_ARCHIVE,)
+                       + MUSIC_ARCHIVES))
     archives = {name: resolve(Path(game) / 'archives' / name) for name in names}
     archives = {name: path for name, path in archives.items() if path.is_file()}
     layout, layout_text = decoration_layout(config)
@@ -538,6 +593,16 @@ def prepare(game, out, config, env, base):
             decoration = cupcake_files(archives['update2.pak'], Archive(archives[CRASH_ARCHIVE]))
         except ValueError as error:
             say(f'no decoration: {error}')
+    music = None
+    if theme and MAP_MUSIC_ARCHIVE in archives:
+        try:
+            hub = Archive(archives[MAP_MUSIC_ARCHIVE])
+            map_entry, title_entry = find(hub, MAP_MUSIC), find(hub, TITLE_MUSIC)
+            if not map_entry or not title_entry:
+                raise ValueError('the music streams are not in ' + MAP_MUSIC_ARCHIVE)
+            music = glacier_music(bytes(hub.extract(map_entry)), bytes(hub.extract(title_entry)))
+        except ValueError as error:
+            say(f'the title keeps its music: {error}')
     folder.mkdir(parents=True, exist_ok=True)
     for old in folder.glob('*.bbpatch'):
         old.unlink()
@@ -554,6 +619,10 @@ def prepare(game, out, config, env, base):
             entry = find(archive, ICONS)
             if entry:
                 entries[entry['index']] = with_image_of(bytes(archive.extract(entry)), trees)
+        if music and name in MUSIC_ARCHIVES:
+            entry = find(archive, TITLE_MUSIC)
+            if entry:
+                entries[entry['index']] = music
         for texture in BACKDROPS.get(name, ()) if theme else ():
             entry = find(archive, texture)
             if entry:

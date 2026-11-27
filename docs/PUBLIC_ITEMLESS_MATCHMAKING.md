@@ -14,7 +14,7 @@ Two compatible solo players suffice; filling all eight seats is not required. Pr
 Public Itemless disables player/AI kart collisions and places every racer on one
 starting row within the native front-row width. Track and wall collisions remain
 enabled. Ranked Itemless uses the same collision and starting-position policy,
-with its own fixed five-lap, human-only race rules.
+with its own fixed three-lap, human-only race rules (Ranked Normal: five laps).
 
 ## Parties and compatibility
 
@@ -85,7 +85,7 @@ Ranked Normal and Itemless use `octr_ranked` version 2 and a server-owned filter
 Members preflight through signed `/ryunet/ranked-party`; `octr_ranked_v1` room
 confirmation must match mode and registered nonce. Registration preserves that nonce
 across native reloads. Joining waits for pending native session work.
-Ranked uses five laps and human-only fields; start minimums come from server ENV.
+Ranked uses five laps (Itemless three) and human-only fields; start minimums come from server ENV.
 
 Every client submits original human identity, finish evidence and DC through
 `/ryunet/ranked-result`. The client handles the authoritative response without requiring a host-first report.

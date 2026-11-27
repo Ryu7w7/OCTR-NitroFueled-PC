@@ -5,6 +5,7 @@ with the same modules, so the Linux launch has what the Windows one has:
   season_art      the seasonal title screen (bbport.ini title_theme)
   signed_in_name  online, the nickname bottom left of the menus (as the Xbox game shows it)
   ctr_tv_logo     the port's CTR TV logo
+  track_content   the port's new tracks: their names in their own level archives
   tacho_pack      Pack Tacho: its HUD, reserves bar, leaders list and main menu files. Its executable
                   patches (scripts/tacho_pack/patches) only work with these files: without them a
                   race crashed while loading (guest 0x1469081 USA, 0x1469071 EU).
@@ -25,6 +26,7 @@ import ctr_tv_logo
 import season_art
 import signed_in_name
 import tacho_pack
+import track_content
 import track_names
 
 
@@ -40,10 +42,11 @@ def main():
     base = {archive_patch.read(path)[1]: Path(path) for path in a.base}
     for name, module, otherwise in (('Title theme', season_art, "the game's own"),
                                     ('Nickname in the menus', signed_in_name, 'not shown'),
-                                    ('CTR TV logo', ctr_tv_logo, "the game's own")):
+                                    ('CTR TV logo', ctr_tv_logo, "the game's own"),
+                                    ('Tracks', track_content, 'their names as their authors left them')):
         try:
             base.update(module.prepare(a.game, a.out, a.settings, env, base))
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, KeyError) as error:
             print(f'{name}: {error}; {otherwise}', flush=True)
     try:
         made, extra = tacho_pack.prepare(a.game, a.out, a.settings, env, base)

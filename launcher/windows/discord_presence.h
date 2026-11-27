@@ -19,8 +19,10 @@ struct Activity {
     std::string details;  // first line, e.g. "Playing online"
     std::string state;    // second line, optional
     int64_t start = 0;    // Unix seconds; shows "elapsed"; 0 = none
-    std::string large_image;  // asset key uploaded to the Discord application, optional
-    std::string large_text;
+    std::string large_image;  // asset key uploaded to the Discord application, or an https image URL; optional
+    std::string large_text;   // shown when the pointer is over the large image
+    std::string small_image;  // the small round picture at the large one's corner (needs a large one), optional
+    std::string small_text;
     // Joinable: all four set, or none. Discord shows "(size of max)" after the state.
     std::string party_id;
     int party_size = 0;

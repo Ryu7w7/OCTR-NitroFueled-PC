@@ -73,11 +73,27 @@ static void *guard_thread(void *unused) {
     return NULL;
 }
 
+void runtime_type_diag(const char *tag, const char *level);   /* runtime_hero_guard.c */
+static const char *type_diag_moment;    /* a level change seen in the line just looked at (line_lock) */
+static char type_diag_level[128];       /* the level of "LOADING LEVEL: '...'" (line_lock) */
+
 static void note_line(const char *text, size_t size) {
+    /* "WARNING: *** GlobalChunk [76]: 1116 block(s) [75,360 bytes] still allocated.": a level's memory given
+     * back with objects still in it (Neo Bowser City), written by the thread giving it back before it does */
+    if (find(text, size, " block(s) [") && find(text, size, "still allocated.")) {
+        type_diag_moment = "memory given back";
+        return;
+    }
     /* Quick test: every line this cares about has "oad" ("LOAD", "load") in it. */
     if (!find(text, size, "OAD") && !find(text, size, "oad")) return;
     int loading = find(text, size, "LOADING LEVEL: '") != NULL;
     int finished = find(text, size, "level finished loading") != NULL;
+    if (find(text, size, "**push load ")) type_diag_moment = "leaving the level";
+    else if (loading) {
+        type_diag_moment = "the next level loads";
+        quoted_after(text, size, "LOADING LEVEL: '", '\'', type_diag_level, sizeof(type_diag_level));
+    }
+    else if (finished) type_diag_moment = "level loaded";
     int failed = find(text, size, "Failed to load chunk '") != NULL;
     int required = find(text, size, "Required file \"") != NULL;
     if (!loading && !finished && !failed && !required) return;
@@ -131,13 +147,21 @@ void runtime_load_guard_note(const void *buffer, size_t size) {
     }
     if (!guard_seconds) return;
     pthread_mutex_lock(&line_lock);
+    const char *moment = NULL;
+    char level[128] = "";
     for (size_t i = 0; i < size; ++i) {
         if (text[i] == '\n') {
+            type_diag_moment = NULL;
             note_line(line_text, line_size);
+            if (type_diag_moment) {
+                moment = type_diag_moment;
+                snprintf(level, sizeof(level), "%s", type_diag_level);
+            }
             line_size = 0;
         } else if (line_size < sizeof(line_text)) {
             line_text[line_size++] = text[i];
         }
     }
     pthread_mutex_unlock(&line_lock);
+    if (moment) runtime_type_diag(moment, level);   /* on the game's own thread, out of the lock */
 }

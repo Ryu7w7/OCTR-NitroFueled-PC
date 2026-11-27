@@ -47,6 +47,9 @@ void runtime_chat_mute(const char *nick, int muted);
 int runtime_chat_muted(const char *nick);
 /* Whether this nickname hosts the room on screen (runtime_room_host.c): a crown before its name. */
 int runtime_room_host_is(const char *nick);
+/* A public/Ranked race's host changed mid-race (runtime_public_itemless.c): 1 once, with the new
+ * host's nickname; *self 1 when it is this game. */
+int runtime_public_itemless_take_host_change(char name[24], int *self);
 
 #ifdef __cplusplus
 }

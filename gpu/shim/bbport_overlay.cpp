@@ -76,6 +76,17 @@ struct TeamLobbyMember {
     int team, ready, local;
 };
 extern "C" int runtime_online_team_lobby(TeamLobbyMember* out, int max, int* teams);
+// 1 while the online RANKED Mode Select screen shows (src/runtime_online_mode.c): the rules notice shows there only.
+extern "C" int runtime_online_mode_select_screen(void);
+// The rules notice's texts from RyuNET (src/runtime_ranked.c, the server's ranked_rules.go, edited in its admin
+// panel): the rules' count, 0 none to show, -1 no answer yet (the built-in Polswid notice below).
+extern "C" int runtime_ranked_rules(char* title, size_t title_size, char* subtitle, size_t subtitle_size, int* kinds,
+                                    char (*texts)[1280], int max);
+// Elimination mode's notices (src/runtime_elimination.c): 1 while one shows; NULL buffers only ask that.
+extern "C" int runtime_elimination_banner(char* title, size_t title_size, char* detail, size_t detail_size,
+                                          float* age, int* won);
+// Elimination mode's spectator (src/runtime_elimination.c): 1 while the player out watches; the racer watched.
+extern "C" int runtime_elimination_spectator(char* name, size_t size, int* place, int* lap, int* wide_on);
 extern "C" int runtime_online_team_color(int team, unsigned char rgb[3], char* name, size_t size);
 extern "C" int runtime_online_team_points(int team);   // the room's points so far, -1 none
 extern "C" void runtime_online_team_text(int which, int team, char* out, size_t size);   // 0 title, 1 hint
@@ -686,6 +697,14 @@ void PollFriends() {
     char message[RF_MESSAGE];
     while (runtime_friends_take_message(message)) {
         Notify(BbSettings::MenuText("Message from the server", "Сообщение сервера"), message, "", 7, nullptr, 0);
+    }
+    // The race's new host after the old one left mid-race: always shown (not a friends notice).
+    char host[24];
+    for (int self = 0; runtime_public_itemless_take_host_change(host, &self);) {
+        runtime_avatar_want(host);
+        NotifyWithPicture(BbSettings::MenuText("New host", "Новый хост"), host,
+                          self ? BbSettings::MenuText("You are now the host", "Теперь вы хост")
+                               : BbSettings::MenuText("is now the host", "теперь хост"), 5);
     }
     char name[RF_NAME];
     for (int kind; (kind = runtime_friends_take_event(name));) {
@@ -2803,6 +2822,305 @@ bool AnnouncementActive() {
 // The CTR title font (<BB_ART_DIR>/ctr-title.ttf, CCZoinks) for the members list by team; null without the file.
 ImFont* banner_title_font = nullptr;
 
+/// Elimination mode: "<name> ELIMINADO" / "<name> GANÓ" in the middle near the top, as the game's own result banners
+/// look: a blue panel, an orange title with a dark edge, a white line under it, an icon on the left.
+void EliminationBanner() {
+    char title[96], detail[128];
+    float age = 0.0f;
+    int won = 0;
+    if (!runtime_elimination_banner(title, sizeof title, detail, sizeof detail, &age, &won)) return;
+    const float total = won ? 8.0f : 4.5f;
+    const float in = std::min(age / 0.25f, 1.0f), out = std::clamp((total - age) / 0.5f, 0.0f, 1.0f);
+    const float alpha = std::min(in, out);
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* title_font = banner_title_font ? banner_title_font : ImGui::GetFont();
+    ImFont* text_font = ImGui::GetFont();
+    const float title_size = 46.0f * s, text_size = 24.0f * s, icon = 64.0f * s, pad = 22.0f * s;
+    const ImVec2 t = title_font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title);
+    const ImVec2 d = text_font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, detail);
+    const float body = std::max(t.x, d.x);
+    const float width = pad + icon + pad + body + pad * 1.5f, height = std::max(icon, t.y + d.y + 6.0f * s) + pad * 1.4f;
+    const float cx = viewport->WorkPos.x + viewport->WorkSize.x * 0.5f;
+    const float top = viewport->WorkPos.y + viewport->WorkSize.y * 0.07f - (1.0f - in) * 30.0f * s;
+    const ImVec2 a(cx - width * 0.5f, top), b(cx + width * 0.5f, top + height);
+    const auto col = [&](int r, int g, int bl, float o) { return IM_COL32(r, g, bl, int(255 * o * alpha)); };
+    // panel: a slanted blue box with a darker band below and a light top edge
+    const float slant = 18.0f * s;
+    const ImVec2 shadow[4] = {{a.x + slant + 6 * s, a.y + 8 * s}, {b.x + 6 * s, a.y + 8 * s}, {b.x - slant + 6 * s, b.y + 8 * s},
+                              {a.x + 6 * s, b.y + 8 * s}};
+    dl->AddConvexPolyFilled(shadow, 4, col(4, 22, 60, 0.45f));
+    const ImVec2 panel[4] = {{a.x + slant, a.y}, {b.x, a.y}, {b.x - slant, b.y}, {a.x, b.y}};
+    dl->AddConvexPolyFilled(panel, 4, col(22, 104, 196, 0.97f));
+    const ImVec2 lower[4] = {{a.x + slant * 0.35f, a.y + height * 0.65f}, {b.x - slant * 0.65f, a.y + height * 0.65f},
+                             {b.x - slant, b.y}, {a.x, b.y}};
+    dl->AddConvexPolyFilled(lower, 4, col(14, 78, 160, 0.97f));
+    dl->AddLine(ImVec2(a.x + slant, a.y + 1.5f * s), ImVec2(b.x, a.y + 1.5f * s), col(120, 200, 255, 0.9f), 3.0f * s);
+    dl->AddPolyline(panel, 4, col(90, 170, 245, 0.8f), ImDrawFlags_Closed, 2.0f * s);
+    // icon: a white racer out (a cross) or the winner's star
+    const ImVec2 c(a.x + pad + icon * 0.5f + slant * 0.4f, (a.y + b.y) * 0.5f);
+    dl->AddCircleFilled(c, icon * 0.5f, col(10, 60, 130, 0.9f));
+    if (won) {
+        ImVec2 star[10];
+        for (int i = 0; i < 10; ++i) {
+            const float r = (i % 2 ? 0.20f : 0.42f) * icon, ang = -1.5708f + i * 0.6283f;
+            star[i] = ImVec2(c.x + std::cos(ang) * r, c.y + std::sin(ang) * r);
+        }
+        for (int i = 0; i < 10; i += 2)   // five triangles from the centre: a filled star
+            dl->AddTriangleFilled(c, star[i], star[(i + 1) % 10], col(255, 205, 60, 1.0f)),
+            dl->AddTriangleFilled(c, star[(i + 9) % 10], star[i], col(255, 205, 60, 1.0f));
+    } else {
+        const float r = icon * 0.24f, w = 7.0f * s;
+        dl->AddLine(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), col(255, 255, 255, 1.0f), w);
+        dl->AddLine(ImVec2(c.x + r, c.y - r), ImVec2(c.x - r, c.y + r), col(255, 255, 255, 1.0f), w);
+    }
+    // the texts: the title in orange with a dark edge, the line under it in white
+    const float tx = a.x + pad + icon + pad + slant * 0.4f + (body - t.x) * 0.5f;
+    const float ty = a.y + (height - (t.y + d.y + 6.0f * s)) * 0.5f;
+    for (int ox = -2; ox <= 2; ox += 2)
+        for (int oy = -2; oy <= 3; oy += 2)
+            dl->AddText(title_font, title_size, ImVec2(tx + ox * s, ty + oy * s), col(40, 14, 0, 0.9f), title);
+    dl->AddText(title_font, title_size, ImVec2(tx, ty), col(255, 150, 28, 1.0f), title);
+    const float dx = a.x + pad + icon + pad + slant * 0.4f + (body - d.x) * 0.5f;
+    dl->AddText(text_font, text_size, ImVec2(dx + 1.5f * s, ty + t.y + 6.0f * s + 1.5f * s), col(4, 22, 60, 0.8f), detail);
+    dl->AddText(text_font, text_size, ImVec2(dx, ty + t.y + 6.0f * s), col(255, 255, 255, 1.0f), detail);
+}
+
+/// Elimination mode's spectator: who you are watching (name, place, lap) and the buttons, at the bottom of the screen,
+/// in the notices' style: the d-pad left / right changes racer, L3 the wide view.
+void SpectatorLegend() {
+    char name[48];
+    int place = 0, lap = 0, wide_on = 0;
+    if (!runtime_elimination_spectator(name, sizeof name, &place, &lap, &wide_on)) return;
+    const char* lang = std::getenv("BB_LANGUAGE");
+    const int id = lang ? std::atoi(lang) : 1;
+    // 0 English, 1 Spanish (3, 20), 2 French (2, 22), 3 German (4), 4 Italian (5), 5 Portuguese (7, 17)
+    const int ln = id == 3 || id == 20 ? 1 : id == 2 || id == 22 ? 2 : id == 4 ? 3 : id == 5 ? 4 : id == 7 || id == 17 ? 5 : 0;
+    static const char* const tops[] = {"WATCHING %s   |   PLACE %d   |   LAP %d", "VIENDO A %s   |   LUGAR %d   |   VUELTA %d",
+                                       "VOUS REGARDEZ %s   |   PLACE %d   |   TOUR %d", "DU SIEHST %s   |   PLATZ %d   |   RUNDE %d",
+                                       "GUARDI %s   |   POSIZIONE %d   |   GIRO %d", "ASSISTINDO %s   |   LUGAR %d   |   VOLTA %d"};
+    static const char* const changes[] = {"Change racer", "Cambiar corredor", "Changer de pilote", "Fahrer wechseln",
+                                          "Cambia pilota", "Trocar piloto"};
+    static const char* const wides[] = {"Wide view", "Vista panor\xc3\xa1mica", "Vue panoramique", "Panoramaansicht",
+                                        "Vista panoramica", "Vista panor\xc3\xa2mica"};
+    static const char* const normals[] = {"Normal view", "Vista normal", "Vue normale", "Normale Ansicht", "Vista normale",
+                                          "Vista normal"};
+    char top[160], change[48], view[64];
+    std::snprintf(top, sizeof top, tops[ln], name, place, lap);
+    std::snprintf(change, sizeof change, "%s", changes[ln]);
+    std::snprintf(view, sizeof view, "%s", wide_on ? normals[ln] : wides[ln]);
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* title_font = banner_title_font ? banner_title_font : ImGui::GetFont();
+    ImFont* text_font = ImGui::GetFont();
+    const float text_size = 22.0f * s, pad = 16.0f * s, key = 34.0f * s, gap = 28.0f * s;
+    // a long name: the top line gets smaller so the box stays within 62% of the screen's width
+    float title_size = 30.0f * s;
+    ImVec2 t = title_font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, top);
+    const float room = viewport->WorkSize.x * 0.62f - pad * 3.0f;
+    if (t.x > room && t.x > 0.0f) {
+        title_size = std::max(title_size * room / t.x, 16.0f * s);
+        t = title_font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, top);
+    }
+    const ImVec2 c1 = text_font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, change);
+    const ImVec2 c2 = text_font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, view);
+    const float keys_w = key * 2 + 6.0f * s + 10.0f * s + c1.x + gap + key * 1.3f + 10.0f * s + c2.x;
+    const float width = std::max(t.x, keys_w) + pad * 3.0f, height = t.y + key + pad * 2.4f;
+    const float cx = viewport->WorkPos.x + viewport->WorkSize.x * 0.5f;
+    const float bottom = viewport->WorkPos.y + viewport->WorkSize.y * 0.965f;
+    const ImVec2 a(cx - width * 0.5f, bottom - height), b(cx + width * 0.5f, bottom);
+    const auto col = [&](int r, int g, int bl, float o) { return IM_COL32(r, g, bl, int(255 * o)); };
+    const float slant = 14.0f * s;
+    const ImVec2 panel[4] = {{a.x + slant, a.y}, {b.x, a.y}, {b.x - slant, b.y}, {a.x, b.y}};
+    dl->AddConvexPolyFilled(panel, 4, col(22, 104, 196, 0.88f));
+    dl->AddPolyline(panel, 4, col(90, 170, 245, 0.8f), ImDrawFlags_Closed, 2.0f * s);
+    // the line on top: who, place, lap (orange title font with a dark edge)
+    const float tx = cx - t.x * 0.5f, ty = a.y + pad * 0.7f;
+    for (int ox = -2; ox <= 2; ox += 2)
+        for (int oy = -2; oy <= 2; oy += 2) dl->AddText(title_font, title_size, ImVec2(tx + ox * s * 0.6f, ty + oy * s * 0.6f), col(40, 14, 0, 0.9f), top);
+    dl->AddText(title_font, title_size, ImVec2(tx, ty), col(255, 150, 28, 1.0f), top);
+    // the buttons: two d-pad arrows, then the L3 stick
+    float x = cx - keys_w * 0.5f;
+    const float ky = ty + t.y + pad * 0.5f, mid = ky + key * 0.5f;
+    for (int dir = -1; dir <= 1; dir += 2) {
+        const ImVec2 k0(x, ky), k1(x + key, ky + key);
+        dl->AddRectFilled(k0, k1, col(10, 60, 130, 0.95f), 6.0f * s);
+        dl->AddRect(k0, k1, col(255, 255, 255, 0.9f), 6.0f * s, 0, 2.0f * s);
+        const float h = key * 0.22f, ccx = x + key * 0.5f;
+        dl->AddTriangleFilled(ImVec2(ccx + dir * h, mid), ImVec2(ccx - dir * h, mid - h), ImVec2(ccx - dir * h, mid + h), col(255, 255, 255, 1.0f));
+        x += key + 6.0f * s;
+    }
+    x += 4.0f * s;
+    dl->AddText(text_font, text_size, ImVec2(x, mid - c1.y * 0.5f), col(255, 255, 255, 1.0f), change);
+    x += c1.x + gap;
+    const float r = key * 0.62f;
+    dl->AddCircleFilled(ImVec2(x + r, mid), r, col(10, 60, 130, 0.95f));
+    dl->AddCircle(ImVec2(x + r, mid), r, col(255, 255, 255, 0.9f), 0, 2.0f * s);
+    const ImVec2 l3 = text_font->CalcTextSizeA(text_size * 0.9f, FLT_MAX, 0.0f, "L3");
+    dl->AddText(text_font, text_size * 0.9f, ImVec2(x + r - l3.x * 0.5f, mid - l3.y * 0.5f), col(255, 255, 255, 1.0f), "L3");
+    x += r * 2 + 10.0f * s;
+    dl->AddText(text_font, text_size, ImVec2(x, mid - c2.y * 0.5f), col(255, 255, 255, 1.0f), view);
+}
+
+/// The Ranked screen's rules notice (contributor's design, 26/11): a purple panel as the Competitive Hub's, next to
+/// the room's members, above the character, with up to 6 rules in cards (not allowed, penalty, allowed). The texts
+/// come from RyuNET in the game's language (admin panel > Avisos > Reglas de Ranked); until the server answers, or
+/// without it, the Polswid notice built in here, in the game's language.
+void RankedRulesNotice() {
+    if (!runtime_online_mode_select_screen()) return;
+    static char server_title[128], server_subtitle[128], server_texts[6][1280];
+    static int server_kinds[6];
+    const int server = runtime_ranked_rules(server_title, sizeof server_title, server_subtitle, sizeof server_subtitle,
+                                            server_kinds, server_texts, 6);
+    if (server == 0) return;   // switched off in the panel
+    const char* lang = std::getenv("BB_LANGUAGE");
+    const int id = lang ? std::atoi(lang) : 1;
+    // 0 English, 1 Spanish (3, 20), 2 French (2, 22), 3 German (4), 4 Italian (5), 5 Portuguese (7, 17)
+    const int ln = id == 3 || id == 20 ? 1 : id == 2 || id == 22 ? 2 : id == 4 ? 3 : id == 5 ? 4 : id == 7 || id == 17 ? 5 : 0;
+    static const char* const titles[6] = {"NOTICE", "AVISO", "ATTENTION", "HINWEIS", "AVVISO", "AVISO"};
+    static const char* const subtitles[6] = {"RANKED RACES", "PARTIDAS CLASIFICATORIAS", "PARTIES CLASSÉES", "RANGLISTE",
+                                             "PARTITE CLASSIFICATE", "PARTIDAS RANQUEADAS"};
+    static const char* const texts[6][3] = {
+        {"The \"Polswid\" technique is not allowed on the track's walls (Electron Avenue, Roo's Tubes, etc.), nor Polswid "
+         "with items downhill (Megamix Mania, Prehistoric Playground, etc.).",
+         "Anyone who uses it will be reported and suspended from ranked races. Repeat offenses can lead to a permanent ban.",
+         "Exception: only the Super Engine Polswid and Polswid on grass are allowed."},
+        {"Está prohibido realizar la técnica \"Polswid\" en los muros de la pista (Avenida Electrón, Tubos de Roo, etc.), "
+         "así como el Polswid con ítems cuesta abajo (Megamix Manía, Parque Prehistórico, etc.).",
+         "Quien la utilice será reportado y suspendido de las partidas clasificatorias. En caso de reincidencia, la sanción "
+         "puede escalar hasta el baneo permanente.",
+         "Excepción: únicamente se permite el Polswid de super motor y en las zonas de césped."},
+        {"La technique \"Polswid\" est interdite sur les murs de la piste (Électrons, Tubes Roo, etc.), ainsi que le Polswid "
+         "avec des objets en descente (Megamix Mania, Parc préhistorique, etc.).",
+         "Quiconque l'utilise sera signalé et suspendu des parties classées. En cas de récidive, la sanction peut aller "
+         "jusqu'au bannissement définitif.",
+         "Exception : seuls le Polswid du Super Moteur et celui sur les zones d'herbe sont autorisés."},
+        {"Die \"Polswid\"-Technik an den Streckenwänden ist verboten (Electron Avenue, Roo's Tubes usw.), ebenso Polswid "
+         "mit Items bergab (Megamix Mania, Prehistoric Playground usw.).",
+         "Wer sie nutzt, wird gemeldet und von Ranglistenspielen gesperrt. Im Wiederholungsfall kann die Strafe bis zur "
+         "dauerhaften Sperre reichen.",
+         "Ausnahme: Erlaubt sind nur das Polswid mit dem Supermotor und auf Grasflächen."},
+        {"È vietato usare la tecnica \"Polswid\" sui muri della pista (Electron Avenue, Roo's Tubes, ecc.), così come il "
+         "Polswid con gli oggetti in discesa (Megamix Mania, Prehistoric Playground, ecc.).",
+         "Chi la utilizza verrà segnalato e sospeso dalle partite classificate. In caso di recidiva, la sanzione può arrivare "
+         "al ban permanente.",
+         "Eccezione: è consentito solo il Polswid del Super Motore e nelle zone d'erba."},
+        {"É proibido usar a técnica \"Polswid\" nas paredes da pista (Avenida Elétron, Dutos do Roo, etc.), assim como o "
+         "Polswid com itens em descidas (Megamix Mania, Parque Pré-Histórico, etc.).",
+         "Quem a utilizar será denunciado e suspenso das partidas ranqueadas. Em caso de reincidência, a punição pode chegar "
+         "ao banimento permanente.",
+         "Exceção: só é permitido o Polswid do Super Motor e nas áreas de grama."}};
+    static const int builtin_kinds[3] = {0, 1, 2};
+    const bool from_server = server > 0;
+    const int count = from_server ? server : 3;
+    const char* paras[6];
+    const int* kinds = from_server ? server_kinds : builtin_kinds;
+    for (int i = 0; i < count; ++i) paras[i] = from_server ? server_texts[i] : texts[ln][i];
+    const char* title = from_server && server_title[0] ? server_title : from_server ? "" : titles[ln];
+    const char* subtitle = from_server ? server_subtitle : subtitles[ln];
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* title_font = banner_title_font ? banner_title_font : ImGui::GetFont();
+    ImFont* text_font = ImGui::GetFont();
+    // above the character's head, not over it; a little smaller with more rules
+    const float title_size = 42.0f * s, sub_size = 19.0f * s, text_size = (count > 3 ? 14.0f : 15.5f) * s;
+    const float pad = 12.0f * s, icon = 28.0f * s, card_pad = 7.0f * s, card_gap = 5.0f * s, head = 48.0f * s;
+    const float x0 = viewport->WorkPos.x + viewport->WorkSize.x * 0.232f, y0 = viewport->WorkPos.y + viewport->WorkSize.y * 0.022f;
+    const float width = viewport->WorkSize.x * 0.40f;
+    const float text_x = pad + card_pad + icon + 12.0f * s, wrap = width - text_x - pad - card_pad;
+    float card_h[6], height = head + pad - 2.0f * s;
+    for (int i = 0; i < count; ++i) {
+        card_h[i] = std::max(text_font->CalcTextSizeA(text_size, FLT_MAX, wrap, paras[i]).y, icon) + card_pad * 2.0f;
+        height += card_h[i] + card_gap;
+    }
+    const ImVec2 a(x0, y0), b(x0 + width, y0 + height);
+    const float r = 18.0f * s;
+    // a soft violet glow and a shadow
+    for (int k = 6; k >= 1; --k)
+        dl->AddRect(ImVec2(a.x - k * 1.6f * s, a.y - k * 1.6f * s), ImVec2(b.x + k * 1.6f * s, b.y + k * 1.6f * s),
+                    IM_COL32(150, 110, 255, 14 + (6 - k) * 6), r + k * 1.6f * s, 0, 2.0f * s);
+    dl->AddRectFilled(ImVec2(a.x + 8 * s, a.y + 12 * s), ImVec2(b.x + 8 * s, b.y + 12 * s), IM_COL32(8, 2, 30, 120), r);
+    // the body: a vertical gradient (light violet to deep purple) with rounded corners
+    const ImU32 top = IM_COL32(92, 64, 200, 245), bottom = IM_COL32(44, 26, 118, 245);
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + r * 2.0f), top, r, ImDrawFlags_RoundCornersTop);
+    dl->AddRectFilled(ImVec2(a.x, b.y - r * 2.0f), b, bottom, r, ImDrawFlags_RoundCornersBottom);
+    const float t0 = r / height, t1 = 1.0f - r / height;
+    auto mix = [&](float t) {
+        return IM_COL32(int(92 + (44 - 92) * t), int(64 + (26 - 64) * t), int(200 + (118 - 200) * t), 245);
+    };
+    dl->AddRectFilledMultiColor(ImVec2(a.x, a.y + r), ImVec2(b.x, b.y - r), mix(t0), mix(t0), mix(t1), mix(t1));
+    // diagonal stripes in the header, as the Competitive Hub's pattern
+    dl->PushClipRect(ImVec2(a.x + 3 * s, a.y + 3 * s), ImVec2(b.x - 3 * s, a.y + head), true);
+    for (float k = -head; k < width; k += 26.0f * s)
+        dl->AddQuadFilled(ImVec2(a.x + k, a.y + head), ImVec2(a.x + k + 10 * s, a.y + head),
+                          ImVec2(a.x + k + 10 * s + head, a.y), ImVec2(a.x + k + head, a.y), IM_COL32(255, 255, 255, 14));
+    dl->PopClipRect();
+    dl->AddRect(a, b, IM_COL32(190, 170, 255, 255), r, 0, 3.0f * s);
+    dl->AddLine(ImVec2(a.x + 16 * s, a.y + head - 2 * s), ImVec2(b.x - 16 * s, a.y + head - 2 * s), IM_COL32(255, 170, 60, 200), 2.0f * s);
+    // the warning badge
+    const float br = 19.0f * s;
+    const ImVec2 c(a.x + pad + 20.0f * s, a.y + head * 0.5f);
+    dl->AddCircleFilled(c, br + 3 * s, IM_COL32(60, 20, 0, 255), 40);
+    dl->AddCircleFilled(c, br, IM_COL32(255, 190, 40, 255), 40);
+    dl->AddCircleFilled(ImVec2(c.x, c.y - br * 0.35f), br * 0.62f, IM_COL32(255, 225, 120, 120), 32);
+    dl->AddRectFilled(ImVec2(c.x - 2.8f * s, c.y - 11.5f * s), ImVec2(c.x + 2.8f * s, c.y + 3 * s), IM_COL32(70, 25, 0, 255), 3 * s);
+    dl->AddCircleFilled(ImVec2(c.x, c.y + 9.5f * s), 3.1f * s, IM_COL32(70, 25, 0, 255));
+    // the title: orange with a thick dark edge; the subtitle on the right
+    const ImVec2 t = title_font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title);
+    const float tx = c.x + br + 14.0f * s, ty = c.y - t.y * 0.5f;
+    for (int k = 0; k < 12; ++k) {
+        const float ang = k * 0.5235988f;
+        dl->AddText(title_font, title_size, ImVec2(tx + std::cos(ang) * 4 * s, ty + std::sin(ang) * 4 * s + 2 * s),
+                    IM_COL32(45, 12, 0, 255), title);
+    }
+    dl->AddText(title_font, title_size, ImVec2(tx, ty - 2 * s), IM_COL32(255, 205, 70, 255), title);
+    dl->AddText(title_font, title_size, ImVec2(tx, ty), IM_COL32(255, 160, 30, 255), title);
+    const ImVec2 st = title_font->CalcTextSizeA(sub_size, FLT_MAX, 0.0f, subtitle);
+    dl->AddText(title_font, sub_size, ImVec2(b.x - pad - st.x, c.y - st.y * 0.5f), IM_COL32(215, 200, 255, 230), subtitle);
+    // the rules, each in its card with its icon: not allowed, the penalty, allowed
+    float y = a.y + head + card_gap;
+    for (int i = 0; i < count; ++i) {
+        const float h = card_h[i];
+        dl->AddRectFilled(ImVec2(a.x + pad, y), ImVec2(b.x - pad, y + h), IM_COL32(28, 14, 80, 200), 12 * s);
+        dl->AddRect(ImVec2(a.x + pad, y), ImVec2(b.x - pad, y + h), IM_COL32(120, 95, 210, 160), 12 * s, 0, 2 * s);
+        const float ir = icon * 0.5f;
+        const ImVec2 ic(a.x + pad + card_pad + ir, y + h * 0.5f);
+        if (kinds[i] == 0) {   // a "no" sign
+            dl->AddCircleFilled(ic, ir, IM_COL32(255, 255, 255, 255), 36);
+            dl->AddCircleFilled(ic, ir - 2 * s, IM_COL32(225, 30, 40, 255), 36);
+            dl->AddCircleFilled(ic, ir - 6 * s, IM_COL32(255, 255, 255, 255), 36);
+            dl->AddLine(ImVec2(ic.x - ir * 0.55f, ic.y + ir * 0.55f), ImVec2(ic.x + ir * 0.55f, ic.y - ir * 0.55f),
+                        IM_COL32(225, 30, 40, 255), 4.5f * s);
+        } else if (kinds[i] == 1) {   // the penalty: an orange "!"
+            dl->AddCircleFilled(ic, ir, IM_COL32(255, 140, 20, 255), 36);
+            dl->AddCircleFilled(ImVec2(ic.x, ic.y - ir * 0.35f), ir * 0.6f, IM_COL32(255, 190, 90, 110), 28);
+            dl->AddRectFilled(ImVec2(ic.x - 2.2f * s, ic.y - 8.5f * s), ImVec2(ic.x + 2.2f * s, ic.y + 2.5f * s), IM_COL32(255, 255, 255, 255), 2 * s);
+            dl->AddCircleFilled(ImVec2(ic.x, ic.y + 7.5f * s), 2.6f * s, IM_COL32(255, 255, 255, 255));
+        } else {   // allowed: a green check
+            dl->AddCircleFilled(ic, ir, IM_COL32(40, 190, 80, 255), 36);
+            dl->AddCircleFilled(ImVec2(ic.x, ic.y - ir * 0.35f), ir * 0.6f, IM_COL32(120, 235, 150, 110), 28);
+            const ImVec2 check[3] = {ImVec2(ic.x - 6.5f * s, ic.y), ImVec2(ic.x - 1.5f * s, ic.y + 6 * s), ImVec2(ic.x + 7.5f * s, ic.y - 6 * s)};
+            dl->AddPolyline(check, 3, IM_COL32(255, 255, 255, 255), 0, 4.0f * s);
+        }
+        const float th = text_font->CalcTextSizeA(text_size, FLT_MAX, wrap, paras[i]).y;
+        const ImVec2 at(a.x + text_x, y + (h - th) * 0.5f);
+        dl->AddText(text_font, text_size, ImVec2(at.x + 1.5f * s, at.y + 1.5f * s), IM_COL32(8, 2, 30, 200), paras[i], nullptr, wrap);
+        dl->AddText(text_font, text_size, at, IM_COL32(255, 255, 255, 255), paras[i], nullptr, wrap);
+        // an allowed rule's lead word ("Exception:") in green, over the white one, when it starts with one
+        if (kinds[i] == 2) {
+            const char* colon = std::strchr(paras[i], ':');
+            size_t lead = colon ? size_t(colon - paras[i]) : 0;
+            if (lead && paras[i][lead - 1] == ' ') --lead;   // "Exception :" (French)
+            if (colon && lead && lead < 24 && !std::memchr(paras[i], ' ', lead))
+                dl->AddText(text_font, text_size, at, IM_COL32(120, 240, 140, 255), paras[i], colon + 1);
+        }
+        y += h + card_gap;
+    }
+}
+
 /// A private room with teams: the game's "Lobby members" list grouped by team, where the game's flat list was
 /// (ui/Octane_LobbyMembers, 1920x1080 canvas: header at y 112, rows from x 80 / y 160). Each team a slanted bar in
 /// its color with its name, its members under it with the ready tick; the local player in orange, as the game does.
@@ -3422,7 +3740,9 @@ bool Visible() {
                            (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
                            runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing() ||
                            !BbVoice::Speaking().empty() ||
-                           runtime_online_team_lobby(nullptr, 0, nullptr) >= 0);
+                           runtime_online_team_lobby(nullptr, 0, nullptr) >= 0 || runtime_online_mode_select_screen() ||
+                           runtime_elimination_banner(nullptr, 0, nullptr, 0, nullptr, nullptr) ||
+                           runtime_elimination_spectator(nullptr, 0, nullptr, nullptr, nullptr));
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -3563,6 +3883,9 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     }
     AnnouncementBanner();
     if (!menu_open) TeamLobbyList();
+    if (!menu_open) RankedRulesNotice();
+    if (!menu_open) EliminationBanner();
+    if (!menu_open) SpectatorLegend();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
     }

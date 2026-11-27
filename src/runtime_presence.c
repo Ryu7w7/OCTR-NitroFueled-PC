@@ -11,6 +11,7 @@
  *   room=     public or private while in an online match or room, else empty
  *   lobby=    1 while an online lobby is on screen
  *   itemless= 1 in an Itemless match; speed= 1 in a Speed race
+ *   ranked=   1 in a Ranked room, its lobby and its races (runtime_ranked_active)
  * The launchers turn them into text (and the zone into the track's own name, scripts/track_names.py). */
 #include "runtime.h"
 #include "runtime_replay_internal.h"
@@ -50,9 +51,9 @@ void runtime_presence_tick(void) {
     const char *room = runtime_online_mode_room_on() ? "private"
                        : runtime_public_match_active() ? "public" : "";
     char text[512];
-    snprintf(text, sizeof text, "game=%d\nrace=%d\nlevel=%.200s\nroom=%s\nlobby=%d\nitemless=%d\nspeed=%d\n",
+    snprintf(text, sizeof text, "game=%d\nrace=%d\nlevel=%.200s\nroom=%s\nlobby=%d\nitemless=%d\nspeed=%d\nranked=%d\n",
              game, race, level ? level : "", room, runtime_online_mode_lobby_open(),
-             runtime_public_itemless_active(), runtime_speed_race_active());
+             runtime_public_itemless_active(), runtime_speed_race_active(), runtime_ranked_active());
     if (!strcmp(text, last)) return;
     snprintf(last, sizeof last, "%s", text);
     FILE *f = fopen(path, "wb");

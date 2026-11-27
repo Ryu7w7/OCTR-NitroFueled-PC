@@ -19,6 +19,26 @@ typedef DWORD (WINAPI *PFN_LauncherXInputGetState)(DWORD dwUserIndex, void* pSta
 
 
 
+/// A second game for a second player on this PC (scripts/second_instance.py, issue #287): its own
+/// data folder, nickname and port, with the environment StartGame set for the main game (this
+/// process's). Not tracked: it lives on its own; its output is in <data>/instance2/last_console.txt.
+bool SpawnSecondInstance(const std::string& nick) {
+    App& a = g_app;
+    if (!a.python) return false;
+    std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+                       Quote(WidePath(a.root / L"scripts" / L"second_instance.py")) + L" --data " + Quote(WidePath(a.data)) +
+                       L" --nick " + Quote(Widen(nick));
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(a.python->exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        a.root.c_str(), &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
 void LaunchGameProcess() {
     App& a = g_app;
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};

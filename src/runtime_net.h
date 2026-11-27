@@ -95,6 +95,9 @@ typedef struct {
 
 /* Check if online mode is enabled */
 int runtime_net_is_online(void);
+/* The game's datagrams with each peer since the last call ("ip:port rx N (bytes, path, last) tx N; ..."),
+ * the number of peers listed. For the host handoff's diagnostics. */
+int runtime_net_peer_stats(char *out, size_t cap);
 
 /* Tracing helper: prints only when BB_NET_TRACE=1 */
 void runtime_net_trace(const char *fmt, ...);

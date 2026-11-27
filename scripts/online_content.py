@@ -87,6 +87,28 @@ APPROVED_MOD_PATCHES = {
 }
 
 
+# The port's official new tracks (scripts/track_content.py): the files their packages put in the game
+# folder (scripts/mods.py), allowed in public play and Ranked by content: the exact release of the track
+# (a changed byte is another digest, "modified"). Their lists and texts are made by the port in out/.
+APPROVED_TRACK_FILES = {
+    # Neo Bowser City 1.3.1 (PanchoPewPew)
+    'archives/t929_neo_bowser_city.pak': '63176e1e3fe8553003693cd9b21d3f896bc3963de345a30038d3d66024d7e444',
+    'archives/octane_ui_race_select_neo_bowser_city.bk2':
+        'c8a126e96573c01489508600b40aa2319765e277be40750e5c577eed25f0f22f',
+}
+
+
+def approved_track_file(relative, path):
+    want = APPROVED_TRACK_FILES.get(relative.lower())
+    if not want:
+        return False
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest() == want
+
+
 # The patches scripts/patches.py writes itself (render_plan_patches, theme_patches, end_race_patches)
 PORT_PATCHES = ('render/', 'theme/', 'end_race/')
 
@@ -268,11 +290,56 @@ def system_data_reasons(mod_blob, game_blob):
 
 
 # ---- one entry, one archive ----
-def entry_reasons(path, data, game):
+PAK_MAGIC = 0x1a414749
+
+
+def bytes_archive(data):
+    """An archive read from bytes (a .pak that is itself an entry of another), None when it is not one."""
+    if len(data) < 56 or struct.unpack_from('<I', data, 0)[0] != PAK_MAGIC:
+        return None
+    archive = object.__new__(Archive)
+    archive.path = Path('entry.pak')
+    archive.data = data
+    archive._index(data, lambda o: struct.unpack_from('<I', data, o)[0])
+    return archive
+
+
+def nested_pak_reasons(path, data, game, depth):
+    """A character's archives (archives/DriverX*.pak) live inside update.pak: a mod package replaces such
+    an entry whole (25/11: Hatsune Megumi, the Motorsport skins). Checked entry by entry like a loose mod
+    archive; an entry identical to the one of the game's own copy of that archive is the game's."""
+    try:
+        mod = bytes_archive(data)
+    except (ValueError, struct.error, UnicodeDecodeError) as error:
+        return [f'{path} cannot be read ({error})']
+    if mod is None:
+        return [f'it changes {path}' if game.has(path.lower()) else f'it adds {path}']
+    own = {}
+    for archive, f in getattr(game, 'where', {}).get(path.lower().replace('\\', '/'), []):
+        try:
+            copy = bytes_archive(archive.extract(f))
+        except (ValueError, struct.error, UnicodeDecodeError):
+            continue
+        for entry in copy.files if copy else []:
+            own.setdefault(entry['path'].lower(), set()).add(sha(copy.extract(entry)))
+    out = []
+    for entry in mod.files:
+        blob = mod.extract(entry)
+        if sha(blob) in own.get(entry['path'].lower(), ()):
+            continue
+        out += [f'{path}: {r}' for r in entry_reasons(entry['path'], blob, game, depth + 1)]
+        if len(out) >= 4:
+            break
+    return out
+
+
+def entry_reasons(path, data, game, depth=0):
     """Why one file a mod gives the game is not a character mod's ([] when it is)"""
     key = path.lower().replace('\\', '/')
     if game.has(key) and sha(data) in game.digests(key):
         return []                               # the game's own file, copied along
+    if key.endswith('.pak') and depth < 2:
+        return nested_pak_reasons(path, data, game, depth)
     if key == SYSTEM_DATA:
         return system_data_reasons(data, game.system_data())
     if key in LISTINGS or (key.startswith(TEXTS) and key.endswith('.lng')):
@@ -341,6 +408,8 @@ def mod_reasons(game_dir, view_dir, file_map, archive_plan, own_dir=None):
                     continue
             except OSError:
                 pass
+            if approved_track_file(relative, path):
+                continue                        # an official new track, as released
             looked += 1
             if relative.lower().startswith('archives/') and relative.lower().endswith('.pak'):
                 reasons += archive_reasons(path, game, f'mod archive {path.name}')

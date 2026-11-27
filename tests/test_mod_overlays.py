@@ -49,6 +49,25 @@ class OverlayTests(unittest.TestCase):
             self.assertEqual(source.stat().st_size,before);self.assertEqual(source.read_bytes()[:4096],header)
             with self.assertRaisesRegex(ValueError,'OCTR setting also changes'):
                 compose(game,root/'conflict',[(op,folder)],made)
+    def test_mod_session_update_seen_from_the_tracks_view(self):
+        # 26/11: a character mod's update3.pak (file map) with the new tracks' view (mods.py, links):
+        # the port's archive took update3 too and the game never loaded it (no Neo Bowser City).
+        import mods,graphics_tab
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);game=root/'game';(game/'archives').mkdir(parents=True)
+            (game/'eboot.bin').write_bytes(b'EBOOT');(game/'archives/update2.pak').write_bytes(b'U2')
+            mod=root/'mod/update3.pak';mod.parent.mkdir();mod.write_bytes(b'MOD U3')
+            level=root/'t929.pak';level.write_bytes(b'LEVEL')
+            mapping=root/'map';dirs=root/'dirs'
+            file_map(game,mapping,dirs,[(Path('archives/update3.pak'),mod)])
+            view=mods.build_overlay(game,root/'out',[],[(Path('archives/t929.pak'),level)])
+            self.assertNotEqual(view.resolve(),game.resolve())
+            with patch.object(mod_file_paths,'_settings',{'BB_MOD_FILE_MAP':str(mapping),'BB_MOD_SOURCE_GAME':str(game)}):
+                mod_file_paths._view_root.cache_clear()
+                self.assertEqual(mod_file_paths.resolve(view/'archives/update3.pak'),mod)
+                self.assertEqual(mod_file_paths.extra_updates(view),['update3.pak'])
+                self.assertEqual(graphics_tab.slot(view),'update4.pak')
+                self.assertIn(mod,mod_file_paths.archives(view/'archives'))
     def test_file_map_redirects_host_reads_without_game_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);game=root/'game';game.mkdir();(game/'original').write_bytes(b'SOURCE')

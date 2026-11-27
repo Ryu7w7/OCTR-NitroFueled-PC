@@ -15,7 +15,8 @@ to a small update3.pak (uncompressed, the archives' own format) that the game lo
 Diagnostics: the Options menu files of every archive searched are copied to
 OUT/graphics-tab/dump/<archive>/ (a few hundred kilobytes).
 
-Prints "archives/update3.pak=<file>" for scripts/mods.py --replace, or nothing when the
+Prints "archives/update<N>.pak=<file>" (update3.pak, or the first free number after a mod's own
+update archives) for run.py/run.sh, or nothing when the
 graphics_tab setting is off or the files are not found.
 
 usage: graphics_tab.py GAME --out OUT [--settings bbport.ini]
@@ -434,18 +435,42 @@ WIDGET_RESOURCES = {
     'textures/guistandard_diffuse,textures@!ui!octane!icons!octane_ui_ico_singlerace`tga,101.igz',
 }
 
-def build(game, dest, dump, *, asset_transform=None):
+def search_archives(game):
+    """The archives searched for each file, newest first: a mod's own update3.pak... (its track lists,
+    its menus), then the game's."""
+    from mod_file_paths import extra_updates
+    return list(reversed(extra_updates(game))) + list(ARCHIVES)
+
+
+def slot(game):
+    """The port's update archive's name: update3.pak, or the first number after a mod's own (25/11: a mod
+    with an update3.pak turned off the Graphics tab and with it the new tracks)."""
+    from mod_file_paths import extra_updates
+    return f'update{3 + len(extra_updates(game))}.pak'
+
+
+def build(game, dest, dump, *, asset_transform=None, tracks=None):
     # Compose layout corrections before adding widgets: the generated update3 archive
     # loads after the native archives and would otherwise hide their layout changes.
     def source(archive, index, name, logical):
         data = archive.read(index)
         return asset_transform(name, logical, data) if asset_transform else data
 
+    if tracks is None:
+        # Every build carries the new tracks (scripts/track_content.py), also the ones rebuilt with
+        # other menus (Pack Tacho's, widescreen.py's): without them the tracks were gone.
+        try:
+            import track_content
+            tracks = track_content.entries(game)
+        except (OSError, ValueError, KeyError, StopIteration, struct.error, ImportError) as error:
+            print(f'Tracks: not added ({error})')
+            tracks = []
+    from mod_file_paths import resolve
     with ExitStack() as stack:
         found = {}  # logical name (lower case) -> (archive, index, archive name)
         archives = []
-        for name in ARCHIVES:
-            path = game / 'archives' / name
+        for name in search_archives(game):
+            path = resolve(game / 'archives' / name)
             if not path.is_file():
                 continue
             archive = Archive(path)
@@ -498,6 +523,24 @@ def build(game, dest, dump, *, asset_transform=None):
                 print('Graphics tab: Quit Game button in the main menu')
             except (ValueError, KeyError, IndexError, struct.error, ImportError) as error:
                 print(f'Graphics tab: no Quit Game button ({type(error).__name__}: {error})')
+        # The port's new tracks (scripts/track_content.py): the track lists with them, their files.
+        if tracks:
+            taken = {f[1].lower() for f in files}
+            for full, logical, data in tracks:
+                if logical.lower() in taken:
+                    raise ValueError(f'tracks: {logical} is a Graphics tab file too')
+                files.append((full, logical, 0, data))
+            print(f'Graphics tab: {len(tracks)} files of the new tracks')
+        # Fixes to the game's own levels (scripts/game_fixes.py): in this archive, the last one the game
+        # loads, so every player has them whatever mods are on.
+        try:
+            import game_fixes
+            fixes = game_fixes.entries(game)
+        except (OSError, ValueError, KeyError, struct.error, ImportError) as error:
+            print(f'Game fixes: none ({error})')
+            fixes = []
+        taken = {f[1].lower() for f in files}
+        files += [(full, logical, 0, data) for full, logical, data in fixes if logical.lower() not in taken]
         dest.parent.mkdir(parents=True, exist_ok=True)
         write_archive(dest, files, archives[0])
 
@@ -518,32 +561,46 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--settings', type=Path)
     args = parser.parse_args()
-    if not enabled(args.settings):
+    import track_content
+    # The port's tracks are part of the game (track_content.sync makes them mandatory): their lists are in
+    # this archive, so it is made with graphics_tab=0 too, and without them nothing is made (the launch
+    # stops: run.py, run.sh). 26/11: a player entered online without Neo Bowser City.
+    required = bool(track_content.packages())
+    if not enabled(args.settings) and not required:
         return
-    if (args.game / OUTPUT).exists():
-        print(f'Graphics tab: the game already has {OUTPUT}, off')
-        return
+    from mod_file_paths import resolve
+    archive_paths = [(a, resolve(args.game / 'archives' / a)) for a in search_archives(args.game)]
     stamp = hashlib.sha256(repr([
-        (a, str((args.game / 'archives' / a).resolve()),
-         (args.game / 'archives' / a).stat().st_size,
-         (args.game / 'archives' / a).stat().st_mtime_ns,
-         (args.game / 'archives' / a).stat().st_ctime_ns)
-        for a in ARCHIVES if (args.game / 'archives' / a).is_file()]).encode()).hexdigest()[:16]
+        (a, str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+        for a, p in archive_paths if p.is_file()]).encode()).hexdigest()[:16]
+    output = 'archives/' + slot(args.game)
+    if output != OUTPUT:
+        print(f"Graphics tab: a mod has its own update archives; the port's goes after them ({output})")
     folder = args.out / 'graphics-tab'
     scripts = Path(__file__).resolve().parent
     digest = hashlib.sha256(b''.join((scripts / name).read_bytes() for name in
-        ('graphics_tab.py', 'graphics_widgets.py', 'igz_file.py', 'quit_confirmation.py'))).hexdigest()[:16]
+        ('graphics_tab.py', 'graphics_widgets.py', 'igz_file.py', 'quit_confirmation.py', 'game_fixes.py'))
+        + track_content.digest().encode()).hexdigest()[:16]
     dest = folder / f'update3-{digest}-{stamp}.pak'
     try:
         if not dest.is_file():
-            build(args.game, dest, folder / 'dump')
+            try:
+                tracks = track_content.entries(args.game)
+            except (OSError, ValueError, KeyError, StopIteration, struct.error) as error:
+                print(f'Tracks: not added ({error})')
+                if required:
+                    sys.exit(3)
+                tracks = []
+            build(args.game, dest, folder / 'dump', tracks=tracks)
         from cache_cleanup import discard_files
         discard_files(folder, [old for old in folder.glob('update3-*.pak') if old != dest])
     except (OSError, ValueError, lzma.LZMAError, zlib.error) as error:
         print(f'Graphics tab: {error}, off')
+        if required:
+            sys.exit(3)
         return
     print(f'Graphics tab: Options menu tab relabelled ({dest.name})')
-    print(f'{OUTPUT}={dest}')
+    print(f'{output}={dest}')
 
 
 if __name__ == '__main__':

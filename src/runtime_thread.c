@@ -275,6 +275,16 @@ static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
+#ifdef _WIN32
+    /* Windows' own name too (the stutter log and crash tools read it): the full guest name. */
+    wchar_t wide[64];
+    const int n=MultiByteToWideChar(CP_UTF8,0,name,-1,wide,(int)(sizeof(wide)/sizeof(wide[0])));
+    typedef HRESULT (WINAPI *SetDescription)(HANDLE,PCWSTR);
+    static SetDescription set_description;
+    if (!set_description)
+        set_description=(SetDescription)(void (*)(void))GetProcAddress(GetModuleHandleA("kernel32.dll"),"SetThreadDescription");
+    if (n>0 && set_description) set_description(GetCurrentThread(),wide);
+#endif
 }
 #ifdef _WIN32
 #define exit_setjmp(t) bb_setjmp((t)->exit_jump)

@@ -5,7 +5,8 @@
  * A private room's host is known here (runtime_room_mode.c: the host this player follows, or
  * this player). The game never shows who hosts a public or Ranked room, and only the RyuNET
  * server knows: GET /ryunet/room-host?name=<this player> answers {"host":"<nickname>"}, asked in
- * the background at most every 3 seconds while a public room's lobby is on screen.
+ * the background at most every 3 seconds while a public room's lobby, or the pause menu of its
+ * race, is on screen (after a mid-race host migration it names the new host).
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "runtime.h"
 #include "runtime_http.h"
@@ -74,7 +75,9 @@ int runtime_room_host_is(const char *nick) {
         runtime_room_mode_host_name(host);
         return same_nick(host, nick);
     }
-    if (!runtime_online_mode_public_on()) {
+    /* The lobby, and the race's pause menu (its racers list) while still in that public/Ranked room:
+     * after the host leaves mid-race the server names the promoted one, so the crown moves to them. */
+    if (!runtime_online_mode_public_on() && !runtime_public_match_active()) {
         pthread_mutex_lock(&lock);
         public_host[0] = 0;
         pthread_mutex_unlock(&lock);

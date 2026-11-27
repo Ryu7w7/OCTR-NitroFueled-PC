@@ -63,15 +63,16 @@ class Activity:
     """What the presence shows. Joinable: party_id, party_size, party_max and join_secret."""
 
     def __init__(self, details, state="", start=0, large_image="", large_text="",
-                 party_id="", party_size=0, party_max=0, join_secret=""):
+                 party_id="", party_size=0, party_max=0, join_secret="", small_image="", small_text=""):
         self.details, self.state, self.start = details, state, start
         self.large_image, self.large_text = large_image, large_text
+        self.small_image, self.small_text = small_image, small_text
         self.party_id, self.party_size, self.party_max = party_id, party_size, party_max
         self.join_secret = join_secret
 
     def key(self):
         return (self.details, self.state, self.start, self.large_image, self.large_text,
-                self.party_id, self.party_size, self.party_max, self.join_secret)
+                self.small_image, self.small_text, self.party_id, self.party_size, self.party_max, self.join_secret)
 
     def to_json(self):
         a = {"details": self.details}
@@ -83,6 +84,10 @@ class Activity:
             a["assets"] = {"large_image": self.large_image}
             if self.large_text:
                 a["assets"]["large_text"] = self.large_text
+            if self.small_image:
+                a["assets"]["small_image"] = self.small_image
+                if self.small_text:
+                    a["assets"]["small_text"] = self.small_text
         if self.party_id and self.party_size > 0 and self.party_max >= self.party_size:
             a["party"] = {"id": self.party_id, "size": [self.party_size, self.party_max]}
             if self.join_secret:

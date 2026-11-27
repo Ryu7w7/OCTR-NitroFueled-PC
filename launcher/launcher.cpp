@@ -618,6 +618,8 @@ struct App {
     // lines): percent, -1 when no build is on; its stage (extract, export, translate, compile).
     std::atomic<int> shader_percent{-1};
     std::string shader_stage;
+    std::atomic<int> track_percent{-1};    // a new track downloading (scripts/track_content.py)
+    std::string track_name;
     unsigned long exit_code = 0;
     bool show_exit = false, stopped = false;
 
@@ -1298,6 +1300,22 @@ bool ListHas(const std::string& csv, const std::string& name) {
 /// run.py's "@progress native-shaders ..." lines: the launcher comes back to show the shader build
 /// (ShaderProgressPopup) and goes away again when the game starts. Not shown in the log.
 bool ShaderProgressLine(const std::string& line) {
+    static const std::string tracks = "@progress tracks ";
+    if (line.compare(0, tracks.size(), tracks) == 0) {
+        // "@progress tracks <percent> <name>" while a new track downloads, "@progress tracks done" after
+        const std::string rest = line.substr(tracks.size());
+        if (rest.rfind("done", 0) == 0) {
+            g_app.track_percent = -1;
+            return true;
+        }
+        const size_t space = rest.find(' ');
+        {
+            std::scoped_lock lock{g_app.mutex};
+            g_app.track_name = space == std::string::npos ? "" : Trim(rest.substr(space + 1));
+        }
+        g_app.track_percent = std::clamp(std::atoi(rest.substr(0, space).c_str()), 0, 100);
+        return true;
+    }
     static const std::string prefix = "@progress native-shaders ";
     if (line.compare(0, prefix.size(), prefix) != 0) return line.rfind("@progress ", 0) == 0;
     App& a = g_app;
@@ -1482,10 +1500,51 @@ int GpuIndex(const std::vector<App::Gpu>& gpus, const std::string& name, int nth
 bool UpdateBusy();
 
 void LaunchGameProcess();
+bool SpawnSecondInstance(const std::string& nick);
+void FormNote(const char* text);
 void BeginGameEnv();
 void SetPlatformGameEnv();
 void ApplyPlatformCapabilities();
 void PlatformSettings();
+/// A second player on this PC (issue #287): a second game with its own data folder, nickname,
+/// controllers and port (scripts/second_instance.py), started while the main one runs, with its
+/// environment. The two can join the same room online, each on a screen with a controller.
+void SecondPlayerPanel() {
+    App& a = g_app;
+    static char nick[17] = "";
+    static bool loaded = false;
+    static std::string message;
+    static bool error = false;
+    if (!loaded) {
+        loaded = true;
+        std::snprintf(nick, sizeof nick, "%s", a.launcher.Get("second_nick").c_str());
+    }
+    if (!ImGui::TreeNode(T("Segundo jugador en este PC", "Second player on this PC"))) return;
+    FormNote(T("Abre otra ventana del juego para un segundo jugador, con su propio apodo, mandos y partidas guardadas. "
+               "Los dos podéis entrar a la misma sala online. Configura su mando dentro de esa ventana (Insert / L3+R3).",
+               "Opens another game window for a second player, with their own nickname, controllers and saves. "
+               "Both of you can join the same online room. Set up their controller in that window (Insert / L3+R3)."));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    ImGui::InputText(T("Apodo del 2.º jugador##second", "Player 2 nickname##second"), nick, sizeof nick,
+                     ImGuiInputTextFlags_CallbackCharFilter, NickFilter);
+    const std::string chosen = Trim(nick);
+    const std::string main_nick = Trim(a.online_name_buf);
+    const bool same = !chosen.empty() && Lower(chosen) == Lower(main_nick);
+    ImGui::BeginDisabled(chosen.size() < 3 || same);
+    if (ImGui::Button(T("Abrir segunda instancia", "Open a second instance"))) {
+        a.launcher.Set("second_nick", chosen);
+        SaveLauncher();
+        error = !SpawnSecondInstance(chosen);
+        message = error ? T("No se pudo abrir la segunda instancia.", "Could not open the second instance.")
+                        : T("Abriendo la segunda instancia... (tarda como el primer arranque)",
+                            "Opening the second instance... (it takes as long as a first start)");
+    }
+    ImGui::EndDisabled();
+    if (same) ImGui::TextColored(kYellow, "%s", T("Usa un apodo distinto al tuyo.", "Use a nickname other than yours."));
+    if (!message.empty()) ImGui::TextColored(error ? kRed : kGreen, "%s", message.c_str());
+    ImGui::TreePop();
+}
+
 void StartGame() {
     App& a = g_app;
     if (!a.python || a.game_running || UpdateBusy()) return;
@@ -1575,7 +1634,7 @@ struct GameFacts {
     bool known = false;
     int game = 0, race = 0;  // EGameMode (Story 1, Arcade 8, OnlinePlay 16), EOctaneRaceModes
     std::string level, room;
-    bool lobby = false, itemless = false, speed = false;
+    bool lobby = false, itemless = false, speed = false, ranked = false;
 };
 
 GameFacts ReadGameFacts() {
@@ -1598,9 +1657,105 @@ GameFacts ReadGameFacts() {
         else if (key == "lobby") f.lobby = value == "1";
         else if (key == "itemless") f.itemless = value == "1";
         else if (key == "speed") f.speed = value == "1";
+        else if (key == "ranked") f.ranked = value == "1";
     }
     facts = f;
     return facts;
+}
+
+/// A level's zone: octane/t111_crash_cove/t111_crash_cove -> t111_crash_cove.
+std::string ZoneKey(const std::string& level) {
+    std::string zone = Lower(level);
+    const size_t slash = zone.find_last_of("/\\");
+    return slash == std::string::npos ? zone : zone.substr(slash + 1);
+}
+
+/// The picture of the track being played, for the presence's large image: an https URL from
+/// presence_images.txt (scripts/track_names.py: the tracks with one in the content bucket's presence/
+/// folder), "" for menus and levels without one.
+std::string PresenceImage(const std::string& level) {
+    static std::map<std::string, std::string> urls;
+    static uint64_t loaded_at = 0;
+    const uint64_t now = Ticks();
+    if (!loaded_at || now - loaded_at > 30000) {  // run.py writes it at each start
+        loaded_at = now;
+        urls.clear();
+        std::istringstream in(ReadText(PresenceFolder() / L"presence_images.txt"));
+        for (std::string line; std::getline(in, line);) {
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+            const std::string url = Trim(line.substr(tab + 1));
+            if (url.rfind("https://", 0) == 0 && url.size() < 256) urls[Lower(line.substr(0, tab))] = url;
+        }
+    }
+    const auto it = urls.find(ZoneKey(level));
+    return it == urls.end() ? std::string() : it->second;
+}
+
+/// The player's Ranked standing from the server (GET /ryunet/ranked-profile?name=&mode=all), asked once
+/// a minute on a worker thread, for the text over the track's picture.
+struct RankState {
+    std::mutex mutex;
+    std::string id;  // server|nick asked
+    uint64_t at = 0;
+    bool in_flight = false;
+    struct Mode { bool ranked = false; std::string tier; int rank = 0; };
+    Mode normal, itemless;
+};
+RankState g_rank;
+
+/// The {...} after "key": in a JSON text ("" when missing).
+std::string JsonObjectText(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\":{";
+    const size_t at = json.find(needle);
+    if (at == std::string::npos) return "";
+    int depth = 0;
+    for (size_t i = at + needle.size() - 1; i < json.size(); ++i) {
+        if (json[i] == '{') ++depth;
+        else if (json[i] == '}' && --depth == 0) return json.substr(at + needle.size() - 1, i - at - needle.size() + 2);
+    }
+    return "";
+}
+
+/// "Rango Ranked: Golden Wumpa (#12)" for the mode being played (Itemless in an Itemless match), else
+/// the other one the player has; "" with none or before the server answered.
+std::string RankText(const std::string& server, const std::string& nick, bool itemless) {
+    const std::string id = server + "|" + nick;
+    std::scoped_lock lock{g_rank.mutex};
+    if ((g_rank.id != id || Ticks() - g_rank.at >= 60000) && !g_rank.in_flight) {
+        g_rank.in_flight = true;
+        std::thread([server, nick, id] {
+            const std::string body = HttpGet(server, L"/ryunet/ranked-profile?mode=all&name=" + Widen(nick));
+            auto mode = [&](const char* key) {
+                RankState::Mode m;
+                const std::string o = JsonObjectText(body, key);
+                m.ranked = JsonBool(o, "ranked");
+                m.tier = JsonField(o, "tier");
+                JsonNumber(o, "rank", m.rank);
+                if (m.tier.empty() || m.tier.size() > 40) m.ranked = false;
+                return m;
+            };
+            const RankState::Mode normal = mode("normal"), items = mode("itemless");
+            std::scoped_lock done{g_rank.mutex};
+            g_rank.id = id;
+            g_rank.normal = normal;
+            g_rank.itemless = items;
+            g_rank.at = Ticks();
+            g_rank.in_flight = false;
+        }).detach();
+    }
+    if (g_rank.id != id) return "";
+    const RankState::Mode* m = itemless ? &g_rank.itemless : &g_rank.normal;
+    bool shown_itemless = itemless;
+    if (!m->ranked) {
+        m = itemless ? &g_rank.normal : &g_rank.itemless;
+        shown_itemless = !itemless;
+    }
+    if (!m->ranked) return "";
+    std::string text = std::string(shown_itemless ? T("Ranked sin objetos: ", "Ranked Itemless: ")
+                                                  : T("Ranked: ", "Ranked: ")) + m->tier;
+    if (m->rank > 0) text += " (#" + std::to_string(m->rank) + ")";
+    return text;
 }
 
 /// A level's own name in the launcher's language (track_names.txt from scripts/track_names.py: the
@@ -1619,9 +1774,7 @@ std::string ZoneName(const std::string& level) {
             names[line.substr(0, a)][line.substr(a + 1, b - a - 1)] = Trim(line.substr(b + 1));
         }
     }
-    std::string zone = Lower(level);
-    const size_t slash = zone.find_last_of("/\\");
-    if (slash != std::string::npos) zone = zone.substr(slash + 1);
+    std::string zone = ZoneKey(level);
     const std::string locale = g_active_locale == "es" || g_active_locale == "fr" || g_active_locale == "pt_BR"
                                    ? g_active_locale : "en";
     // the zone, else its leading parts (h100_hub_chunk_... is the Adventure hub, h100_hub)
@@ -1671,10 +1824,14 @@ bool DescribePlay(std::string& doing, std::string& match) {
     if (f.speed) mode += " (Speed)";
     const bool online = f.game == 16 || !f.room.empty();
     match = f.room == "private" ? T("Sala privada", "Private room")
+            : f.ranked         ? T("Ranked", "Ranked")
             : online           ? T("Partida pública", "Public match")
                                : "";
     if (place.empty()) {  // menus, an online lobby, a level without a name
         if (f.lobby && f.room == "private") doing = T("En una sala privada online", "In a private online room");
+        else if (f.ranked && (f.lobby || f.room == "public"))
+            doing = f.itemless ? T("Buscando partida Ranked sin objetos", "Looking for a Ranked Itemless match")
+                               : T("Buscando partida Ranked", "Looking for a Ranked match");
         else if (f.lobby || f.room == "public") doing = T("Buscando partida online", "Looking for an online match");
         else doing = online ? T("En los menús online", "In the online menus") : T("En los menús", "In the menus");
         if (f.lobby || f.room == "public") match.clear();  // the first line says it
@@ -1711,6 +1868,12 @@ void UpdateDiscord() {
     std::string doing, match;
     const bool described = DescribePlay(doing, match);
     activity.large_text = "Crash Team Racing Nitro-Fueled";
+    // the track's picture when the player is on one (the game's own from the online lobby's vote, in the
+    // content bucket), with the logo in its corner; the logo alone in the menus
+    const GameFacts facts = ReadGameFacts();
+    const std::string picture = described ? PresenceImage(facts.level) : std::string();
+    const std::string track = picture.empty() ? std::string() : ZoneName(facts.level);
+    if (!track.empty()) activity.large_text = track;
     if (a.game.Flag("online", true)) {
         activity.details = described ? doing : T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
@@ -1720,6 +1883,11 @@ void UpdateDiscord() {
         // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
         // whoever accepts; their launcher adds us as a friend and starts their game.
         const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+        // over the picture: the player's Ranked tier (the track's name stays in the first line)
+        if (!NickProblem(nick) && ValidServer(server)) {
+            const std::string rank = RankText(server, nick, facts.itemless);
+            if (!rank.empty()) activity.large_text = rank;
+        }
         if (!NickProblem(nick) && ValidServer(server)) {
             int players = 0, max = 0;
             if (!PartyInfo(server, nick, players, max)) {
@@ -1739,6 +1907,11 @@ void UpdateDiscord() {
     }
     activity.start = started;
     activity.large_image = "logo";
+    if (!picture.empty()) {
+        activity.large_image = picture;
+        activity.small_image = "logo";
+        activity.small_text = facts.ranked ? std::string(T("Ranked", "Ranked")) : std::string("Crash Team Racing Nitro-Fueled");
+    }
     DiscordPresence::Update(enabled, app_id, &activity);
 }
 
@@ -2036,6 +2209,7 @@ void PollJobs() {
     } else if (finished == Job::Play) {
         ReleaseGameProcess();
         a.game_running = false;
+        a.track_percent = -1;
         // Back from the tray where Play put it: a launcher left hidden there was missed and a second
         // one opened (20/11).
         if (!LauncherVisible()) BringLauncherToFront();
@@ -2885,6 +3059,7 @@ void PlayTab() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.68f, 0.20f, 0.28f, 1.0f));
         if (ImGui::Button(T("Cerrar el juego", "Stop the game"), ImVec2(-FLT_MIN, play_height))) StopGame();
         ImGui::PopStyleColor(2);
+        SecondPlayerPanel();
     } else {
         ImGui::BeginDisabled(!ready || busy || !a.python);
         ImGui::PushFont(g_ctr_font, ImGui::GetStyle().FontSizeBase * 1.5f);
@@ -2914,7 +3089,18 @@ void PlayTab() {
         std::scoped_lock lock{a.mutex};
         status = a.last_status;
     }
-    if (a.game_running) {
+    if (a.game_running && a.track_percent.load() >= 0) {
+        std::string name;
+        {
+            std::scoped_lock lock{a.mutex};
+            name = a.track_name;
+        }
+        const int percent = a.track_percent.load();
+        ImGui::TextColored(kYellow, "%s %s", T("Descargando pista nueva:", "Downloading a new track:"), name.c_str());
+        char overlay[16];
+        std::snprintf(overlay, sizeof overlay, "%d %%", percent);
+        ImGui::ProgressBar(percent / 100.0f, ImVec2(-FLT_MIN, 0), overlay);
+    } else if (a.game_running) {
         ImGui::TextColored(kYellow, "%s", T("El juego está abierto. El primer arranque compila shaders y tarda un poco.",
                                             "The game is running. The first start compiles shaders and takes a while."));
     } else if (a.show_exit) {
@@ -8139,9 +8325,182 @@ void ToolsAboutPage() {
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());
 }
 
+// ---- Tools > Content: the game's new tracks (scripts/content_cli.py, scripts/track_content.py) ----
+// Play downloads them before the game starts; this page scans them against the server's list (every
+// file read again whole) and, when one is missing, damaged or old, downloads it again.
+struct ContentRow {
+    std::string name, version, state;
+};
+struct ContentState {
+    std::mutex mutex;
+    bool busy = false, scanned = false, repairing = false, server = true, rescan = false;
+    std::vector<ContentRow> rows;
+    int problems = 0;
+    std::string message;
+    bool error = false;
+    fs::path progress;          // the percent file content_cli.py rewrites
+    std::string progress_text;  // its last reading
+    double progress_read = 0.0;
+};
+ContentState g_content;
+
+fs::path ContentFolder() {
+    const auto override = Env("BB_CONTENT_DIR");
+    if (!override.empty()) return TextPath(override);
+#ifdef _WIN32
+    return g_app.root / L"content";    // run.py: content/ beside scripts/ (track_content.content_root)
+#else
+    return g_app.data / L"content";    // run.sh: BB_CONTENT_DIR=$data/content
+#endif
+}
+
+void ContentRun(bool repair, bool keep_message = false) {
+    App& a = g_app;
+    if (!a.python) {
+        std::scoped_lock lock{g_content.mutex};
+        g_content.error = true;
+        g_content.message = T("Falta Python 3.", "Python 3 is missing.");
+        return;
+    }
+    const fs::path progress = a.data / L"content-progress.txt";
+    {
+        std::scoped_lock lock{g_content.mutex};
+        if (g_content.busy) return;
+        g_content.busy = true;
+        g_content.repairing = repair;
+        if (!keep_message) {
+            g_content.message.clear();
+            g_content.error = false;
+        }
+        g_content.progress = progress;
+        g_content.progress_text.clear();
+    }
+    std::error_code ec;
+    fs::remove(progress, ec);
+    const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-I -X utf8 " +
+                             Quote(WidePath(a.root / L"scripts" / L"content_cli.py")) + (repair ? L" repair" : L" scan") +
+                             L" --settings " + Quote(WidePath(GameIni())) + L" --content " + Quote(WidePath(ContentFolder())) +
+                             L" --progress " + Quote(WidePath(progress));
+    const std::wstring exe = a.python->exe;
+    const fs::path root = a.root;
+    std::thread([cmd, exe, root, repair] {
+        const Captured r = RunCaptured(exe, cmd, root, repair ? 3600000 : 600000);
+        std::string out = r.output;   // one JSON object, last
+        if (const auto line = out.rfind("\n{"); line != std::string::npos) out = out.substr(line + 1);
+        else if (const auto brace = out.find('{'); brace != std::string::npos) out = out.substr(brace);
+        std::vector<ContentRow> rows;
+        int problems = 0;
+        for (size_t at = out.find("{\"id\""); at != std::string::npos; at = out.find("{\"id\"", at + 1)) {
+            const std::string one = out.substr(at, out.find('}', at) - at + 1);
+            rows.push_back({JsonField(one, "name"), JsonField(one, "version"), JsonField(one, "state")});
+        }
+        JsonNumber(out, "problems", problems);
+        const std::string error = r.started ? JsonField(out, "error") : std::string("python");
+        std::scoped_lock lock{g_content.mutex};
+        g_content.busy = false;
+        g_content.error = !error.empty() || (!repair && out.find("\"tracks\"") == std::string::npos);
+        g_content.server = out.find("\"server\":false") == std::string::npos;
+        if (repair) {
+            g_content.message = g_content.error
+                ? T("No se pudo descargar todo el contenido. Revisa tu conexión (y que ningún antivirus o firewall "
+                    "bloquee el launcher) y vuelve a intentarlo.",
+                    "Not all the content could be downloaded. Check your connection (and that no antivirus or "
+                    "firewall blocks the launcher) and try again.")
+                : T("Contenido descargado de nuevo y comprobado.", "Content downloaded again and checked.");
+            if (!g_content.error) g_content.rescan = true;   // scanned again at once (ToolsContentPage)
+        } else if (g_content.error) {
+            g_content.scanned = false;
+            g_content.message = T("No se pudo leer la lista de contenido del servidor ni la copia guardada.",
+                                  "Neither the server's list of content nor the kept copy could be read.");
+        } else {
+            g_content.rows = std::move(rows);
+            g_content.problems = problems;
+            g_content.scanned = true;
+        }
+    }).detach();
+}
+
+void ToolsContentPage() {
+    App& a = g_app;
+    ContentState& c = g_content;
+    std::scoped_lock lock{c.mutex};
+    if (c.rescan && !c.busy) {
+        c.rescan = false;
+        c.mutex.unlock();
+        ContentRun(false, true);
+        c.mutex.lock();
+    }
+    FormSection(T("Contenido del juego", "Game content"));
+    FormNote(T("Las pistas nuevas se descargan del servidor al pulsar Jugar. Aquí puedes comprobar que están completas "
+               "y al día, y descargarlas de nuevo si algo está roto.",
+               "New tracks are downloaded from the server when you press Play. Here you can check that they are whole "
+               "and up to date, and download them again if something is broken."));
+    if (a.game_running) ImGui::TextColored(kYellow, "%s", T("Cierra el juego para comprobar el contenido.",
+                                                            "Close the game to check the content."));
+    ImGui::BeginDisabled(c.busy || a.game_running);
+    if (ImGui::Button(T("Escanear contenido", "Scan content"))) {
+        c.mutex.unlock();
+        ContentRun(false);
+        c.mutex.lock();
+    }
+    if (c.scanned && c.problems > 0) {
+        ImGui::SameLine();
+        if (ImGui::Button(T("Redescargar contenido", "Download content again"))) {
+            c.mutex.unlock();
+            ContentRun(true);
+            c.mutex.lock();
+        }
+    }
+    ImGui::EndDisabled();
+    if (c.busy) {
+        const double now = ImGui::GetTime();
+        if (now - c.progress_read > 0.2) {
+            c.progress_read = now;
+            c.progress_text = ReadText(c.progress);
+        }
+        // "scan 40" or "tracks 40 <name>" (scripts/content_cli.py --progress)
+        int percent = -1;
+        if (const auto space = c.progress_text.find(' '); space != std::string::npos)
+            percent = std::clamp(std::atoi(c.progress_text.c_str() + space + 1), 0, 100);
+        ImGui::TextColored(kYellow, "%s", c.repairing ? T("Descargando contenido...", "Downloading content...")
+                                                      : T("Comprobando archivos...", "Checking files..."));
+        if (percent >= 0) {
+            char overlay[16];
+            std::snprintf(overlay, sizeof overlay, "%d%%", percent);
+            ImGui::ProgressBar(percent / 100.0f, ImVec2(-FLT_MIN, 0), overlay);
+        } else {
+            ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()), ImVec2(-FLT_MIN, 0));
+        }
+    }
+    if (!c.message.empty()) ImGui::TextColored(c.error ? kRed : kGreen, "%s", c.message.c_str());
+    if (!c.scanned || c.busy) return;
+    if (!c.server)
+        FormNote(T("El servidor no respondió: se comprobó con la última lista guardada.",
+                   "The server did not answer: checked against the last list kept."));
+    if (c.rows.empty()) {
+        FormNote(T("El servidor no tiene contenido adicional ahora mismo.", "The server has no extra content right now."));
+        return;
+    }
+    for (const auto& row : c.rows) {
+        const bool ok = row.state == "ok";
+        const char* state = ok                         ? T("Correcto", "OK")
+                            : row.state == "missing"   ? T("Sin descargar", "Not downloaded")
+                            : row.state == "outdated"  ? T("Versión antigua", "Old version")
+                                                       : T("Dañado", "Damaged");
+        ImGui::TextUnformatted(row.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(kGrey, "%s", row.version.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(ok ? kGreen : kRed, "%s", state);
+    }
+    if (c.problems == 0)
+        ImGui::TextColored(kGreen, "%s", T("Todo el contenido está completo y al día.", "All content is whole and up to date."));
+}
+
 void ToolsTab() {
     if (!ImGui::BeginTabBar("tools_pages")) return;
     SettingsPage(T("Actualizaciones", "Updates"), UpdateSection);
+    SettingsPage(T("Contenido", "Content"), ToolsContentPage);
     SettingsPage(T("Datos y carpetas", "Data and folders"), ToolsDataPage);
     SettingsPage(T("Accesos directos", "Shortcuts"), ToolsShortcutsPage);
     SettingsPage(T("Idioma", "Language"), ToolsLanguagePage);

@@ -29,6 +29,7 @@
 #include "runtime_np_online.h"
 #include "runtime_ranked.h"
 #include "runtime_replay.h"
+#include "runtime_net.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -92,6 +93,24 @@ int runtime_ranked_account(void) {
     return account;
 }
 
+/* A ban from Ranked only (the server's ranked_bans.go, made in its admin panel): the reason and
+ * when it ends (monotonic ms, 0 permanent), from the signed status. */
+static int status_banned;
+static char status_ban_reason[256];
+static uint64_t status_ban_until;
+
+int runtime_ranked_ban(char *reason, size_t size, long *left_seconds) {
+    pthread_mutex_lock(&lock);
+    const uint64_t now = monotonic_ms();
+    int banned = status_banned && (!status_ban_until || now < status_ban_until);
+    if (banned) {
+        if (reason && size) snprintf(reason, size, "%s", status_ban_reason);
+        if (left_seconds) *left_seconds = status_ban_until ? (long)((status_ban_until - now + 999) / 1000) : 0;
+    }
+    pthread_mutex_unlock(&lock);
+    return banned;
+}
+
 int runtime_ranked_status(int fresh) {
     const uint64_t now = monotonic_ms();
     pthread_mutex_lock(&lock);
@@ -137,6 +156,58 @@ static int ranked_status_reply(const char *reply, int *season, int *enabled, int
     return status_bool(reply, "enabled", enabled);
 }
 
+/* A JSON string field, unescaped (\uXXXX as UTF-8, surrogate pairs too): 1 found */
+static int status_text(const char *reply, const char *key, char *out, size_t size) {
+    const char *p = runtime_json_field(reply, key);
+    if (!p || *p != '"' || !size) return 0;
+    size_t used = 0;
+    for (++p; *p && *p != '"'; ++p) {
+        unsigned code = (unsigned char)*p;
+        if (*p == '\\') {
+            ++p;
+            if (!*p) break;
+            if (*p == 'u') {
+                unsigned u = 0;
+                for (int i = 1; i <= 4; ++i) {
+                    const char c = p[i];
+                    if (!isxdigit((unsigned char)c)) return 0;
+                    u = u * 16 + (unsigned)(isdigit((unsigned char)c) ? c - '0' : (tolower((unsigned char)c) - 'a' + 10));
+                }
+                p += 4;
+                if (u >= 0xd800 && u < 0xdc00 && p[1] == '\\' && p[2] == 'u') {
+                    unsigned low = 0;
+                    int ok = 1;
+                    for (int i = 3; i <= 6 && ok; ++i) {
+                        const char c = p[i];
+                        ok = isxdigit((unsigned char)c);
+                        if (ok) low = low * 16 + (unsigned)(isdigit((unsigned char)c) ? c - '0' : (tolower((unsigned char)c) - 'a' + 10));
+                    }
+                    if (ok && low >= 0xdc00 && low < 0xe000) {
+                        u = 0x10000 + ((u - 0xd800) << 10) + (low - 0xdc00);
+                        p += 6;
+                    }
+                }
+                char utf8[4];
+                size_t n = u < 0x80 ? 1 : u < 0x800 ? 2 : u < 0x10000 ? 3 : 4;
+                if (n == 1) utf8[0] = (char)u;
+                else if (n == 2) { utf8[0] = (char)(0xc0 | u >> 6); utf8[1] = (char)(0x80 | (u & 0x3f)); }
+                else if (n == 3) { utf8[0] = (char)(0xe0 | u >> 12); utf8[1] = (char)(0x80 | ((u >> 6) & 0x3f)); utf8[2] = (char)(0x80 | (u & 0x3f)); }
+                else { utf8[0] = (char)(0xf0 | u >> 18); utf8[1] = (char)(0x80 | ((u >> 12) & 0x3f));
+                       utf8[2] = (char)(0x80 | ((u >> 6) & 0x3f)); utf8[3] = (char)(0x80 | (u & 0x3f)); }
+                if (used + n >= size) break;
+                memcpy(out + used, utf8, n);
+                used += n;
+                continue;
+            }
+            code = (unsigned char)(*p == 'n' ? '\n' : *p == 't' ? '\t' : *p == 'r' ? ' ' : *p);
+        }
+        if (used + 1 >= size) break;
+        out[used++] = (char)code;
+    }
+    out[used] = 0;
+    return 1;
+}
+
 /* 1 may enter Ranked, 0 must link an account (account_required and not account_linked) */
 static int ranked_account_reply(const char *reply) {
     int required = 0, linked = 0;
@@ -159,9 +230,20 @@ static void ranked_status_fetch(void) {
     const int valid = runtime_ryunet_transfer("GET", target, NULL, 0,
         &reply, &size, 1024) == 200 && ranked_status_reply(reply, &season, &enabled, &retry);
     const int account = valid ? ranked_account_reply(reply) : -1;
+    int banned = 0, ban_left = 0;
+    char ban_reason[sizeof status_ban_reason] = "";
+    if (valid && status_bool(reply, "ranked_banned", &banned) && banned) {
+        if (!status_text(reply, "ranked_ban_reason", ban_reason, sizeof ban_reason)) ban_reason[0] = 0;
+        if (!status_integer(reply, "ranked_ban_left", &ban_left)) ban_left = 0;
+    }
     free(reply);
     pthread_mutex_lock(&lock);
     if (valid) status_account = account;
+    if (valid) {
+        status_banned = banned;
+        memcpy(status_ban_reason, ban_reason, sizeof status_ban_reason);
+        status_ban_until = banned && ban_left > 0 ? monotonic_ms() + (uint64_t)ban_left * 1000u : 0;
+    }
     if (valid && season != status_season) {
         status_season = season;
         runtime_hof_season_changed(season);
@@ -728,4 +810,106 @@ void runtime_ranked_start(void) {
     pthread_t thread;
     if (pthread_create(&thread, NULL, ranked_tier_worker, NULL) == 0)
         pthread_detach(thread);
+}
+
+/* ---- the rules notice on the Ranked screen (the server's ranked_rules.go, edited in its admin panel) ----
+ * GET /ryunet/ranked-rules?lang=xx: "ok\n", "title\t..\n", "subtitle\t..\n" and "rule\t<no|warn|ok>\t..\n" per
+ * rule in the game's language, or "off\n". Asked when the overlay first wants it once online, then every two
+ * minutes while it does (bbport_overlay.cpp RankedRulesNotice); until an answer, the built-in notice. */
+#define RULES_MAX 6
+#define RULES_TEXT 1280
+static pthread_mutex_t rules_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    int state;                          /* -1 no answer yet, 0 switched off, 1 the server's */
+    char title[128], subtitle[128];
+    int count, kind[RULES_MAX];         /* 0 no, 1 warn, 2 ok */
+    char text[RULES_MAX][RULES_TEXT];
+    uint64_t next;
+    int running;
+} rules = {.state = -1};
+
+/* the game's language as a code for the server (PS4 system language ids, BB_LANGUAGE; as runtime_tips.c) */
+static const char *rules_language(void) {
+    static const char *const CODES[] = {
+        "ja", "en", "fr", "es", "de", "it", "nl", "pt", "ru", "ko", "zh", "zh",
+        "fi", "sv", "da", "no", "pl", "pt", "en", "tr", "es", "ar", "fr"};
+    const char *v = getenv("BB_LANGUAGE");
+    const int id = v ? atoi(v) : 1;
+    return id >= 0 && id < (int)(sizeof CODES / sizeof *CODES) ? CODES[id] : "en";
+}
+
+static void rules_parse(char *body) {
+    int state = -1, count = 0, kind[RULES_MAX] = {0};
+    char title[sizeof rules.title] = "", subtitle[sizeof rules.subtitle] = "";
+    static char text[RULES_MAX][RULES_TEXT];
+    char *save = NULL;
+    for (char *line = strtok_r(body, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strcmp(line, "off")) state = 0;
+        else if (!strcmp(line, "ok")) state = 1;
+        else if (!strncmp(line, "title\t", 6)) snprintf(title, sizeof title, "%s", line + 6);
+        else if (!strncmp(line, "subtitle\t", 9)) snprintf(subtitle, sizeof subtitle, "%s", line + 9);
+        else if (!strncmp(line, "rule\t", 5) && count < RULES_MAX) {
+            char *tab = strchr(line + 5, '\t');
+            if (!tab || !tab[1]) continue;
+            *tab = 0;
+            kind[count] = !strcmp(line + 5, "no") ? 0 : !strcmp(line + 5, "ok") ? 2 : 1;
+            snprintf(text[count], RULES_TEXT, "%s", tab + 1);
+            ++count;
+        }
+    }
+    if (state < 0) return;   /* not an answer: the last one (or the built-in notice) stays */
+    pthread_mutex_lock(&rules_lock);
+    const int changed = rules.state != state || rules.count != count;
+    rules.state = state && count ? 1 : 0;
+    rules.count = count;
+    memcpy(rules.title, title, sizeof title);
+    memcpy(rules.subtitle, subtitle, sizeof subtitle);
+    memcpy(rules.kind, kind, sizeof kind);
+    memcpy(rules.text, text, sizeof text);
+    pthread_mutex_unlock(&rules_lock);
+    if (changed) {
+        printf("Ranked rules: %s from RyuNET\n", state && count ? "the notice" : "no notice");
+        fflush(stdout);
+    }
+}
+
+static void *rules_worker(void *unused) {
+    (void)unused;
+    char target[64], *body = malloc(16384);
+    snprintf(target, sizeof target, "/ryunet/ranked-rules?lang=%s", rules_language());
+    if (body && runtime_ryunet_request("GET", target, body, 16384) == 200) rules_parse(body);
+    free(body);
+    pthread_mutex_lock(&rules_lock);
+    rules.running = 0;
+    pthread_mutex_unlock(&rules_lock);
+    return NULL;
+}
+
+int runtime_ranked_rules(char *title, size_t title_size, char *subtitle, size_t subtitle_size, int *kinds,
+                         char (*texts)[RULES_TEXT], int max) {
+    const uint64_t now = monotonic_ms();
+    pthread_mutex_lock(&rules_lock);
+    int ask = !rules.running && now >= rules.next && runtime_net_is_online();
+    if (ask) {
+        rules.running = 1;
+        rules.next = now + 120000;
+    }
+    const int state = rules.state;
+    int count = state == 1 ? rules.count : state;
+    if (state == 1) {
+        if (count > max) count = max;
+        if (title && title_size) snprintf(title, title_size, "%s", rules.title);
+        if (subtitle && subtitle_size) snprintf(subtitle, subtitle_size, "%s", rules.subtitle);
+        for (int i = 0; i < count; ++i) {
+            if (kinds) kinds[i] = rules.kind[i];
+            if (texts) memcpy(texts[i], rules.text[i], RULES_TEXT);
+        }
+    }
+    pthread_mutex_unlock(&rules_lock);
+    if (ask) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, rules_worker, NULL) == 0) pthread_detach(thread);
+        else { pthread_mutex_lock(&rules_lock); rules.running = 0; pthread_mutex_unlock(&rules_lock); }
+    }
+    return count;
 }

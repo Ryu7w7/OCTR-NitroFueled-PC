@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <math.h>
+#include <inttypes.h>
 #include <pthread.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -39,6 +40,7 @@ static int private_speed_selected;
 static int private_collision_selected;
 static int collision_refreshing;
 static int private_nsane_selected;
+static int private_elimination_selected;   /* ELIMINATION (index 4): runtime_elimination.c */
 static int selector_mode_index;
 static int matchmaking_return_mode = -1;
 static uint64_t mode_select_updated_ms;
@@ -339,7 +341,7 @@ static void normalize_race_teams(void) {
     int teams, mode = 0;
     memcpy(&teams, *race_settings + 0x28, 4);
     if (race_manager && *race_manager) memcpy(&mode, (unsigned char *)*race_manager + 0xd40, 4);
-    if (runtime_public_match_active() || runtime_online_mode_private_cup() ||
+    if (runtime_public_match_active() || runtime_online_mode_private_cup() || runtime_elimination_mode_enabled() ||
         (mode == 1 && !is_private() && !private_team_selector_active)) teams = 1;
     else if (mode == 1 && is_private() && !battle_selected() && teams == 3) teams = 2;
     memcpy(*race_settings + 0x28, &teams, 4);
@@ -351,7 +353,8 @@ static void ABI team_count_event(unsigned char *self, void *event, void *owner) 
         collision_selector_event(self, event, owner);
         return;
     }
-    const int cup = runtime_online_mode_private_cup();
+    /* Elimination: no teams, as a CUP (and its row hidden, team_row_visibility) */
+    const int cup = runtime_online_mode_private_cup() || runtime_elimination_mode_enabled();
     const int single = is_private() && !battle_selected() && !cup;
     normalize_race_teams();
     GetType type = (GetType)pointer_at(pointer_at(event, 0), 0);
@@ -403,20 +406,22 @@ static void ABI menu_project(void *context, void *pin, void **result, unsigned c
 /* Every pick in the selector (set by runtime_room_mode.c; NULL in the unit test, which links this
  * file alone): in a private match the host's choice goes to RyuNET for the players who join, and
  * a player picking a mode stops following another host's room. */
-void (*runtime_online_mode_chosen)(int mode, int private_room); /* 0 normal, 1 itemless, 2 n.sane */
+void (*runtime_online_mode_chosen)(int mode, int private_room); /* 0 normal, 1 itemless, 2 n.sane, 3 elimination */
 
 /* A joining player takes the room's mode from its host (runtime_room_mode.c): 0 Normal, 1 Itemless,
  * 2 N.Sane, whatever this player picked in the selector. Their own choice stays for their own room. */
 void runtime_online_mode_adopt(int mode) {
     runtime_speed_mode_set(mode == 1);
     runtime_nsane_mode_set(mode == 2);
+    runtime_elimination_mode_set(mode == 3);
     printf("Native Online mode: %s (the host's private room)\n",
-           mode == 1 ? "ITEMLESS" : mode == 2 ? "N.SANE" : "NORMAL");
+           mode == 1 ? "ITEMLESS" : mode == 2 ? "N.SANE" : mode == 3 ? "ELIMINATION" : "NORMAL");
 }
 
 int runtime_online_mode_private_speed(void) { return private_speed_selected; }
 int runtime_online_mode_itemless_collision(void) { return private_collision_selected; }
 int runtime_online_mode_private_nsane(void) { return private_nsane_selected; }
+int runtime_online_mode_private_elimination(void) { return private_elimination_selected; }
 
 static void *pointer_at(const void *object, size_t offset) {
     void *pointer;
@@ -821,7 +826,9 @@ static void ranked_race_rules(int active) {
         memcpy(&ranked_previous_laps, settings + 0x0c, 4);
         ranked_previous_ai = settings[0x10];
     }
-    const int laps = 5;
+    /* Ranked Normal 5 laps, Ranked Itemless 3 (the user, 25/11): the server checks the laps' order,
+     * up to 7, not their number (ranked_consensus.go). */
+    const int laps = runtime_public_itemless_active() ? 3 : 5;
     memcpy(settings + 0x0c, &laps, 4);
     settings[0x10] = 0;
 }
@@ -1007,6 +1014,7 @@ static void ABI load_private_map(const char *map, int reason) {
     cup_timer_pending = 0;
     runtime_nsane_map_loading(map);
     runtime_race_options_map_loading(map);
+    runtime_elimination_map_loading(map);
     clear_team_selector();
     normalize_race_teams();
     const int team_return = team_ranking_project && map &&
@@ -1020,7 +1028,8 @@ static void ABI load_private_map(const char *map, int reason) {
         strcasecmp(map, "octane/octane_startscreen/octane_startscreen");
     if (private_single_race_active)
         printf("Native private race: loading %s mode=%s teams=%d\n", map,
-               runtime_speed_race_active() ? "ITEMLESS" : runtime_nsane_race_active() ? "N.SANE" : "NORMAL",
+               runtime_speed_race_active() ? "ITEMLESS" : runtime_nsane_race_active() ? "N.SANE" :
+               runtime_elimination_mode_enabled() ? "ELIMINATION" : "NORMAL",
                race_settings && *race_settings ? *(int *)(*race_settings + 0x28) : 1);
     const int incomplete_cup_return = private_cup_race_active && !cup_final_results_ready &&
         map && !strcasecmp(map, "octane/octane_onlinelobby/octane_onlinelobby");
@@ -1623,6 +1632,10 @@ static int result_racer_id(unsigned char *racer) {
     }
     return -1;
 }
+
+/* runtime_elimination.c: the host's id of a racer (the same on every PC), and whether a private room's single race is on. */
+int runtime_online_racer_id(void *racer) { return racer ? result_racer_id(racer) : -1; }
+int runtime_online_private_single_race(void) { return private_single_race_active; }
 
 static unsigned char ABI racer_ahead(unsigned char *a, unsigned char *b) {
     const unsigned char ahead = original_racer_ahead(a, b);
@@ -2708,6 +2721,7 @@ static void ABI race_results_received(unsigned char *event) {
 }
 
 static int ABI race_finished(unsigned char *self) {
+    if (runtime_elimination_holds_race(self)) return 0;  /* elimination mode: on until one racer is left */
     unsigned char *manager = racer_manager ? *racer_manager : NULL;
     unsigned char *list = manager ? pointer_at(manager, 0x10) : NULL;
     int count = 0;
@@ -3133,18 +3147,370 @@ int runtime_online_mode_race_running(void) {
     memcpy(&state_id, state + 0x144, sizeof state_id);
     return network_race(state_id);
 }
-void runtime_online_mode_note_frame(void) {
-    ranked_intro_skip();
-    team_lobby_frame();
-    if (runtime_online_mode_race_running()) {
-        snapshot_race_identity();
-        runtime_party_server_tick();
+/* ---- Stutter log (27/11: "se traba en el online, cuando emparejas y en la pista") ----
+ * Every frame of the game's thread (runtime_replay_tick, the pad read) is timed, and each of the port's own tasks
+ * in it (runtime_stutter_note). Online, a frame much longer than the usual ones is told with what the port spent
+ * in it and on what; a task over 8 ms is told on its own. The rest of a long frame is the game's own work or a
+ * wait (the renderer's "hitch" lines say what the GPU side did). Not during loads (frames over 2 s). */
+#include <time.h>
+int runtime_net_is_online(void);   /* runtime_net.c (its winsock headers go before windows.h) */
+uint64_t runtime_stutter_clock_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u;
+}
+static struct { const char *name; uint64_t us; } stutter_top[3];
+static uint64_t stutter_ours, stutter_last_frame, stutter_told_at;
+static double stutter_usual;
+static int stutter_frames;
+void runtime_stutter_note(const char *what, uint64_t us) {
+    stutter_ours += us;
+    for (int i = 0; i < 3; ++i) {
+        if (!stutter_top[i].name || us > stutter_top[i].us) {
+            for (int j = 2; j > i; --j) stutter_top[j] = stutter_top[j - 1];
+            stutter_top[i].name = what;
+            stutter_top[i].us = us;
+            break;
+        }
     }
-    runtime_public_itemless_poll_race_host();
-    runtime_public_itemless_poll_ranked_request();
-    startup_update();
-    apply_pending_online_reset();
-    refresh_ranked_score();
+    if (us >= 8000 && runtime_net_is_online())
+        printf("Stutter: %s took %.1f ms on the game's thread\n", what, us / 1000.0);
+}
+
+/* Where the game's thread is during a long frame (27/11: the port's tasks were 0 ms in every long frame, so the
+ * time goes to the game itself or to a wait). Windows: a thread looks at it each 5 ms; once a frame has lasted
+ * 70 ms it stops the game's thread for a moment (no allocation while it is stopped), takes its instruction
+ * pointer, its native call chain (unwind tables: our HLE, drivers, Windows) and the guest code addresses on its
+ * stack, and lets it go. The long frame's line then tells up to 4 such looks, and how much CPU the thread used
+ * in that frame (near the frame's length: it was working; near 0: it was waiting). */
+static unsigned char *stutter_image;
+static size_t stutter_image_bytes;
+static uint64_t stutter_cpu_at;
+#ifdef _WIN32
+#define STUTTER_LOOKS 4
+#define STUTTER_CHAIN 10
+#define STUTTER_GUEST 6
+typedef struct {
+    volatile uint64_t beat;   /* the frame start it belongs to (written last) */
+    uint32_t at_ms;
+    int chain_n, guest_n;
+    uintptr_t chain[STUTTER_CHAIN];
+    uintptr_t guest[STUTTER_GUEST];
+} StutterLook;
+static StutterLook stutter_looks[STUTTER_LOOKS];
+static HANDLE volatile stutter_thread;   /* the thread that reads the pad now (it changes after the start) */
+static volatile uint64_t stutter_beat;
+static void stutter_all_threads(uint64_t beat_age_ms);
+static DWORD WINAPI stutter_watch(LPVOID unused) {
+    (void)unused;
+    uint64_t looked_beat = 0, looked_at = 0;
+    int looks = 0, told_suspend = 0, told_context = 0, told_first = 0;
+    printf("Stutter watch: on, looking at thread %lu\n", (unsigned long)GetThreadId(stutter_thread));
+    for (;;) {
+        Sleep(5);
+        const uint64_t beat = stutter_beat, now = runtime_stutter_clock_us();
+        if (!beat || now < beat || now - beat < 70000 || now - beat > 2000000) continue;
+        if (beat != looked_beat) { looked_beat = beat; looks = 0; looked_at = 0; }
+        if (looks >= STUTTER_LOOKS || (looked_at && now - looked_at < 35000)) continue;
+        StutterLook *look = &stutter_looks[looks];
+        HANDLE const watched = stutter_thread;
+        if (SuspendThread(watched) == (DWORD)-1) {
+            if (!told_suspend++) printf("Stutter watch: could not stop the game's thread (error %lu)\n", GetLastError());
+            continue;
+        }
+        CONTEXT c;
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        int got_context = GetThreadContext(watched, &c) != 0;
+        int chain_n = 0, guest_n = 0;
+        if (got_context) {
+            CONTEXT walk = c;
+            for (; chain_n < STUTTER_CHAIN && walk.Rip; ) {
+                look->chain[chain_n++] = (uintptr_t)walk.Rip;
+                if (stutter_image && walk.Rip - (uintptr_t)stutter_image < stutter_image_bytes) break; /* guest */
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(walk.Rip, &base, NULL);
+                if (!f) break;
+                PVOID data = NULL;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, walk.Rip, f, &walk, &data, &establisher, NULL);
+            }
+            uintptr_t stack[384];
+            SIZE_T read = 0;
+            ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c.Rsp, stack, sizeof stack, &read);
+            for (SIZE_T i = 0; i < read / sizeof stack[0] && guest_n < STUTTER_GUEST; ++i)
+                if (stutter_image && stack[i] - (uintptr_t)stutter_image < stutter_image_bytes &&
+                    stack[i] > (uintptr_t)stutter_image + 0x80)
+                    look->guest[guest_n++] = stack[i];
+        }
+        const DWORD context_error = got_context ? 0 : GetLastError();
+        ResumeThread(watched);
+        if (!got_context) {
+            if (!told_context++) printf("Stutter watch: could not read the game's thread (error %lu)\n", context_error);
+            continue;
+        }
+        if (!told_first++) printf("Stutter watch: first look, %d native frames, %d game addresses\n", chain_n, guest_n);
+        look->chain_n = chain_n;
+        look->guest_n = guest_n;
+        look->at_ms = (uint32_t)((now - beat) / 1000);
+        MemoryBarrier();
+        look->beat = beat;
+        ++looks;
+        looked_at = now;
+        if (looks == 1) stutter_all_threads((now - beat) / 1000);
+    }
+    return 0;
+}
+static void stutter_where(char *out, size_t size, uintptr_t address) {
+    HMODULE module = NULL;
+    char name[MAX_PATH] = "?";
+    if (stutter_image && address - (uintptr_t)stutter_image < stutter_image_bytes) {
+        snprintf(out, size, "game 0x%" PRIxPTR, address - (uintptr_t)stutter_image);
+        return;
+    }
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)address, &module) && module) {
+        GetModuleFileNameA(module, name, sizeof name);
+        const char *base = strrchr(name, '\\');
+        snprintf(out, size, "%s+0x%" PRIxPTR, base ? base + 1 : name, address - (uintptr_t)module);
+        return;
+    }
+    snprintf(out, size, "%p", (void *)address);
+}
+/* Every thread at a long frame (27/11: the game's thread waits in its own event at 0x14d42f0 for another of
+ * its threads; which one, and what that one waits on, is the question). For the first 10 long frames: each
+ * thread's CPU cycles over 30 ms, then, one at a time and for a moment each, where it is: the instruction,
+ * our code's return addresses and the game's on its stack (copied while it is stopped; read after). */
+#include <tlhelp32.h>
+#define STUTTER_THREADS 160
+static void stutter_all_threads(uint64_t beat_age_ms) {
+    static int told;
+    if (told >= 10) return;
+    ++told;
+    static HANDLE h[STUTTER_THREADS];
+    static DWORD tid[STUTTER_THREADS];
+    static ULONG64 c0[STUTTER_THREADS], c1[STUTTER_THREADS];
+    static uintptr_t rip[STUTTER_THREADS];
+    static uintptr_t stack[STUTTER_THREADS][256];
+    static SIZE_T stack_got[STUTTER_THREADS];
+    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    int n = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 e;
+    e.dwSize = sizeof e;
+    for (BOOL ok = Thread32First(snap, &e); ok && n < STUTTER_THREADS; ok = Thread32Next(snap, &e)) {
+        if (e.th32OwnerProcessID != pid || e.th32ThreadID == self) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                              e.th32ThreadID);
+        if (!t) continue;
+        h[n] = t;
+        tid[n] = e.th32ThreadID;
+        c0[n] = 0;
+        QueryThreadCycleTime(t, &c0[n]);
+        ++n;
+    }
+    CloseHandle(snap);
+    Sleep(30);
+    for (int i = 0; i < n; ++i) {
+        c1[i] = c0[i];
+        QueryThreadCycleTime(h[i], &c1[i]);
+        rip[i] = 0;
+        stack_got[i] = 0;
+        if (SuspendThread(h[i]) == (DWORD)-1) continue;
+        CONTEXT c;
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(h[i], &c)) {
+            rip[i] = (uintptr_t)c.Rip;
+            ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c.Rsp, stack[i], sizeof stack[i], &stack_got[i]);
+        }
+        ResumeThread(h[i]);
+    }
+    /* our exe's range */
+    const uintptr_t exe = (uintptr_t)GetModuleHandleA(NULL);
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(exe + ((const IMAGE_DOS_HEADER *)exe)->e_lfanew);
+    const uintptr_t exe_bytes = nt->OptionalHeader.SizeOfImage;
+    printf("Stutter threads: %d threads, %llu ms into the long frame (CPU in Mcycles over 30 ms; ours = "
+           "sacredfire.exe offsets, game = guest offsets)\n", n, (unsigned long long)beat_age_ms);
+    for (int i = 0; i < n; ++i) {
+        char name[80] = "";
+        typedef HRESULT (WINAPI *GetDescription)(HANDLE, PWSTR *);
+        static GetDescription get_description;
+        if (!get_description)
+            get_description = (GetDescription)(void (*)(void))GetProcAddress(GetModuleHandleA("kernel32.dll"),
+                                                                              "GetThreadDescription");
+        PWSTR d = NULL;
+        if (get_description && SUCCEEDED(get_description(h[i], &d)) && d && *d)
+            WideCharToMultiByte(CP_UTF8, 0, d, -1, name, sizeof name, NULL, NULL);
+        if (d) LocalFree(d);
+        char where[MAX_PATH + 32] = "?";
+        if (rip[i]) stutter_where(where, sizeof where, rip[i]);
+        char line[700];
+        size_t used = (size_t)snprintf(line, sizeof line, "Stutter threads:   %lu %s%s cpu %.1f at %s;",
+                                       (unsigned long)tid[i], name[0] ? name : "(no name)",
+                                       tid[i] == GetThreadId(stutter_thread) ? " [pad read]" : "",
+                                       (double)(c1[i] - c0[i]) / 1e6, where);
+        int ours = 0, game = 0;
+        for (SIZE_T k = 0; k < stack_got[i] / sizeof(uintptr_t) && used < sizeof line - 40; ++k) {
+            const uintptr_t v = stack[i][k];
+            if (v - exe > 0x1000 && v - exe < exe_bytes && ours < 5) {
+                used += (size_t)snprintf(line + used, sizeof line - used, " ours+0x%" PRIxPTR, v - exe);
+                ++ours;
+            } else if (stutter_image && v - (uintptr_t)stutter_image < stutter_image_bytes &&
+                       v > (uintptr_t)stutter_image + 0x80 && game < 4) {
+                used += (size_t)snprintf(line + used, sizeof line - used, " game+0x%" PRIxPTR,
+                                         v - (uintptr_t)stutter_image);
+                ++game;
+            }
+        }
+        printf("%s\n", line);
+        CloseHandle(h[i]);
+    }
+}
+static DWORD stutter_tid;
+static uint64_t stutter_thread_cpu_us(void) {
+    FILETIME a, b, k, u;
+    if (!stutter_thread) return 0;
+    if (!GetThreadTimes(stutter_thread, &a, &b, &k, &u)) {
+        static int told;
+        if (!told++) printf("Stutter watch: no CPU time for the game's thread (error %lu)\n", GetLastError());
+        return 0;
+    }
+    const uint64_t kernel = ((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime;
+    const uint64_t user = ((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime;
+    return (kernel + user) / 10;
+}
+/* The game's thread, once: the watcher starts (online only). */
+static void stutter_watch_start(void) {
+    static int tried;
+    if (tried || !runtime_net_is_online()) return;
+    tried = 1;
+    stutter_tid = GetCurrentThreadId();
+    stutter_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                                stutter_tid);
+    if (!stutter_thread) {
+        printf("Stutter watch: could not open the game's thread %lu (error %lu)\n", (unsigned long)stutter_tid,
+               GetLastError());
+        return;
+    }
+    HANDLE t = CreateThread(NULL, 256 * 1024, stutter_watch, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+    else printf("Stutter watch: could not start (error %lu)\n", GetLastError());
+}
+/* The game reads the pad on its start thread first and on its main loop's thread after (27/11 log): the
+ * watcher follows it. The old handle stays open (the watcher may hold it this moment); it happens once or twice. */
+static int stutter_rebase;
+static void stutter_follow(void) {
+    if (!stutter_thread || GetCurrentThreadId() == stutter_tid) return;
+    const DWORD tid = GetCurrentThreadId();
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    static int told;
+    if (told++ < 4)
+        printf("Stutter watch: the pad read moved from thread %lu to %lu%s\n", (unsigned long)stutter_tid,
+               (unsigned long)tid, h ? ", following it" : " (could not open it)");
+    stutter_tid = tid;   /* a failed open is not tried again each frame */
+    if (h) {
+        stutter_thread = h;
+        stutter_rebase = 1;
+    }
+}
+/* Each 10 s online: frames and the game thread's CPU time (the measures work). */
+static void stutter_check(uint64_t now, uint64_t cpu) {
+    static uint64_t since, cpu_since;
+    static unsigned frames;
+    if (!stutter_thread) return;
+    if (stutter_rebase) since = 0;
+    ++frames;
+    if (!since) { since = now; cpu_since = cpu; frames = 0; return; }
+    if (now - since < 10000000) return;
+    printf("Stutter check: %u frames in %.1f s, the game's thread used %.0f ms of CPU\n", frames,
+           (now - since) / 1e6, (cpu - cpu_since) / 1000.0);
+    since = now;
+    cpu_since = cpu;
+    frames = 0;
+}
+/* The looks taken in the frame that began at beat, and the thread's CPU time in it. */
+static void stutter_tell_looks(uint64_t beat, double gap, uint64_t cpu_us) {
+    if (stutter_thread) printf("Stutter:   the game's thread used %.0f ms of CPU in those %.0f ms\n", cpu_us / 1000.0, gap);
+    for (int i = 0; i < STUTTER_LOOKS; ++i) {
+        StutterLook *look = &stutter_looks[i];
+        if (look->beat != beat) continue;
+        char line[900];
+        size_t used = (size_t)snprintf(line, sizeof line, "Stutter:   at %u ms:", look->at_ms);
+        for (int j = 0; j < look->chain_n && used < sizeof line - 80; ++j) {
+            char where[MAX_PATH + 32];
+            stutter_where(where, sizeof where, look->chain[j]);
+            used += (size_t)snprintf(line + used, sizeof line - used, "%s%s", j ? " < " : " ", where);
+        }
+        if (look->guest_n) used += (size_t)snprintf(line + used, sizeof line - used, "; game callers");
+        for (int j = 0; j < look->guest_n && used < sizeof line - 24; ++j)
+            used += (size_t)snprintf(line + used, sizeof line - used, " 0x%" PRIxPTR,
+                                     look->guest[j] - (uintptr_t)stutter_image);
+        printf("%s\n", line);
+    }
+}
+#else
+static int stutter_rebase;
+static void stutter_follow(void) {}
+static void stutter_check(uint64_t now, uint64_t cpu) { (void)now; (void)cpu; }
+static void stutter_watch_start(void) {}
+static uint64_t stutter_thread_cpu_us(void) { return 0; }
+static void stutter_tell_looks(uint64_t beat, double gap, uint64_t cpu_us) { (void)beat; (void)gap; (void)cpu_us; }
+#endif
+/* At the start of each frame: the frame before it, told when it was long. */
+void runtime_stutter_frame(const char *where) {
+    const uint64_t now = runtime_stutter_clock_us();
+    stutter_watch_start();
+    stutter_follow();
+    const uint64_t cpu = stutter_thread_cpu_us();
+    stutter_check(now, cpu);
+    if (stutter_rebase) {   /* a new thread: its CPU time starts from here */
+        stutter_rebase = 0;
+        stutter_cpu_at = cpu;
+    }
+    if (stutter_last_frame) {
+        const double gap = (double)(now - stutter_last_frame) / 1000.0;
+        if (gap < 2000.0) {
+            if (stutter_frames >= 30 && gap > 45.0 && gap > stutter_usual * 1.8 && runtime_net_is_online() &&
+                now - stutter_told_at > 200000) {
+                stutter_told_at = now;
+                char parts[160] = "";
+                size_t used = 0;
+                for (int i = 0; i < 3 && stutter_top[i].name && stutter_top[i].us >= 500; ++i)
+                    used += (size_t)snprintf(parts + used, sizeof parts - used, "%s%s %.1f ms", used ? ", " : ": ",
+                                             stutter_top[i].name, stutter_top[i].us / 1000.0);
+                printf("Stutter: a frame of %.0f ms (usual %.0f) %s; the port's tasks %.1f ms%s; the rest is the "
+                       "game's own work or a wait\n", gap, stutter_usual, where, stutter_ours / 1000.0, parts);
+                stutter_tell_looks(stutter_last_frame, gap, cpu - stutter_cpu_at);
+            }
+            stutter_usual = stutter_frames ? stutter_usual * 0.95 + gap * 0.05 : gap;
+            if (stutter_frames < 1000) ++stutter_frames;
+        }
+    }
+    stutter_last_frame = now;
+    stutter_cpu_at = cpu;
+#ifdef _WIN32
+    stutter_beat = now;
+#endif
+    stutter_ours = 0;
+    memset(stutter_top, 0, sizeof stutter_top);
+}
+#define TIMED(name, call) do { const uint64_t t0_ = runtime_stutter_clock_us(); call; \
+    runtime_stutter_note(name, runtime_stutter_clock_us() - t0_); } while (0)
+
+void runtime_online_mode_note_frame(void) {
+    TIMED("ranked intro", ranked_intro_skip());
+    TIMED("team lobby", team_lobby_frame());
+    if (runtime_online_mode_race_running()) {
+        TIMED("race identity", snapshot_race_identity());
+        TIMED("party server", runtime_party_server_tick());
+    }
+    TIMED("host handoff / race host", runtime_public_itemless_poll_race_host());
+    TIMED("ranked request", runtime_public_itemless_poll_ranked_request());
+    TIMED("online startup", startup_update());
+    TIMED("online reset", apply_pending_online_reset());
+    TIMED("ranked score", refresh_ranked_score());
     if (hof_project) {
         unsigned char *project = handle_object(&hof_project);
         if (runtime_hof_active() && project) {
@@ -3168,6 +3534,13 @@ int runtime_online_mode_public_on(void) { return __atomic_load_n(&public_on, __A
 int runtime_online_mode_lobby_open(void) {
     const uint64_t at = __atomic_load_n(&lobby_updated_ms, __ATOMIC_RELAXED);
     return at && monotonic_ms() - at < 1000;
+}
+
+/* The online menu's RANKED Mode Select screen ("go to lobby", Game Mode, the ranked badge) is on screen: its Game Mode
+ * selector updates every frame while it shows (the overlay's Ranked rules notice shows only there). */
+int runtime_online_mode_select_screen(void) {
+    const uint64_t at = __atomic_load_n(&mode_select_updated_ms, __ATOMIC_RELAXED);
+    return mode_select_active && at && monotonic_ms() - at < 300 && runtime_ranked_selected();   /* Ranked only */
 }
 
 /* ---- The room's members by team ----------------------------------------------------------------
@@ -4230,7 +4603,8 @@ static void refresh_lobby_card(unsigned char *owner) {
     char mode[48];
     /* Show the chosen/adopted mode even before another player sends game traffic. */
     snprintf(mode, sizeof mode, "%s RACE - %s", cup_mode ? "CUP" : "SINGLE",
-             runtime_speed_mode_enabled() ? "ITEMLESS" : runtime_nsane_mode_enabled() ? "N.SANE MODE" : "NORMAL");
+             runtime_speed_mode_enabled() ? "ITEMLESS" : runtime_nsane_mode_enabled() ? "N.SANE MODE" :
+             runtime_elimination_mode_enabled() ? "ELIMINATION" : "NORMAL");
     update_card(owner, name, mode, preview, 0);
 }
 
@@ -4409,8 +4783,46 @@ static void collision_selector_event(unsigned char *self, void *event, unsigned 
     collision_selector_visibility(self, owner);
 }
 
+/* The TEAMS row: hidden in an Elimination room (one racer wins, teams mean nothing there), its neighbours' up/down
+ * navigation going round it; shown again for another mode. */
+static void team_row_visibility(unsigned char *self, unsigned char *owner) {
+    static unsigned char *hidden_owner;
+    if (!owner) return;
+    const int hide = is_private() && !battle_selected() && runtime_elimination_mode_enabled();
+    if (!hide && hidden_owner != owner) return;   /* never hidden by us: as the game has it */
+    unsigned flags;
+    memcpy(&flags, owner + 12, 4);
+    const unsigned wanted = hide ? flags | 0x1400u : ((flags & ~0x1400u) | 0x1000u);
+    if (wanted != flags) {
+        memcpy(owner + 12, &wanted, 4);
+        static int told = -1;   /* the game sets the row's flags again and again: told once per change */
+        if (told != hide) printf("Native private TEAM: the teams row %s (Elimination room)\n", hide ? "hidden" : "shown again");
+        told = hide;
+    }
+    hidden_owner = hide ? owner : NULL;
+    unsigned char *before = pointer_at(self, 0x110), *after = pointer_at(self, 0x118);
+    unsigned char *previous = row_behavior(before), *next = row_behavior(after);
+    void *down = hide ? (void *)after : owner, *up = hide ? (void *)before : owner;
+    if (previous) memcpy(previous + 0x118, &down, sizeof down);
+    if (next) memcpy(next + 0x110, &up, sizeof up);
+}
+
 static void ABI team_count_update(unsigned char *self, unsigned char *owner, float dt) {
     original_selector_update(self, owner, dt);
+    if (!collision_selector(self)) {
+        if (runtime_elimination_mode_enabled() && is_private() && race_settings && *race_settings) {
+            int teams;
+            memcpy(&teams, *race_settings + 0x28, 4);
+            if (teams != 1) {
+                normalize_race_teams();
+                const int index = 0;
+                memcpy(self + 0x190, &index, 4);
+                if (pointer_at(self, 0x198)) refresh_selector(self);
+                if (!runtime_room_mode_following()) broadcast_private_race_settings(*race_settings);
+            }
+        }
+        team_row_visibility(self, owner);
+    }
     if (collision_selector(self)) {
         int selected;
         memcpy(&selected, self + 0x190, 4);
@@ -4517,7 +4929,7 @@ static void refresh_mode_options(unsigned char *self) {
     unsigned char *options = pointer_at(self, 0x1a8);
     const int count = options ? *(int *)(options + 12) : 0;
     /* NORMAL / ITEMLESS / BATTLE, and N.SANE as a fourth option (private rooms only). */
-    if (count != 3 && !(count == 4 && mode_selector(self, count))) return;
+    if (count != 3 && !(count >= 4 && mode_selector(self, count))) return;
     unsigned char *available = pointer_at(self, 0x1b0);
     unsigned char *items = available ? pointer_at(available, 0x20) : NULL;
     if (!items) return;
@@ -4525,7 +4937,8 @@ static void refresh_mode_options(unsigned char *self) {
     const unsigned char enabled[] = {1,
         (unsigned char)(private || runtime_public_itemless_available()),
         (unsigned char)(private || !runtime_ranked_selected()),
-        (unsigned char)(private && runtime_nsane_available())};
+        (unsigned char)(private && runtime_nsane_available()),
+        (unsigned char)(private && runtime_elimination_available())};   /* ELIMINATION: private rooms only */
     const int changed = memcmp(items, enabled, (size_t)count);
     memcpy(items, enabled, (size_t)count);
     self[0x194] = 1;
@@ -4543,10 +4956,10 @@ static void ABI selector_update(unsigned char *self, unsigned char *owner, float
     unsigned char *options = pointer_at(self, 0x1a8);
     int count = 0;
     if (options) memcpy(&count, options + 12, 4);
-    if (count == 3 || (count == 4 && mode_selector(self, count))) {
+    if (count == 3 || (count >= 4 && mode_selector(self, count))) {
         if (mode_select_active)
             __atomic_store_n(&mode_select_updated_ms, monotonic_ms(), __ATOMIC_RELAXED);
-        race_type_visibility(self, owner, is_private() && selector_mode_index != 2);
+        race_type_visibility(self, owner, is_private() && selector_mode_index != 2 && selector_mode_index != 4);
         unsigned char *root = ranked_mode_select_root(owner);
         if (root) {
             const int ranked = runtime_ranked_selected() && !is_private();
@@ -4558,7 +4971,7 @@ static void ABI selector_update(unsigned char *self, unsigned char *owner, float
     } else if (count == 2 && race_type_selector(self)) {
         unsigned char *mode_owner = pointer_at(self, 0x110);
         unsigned char *mode = row_behavior(mode_owner);
-        if (mode) race_type_visibility(mode, mode_owner, is_private() && selector_mode_index != 2);
+        if (mode) race_type_visibility(mode, mode_owner, is_private() && selector_mode_index != 2 && selector_mode_index != 4);
     }
 }
 
@@ -4645,10 +5058,10 @@ int runtime_online_mode_in_private(void) {
  * flag does not hold during these races (runtime_speed_race_active, Itemless). */
 int runtime_online_mode_private_cup_race(void) { return private_cup_race_active; }
 
-/* The Game Mode selector: NORMAL / ITEMLESS / BATTLE (/ N.SANE MODE), recognized by its labels so that
- * another selector with as many options (team count) is never taken for it. */
+/* The Game Mode selector: NORMAL / ITEMLESS / BATTLE (/ N.SANE MODE / ELIMINATION), recognized by its labels so
+ * that another selector with as many options (team count) is never taken for it. */
 static int mode_selector(const unsigned char *self, int count) {
-    if (count != 3 && count != 4) return 0;
+    if (count < 3 || count > 5) return 0;
     unsigned char *options = pointer_at(self, 0x1a8);
     const char **labels = options ? pointer_at(options, 0x20) : NULL;
     return labels && runtime_text_is(labels[1], "ITEMLESS");
@@ -4675,6 +5088,7 @@ static void ABI select_mode(void *sender, int index) {
     if (!private) private_collision_selected = 0;
     if (!private && index == 1 && !runtime_public_itemless_available()) return;
     if (index == 3 && (!private || !runtime_nsane_available())) return; /* N.Sane: private rooms only */
+    if (index == 4 && (!private || !runtime_elimination_available())) return; /* Elimination: private rooms only */
     selector_mode_index = index;
     clear_team_selector();
     cup_timer_pending = 0;
@@ -4682,20 +5096,23 @@ static void ABI select_mode(void *sender, int index) {
     runtime_public_itemless_select(!private && index == 1);
     const int speed = index == 1 && private;
     const int nsane = index == 3 && private;
+    const int elimination = index == 4 && private;
     if (private) {
         private_speed_selected = speed;
         private_nsane_selected = nsane;
-        if (index == 2) {
+        private_elimination_selected = elimination;
+        if (index == 2 || index == 4) {   /* BATTLE, ELIMINATION: no CUP */
             private_cup_selected = 0;
             remote_cup_selected = -1;
         }
     }
-    /* Room mode for RyuNET: 0 normal, 1 itemless (speed), 2 n.sane. */
-    if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed ? 1 : nsane ? 2 : 0, private);
+    /* Room mode for RyuNET: 0 normal, 1 itemless (speed), 2 n.sane, 3 elimination. */
+    if (runtime_online_mode_chosen) runtime_online_mode_chosen(speed ? 1 : nsane ? 2 : elimination ? 3 : 0, private);
     runtime_speed_mode_set(speed);
     runtime_nsane_mode_set(nsane);
+    runtime_elimination_mode_set(elimination);
     printf("Native Online mode: %s (%s)\n", index == 1 ? "ITEMLESS" : index == 2 ? "BATTLE" :
-           index == 3 ? "N.SANE" : "NORMAL", private ? "private" : "public");
+           index == 3 ? "N.SANE" : index == 4 ? "ELIMINATION" : "NORMAL", private ? "private" : "public");
     original_choice(sender, index == 2 ? 1 : 0);
 }
 
@@ -4725,14 +5142,17 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         mode_select_active = 1;
         if (!private) private_collision_selected = 0;
         /* N.Sane (the fourth option): private rooms only, when its hooks are in. */
-        if (count == 4) items[3] = (unsigned char)(private && runtime_nsane_available());
+        if (count >= 4) items[3] = (unsigned char)(private && runtime_nsane_available());
+        if (count >= 5) items[4] = (unsigned char)(private && runtime_elimination_available());   /* ELIMINATION */
         int type;
         memcpy(&type, *network + 0x13c, sizeof type);
         const int following = runtime_room_mode_following();
         const int private_speed = following ? runtime_speed_mode_enabled() : private_speed_selected;
-        const int private_nsane = count == 4 && items[3] &&
+        const int private_nsane = count >= 4 && items[3] &&
             (following ? runtime_nsane_mode_enabled() : private_nsane_selected);
-        int index = type == 2 && items[2] ? 2 : private && private_nsane ? 3 :
+        const int private_elimination = count >= 5 && items[4] &&
+            (following ? runtime_elimination_mode_enabled() : private_elimination_selected);
+        int index = type == 2 && items[2] ? 2 : private && private_nsane ? 3 : private && private_elimination ? 4 :
                     (items[1] && (private ? private_speed : runtime_public_itemless_selected()) ? 1 : 0);
         if (!private && matchmaking_return_mode>=0) {
             if (matchmaking_return_mode<3 && items[matchmaking_return_mode]) index=matchmaking_return_mode;
@@ -4750,9 +5170,10 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         memcpy(self + 0x190, &index, sizeof index);
         runtime_speed_mode_set(private && index == 1);
         runtime_nsane_mode_set(private && index == 3);
+        runtime_elimination_mode_set(private && index == 4);
         /* The asset already supplies all options. Keep the base selector initialization. */
         base_event(self, event, owner);
-        race_type_visibility(self, owner, private && index != 2);
+        race_type_visibility(self, owner, private && index != 2 && index != 4);   /* BATTLE, ELIMINATION: single races */
     } else {
         const int previous = customized_selector;
         const int mode = mode_selector(self, count);
@@ -4761,7 +5182,7 @@ static void ABI selector_event(unsigned char *self, void *event, void *owner) {
         customized_selector = previous;
         if (mode) {
             /* The emitted choice precedes both native UI and network updates. */
-            race_type_visibility(self, owner, is_private() && selector_mode_index != 2);
+            race_type_visibility(self, owner, is_private() && selector_mode_index != 2 && selector_mode_index != 4);
         }
     }
 }
@@ -5406,11 +5827,12 @@ static void ranked_member_icons(unsigned char *self) {
             continue;
         }
         if (icon_mode == 2) {
-            /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only. */
+            /* "Mode" 2: the room host's crown (runtime_room_host.c), on the host's row only: private rooms,
+             * public matchmaking and Ranked (the server names a found room's host, also after a migration),
+             * in the lobby and in the race's pause menu, whose racers list is this same list (user, 25/11). */
             unsigned crown_flags;
             memcpy(&crown_flags, icon + 12, sizeof crown_flags);
-            const int crown_hidden = !is_private() || !runtime_online_mode_lobby_open() ||
-                                     !nick || !runtime_room_host_is(nick);
+            const int crown_hidden = !nick || !runtime_room_host_is(nick);
             if (!!(crown_flags & 0x400) != crown_hidden) hide_placeable(icon, crown_hidden);
             if (!crown_hidden) {
                 /* Left of the name, first in the row (the user's pick, 19/11; scripts/online_mode.py places it at
@@ -5818,6 +6240,8 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     else if (!strcmp(setting, "1277df0")) shift = 0x10;
     else return 0;
     if (size < 0x2af1fb0) return 0;
+    stutter_image = image;
+    stutter_image_bytes = size;
     const char *online = getenv("BB_ONLINE");
     const int startup = online && !strcmp(online, "1");
     static const unsigned char navigation_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,

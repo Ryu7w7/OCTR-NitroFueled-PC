@@ -866,6 +866,7 @@ static int stale_noted, expired_noted;
 /* After the safety release, require a physical release before accepting the same button again.
  * Per-port and protected by read_lock, like sample_host_from's other game-side state. */
 static uint32_t rearm_buttons[PORTS];
+static uint32_t host_buttons, host_right_stick = 0x8080;   /* runtime_pad_host_buttons / _right_stick */
 static void sample_host_from(PadData *d, int p) {
     bbgpu_refresh_graphics_tab();
     if (pad_thread_state<0) pad_poll();
@@ -924,7 +925,16 @@ static void sample_host_from(PadData *d, int p) {
         mouse_buttons=mouse_focus ? SDL_GetMouseState(NULL,NULL) : 0;
         apply_keyboard(d,k);
     }
+    if (p==0) {
+        __atomic_store_n(&host_buttons,d->buttons,__ATOMIC_RELAXED);
+        __atomic_store_n(&host_right_stick,(uint32_t)d->right_x | (uint32_t)d->right_y<<8,__ATOMIC_RELAXED);
+    }
 }
+/* The first port's buttons at its last read (BTN_* bits, as scePadReadState gives them), for the native modes that
+ * use a button the game does not (elimination mode's spectator: L3). */
+uint32_t runtime_pad_host_buttons(void) { return __atomic_load_n(&host_buttons,__ATOMIC_RELAXED); }
+/* The first port's right stick at its last read: x in bits 0-7, y in 8-15 (0..255, 128 centred). */
+uint32_t runtime_pad_host_right_stick(void) { return __atomic_load_n(&host_right_stick,__ATOMIC_RELAXED); }
 static void sample_host(PadData *d) { sample_host_from(d,0); }
 /* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard); no scripted input. */
 static void sample_port(PadData *d, int p) { sample_host_from(d,p); }

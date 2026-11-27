@@ -789,6 +789,7 @@ size_t runtime_replay_live_pack(uint32_t race_id, uint32_t from, uint32_t to, ui
  * runtime_replay_play.c), the game's function returns at once. */
 int ABI runtime_replay_item_gate(void);
 int ABI runtime_replay_item_used(void *controller) {
+    if (runtime_elimination_blocks_item(controller)) return 0;   /* elimination mode: the player out */
     if (!runtime_replay_item_gate()) return 0;
     if (!rr.recording || !controller) return 1;
     const int stored = handle_object(&AT(controller, 0x30, void *)) != 0;
@@ -824,7 +825,7 @@ void *runtime_replay_cont_race_frame, *runtime_replay_cont_level_exit, *runtime_
      *runtime_replay_cont_item_crate, *runtime_replay_cont_item_wumpa, *runtime_replay_cont_hud_lap,
      *runtime_replay_cont_crate, *runtime_replay_cont_hero, *runtime_replay_cont_damage, *runtime_replay_cont_power_event,
      *runtime_replay_stack_guard;
-int ABI runtime_replay_on(void), runtime_replay_crate(void), runtime_replay_hud_lap(void);   /* the player */
+int ABI runtime_replay_on(void), runtime_replay_crate(void), runtime_replay_hud_lap(unsigned char *, int);   /* the player */
 int ABI runtime_replay_hero(void *entities, int index, char **hero, void **outfit);
 int ABI runtime_replay_take_damage(void *damage, int type);        /* runtime_replay_play.c */
 int ABI runtime_replay_power_event(void *controller, void *event);

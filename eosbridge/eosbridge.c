@@ -1800,6 +1800,31 @@ static void usage(void) {
     exit(2);
 }
 
+/* Windows asks whether to let a program through its firewall the first time it listens on the network. The
+ * game only does when it becomes a match's host, so the question came up in the middle of a race after a host
+ * handoff (27/11). A listening socket on every interface for a moment at start asks it then: whatever the
+ * player answers is kept for this program, and the race is never interrupted by it. */
+#ifdef _WIN32
+static DWORD WINAPI firewall_prompt_close(LPVOID s) {
+    Sleep(5000);
+    closesocket((SOCKET)(uintptr_t)s);
+    return 0;
+}
+static void firewall_prompt_now(void) {
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 1) != 0) { closesocket(s); return; }
+    HANDLE t = CreateThread(NULL, 0, firewall_prompt_close, (LPVOID)(uintptr_t)s, 0, NULL);
+    if (t) CloseHandle(t); else closesocket(s);
+}
+#else
+static inline void firewall_prompt_now(void) {}
+#endif
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -1876,6 +1901,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         CreateMutexA(NULL, TRUE, "Local\\RyuNET-bridge");
         if (GetLastError() == ERROR_ALREADY_EXISTS) { status("FAILED busy"); return 7; }
+        firewall_prompt_now();   /* EOS P2P listens once this PC hosts a match: ask now, at the launcher's start */
 #else
         char lock_path[1100];
         snprintf(lock_path, sizeof lock_path, "%s/client.lock", S.data_dir);

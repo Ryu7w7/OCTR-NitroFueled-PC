@@ -37,19 +37,54 @@ def read_map(name,game,mtime,size):
     if at!=len(data):raise ValueError('Truncated or trailing mod file map')
     return Path(game).resolve(),files
 
+@lru_cache(maxsize=64)
+def _view_root(directory,game):
+    """The game view (the game folder, or mods.py's view of it: links to the game's files) that holds
+    directory: the nearest folder whose eboot.bin is the game's."""
+    eboot=Path(game)/'eboot.bin'
+    for folder in (Path(directory),*Path(directory).parents):
+        candidate=folder/'eboot.bin'
+        try:
+            if candidate.exists() and os.path.samefile(candidate,eboot):return folder
+        except OSError:pass
+    return None
+
+def relative_in_view(path,game):
+    """path's place in the game (archives/update3.pak...), also for a path in mods.py's view, whose
+    entries are links (26/11: the new tracks' view hid a mod session's update3.pak, the port's archive
+    took the same number and the game never saw it: no Neo Bowser City, no Graphics tab)."""
+    path=Path(os.path.abspath(path))
+    root=_view_root(str(path.parent),str(game))
+    if root is not None:return path.relative_to(root).as_posix().casefold()
+    try:return path.resolve().relative_to(game).as_posix().casefold()
+    except ValueError:return None
+
 def resolve(path):
     path=Path(path)
     game,files=records()
     if game is None:return path
-    try:relative=path.resolve().relative_to(game).as_posix().casefold()
-    except ValueError:return path
+    relative=relative_in_view(path,game)
+    if relative is None:return path
     return files.get(relative,path)
+
+def extra_updates(game):
+    """update3.pak, update4.pak, ... in the game view (a mod's, loaded after update2.pak and in that
+    order, until one is missing): their names, oldest first. The port's own update archive
+    (scripts/graphics_tab.py) takes the first free number after them."""
+    out = []
+    for n in range(3, 20):
+        name = f'update{n}.pak'
+        if not resolve(Path(game) / 'archives' / name).is_file():
+            break
+        out.append(name)
+    return out
+
 
 def archives(directory):
     directory=Path(directory)
     game,files=records()
     result={p.name.casefold():resolve(p) for p in directory.glob('*.pak')}
-    if game is not None and directory.resolve()==game/'archives':
+    if game is not None and relative_in_view(directory/'x',game)=='archives/x':
         for relative,source in files.items():
             if relative.startswith('archives/') and relative.count('/')==1 and relative.endswith('.pak'):
                 result[relative.split('/')[1]]=source

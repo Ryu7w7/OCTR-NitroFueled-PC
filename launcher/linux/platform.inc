@@ -150,6 +150,30 @@ void SetPlatformGameEnv() {
         if (at != std::string::npos && at > 0) SetEnv(Widen(item.substr(0, at)).c_str(), item.substr(at + 1));
     }
 }
+/// A second game for a second player on this PC (scripts/second_instance.py, issue #287), with the
+/// main game's environment (g_game_env). Not tracked; its output: <data>/instance2/last_console.txt.
+bool SpawnSecondInstance(const std::string& nick) {
+    App& a = g_app;
+    if (!a.python) return false;
+    std::vector<std::string> environment;
+    for (char** item = environ; *item; ++item) {
+        const std::string value = *item;
+        if (!g_game_env.count(value.substr(0, value.find('=')))) environment.push_back(value);
+    }
+    for (const auto& [key, value] : g_game_env)
+        if (!value.empty()) environment.push_back(key + "=" + value);
+    std::vector<char*> env;
+    for (auto& value : environment) env.push_back(value.data());
+    env.push_back(nullptr);
+    const auto child = LinuxProcess::Start({Narrow(a.python->exe), PathText(a.root / "scripts" / "second_instance.py"),
+                                            "--data", PathText(a.data), "--nick", nick},
+                                           PathText(a.root), {}, -1, false, env.data());
+    if (!child.pid) return false;
+    if (child.output >= 0) close(child.output);
+    std::thread([pid = child.pid] { int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} }).detach();
+    return true;
+}
+
 void LaunchGameProcess() {
     App& a = g_app;
     std::vector<std::string> environment;

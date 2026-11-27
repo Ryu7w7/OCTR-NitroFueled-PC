@@ -71,7 +71,8 @@ void Update(bool enabled, const std::string& app_id, const Activity* activity) {
         const auto& a = *activity;
         request += "{\"details\":\"" + JsonEscape(a.details) + "\",\"state\":\"" + JsonEscape(a.state) +
             "\",\"start\":" + std::to_string(a.start) + ",\"large_image\":\"" + JsonEscape(a.large_image) +
-            "\",\"large_text\":\"" + JsonEscape(a.large_text) + "\",\"party_id\":\"" + JsonEscape(a.party_id) +
+            "\",\"large_text\":\"" + JsonEscape(a.large_text) + "\",\"small_image\":\"" + JsonEscape(a.small_image) +
+            "\",\"small_text\":\"" + JsonEscape(a.small_text) + "\",\"party_id\":\"" + JsonEscape(a.party_id) +
             "\",\"party_size\":" + std::to_string(a.party_size) + ",\"party_max\":" + std::to_string(a.party_max) +
             ",\"join_secret\":\"" + JsonEscape(a.join_secret) + "\"}";
     } else request += "null";

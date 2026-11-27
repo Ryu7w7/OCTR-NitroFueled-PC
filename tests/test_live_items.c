@@ -17,6 +17,7 @@ void *rr_ptr(size_t offset) {
 void *rr_handle_object(void **slot) { (void)slot; return NULL; }
 void *rr_racer_of(void *kart) { (void)kart; return NULL; }
 int runtime_replay_playing(void) { return 0; }
+int runtime_ranked_active(void) { return 0; }
 int runtime_net_ping_view(PingPeer *out, int max) { (void)out; (void)max; return 0; }
 static char told_id[48];
 void runtime_items_id_set(const char *id) { snprintf(told_id, sizeof told_id, "%s", id); }

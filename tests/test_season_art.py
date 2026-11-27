@@ -112,5 +112,41 @@ class GrownPatchTests(unittest.TestCase):
                                                 {'A/One.igz': b'x'})
 
 
+def fake_stream(frames, name=b'mus'):
+    """An FSB5 MPEG stream (one sample, 10 channels) holding these 384-byte frames."""
+    header = struct.pack('<Q', 1 | 9 << 1 | (len(frames) // 5 * 1152) << 34) + struct.pack('<IB', 1 << 1 | 1 << 25, 10)
+    names = struct.pack('<I', 4) + name + b'\0'
+    data = b''.join(frames)
+    top = b'FSB5' + struct.pack('<6I', 1, 1, len(header), len(names), len(data), 11) + bytes(32)
+    return top + header + names + data
+
+
+def frame(tag):
+    # MPEG-1 layer III, 128 kbps, 48 kHz, no padding, joint stereo; the body tells frames apart
+    return struct.pack('>I', 0xFFFB9444) + bytes([tag % 256, tag // 256]) + bytes(378)
+
+
+class MusicTests(unittest.TestCase):
+    def test_glacier_is_the_fourth_zone(self):
+        zone = season_art.MUSIC_ZONE_FRAMES * season_art.MUSIC_STREAMS
+        hub = fake_stream([frame(i) for i in range(5 * zone)], b'mus_h100_hub')
+        title = fake_stream([frame(60000 + i % 5) for i in range(1000 * 5)], b'mus_frontscreen_menu_lp')
+        out = season_art.glacier_music(hub, title)
+        names, frames = season_art._fsb_frames(out)
+        self.assertEqual(frames, [frame(i) for i in range(3 * zone, 4 * zone)])
+        self.assertIn(b'mus_frontscreen_menu_lp', names)
+        sample, = struct.unpack_from('<Q', out, 60)
+        self.assertEqual(sample >> 34, 1250 * 1152)   # 30 s at 48 kHz
+        self.assertEqual((sample >> 1) & 0xf, 9)      # 48000 Hz
+        count = out.count(b'beat')
+        self.assertEqual(count, 20)                   # one every 1.5 s from 67500
+
+    def test_other_streams_refused(self):
+        with self.assertRaises(ValueError):
+            season_art.glacier_music(b'RIFF' + bytes(100), fake_stream([frame(0)] * 5))
+        with self.assertRaises(ValueError):   # too short to hold the 4th zone
+            season_art.glacier_music(fake_stream([frame(0)] * 50), fake_stream([frame(0)] * 5))
+
+
 if __name__ == '__main__':
     unittest.main()

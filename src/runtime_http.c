@@ -521,6 +521,13 @@ static char items_id[48];
  * (private rooms only), "unknown" not checked (offline, or an older launcher). */
 const char *runtime_online_content(void) {
     static const char *const known[] = {"clean", "characters", "modified"};
+    /* The port's tracks missing from this game (runtime_file.c): online it would break the races on them. */
+    if (!runtime_port_content_ok()) {
+        static int told;
+        if (!__atomic_exchange_n(&told, 1, __ATOMIC_ACQ_REL))
+            puts("Online content: the port's new tracks are not loaded in this game: modified (private rooms only)");
+        return "modified";
+    }
     const char *v = getenv("BB_ONLINE_CONTENT");
     for (unsigned i = 0; v && i < sizeof known / sizeof *known; ++i)
         if (!strcmp(v, known[i])) return known[i];

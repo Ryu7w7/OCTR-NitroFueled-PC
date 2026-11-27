@@ -44,9 +44,14 @@ def source_stamp(game=None):
     code = hashlib.sha256(b''.join(path.read_bytes() for path in files)).hexdigest()
     sources = []
     if game is not None:
+        # By name, size and modification time, not by path: with any mod (or the port's new tracks) the game is
+        # a view made anew each launch (scripts/mods.py, out/mod-game-*), whose files are hard links on Windows
+        # without the symlink privilege, so their path and creation time changed every launch and the shaders
+        # were built again each time (26/11, players' reports). A hard link or a copy keeps the same name, size
+        # and modification time; a changed eboot.bin or shaders_ps4.pak does not.
         for path in (Path(game)/'eboot.bin', Path(game)/'archives/shaders_ps4.pak'):
             stat = path.stat()
-            sources.append([str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns])
+            sources.append([path.name, stat.st_size, stat.st_mtime_ns])
     compiler = find_dxc(port)
     compiler_stamp = None
     if compiler:

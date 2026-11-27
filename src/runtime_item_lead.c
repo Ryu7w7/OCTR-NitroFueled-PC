@@ -655,23 +655,32 @@ static void net_config_tick(void) {
  * online tables by race mode (an igHashTable: +0x18 values, +0x20 their byte size, +0x28 keys, +0x30 count;
  * EOctaneRaceModes -> a list, +0xc count, +0x20 items, of weight tables EPowerUpType -> float), +0x20 the
  * cooldowns, +0x88 the item names. The online draw (0xe38030) reads the table at the network config +0x138,
- * written too when it is another one. Logins then say the new rules' id (X-RyuNET-Items). */
+ * written too when it is another one. Logins then say the new rules' id (X-RyuNET-Items).
+ * Ranked has its own preset (25/11: public chaotic, Ranked competitive): in a Ranked room the game asks with
+ * mode=ranked, and asks again at once when it enters or leaves one (checked every second), so the rules of the
+ * mode it plays are in before its next race. */
 #define LIVE_EMPTY 0xFFFFFFFFu
 static struct {
     pthread_mutex_t lock;
     char *pending;              /* the server's answer, applied by the game's thread */
     char id[48];                /* the rules applied while running ("" the startup's) */
     int asked;
-} LIVE = {PTHREAD_MUTEX_INITIALIZER, 0, "", 0};
+    int ranked;                 /* in a Ranked room now (the game's thread, live_items_tick) */
+} LIVE = {PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0};
 
 static void *ask_items(void *unused) {
     (void)unused;
+    int asked_ranked = 0;
     for (;;) {
+        /* every 20 s, at once when the mode changes */
+        for (int second = 0; second < 20 && __atomic_load_n(&LIVE.ranked, __ATOMIC_ACQUIRE) == asked_ranked; ++second) {
 #ifdef _WIN32
-        Sleep(20000);
+            Sleep(1000);
 #else
-        sleep(20);
+            sleep(1);
 #endif
+        }
+        asked_ranked = __atomic_load_n(&LIVE.ranked, __ATOMIC_ACQUIRE);
         char have[48] = "";
         pthread_mutex_lock(&LIVE.lock);
         snprintf(have, sizeof have, "%s", LIVE.id);
@@ -684,9 +693,9 @@ static void *ask_items(void *unused) {
             if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || *c == '-')) *c = '-';
         char target[96], *body = malloc(32768);
         if (!body) continue;
-        snprintf(target, sizeof target, "/ryunet/items/live?have=%s", have);
+        snprintf(target, sizeof target, "/ryunet/items/live?have=%s%s", have, asked_ranked ? "&mode=ranked" : "");
         const int status = runtime_ryunet_request("GET", target, body, 32768);
-        if (status == 200 && !strncmp(body, "id ", 3)) {
+        if (status == 200 && !strncmp(body, "id ", 3) && asked_ranked == __atomic_load_n(&LIVE.ranked, __ATOMIC_ACQUIRE)) {
             pthread_mutex_lock(&LIVE.lock);
             free(LIVE.pending);
             LIVE.pending = body, body = 0;
@@ -804,6 +813,7 @@ static void live_apply(char *text) {
 }
 
 static void live_items_tick(int racing) {
+    __atomic_store_n(&LIVE.ranked, runtime_ranked_active(), __ATOMIC_RELEASE);
     if (!LIVE.asked && runtime_net_is_online() && getenv("BB_ONLINE_SERVER")) {
         const char *off = getenv("BB_LIVE_ITEM_RULES");
         LIVE.asked = 1;
