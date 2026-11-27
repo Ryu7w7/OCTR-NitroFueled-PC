@@ -160,7 +160,8 @@ int main(int argc, char** argv) {
     ImGui_ImplSDLRenderer3_Init(g_renderer);
     LoadArtwork();
     EnsureTray();
-    if (g_app.launcher.Flag("update_check", true)) StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
+    // RecompLauncher (RECOMPLAUNCHER=1) updates the game itself.
+    if (g_app.launcher.Flag("update_check", true) && Env("RECOMPLAUNCHER") != "1") StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
     KeepAnimating(1.0);
     while (!g_quit && !g_terminate) {
         const auto flags = SDL_GetWindowFlags(g_app.hwnd);

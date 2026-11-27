@@ -429,7 +429,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_app.notice = Format(T("Actualizado a %s. Tus ajustes, amigos, parches y partidas se mantienen.",
                                     "Updated to %s. Your settings, friends, patches and saves are kept."),
                                   g_app.version);
-        } else if (g_app.launcher.Flag("update_check", true)) {
+        } else if (g_app.launcher.Flag("update_check", true) && Env("RECOMPLAUNCHER") != "1") {  // it updates the game itself
             StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
         }
     }
