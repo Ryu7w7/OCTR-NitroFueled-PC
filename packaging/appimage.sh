@@ -11,7 +11,8 @@
 #   bash packaging/appimage.sh
 #   mv out out.nix; mv out.arch out        # the everyday build goes back (out.* are ignored)
 # nix bundle extracts nothing, but running the AppImage with --appimage-extract-and-run (no FUSE)
-# unpacks 2.8 GB into $TMPDIR: point TMPDIR at a disk, not a small tmpfs. After editing files
+# unpacks 2.8 GB into $TMPDIR, and so does this script (it packs the bundle again, below): point
+# TMPDIR at a disk, not a small tmpfs. After editing files
 # that go into the package, remove ~/.cache/nix/fetcher-cache-v*.sqlite* so the source is re-read.
 # A release package must match a published commit (GPL: the source of the binary): the build's
 # out/VERSION has to equal the checkout's revision and must not be -dirty. Tag the commit (vX.Y)
@@ -43,13 +44,37 @@ root=$PWD
     echo ']'
 } > packaging/runtime-paths.nix
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT   # the unpacked store is read-only
 (cd "$work" && nix bundle --impure --bundler "path:$root/packaging" \
     --expr "import $root/packaging {}")
 mkdir -p dist
 # The bundler names its output after the package's main program (sacredfire.AppImage).
 built=$(ls "$work"/*.AppImage | head -1)
-install -m755 "$built" dist/SacredFire-x86_64.AppImage
+# RecompLauncher unpacks the AppImage into a plain folder, runs its AppRun from there and leaves
+# out every link that points outside the folder. nix-appimage's links are absolute
+# (entrypoint -> /nix/store/...-sacredfire/bin/sacredfire, and some inside the store): each one
+# becomes relative, the same file unpacked and in the AppImage's root, where its nix/store is
+# /nix/store (AppRun.nix takes a relative entrypoint: flake.nix). Links out of the store (the
+# host's /etc) stay as they are. recomplauncher.json goes at the top, where RecompLauncher reads
+# it. Packed again with the same runtime and compression.
+offset=$("$built" --appimage-offset)
+nix-shell -p squashfsTools --run "unsquashfs -q -n -no-xattrs -o $offset -d '$work/root' '$built'" >/dev/null
+while IFS= read -r -d '' link; do
+    target=$(readlink "$link")
+    [[ $target == /nix/store/* ]] || continue
+    dir=$(dirname "$link") mode=$(stat -c %a "$(dirname "$link")")
+    chmod u+w "$dir"   # store folders are read-only; their mode goes back as it was
+    ln -sfn "$(realpath -s -m --relative-to="$dir" "$work/root$target")" "$link"
+    chmod "$mode" "$dir"
+done < <(find "$work/root" -type l -print0)
+left=$(find "$work/root" -type l -lname '/*' -printf '  %P -> %l\n')
+[[ -z $left ]] || printf 'Links that stay absolute (RecompLauncher leaves them out):\n%s\n' "$left"
+install -m644 recomplauncher.json "$work/root/recomplauncher.json"
+comp=$(nix-shell -p squashfsTools --run "unsquashfs -s -o $offset '$built'" | sed -n 's/^Compression //p')
+nix-shell -p squashfsTools --run \
+    "mksquashfs '$work/root' '$work/repacked' -offset $offset -comp $comp -all-root -noappend -no-recovery -quiet -no-progress"
+head -c "$offset" "$built" | dd of="$work/repacked" conv=notrunc status=none
+install -m755 "$work/repacked" dist/SacredFire-x86_64.AppImage
 (cd dist && sha256sum SacredFire-x86_64.AppImage > SacredFire-x86_64.AppImage.sha256)
 # What the package was built from (for the release notes: the GPL source of the binary is the
 # repository at this revision plus nixpkgs at this version for the bundled libraries).
