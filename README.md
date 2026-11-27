@@ -261,12 +261,25 @@ Insert, or L3+R3 on the pad, opens the port's menu: game patches, controller por
 screen, FPS limit, fullscreen, FPS counter and menu language. It is saved to `bbport.ini`; patches
 apply after a restart.
 
+### Surround audio
+
+OCTR keeps the game's multichannel mix when SDL detects at least six channels on the default
+playback device. On Windows, set the default output (the HDMI receiver or virtual mixer input)
+to 5.1 or 7.1 before launching. Configure the receiver or mixer's output for your speakers too.
+
+To check the game's audio path, look for an `8 ch` port in the launcher log. If the line says
+`folded to stereo`, OCTR detected fewer than six playback channels or could not read the device
+format when the port opened. Restart the game after changing the default device or format.
+
 ### Controllers
 
 SDL3 gamepads. The launcher's Gamepad page or `BB_GAMEPAD=<GUID or part of the name>` picks the
 pad for port 1, and the port switches to whichever pad was used last when the chosen one is
 missing. For split screen, assign pads to ports 2–4 in the in-game menu (or `port.N=<GUID>` in
 `bbport.ini`); each port logs a user in and out as the pad comes and goes.
+
+For Xbox prompts in menus and in-game hints, set **Gamepad → Button prompts → Xbox** in the
+launcher. This takes effect the next time you press Play.
 
 The keyboard works next to a gamepad: WASD left stick, arrow keys right stick, Space Cross,
 LShift Circle, E Square, Q Triangle, 1/3 L1/R1, R/F L2/R2, Z/C L3/R3, Enter Options, IJKL d-pad.
