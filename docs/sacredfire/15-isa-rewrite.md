@@ -67,3 +67,18 @@ unavailable, which only affects CPUs that need it.
 
 i7-3770 (Ivy Bridge) with an RX 580, Windows: 4243 sites (MOVBE 391, BMI1 3528, LZCNT 324), 231
 relocated, 8 int3, 0 unsupported, 0 skipped; the game boots to the start screen and runs.
+
+## Linux (run.sh)
+
+`run.sh` mirrors `run.py`: after the boot image is ready it runs
+`out/sacredfire --cpu-features`, and when the host lacks a set (unless
+`BB_ISA_REWRITE=0`) it generates the table with
+`scripts/isa_rewrite.py "$boot/boot-linked.bin" --out "$boot/isa"` and passes
+`--isa-rewrite` to the game. Without this the Linux runner stopped on older
+CPUs however new the checkout was, because only `run.py` generated the table.
+The Python that runs the rewrite needs iced-x86 (`pip install iced-x86`;
+`run.sh` honours the `PYTHON` environment variable).
+
+Tested on i7-2600 (Sandy Bridge, no MOVBE/F16C/BMI1/LZCNT) with an RX 580
+(RADV) on CachyOS: 4243 sites rewritten (4004 jmp, 231 relocated, 8 int3),
+0 skipped; the game boots and runs, offline and online.
