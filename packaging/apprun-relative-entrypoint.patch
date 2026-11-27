@@ -1,0 +1,21 @@
+--- a/appruns/userns-chroot/main.c
++++ b/appruns/userns-chroot/main.c
+@@ -202,10 +202,17 @@ void child_main(char** argv)
+ 	// For better error messages, we wanna get what entrypoint points to
+ 	const char* entrypoint = strprintf("%s/entrypoint", appdir);
+ 	char exe[PATH_MAX + 1];
+-	ssize_t exe_size = readlink(entrypoint, exe, PATH_MAX);
++	ssize_t exe_size = readlink(entrypoint, exe, PATH_MAX - 1);
+ 	die_if(exe_size < 0, "cannot read link %s", entrypoint);
+ 	exe[exe_size] = 0;
+ 
++	// A relative entrypoint (appimage.sh makes every link relative, for unpacked copies) names a
++	// path from the top of the AppImage, whose nix/store is /nix/store in this root.
++	if (exe[0] != '/') {
++		memmove(exe + 1, exe, exe_size + 1);
++		exe[0] = '/';
++	}
++
+ 	execv(exe, argv);
+ 	die_if(true, "cannot exec %s", exe);
+ }

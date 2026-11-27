@@ -4,6 +4,8 @@
 
 # OCTR
 
+<a href="https://recomplauncher.com/game/octr-nitrofueled-pc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows and Linux,
 with online play on a community server.**
 

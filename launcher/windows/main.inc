@@ -348,10 +348,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
-    bool direct_launch = false, updated = false;
+    bool direct_launch = false, updated = false, prepare = false;
+    fs::path prepare_base, prepare_update, prepare_out;
     std::string ranked_link;  // sacredfire://ranked?mode=N: a Discord announcement's Join (RankedLinkRequest)
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsicmp(cmd_argv[i], L"--prepare") == 0) prepare = true;
+            // "--name value" or "--name=value" (before --play, which ends the list)
+            const std::pair<std::wstring, fs::path*> options[] = {
+                {L"--base", &prepare_base}, {L"--update", &prepare_update}, {L"--out", &prepare_out}, {L"--game", &g_game_override}};
+            const std::wstring arg = cmd_argv[i];
+            for (const auto& [flag, target] : options) {
+                if (arg == flag && i + 1 < cmd_argc) *target = cmd_argv[++i];
+                else if (arg.rfind(flag + L"=", 0) == 0) *target = arg.substr(flag.size() + 1);
+            }
             if (_wcsnicmp(cmd_argv[i], L"sacredfire:", 11) == 0) ranked_link = Narrow(cmd_argv[i]);
             if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
@@ -362,6 +372,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         }
         LocalFree(cmd_argv);
+    }
+    if (prepare) {
+        const int code = PrepareMerge(prepare_base, prepare_update, prepare_out);
+        CoUninitialize();
+        return code;
     }
 
     LoadState();
@@ -414,7 +429,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_app.notice = Format(T("Actualizado a %s. Tus ajustes, amigos, parches y partidas se mantienen.",
                                     "Updated to %s. Your settings, friends, patches and saves are kept."),
                                   g_app.version);
-        } else if (g_app.launcher.Flag("update_check", true)) {
+        } else if (g_app.launcher.Flag("update_check", true) && Env("RECOMPLAUNCHER") != "1") {  // it updates the game itself
             StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
         }
     }
