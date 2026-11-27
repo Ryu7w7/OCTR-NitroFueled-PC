@@ -97,14 +97,23 @@ void WaitForGame() {
 int main(int argc, char** argv) {
     signal(SIGINT, HandleTermination);
     signal(SIGTERM, HandleTermination);
-    bool direct = false;
+    bool direct = false, prepare = false;
+    fs::path prepare_base, prepare_update, prepare_out;
     std::string ranked_link;  // sacredfire://ranked?mode=N: a Discord announcement's Join (RankedLinkRequest)
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (Lower(arg).rfind("sacredfire:", 0) == 0) ranked_link = arg;
         if (arg == "--help") { std::puts("SacredFire launcher: --play starts the saved game without a window."); return 0; }
         if (arg == "--play" || arg == "--launch" || arg == "--direct" || arg == "-play" || arg == "-launch") direct = true;
+        if (arg == "--prepare") prepare = true;
+        // "--name value" or "--name=value"
+        for (const auto& [flag, target] : {std::pair<std::string, fs::path*>{"--base", &prepare_base},
+                 {"--update", &prepare_update}, {"--out", &prepare_out}, {"--game", &g_game_override}}) {
+            if (arg == flag && i + 1 < argc) *target = TextPath(argv[++i]);
+            else if (arg.rfind(flag + "=", 0) == 0) *target = TextPath(arg.substr(flag.size() + 1));
+        }
     }
+    if (prepare) return PrepareMerge(prepare_base, prepare_update, prepare_out);
     try { LoadState(); }
     catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
