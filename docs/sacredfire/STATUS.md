@@ -19,6 +19,17 @@ Updated 2026-10-09.
 | EU 1.21 private Speed Mode | startup, hook installation, and 40-track overlay preparation validated for CUSA14876 and CUSA13795; live EU lobby/multiplayer verification pending ([notes](21-eu-speed-mode.md)) |
 | 16:10 aspect ratio | separate display/camera support, with GUI VFX alignment and shared boost-gauge proportions corrected; EU Adventure and active drift fill checked at 2560x1600/1440p, other HUD modes and video proportions pending ([notes](23-aspect-ratios.md)) |
 
+## Windows Steam shortcuts
+
+The Add to Steam action searches each profile's existing shortcuts before deciding whether to
+append a new entry. A profile with no shortcuts skips the search loop, leaving the match flag
+uninitialized. Initialize it to false so the first shortcut is added. The validation count also
+used a hex escape that absorbed the first letter of the key. Separate the type byte from the key.
+A disposable VDF fixture verifies that the first add creates one entry and the second updates it.
+The Windows process scan also starts with Steam marked closed. This keeps a failed snapshot or
+an unrelated process list from entering the shutdown path. A process-scan fixture covers both
+cases and a list containing Steam.
+
 ## How to run
 
 ```bash

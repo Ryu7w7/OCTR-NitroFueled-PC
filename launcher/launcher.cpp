@@ -7536,7 +7536,7 @@ std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
 /// The shortcuts a shortcuts.vdf holds, counted from its raw "appname" keys: a file ParseShortcuts
 /// reads differently is left alone rather than rewritten without the player's other games.
 size_t CountShortcuts(const std::vector<uint8_t>& buf) {
-    static constexpr char key[] = "\x01appname";
+    static constexpr char key[] = "\x01" "appname";
     size_t count = 0;
     for (size_t i = 0; i + sizeof key <= buf.size(); ++i) {
         size_t k = 0;

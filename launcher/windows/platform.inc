@@ -692,7 +692,7 @@ bool AddToSteam(std::string& out_msg) {
     }
 
     const auto steam_running = [] {
-        bool running;
+        bool running = false;
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap != INVALID_HANDLE_VALUE) {
             PROCESSENTRY32W pe{sizeof pe};
@@ -812,7 +812,7 @@ bool AddToSteam(std::string& out_msg) {
             fs::copy_file(vdf_path, config_dir / L"shortcuts.vdf.octr-backup", fs::copy_options::overwrite_existing, ec);
         }
 
-        bool found;
+        bool found = false;
         for (auto& sc : shortcuts) {
             if (sc.app_name == app_name || sc.exe.find(PathText(kOldLauncherExe)) != std::string::npos ||
                 sc.exe.find(PathText(target_exe.filename())) != std::string::npos) {
