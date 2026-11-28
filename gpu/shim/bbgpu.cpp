@@ -63,6 +63,10 @@ void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
 
 Frontend::WindowSDL* g_window = nullptr;
 
+bool Frontend::UsesKeyboardPrompts() {
+    return g_window && g_window->GetPromptInputDevice() == PromptInputDevice::KeyboardMouse;
+}
+
 namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::VideoOut { void RegisterLib(Core::Loader::SymbolsResolver* sym); }

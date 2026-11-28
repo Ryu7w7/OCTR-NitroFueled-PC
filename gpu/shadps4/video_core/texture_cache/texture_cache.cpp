@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <xxhash.h>
+#include <fstream>
+#include "sdl_window.h" // bbport: active prompt input device
 
 #include "bbport_toggles.h"
 #include "bbport_free_check.h"
@@ -23,6 +25,111 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+
+// bbport: optional locally generated replacements for the game's button font.
+namespace {
+struct PromptAtlas {
+    u32 width;
+    u32 height;
+    std::vector<u8> tiled;
+    std::vector<u8> gamepad;
+    std::vector<u8> keyboard;
+};
+
+const std::vector<PromptAtlas>& GetPromptAtlases() {
+    static const auto atlases = []() -> std::vector<PromptAtlas> {
+        const char* path = std::getenv("BB_ADAPTIVE_PROMPT_ATLASES");
+        if (!path || !*path) {
+            return {};
+        }
+        std::ifstream stream(path, std::ios::binary);
+        const auto read = [&stream](auto* data, size_t size) {
+            return bool(stream.read(reinterpret_cast<char*>(data), size));
+        };
+        std::array<char, 8> magic{};
+        u32 count = 0;
+        if (!read(magic.data(), magic.size()) || std::string_view(magic.data(), magic.size()) != "OCTRGLY2" ||
+            !read(&count, sizeof(count)) || count > 16) {
+            return {};
+        }
+        std::vector<PromptAtlas> result;
+        for (u32 i = 0; i < count; ++i) {
+            PromptAtlas atlas{};
+            if (!read(&atlas.width, sizeof(atlas.width)) || !read(&atlas.height, sizeof(atlas.height)) ||
+                !atlas.width || atlas.width > 2048 || !atlas.height || atlas.height > 512) {
+                return {};
+            }
+            atlas.tiled.resize(Common::DivCeil(atlas.width, 8u) * Common::DivCeil(atlas.height, 8u) * 256u);
+            atlas.gamepad.resize(atlas.width * atlas.height * 4u);
+            atlas.keyboard.resize(atlas.gamepad.size());
+            if (!read(atlas.tiled.data(), atlas.tiled.size()) ||
+                !read(atlas.gamepad.data(), atlas.gamepad.size()) ||
+                !read(atlas.keyboard.data(), atlas.keyboard.size())) {
+                return {};
+            }
+            result.push_back(std::move(atlas));
+        }
+        return result;
+    }();
+    return atlases;
+}
+
+bool TracePromptAtlases() {
+    static const bool enabled = std::getenv("BB_INPUT_UI_TRACE") != nullptr;
+    return enabled;
+}
+
+const PromptAtlas* MatchPromptAtlas(const Image& image) {
+    const auto& info = image.info;
+    const auto& atlases = GetPromptAtlases();
+    if (atlases.empty() || info.num_bits != 32 || info.num_samples != 1 || info.props.is_block ||
+        info.props.is_depth || info.props.is_volume || info.resources.layers != 1 ||
+        info.resources.levels != 1 || info.tile_mode != AmdGpu::TileMode::Thin1DThin ||
+        !info.guest_address || True(image.flags & ImageFlagBits::GpuModified)) {
+        return nullptr;
+    }
+    for (const auto& atlas : atlases) {
+        if (info.size.width != atlas.width || info.size.height != atlas.height ||
+            atlas.tiled.size() > info.guest_size) {
+            continue;
+        }
+        std::vector<u8> pixels(atlas.tiled.size());
+        Core::Memory::Instance()->CopySparseMemory(info.guest_address, pixels.data(), pixels.size());
+        if (pixels == atlas.tiled) {
+            if (TracePromptAtlases()) {
+                std::printf("Input UI: matched %ux%u atlas\n", atlas.width, atlas.height);
+            }
+            return &atlas;
+        }
+    }
+    return nullptr;
+}
+
+void UpdatePromptAtlas(Vulkan::Runtime& runtime, Image& image, bool keyboard) {
+    if (!image.prompt_atlas || image.prompt_keyboard == keyboard ||
+        True(image.flags & ImageFlagBits::GpuModified)) {
+        return;
+    }
+    const auto& atlas = *static_cast<const PromptAtlas*>(image.prompt_atlas);
+    const auto& pixels = keyboard ? atlas.keyboard : atlas.gamepad;
+    const auto staging = runtime.GetStagingPool().Request(pixels.size(), MemoryType::HostUncached, 16);
+    if (!staging.mapped) {
+        return;
+    }
+    std::memcpy(staging.mapped, pixels.data(), pixels.size());
+    staging.Flush();
+    const vk::BufferImageCopy copy{
+        .bufferOffset = staging.offset,
+        .imageSubresource{.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+        .imageExtent = {atlas.width, atlas.height, 1},
+    };
+    runtime.UploadImage(&image, staging.buffer, std::span{&copy, 1});
+    image.prompt_keyboard = keyboard;
+    if (TracePromptAtlases()) {
+        std::printf("Input UI: uploaded %s atlas\n", keyboard ? "keyboard/mouse" : "gamepad");
+    }
+}
+} // namespace
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
@@ -790,6 +897,9 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     if (refresh) {
         UpdateImage(image_id);
     }
+    if (refresh && desc.type == BindingType::Texture && image.prompt_atlas) {
+        UpdatePromptAtlas(runtime, image, Frontend::UsesKeyboardPrompts());
+    }
     if (memo && !BbToggle::Disabled(BbToggle::TextureViewMemo)) {
         if (memo->image_id == image_id && memo->backing == image.backing && memo->view_id) {
             return slot_image_views[memo->view_id];
@@ -1006,6 +1116,8 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    image.prompt_atlas = MatchPromptAtlas(image);
+    image.prompt_keyboard = false;
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

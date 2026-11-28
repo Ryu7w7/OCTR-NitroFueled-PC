@@ -95,6 +95,13 @@ int runtime_cinematic_cutscene(void); /* 1 while a cutscene plays (not a race's 
 void runtime_cinematic_cutscene_fill(void); /* cutscenes get a 16:9 field of view, not a crop */
 /* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */
 void runtime_frontend_start(const unsigned char *image);
+enum MouseCommand {
+    MOUSE_UI_NONE, MOUSE_UI_UP, MOUSE_UI_RIGHT, MOUSE_UI_DOWN, MOUSE_UI_LEFT, MOUSE_UI_CONFIRM,
+    MOUSE_UI_PREVIOUS_PAGE, MOUSE_UI_NEXT_PAGE,
+};
+enum MouseCommand runtime_mouse_ui_command(void);
+int runtime_mouse_ui_enabled(void);
+int runtime_mouse_ui_install(void *slot, uintptr_t expected_callback);
 int runtime_online_mode_start(unsigned char *image, size_t size);
 int runtime_friends_native_start(unsigned char *image, size_t size);
 int runtime_time_trial_start(unsigned char *image, size_t size);

@@ -866,10 +866,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         };
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        const auto blit = MakeCinematicBlit(frame->width, frame->height, extent.width, extent.height);
+        // bbport: mouse coordinates use the same letterboxing as the presented image.
+        window.SetGameViewport(blit.dstOffsets[0].x, blit.dstOffsets[0].y, blit.dstOffsets[1].x,
+                               blit.dstOffsets[1].y, extent.width, extent.height);
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
-                         vk::ImageLayout::eTransferDstOptimal,
-                         MakeCinematicBlit(frame->width, frame->height, extent.width, extent.height),
-                         vk::Filter::eLinear);
+                         vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         const bool overlay = BbOverlay::Visible();
         const std::array post_barriers{

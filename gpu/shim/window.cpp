@@ -18,6 +18,11 @@
 
 extern "C" void runtime_party_experiment_request(int kind); // src/runtime_party_experiment.c
 
+extern "C" void runtime_mouse_ui_pointer(float x, float y, int click);
+extern "C" void runtime_mouse_ui_scroll(float x, float y, int previous);
+extern "C" int runtime_mouse_ui_cursor_visible(void);
+extern "C" int runtime_mouse_ui_enabled(void);
+
 namespace Frontend {
 
 namespace {
@@ -388,6 +393,7 @@ bool WindowSDL::PollEvents() {
     if (!text_active) {
         BbOverlay::UpdateTextInput(window);
     }
+    const bool mouse_ui = runtime_mouse_ui_enabled();
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_MOUSE_MOTION) {
@@ -410,6 +416,7 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         if (BbOverlay::HandleEvent(event)) {
+            if (mouse_ui) runtime_mouse_ui_pointer(-1, -1, 0);
             continue;
         }
         // Host handoff research (src/runtime_party_experiment.c): Ctrl+F9 leave and host,
@@ -427,6 +434,38 @@ bool WindowSDL::PollEvents() {
             bool cur = BbSettings::Get().fullscreen.load(std::memory_order_relaxed);
             BbSettings::Get().fullscreen.store(!cur, std::memory_order_relaxed);
             continue;
+        }
+        TrackPromptInput(event);
+        if (mouse_ui && (event.type == SDL_EVENT_WINDOW_MOUSE_LEAVE ||
+                            event.type == SDL_EVENT_WINDOW_FOCUS_LOST)) {
+            runtime_mouse_ui_pointer(-1, -1, 0);
+        }
+        const bool mouse_motion = event.type == SDL_EVENT_MOUSE_MOTION;
+        const bool mouse_click = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                                 event.button.button == SDL_BUTTON_LEFT;
+        const bool mouse_scroll = event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.y != 0;
+        if (mouse_ui && !text_active && (mouse_motion || mouse_click || mouse_scroll) &&
+            (mouse_motion ? event.motion.windowID : mouse_scroll ? event.wheel.windowID : event.button.windowID) == SDL_GetWindowID(window) &&
+            (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+            int w = 0, h = 0;
+            if (SDL_GetWindowSize(window, &w, &h) && w > 0 && h > 0) {
+                const float x = mouse_motion ? event.motion.x : mouse_scroll ? event.wheel.mouse_x : event.button.x;
+                const float y = mouse_motion ? event.motion.y : mouse_scroll ? event.wheel.mouse_y : event.button.y;
+                const u64 viewport = game_viewport.load(std::memory_order_relaxed);
+                const float left = static_cast<u16>(viewport) / 65535.0f;
+                const float top = static_cast<u16>(viewport >> 16) / 65535.0f;
+                const float right = viewport ? static_cast<u16>(viewport >> 32) / 65535.0f : 1.0f;
+                const float bottom = viewport ? static_cast<u16>(viewport >> 48) / 65535.0f : 1.0f;
+                const float game_x = (x / w - left) / (right - left);
+                const float game_y = (y / h - top) / (bottom - top);
+                if (mouse_scroll) {
+                    const bool previous = (event.wheel.y > 0) !=
+                                          (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED);
+                    runtime_mouse_ui_scroll(game_x, game_y, previous);
+                } else {
+                    runtime_mouse_ui_pointer(game_x, game_y, mouse_click);
+                }
+            }
         }
         switch (event.type) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -453,6 +492,94 @@ bool WindowSDL::PollEvents() {
     }
     UpdateCursor();
     return is_open;
+}
+
+void WindowSDL::SetGameViewport(s32 left, s32 top, s32 right, s32 bottom, u32 surface_w,
+                                u32 surface_h) {
+    if (!surface_w || !surface_h || left < 0 || top < 0 || right <= left || bottom <= top) {
+        game_viewport.store(0, std::memory_order_relaxed);
+        return;
+    }
+    const auto fraction = [](s32 pixel, u32 extent) -> u64 {
+        return std::min(static_cast<u64>(pixel), static_cast<u64>(extent)) * 65535 / extent;
+    };
+    const u64 x0 = fraction(left, surface_w), x1 = fraction(right, surface_w);
+    const u64 y0 = fraction(top, surface_h), y1 = fraction(bottom, surface_h);
+    if (x1 > x0 && y1 > y0) {
+        game_viewport.store(x0 | (y0 << 16) | (x1 << 32) | (y1 << 48), std::memory_order_relaxed);
+    }
+}
+
+void WindowSDL::TrackPromptInput(const SDL_Event& event) {
+    if (event.type != SDL_EVENT_GAMEPAD_REMOVED &&
+        !(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+        return;
+    }
+    PromptInputDevice device;
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN:
+        if (event.key.repeat || event.key.windowID != SDL_GetWindowID(window)) {
+            return;
+        }
+        device = PromptInputDevice::KeyboardMouse;
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        if (event.button.windowID != SDL_GetWindowID(window)) {
+            return;
+        }
+        device = PromptInputDevice::KeyboardMouse;
+        break;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (event.wheel.windowID != SDL_GetWindowID(window) ||
+            (event.wheel.x == 0 && event.wheel.y == 0)) {
+            return;
+        }
+        device = PromptInputDevice::KeyboardMouse;
+        break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        device = PromptInputDevice::Gamepad;
+        break;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+        if (event.gaxis.axis >= SDL_GAMEPAD_AXIS_COUNT) {
+            return;
+        }
+        constexpr int engage = 16000;
+        constexpr int release = 8000;
+        const int magnitude = std::abs(static_cast<int>(event.gaxis.value));
+        const u32 bit = 1u << event.gaxis.axis;
+        auto& engaged = engaged_prompt_axes[event.gaxis.which];
+        if (magnitude <= release) {
+            engaged &= ~bit;
+            return;
+        }
+        if (magnitude < engage || (engaged & bit)) {
+            return;
+        }
+        engaged |= bit;
+        device = PromptInputDevice::Gamepad;
+        break;
+    }
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        engaged_prompt_axes.erase(event.gdevice.which);
+        return;
+    default:
+        return;
+    }
+
+    // A physical navigation input takes over from any mouse-generated pad pulse.
+    if (runtime_mouse_ui_enabled() &&
+        (device == PromptInputDevice::Gamepad || event.type == SDL_EVENT_KEY_DOWN)) {
+        runtime_mouse_ui_pointer(-1, -1, 0);
+    }
+    const auto previous = prompt_input.exchange(device, std::memory_order_relaxed);
+    static const bool trace = [] {
+        const char* value = std::getenv("BB_INPUT_UI_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (trace && previous != GetPromptInputDevice()) {
+        std::printf("Input UI: %s\n",
+                    device == PromptInputDevice::Gamepad ? "gamepad" : "keyboard/mouse");
+    }
 }
 
 // Issue #3: the OS cursor over the game. Hidden in fullscreen, and in a window after 3 s without
