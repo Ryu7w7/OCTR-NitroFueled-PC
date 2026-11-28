@@ -9,6 +9,7 @@ with the same modules, so the Linux launch has what the Windows one has:
   tacho_pack      Pack Tacho: its HUD, reserves bar, leaders list and main menu files. Its executable
                   patches (scripts/tacho_pack/patches) only work with these files: without them a
                   race crashed while loading (guest 0x1469081 USA, 0x1469071 EU).
+  skin_portraits  use skin-specific portraits in race leaders and minimap
   track_names     the tracks' own names for the Discord presence
 Each step keeps the patches made before it for the same archive, as in run.py.
 
@@ -25,6 +26,7 @@ import archive_patch
 import ctr_tv_logo
 import season_art
 import signed_in_name
+import skin_portraits
 import tacho_pack
 import track_content
 import track_names
@@ -57,6 +59,10 @@ def main():
         sys.exit(3)
     except (OSError, ValueError, KeyError) as error:
         print(f"Pack Tacho: {error}; the game's own files", flush=True)
+    try:
+        base.update(skin_portraits.prepare(a.game, a.out, base))
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Skin portraits: {error}; the game's own portraits", flush=True)
     presence = Path(env.setdefault('BB_PRESENCE_FILE', str((a.out / 'presence' / 'presence.txt').resolve())))
     try:
         track_names.prepare(a.game, presence.parent)
