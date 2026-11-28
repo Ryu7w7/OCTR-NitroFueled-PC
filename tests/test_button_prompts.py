@@ -75,6 +75,33 @@ def inclusive(cell):
     return x0, y0, x1 - 1, y1 - 1
 
 
+class KeyboardPromptTests(unittest.TestCase):
+    def test_remap_changes_only_the_bound_keyboard_cell(self):
+        sheet = bp.read_png(bp.ART / 'keyboard.png')
+        glyphs = bp.read_png(bp.ART / 'keyboard-labels.png')
+        original = bp.keyboard_art(sheet, glyphs, bp.keyboard_bindings(None))
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'bbport.ini'
+            config.write_text('key.cross=Mouse Left, Space\nkey.circle=\nkey.move_down=Down\n', encoding='utf-8')
+            labels = bp.keyboard_bindings(config)
+        self.assertEqual(labels['Cross'], 'LMB')
+        self.assertEqual(labels['Circle'], '-')
+        self.assertEqual(labels['Square'], 'E')
+
+        width, height, remapped = bp.keyboard_art(sheet, glyphs, labels)
+        expected = set()
+        for name in ('Cross', 'Circle', 'Left Stick'):
+            left, top, right, bottom = bp.KEYBOARD_SHEET[name]
+            expected.update(y * width + x for y in range(top, bottom) for x in range(left, right))
+        changed = {i for i in range(width * height)
+                   if original[2][4 * i:4 * i + 4] != remapped[4 * i:4 * i + 4]}
+        self.assertTrue(changed)
+        self.assertTrue(changed <= expected)
+        for name in ('Cross', 'Circle', 'Left Stick'):
+            left, top, right, bottom = bp.KEYBOARD_SHEET[name]
+            self.assertTrue(any(y * width + x in changed
+                                for y in range(top, bottom) for x in range(left, right)))
+
 class ButtonPromptTests(unittest.TestCase):
     def setUp(self):
         # The game's image: every texel (x, y, 7, 255) in memory order; the art: (200, y, x % 256, 255)

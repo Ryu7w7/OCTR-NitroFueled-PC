@@ -153,6 +153,8 @@ public:
         u32 depth_target : 1;
         u32 vo_surface : 1;
     } usage{};
+    const void* prompt_atlas{}; ///< bbport: matched local controller prompt atlas
+    bool prompt_keyboard{};     ///< bbport: keyboard pixels are installed in the backing
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;

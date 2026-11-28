@@ -3513,14 +3513,20 @@ void ControllerSettings() {
         static constexpr Choice kButtonPrompts[] = {
             {"PlayStation", "PlayStation", "playstation"},
             {"Xbox", "Xbox", "xbox"},
+            {"Automático (Vulkan)", "Automatic (Vulkan)", "auto"},
         };
         if (GameChoiceCombo(T("Iconos de botones", "Button prompts"), "button_prompts", kButtonPrompts, "playstation", 12.0f))
             SaveGameIni();
         HelpMarker(T("Los botones que muestra el juego en menús y avisos. Xbox: A, B, X, Y, LB, RB, LT, RT y View. "
-                     "Se aplica al pulsar Jugar.",
+                     "Automático alterna Xbox y teclado con Vulkan (shadPS4). Se aplica al pulsar Jugar.",
                      "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. "
-                     "Applies when you press Play."));
+                     "Automatic alternates Xbox and keyboard with Vulkan (shadPS4). Applies when you press Play."));
     }
+
+    GameFlag("mouse_menus", T("Ratón en menús", "Mouse in menus"), false,
+             T("Mueve el ratón para seleccionar y haz clic para confirmar. "
+               "Experimental en la versión estadounidense 1.21 (6.72+).",
+               "Hover to select and click to confirm. Experimental on US 1.21 (6.72+)."));
 
     FormSection(T("Pantalla dividida", "Split screen"));
     GameFlag("split_auto", T("Asignar los mandos automáticamente", "Assign controllers automatically"), true,
@@ -6802,7 +6808,8 @@ bool PadLooksXbox() {
         if (name.find(ps) != std::string::npos) return false;
     for (const char* xb : {"xbox", "xinput", "x-box"})
         if (name.find(xb) != std::string::npos) return true;
-    return Lower(Trim(g_app.game.Get("button_prompts", "playstation"))) == "xbox";
+    const auto style = Lower(Trim(g_app.game.Get("button_prompts", "playstation")));
+    return style == "xbox" || style == "auto";
 }
 
 struct PadSpot {

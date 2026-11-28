@@ -1090,6 +1090,8 @@ def launch(args, restarted=False):
     out.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
     config = env['BB_CONFIG']
+    if ini_value(config, 'mouse_menus') == '1':
+        env.setdefault('BB_MOUSE_UI', '1')
     # A portable package ships bbport.default.ini, so a new version unzipped over an old one keeps
     # the player's bbport.ini.
     if not Path(config).exists() and (PORT / 'bbport.default.ini').is_file():

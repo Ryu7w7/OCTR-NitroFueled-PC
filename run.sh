@@ -19,6 +19,9 @@ data=${BB_DATA_DIR:-.}
 out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
+if [[ -z ${BB_MOUSE_UI+x} && -f $BB_CONFIG ]] && grep -qx 'mouse_menus=1' "$BB_CONFIG"; then
+    export BB_MOUSE_UI=1
+fi
 # The port's new tracks (scripts/track_content.py): a content/ folder in the data directory (the
 # AppImage's own files are read-only: ~/.local/share/sacredfire/content), else the one beside scripts/.
 if [[ -z ${BB_CONTENT_DIR:-} ]] && mkdir -p "$data/content"; then export BB_CONTENT_DIR=$(cd "$data/content" && pwd); fi
@@ -225,6 +228,11 @@ if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online
 while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
+# The automatic style uses Xbox as its source and swaps the local atlas in shadPS4 Vulkan.
+if [[ -z ${BB_ADAPTIVE_PROMPT_ATLASES:-} && -f $out/button_prompts/adaptive-atlases.bin ]] &&
+   grep -q '"adaptive": true' "$out/button_prompts/stamp.json" 2>/dev/null; then
+    export BB_ADAPTIVE_PROMPT_ATLASES="$out/button_prompts/adaptive-atlases.bin"
+fi
 # ...and the voice chat's loudspeaker character in them: the nickname over a talking racer shows it.
 unset BB_VOICE_GLYPH BB_CLAN_BRACKETS
 if grep -q '"speaker": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_VOICE_GLYPH=1; fi

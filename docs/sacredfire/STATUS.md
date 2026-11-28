@@ -237,3 +237,24 @@ with the desktop apps closed.
 - `--cpu-features` names the missing sets before the game starts; fatal sets (SSE4.2, POPCNT, AVX)
   still stop the launch. Tested on an i7-3770 / RX 580: the table applies with 0 skipped and the
   game boots to the start screen.
+
+## Automatic input prompts and mouse menus
+
+- The Windows launcher offers Automatic (Vulkan). Startup generates an Xbox and keyboard atlas
+  from the local 1.21 fonts and caches it against the keyboard bindings. The shadPS4 Vulkan
+  texture cache swaps the sampled atlas without writing guest memory. Texture-set memoization
+  used to skip the update. The isolated Windows run logged uploads in both directions after
+  the cache check changed. A second run sent a keyboard event and moved an SDL virtual
+  controller stick. The title screen displayed Space, then Xbox A.
+- The optional mouse path uses the US 1.21 (6.72+) GUI signal slot and derives the pointer
+  position from the presenter viewport. The slot and callback matched the live game. An
+  offline dialog owned input while exposing no focused placeable. The menu behind it still had a
+  focused Adventure button, so clicks stop at the dialog.
+  Scripted pointer input highlighted Local Arcade in the live main menu and opened it on click.
+  On the offline dialog, the mouse now targets the visible confirm glyph in the nested button
+  legend. An outside click left the dialog open, and clicking Continue dismissed it.
+- On a fresh US 1.21 profile the EULA advanced with R1 and left stick right, the default
+  keyboard bindings 3 and D. Left stick down left the page unchanged. The isolated run
+  ended on page 3 of 43. Scripted wheel input advanced one page, returned to page 1, and
+  returned from page 43 to 42. The final-page legend combines several actions in one text
+  element, so its Accept glyph is excluded from mouse confirmation.

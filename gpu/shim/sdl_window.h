@@ -4,12 +4,16 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include "common/types.h"
 
 struct SDL_Window;
+union SDL_Event;
 
 namespace Frontend {
 
+enum class PromptInputDevice : u8 { KeyboardMouse, Gamepad };
+bool UsesKeyboardPrompts();
 enum class WindowSystemType : u8 { Headless, Windows, X11, Wayland, Metal };
 
 struct WindowSystemInfo {
@@ -30,6 +34,10 @@ public:
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
+    void SetGameViewport(s32 left, s32 top, s32 right, s32 bottom, u32 surface_w, u32 surface_h);
+    PromptInputDevice GetPromptInputDevice() const {
+        return prompt_input.load(std::memory_order_relaxed);
+    }
     /// Keyboard text entry for the system IME dialog; typed text shows in the title bar.
     /// sacredfire: the shared window icon from a PNG file; 8-bit RGB/RGBA.
     void SetIcon(const char* png_path);
@@ -46,6 +54,10 @@ private:
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();
     void UpdateCursor();
+    void TrackPromptInput(const SDL_Event& event);
+    std::atomic<PromptInputDevice> prompt_input{PromptInputDevice::Gamepad};
+    std::unordered_map<u32, u32> engaged_prompt_axes;
+    std::atomic<u64> game_viewport{}; ///< Normalized bounds packed as four 16-bit coordinates.
     u64 last_mouse_motion_ms{}; ///< SDL_GetTicks of the last mouse motion (UpdateCursor)
     bool cursor_hidden{};
     SDL_Window* window{};

@@ -926,6 +926,14 @@ static void sample_host_from(PadData *d, int p) {
         apply_keyboard(d,k);
     }
     if (p==0) {
+        static const uint32_t mouse_buttons_for_command[] = {
+            [MOUSE_UI_UP] = BTN_UP, [MOUSE_UI_RIGHT] = BTN_RIGHT,
+            [MOUSE_UI_DOWN] = BTN_DOWN, [MOUSE_UI_LEFT] = BTN_LEFT, [MOUSE_UI_CONFIRM] = BTN_CROSS,
+            [MOUSE_UI_NEXT_PAGE] = BTN_R1,
+        };
+        const enum MouseCommand mouse_command = runtime_mouse_ui_command();
+        if (mouse_command == MOUSE_UI_PREVIOUS_PAGE) d->left_x = 0;
+        else d->buttons |= mouse_buttons_for_command[mouse_command];
         __atomic_store_n(&host_buttons,d->buttons,__ATOMIC_RELAXED);
         __atomic_store_n(&host_right_stick,(uint32_t)d->right_x | (uint32_t)d->right_y<<8,__ATOMIC_RELAXED);
     }

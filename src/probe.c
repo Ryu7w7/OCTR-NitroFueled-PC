@@ -974,6 +974,24 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
             address - segments[i].address <= segments[i].size - bytes) return 1;
     return 0;
 }
+/* The slot is in non-executable guest data, made writable during segment setup below. */
+static void install_mouse_ui(unsigned char *image, const Segment *segments, uint64_t count) {
+    const char *enabled = getenv("BB_MOUSE_UI");
+    if (!enabled) enabled = getenv("BB_MOUSE_UI_TRACE");
+    if (!enabled || strcmp(enabled, "1")) return;
+
+    /* US 1.21 (6.72+): CGuiInput vtable slot 22 and its relocated native signal callback. */
+    const uint64_t offset = 0x2541ab0, callback = 0x9a0680;
+    for (uint64_t i = 0; i < count; ++i) {
+        const Segment *segment = &segments[i];
+        if ((segment->flags & 1) || offset < segment->address ||
+            segment->size < sizeof(uintptr_t) ||
+            offset - segment->address > segment->size - sizeof(uintptr_t)) continue;
+        if (runtime_mouse_ui_install(image + offset, (uintptr_t)(image + callback))) return;
+        break;
+    }
+    puts("Mouse UI: signal slot did not match this executable");
+}
 /* BBPATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1411,6 +1429,7 @@ int main(int argc, char **argv) {
     }
     runtime_cinematic_start(image);
     runtime_frontend_start(image);
+    install_mouse_ui(image, segments, ns);
     if (!runtime_friends_native_start(image, size)) fail("native Friends refresh callback could not be installed");
     if (!runtime_online_mode_start(image, size)) fail("native Online mode callback could not be installed");
     if (!runtime_race_options_start(image, size)) fail("native race option callback could not be installed");

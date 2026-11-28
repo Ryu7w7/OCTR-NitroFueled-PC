@@ -382,6 +382,12 @@ if (WIN32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(mouse-ui-test EXCLUDE_FROM_ALL ../tests/test_mouse_ui.c)
+target_compile_options(mouse-ui-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(mouse-ui-test PRIVATE PkgConfig::SDL3)
+if (NOT WIN32)
+    target_link_libraries(mouse-ui-test PRIVATE m)
+endif()
 add_executable(flip-timing-test EXCLUDE_FROM_ALL ../tests/test_flip_timing.cpp)
 target_compile_options(flip-timing-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(flip-timing-test PRIVATE ..)

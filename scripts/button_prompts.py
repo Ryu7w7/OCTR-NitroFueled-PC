@@ -16,13 +16,14 @@ MIT License): the IGZ pointer encoding (data section << 27 | offset) and the til
 import argparse
 import struct
 import sys
+import tempfile
 import zlib
 from pathlib import Path
 
 import archive_patch
 from archive_reader import Archive
 
-STYLES = ('playstation', 'xbox')
+STYLES = ('playstation', 'xbox', 'auto')
 # Zoinks_Outline is the title font, with its own copy of the button image: "Press X to skip" in
 # cutscenes and "Press X to continue" on the podium (issue #90).
 FONTS = ('fonts/GeekSpeak.igz', 'fonts/GeekSpeak_Outline.igz', 'fonts/Zoinks_Outline.igz')
@@ -64,6 +65,24 @@ SHEET = {
     'L2': (263, 170, 364, 263), 'R2': (364, 170, 465, 263), 'Touchpad': (0, 170, 93, 255),
 }
 
+
+KEYBOARD_CODES = {**CODES, 0xE009: 'Left Stick', 0xE00A: 'Right Stick',
+                  0x7B: 'Left Stick', 0x7D: 'Right Stick'}
+KEYBOARD_SHEET = {**SHEET, 'Left Stick': (271, 85, 356, 170), 'Right Stick': (356, 85, 441, 170)}
+STICK_KEYS = {
+    'Left Stick': ('Move Up', 'Move Left', 'Move Down', 'Move Right'),
+    'Right Stick': ('Look Up', 'Look Left', 'Look Down', 'Look Right'),
+}
+
+# SDL defaults from runtime_pad.c. A blank configured binding gets a dash.
+KEYBOARD_DEFAULTS = {
+    'Cross': 'SPACE', 'Circle': 'SHIFT', 'Square': 'E', 'Triangle': 'Q',
+    'L1': '1', 'R1': '3', 'L2': 'R', 'R2': 'F', 'Touchpad': 'TAB',
+    'Move Up': 'W', 'Move Left': 'A', 'Move Down': 'S', 'Move Right': 'D',
+    'Look Up': 'UP', 'Look Left': 'LT', 'Look Down': 'DN', 'Look Right': 'RT',
+}
+KEYBOARD_GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ?-./+[]'
+LABEL_WIDTH, LABEL_HEIGHT = 24, 36
 
 def say(message):
     print('Button prompts: ' + message, file=sys.stderr, flush=True)
@@ -131,7 +150,7 @@ def _objects(blob):
     return found, _strings(*fixups['TSTR']), file_offset
 
 
-def button_cells(blob, width, height):
+def button_cells(blob, width, height, codes=CODES):
     """{button: (x0, y0, x1, y1)} of the PlayStation buttons in the font's button image, from its
     character metrics (the layout differs between the game's versions)."""
     cells = {}
@@ -140,12 +159,12 @@ def button_cells(blob, width, height):
         if kind != 'igCharMetrics':
             continue
         char, = struct.unpack_from('<H', blob, at + CM_CHAR)
-        if char not in CODES:
+        if char not in codes:
             continue
         u0, v0, u1, v1 = struct.unpack_from('<4f', blob, at + CM_UV)
         cell = (round(u0 * width), round(v0 * height), round(u1 * width) + 1, round(v1 * height) + 1)
         if cell[2] - cell[0] > MIN_CELL and cell[3] - cell[1] > MIN_CELL:  # not the letter itself
-            cells[CODES[char]] = cell
+            cells[codes[char]] = cell
     return cells
 
 
@@ -257,14 +276,20 @@ def restyled_font(blob, art):
     height, RGBA, laid out as SHEET), each copied into the cell the font's metrics give that
     button. The image is stored BGRA (the texture's swizzle turns it back)."""
     width, height, at, length = image_location(blob)
-    cells = button_cells(blob, width, height)  # the 1.00 fonts have no touchpad button
+    original = blob[at:at + length]
+    linear = restyled_pixels(blob, width, height, original, art)
+    return blob[:at] + tile(linear, width, height, original) + blob[at + length:]
+
+
+def restyled_pixels(blob, width, height, original, art, art_cells=SHEET):
+    """Replace button cells and return the linear BGRA pixels of the font's atlas."""
+    cells = button_cells(blob, width, height, KEYBOARD_CODES)
     if not {'Cross', 'Circle', 'Triangle', 'Square'} <= set(cells):
         raise ValueError('the font has no face buttons')
     art_width, _art_height, art_rgba = art
     stored = swap_red_blue(art_rgba)
-    original = blob[at:at + length]
     linear = bytearray(untile(original, width, height))
-    for name, (sx0, sy0, sx1, sy1) in SHEET.items():
+    for name, (sx0, sy0, sx1, sy1) in art_cells.items():
         if name not in cells:
             continue
         x0, y0, x1, y1 = cells[name]
@@ -274,7 +299,7 @@ def restyled_font(blob, art):
             src = ((sy0 + row) * art_width + sx0) * 4
             dst = ((y0 + row) * width + x0) * 4
             linear[dst:dst + (x1 - x0) * 4] = stored[src:src + (x1 - x0) * 4]
-    return blob[:at] + tile(linear, width, height, original) + blob[at + length:]
+    return linear
 
 
 def _alternate_list(blob):
@@ -591,6 +616,63 @@ def chosen_style(config, env):
     return value if value in STYLES else 'playstation'
 
 
+def keyboard_bindings(config):
+    """The primary key name for the font cells shown during keyboard use."""
+    labels = KEYBOARD_DEFAULTS.copy()
+    by_setting = {'key.' + name.lower().replace(' ', '_'): name for name in labels}
+    aliases = {'LEFT SHIFT': 'SHIFT', 'RIGHT SHIFT': 'RSHIFT', 'LEFT CTRL': 'CTRL',
+               'RIGHT CTRL': 'RCTRL', 'MOUSE LEFT': 'LMB', 'MOUSE RIGHT': 'RMB',
+               'MOUSE MIDDLE': 'MMB', 'BACKSPACE': 'BKSP', 'RETURN': 'ENTER',
+               'UP': 'UP', 'LEFT': 'LT', 'DOWN': 'DN', 'RIGHT': 'RT'}
+    if config and Path(config).is_file():
+        for line in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
+            key, sep, value = line.partition('=')
+            if not sep or key not in by_setting:
+                continue
+            primary = next((part.strip().upper() for part in value.split(',') if part.strip()), '-')
+            label = aliases.get(primary, primary)
+            if len(label) > 10:
+                label = label[:9].rstrip() + '.'
+            labels[by_setting[key]] = ''.join(ch if ch in KEYBOARD_GLYPHS else '?' for ch in label)
+    return labels
+
+
+def keyboard_art(sheet, glyphs, labels):
+    width, height, pixels = sheet
+    glyph_width, glyph_height, glyph_pixels = glyphs
+    if (glyph_width, glyph_height) != (LABEL_WIDTH * len(KEYBOARD_GLYPHS), LABEL_HEIGHT):
+        raise ValueError('invalid keyboard label sheet dimensions')
+    result = bytearray(pixels)
+
+    def draw_label(text, left, top, right, bottom):
+        # Keep each glyph centered in its fixed cell and scale the run to fit the keycap.
+        run_width = len(text) * LABEL_WIDTH
+        draw_width = min(run_width, right - left - 20)
+        draw_height = min(bottom - top - 4, max(1, LABEL_HEIGHT * draw_width // run_width))
+        x0 = (left + right - draw_width) // 2
+        y0 = (top + bottom - draw_height) // 2
+        for y in range(draw_height):
+            src_y = y * LABEL_HEIGHT // draw_height
+            for x in range(draw_width):
+                src_x = x * run_width // draw_width
+                letter = KEYBOARD_GLYPHS.index(text[src_x // LABEL_WIDTH])
+                src = (src_y * glyph_width + letter * LABEL_WIDTH + src_x % LABEL_WIDTH) * 4
+                r, g, b, alpha = glyph_pixels[src:src + 4]
+                if not alpha:
+                    continue
+                dst = ((y0 + y) * width + x0 + x) * 4
+                for channel, value in enumerate((r, g, b)):
+                    result[dst + channel] = (value * alpha + result[dst + channel] * (255 - alpha)) // 255
+    for name, (left, top, right, bottom) in KEYBOARD_SHEET.items():
+        if name in STICK_KEYS:
+            up, west, down, east = (labels[key] for key in STICK_KEYS[name])
+            middle = (top + bottom) // 2
+            draw_label(up, left, top + 10, right, middle + 4)
+            draw_label(f'{west} {down} {east}', left, middle, right, bottom - 8)
+        else:
+            draw_label(labels[name], left, top, right, bottom)
+    return width, height, bytes(result)
+
 def prepare(game, out, config, env, base):
     """{guest archive: patch file} of the fonts: the chosen style's buttons (the game's own for
     the PlayStation ones) and the voice chat's loudspeaker character (with_speaker; env gets
@@ -603,7 +685,10 @@ def prepare(game, out, config, env, base):
     style = chosen_style(config, env)
     env.pop('BB_VOICE_GLYPH', None)
     env.pop('BB_CLAN_BRACKETS', None)
-    art_path = ART / f'{style}.png' if style != 'playstation' else None
+    art_path = ART / 'xbox.png' if style != 'playstation' else None
+    keyboard_path = ART / 'keyboard.png' if style == 'auto' else None
+    label_path = ART / 'keyboard-labels.png'
+    labels = keyboard_bindings(config) if keyboard_path else None
     folder = Path(out) / 'button_prompts'
     from mod_file_paths import resolve
     names = list(ARCHIVES) + [name for name in CONTROLS_ARCHIVES if name not in ARCHIVES]
@@ -613,11 +698,20 @@ def prepare(game, out, config, env, base):
              'speaker': hashlib.sha256(SPEAKER_ART.read_bytes()).hexdigest(), 'fonts': list(FONTS),
              'archives': {a.name: [a.stat().st_size, a.stat().st_mtime_ns] for a in archives},
              'base': {g: hashlib.sha256(Path(p).read_bytes()).hexdigest() for g, p in sorted(base.items())}}
+    atlas_file = folder / 'adaptive-atlases.bin'
+    if keyboard_path:
+        stamp['keyboard'] = [hashlib.sha256(path.read_bytes()).hexdigest()
+                             for path in (keyboard_path, label_path)]
+        stamp['key_labels'] = labels
     stamp_file = folder / 'stamp.json'
     made = {}
     try:
         made = json.loads(stamp_file.read_text(encoding='utf-8'))
-        if made['stamp'] == stamp and all(Path(p).is_file() for p in made['patches'].values()):
+        if (made['stamp'] == stamp
+                and (not keyboard_path or (made.get('adaptive') and atlas_file.is_file()))
+                and all(Path(p).is_file() for p in made['patches'].values())):
+            if keyboard_path:
+                env.setdefault('BB_ADAPTIVE_PROMPT_ATLASES', str(atlas_file))
             if made.get('speaker'):
                 env['BB_VOICE_GLYPH'] = '1'
             if made.get('brackets'):
@@ -631,13 +725,13 @@ def prepare(game, out, config, env, base):
     art = read_png(art_path) if art_path else None
     glyph = read_png(SPEAKER_ART)
     folder.mkdir(parents=True, exist_ok=True)
-    patches, speakers, diagrams, bracketed = {}, 0, 0, set()
+    patches, speakers, diagrams, bracketed = {}, 0, 0, {}
     for path in archives:
         archive = Archive(path)
         entries = {}
         for f in archive.files:
             entry = f['path'].replace('\\', '/').lower()
-            if style == 'xbox' and path.name in CONTROLS_ARCHIVES and entry == CONTROLS_SCRIPT.lower():
+            if art and path.name in CONTROLS_ARCHIVES and entry == CONTROLS_SCRIPT.lower():
                 script = xbox_controls(bytes(archive.extract(f)))
                 if script is not None:
                     entries[f['index']] = script
@@ -654,7 +748,7 @@ def prepare(game, out, config, env, base):
                 except (ValueError, struct.error, IndexError):
                     braced = None
                 if braced is not None:
-                    bracketed.add(entry)
+                    bracketed[entry] = braced
                     font = braced
                 if spoken is not None or art or braced is not None:
                     entries[f['index']] = font
@@ -664,17 +758,80 @@ def prepare(game, out, config, env, base):
         target = folder / (path.stem + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, base.get(guest))
         patches[guest] = target
-    # The 1.21 game reads update.pak's fonts: brackets in all three, or the tags keep their parentheses.
+    adaptive = False
+    if keyboard_path:
+        try:
+            art = keyboard_art(read_png(keyboard_path), read_png(label_path), labels)
+            write_adaptive_atlases(game, art, atlas_file, bracketed)
+        except (OSError, ValueError) as error:
+            say(f'automatic prompts unavailable, using Xbox buttons: {error}')
+        else:
+            env.setdefault('BB_ADAPTIVE_PROMPT_ATLASES', str(atlas_file))
+            adaptive = True
+    # The 1.21 game reads update.pak's fonts: enable brackets only if all three were patched.
     brackets = len(bracketed) == len(FONTS)
     stamp_file.write_text(json.dumps({'stamp': stamp, 'patches': {g: str(p) for g, p in patches.items()},
-                                      'speaker': speakers > 0, 'brackets': brackets}), encoding='utf-8')
+                                      'speaker': speakers > 0, 'adaptive': adaptive, 'brackets': brackets}), encoding='utf-8')
     if speakers:
         env['BB_VOICE_GLYPH'] = '1'
     if brackets:
         env['BB_CLAN_BRACKETS'] = '1'
     say(f'{style} buttons, the loudspeaker in {speakers} fonts, clan brackets in {len(bracketed)}, ' +
-        (f'the Xbox controls diagram in {diagrams} scripts, ' if style == 'xbox' else '') + f'{len(patches)} archives')
+        (f'the Xbox controls diagram in {diagrams} scripts, ' if art else '') + f'{len(patches)} archives')
     return patches
+
+
+def write_adaptive_atlases(game, keyboard_art, output, bracketed=None):
+    """Write matching Xbox and keyboard BGRA atlases from this game dump."""
+    from mod_file_paths import resolve
+
+    xbox_art = read_png(ART / 'xbox.png')
+    if keyboard_art[:2] != xbox_art[:2]:
+        raise ValueError('the keyboard sheet must have the same dimensions as the Xbox sheet')
+    speaker = read_png(SPEAKER_ART)
+    names = {name.lower() for name in FONTS}
+    atlases = {}
+    for archive_name in ARCHIVES:
+        path = resolve(Path(game) / 'archives' / archive_name)
+        if not path.is_file():
+            continue
+        archive = Archive(path)
+        for entry in archive.files:
+            name = entry['path'].replace(chr(92), '/').lower()
+            if name not in names:
+                continue
+            font = bytes(archive.extract(entry))
+            xbox = restyled_font(font, xbox_art)
+            xbox = with_speaker(xbox, speaker) or xbox
+            if archive_name == 'update.pak' and bracketed and name in bracketed:
+                xbox = bracketed[name]
+            w, h, at, length = image_location(xbox)
+            original = xbox[at:at + length]
+            source = bytes(untile(original, w, h))
+            replacement = bytes(restyled_pixels(xbox, w, h, original, keyboard_art, KEYBOARD_SHEET))
+            key = (w, h, original, source)
+            if atlases.setdefault(key, replacement) != replacement:
+                raise ValueError('identical Xbox atlases map to different keyboard art')
+
+    if not atlases:
+        raise ValueError('no button font atlases were found')
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output.parent, suffix='.tmp', delete=False) as bundle:
+            temporary = Path(bundle.name)
+            bundle.write(struct.pack('<8sI', b'OCTRGLY2', len(atlases)))
+            for (w, h, tiled, source), replacement in atlases.items():
+                bundle.write(struct.pack('<II', w, h))
+                bundle.write(tiled)
+                bundle.write(source)
+                bundle.write(replacement)
+        temporary.replace(output)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+    return len(atlases)
 
 
 def main():
@@ -687,7 +844,12 @@ def main():
     p.add_argument('--settings', help='bbport.ini (button_prompts=)')
     p.add_argument('--style', choices=STYLES, help='instead of the settings')
     p.add_argument('--base', action='append', default=[], help='an archive patch made before (repeatable)')
+    p.add_argument('--adaptive-atlases', metavar='KEYBOARD_SHEET', help='export local paired atlases for rendering tests')
     a = p.parse_args()
+    if a.adaptive_atlases:
+        count = write_adaptive_atlases(a.game, read_png(a.adaptive_atlases), Path(a.out) / 'adaptive-atlases.bin')
+        say(f'exported {count} distinct Xbox/keyboard atlas pairs')
+        return
     env = dict(os.environ, **({'BB_BUTTON_PROMPTS': a.style} if a.style else {}))
     base = {archive_patch.read(path)[1]: Path(path) for path in a.base}
     try:

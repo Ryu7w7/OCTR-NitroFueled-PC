@@ -154,6 +154,8 @@ echo "Version: $version (out/VERSION)"
 if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Isrc tests/test_online_race_transition.c -Wl,--gc-sections -lm -o out/online-race-transition-test
     out/online-race-transition-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror "${includes[@]}" tests/test_mouse_ui.c -lm -o out/mouse-ui-test
+    out/mouse-ui-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -lm -o out/online-mode-test
     out/online-mode-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_race_options.c src/runtime_tt_reference.c src/runtime_ai_catchup.c -lm -o out/race-options-test

@@ -2247,7 +2247,8 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
             image_id = depth_image_id;
             image = &texture_cache.GetImage(image_id);
         }
-        if (image->binding.needs_rebind || !texture_cache.IsUpToDate(image_id) ||
+        // bbport: an adaptive prompt change can record a texture upload on the draw thread.
+        if (image->prompt_atlas || image->binding.needs_rebind || !texture_cache.IsUpToDate(image_id) ||
             scene_targets->Tracks(image->image_uid) || FsrRedirects(image_id) ||
             (upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
             return false;
@@ -3265,6 +3266,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
+            // bbport: the descriptor fast path would skip adaptive prompt texture updates.
+            set_ok &= image.prompt_atlas == nullptr;
             const auto binding = image.binding;
 
             // bbport: a proxied scene image sampled with normalized coordinates reads the proxy:
@@ -3530,7 +3533,8 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         // Proxy entries need a current proxy; native entries of a proxied image go through
         // BindTextures, which may sample the proxy instead.
         const bool proxies_on = !BbToggle::Disabled(BbToggle::SampleSceneProxies);
-        if (image.backing != entry.backing || image.binding.needs_rebind ||
+        // bbport: this fast path does not call FindTexture to update adaptive prompts.
+        if (image.prompt_atlas || image.backing != entry.backing || image.binding.needs_rebind ||
             image.binding.is_target || !texture_cache.IsUpToDate(entry.id) ||
             (entry.proxy ? !proxies_on ||
                                !scene_targets->ProxyCurrent(image, entry.range.base.level,

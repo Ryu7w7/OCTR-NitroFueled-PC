@@ -10,6 +10,7 @@ game's launch reads the PNG with button_prompts.read_png).
 
 usage: python tools/make_button_prompts.py
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from button_prompts import ART, SHEET  # noqa: E402  (each button's cell, as in the 1.21 font)
+from button_prompts import ART, KEYBOARD_GLYPHS, KEYBOARD_SHEET, LABEL_HEIGHT, LABEL_WIDTH, SHEET  # noqa: E402  (each button's cell, as in the 1.21 font)
 
 FONT = ROOT / 'art' / 'ctr-menu.ttf'
 OUT = ART / 'xbox.png'
@@ -121,13 +122,40 @@ def button(name, size):
     return cell
 
 
+def keycap(_name, size):
+    width, height = size
+    key_width, key_height = width - 8, height - 12
+    image = body((key_width, key_height), 'pill', radius=8)
+    image = image.resize((key_width, key_height), Image.LANCZOS)
+    cell = Image.new('RGBA', size)
+    cell.alpha_composite(image, (4, 6))
+    return cell
+
+
+def keyboard_glyphs(path):
+    strip = Image.new('RGBA', (LABEL_WIDTH * len(KEYBOARD_GLYPHS), LABEL_HEIGHT))
+    for i, glyph in enumerate(KEYBOARD_GLYPHS):
+        cell = Image.new('RGBA', (LABEL_WIDTH * SCALE, LABEL_HEIGHT * SCALE))
+        label(cell, glyph, 30, (240, 240, 248))
+        strip.alpha_composite(cell.resize((LABEL_WIDTH, LABEL_HEIGHT), Image.LANCZOS),
+                              (i * LABEL_WIDTH, 0))
+    strip.save(path, optimize=True)
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--keyboard-output', type=Path, help='generate a blank keyboard sheet and its label glyphs')
+    args = parser.parse_args()
+    destination = args.keyboard_output or OUT
+    draw = keycap if args.keyboard_output else button
     sheet = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 0))
-    for name, (x0, y0, x1, y1) in SHEET.items():
-        sheet.alpha_composite(button(name, (x1 - x0, y1 - y0)), (x0, y0))
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(OUT, optimize=True)
-    print(f'{OUT.relative_to(ROOT)}: {len(SHEET)} buttons')
+    cells = KEYBOARD_SHEET if args.keyboard_output else SHEET
+    for name, (x0, y0, x1, y1) in cells.items():
+        sheet.alpha_composite(draw(name, (x1 - x0, y1 - y0)), (x0, y0))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(destination, optimize=True)
+    if args.keyboard_output:
+        keyboard_glyphs(destination.with_name('keyboard-labels.png'))
+    print(f'{destination}: {len(cells)} buttons')
 
 
 if __name__ == '__main__':
