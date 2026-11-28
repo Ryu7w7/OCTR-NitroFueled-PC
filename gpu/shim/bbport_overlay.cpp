@@ -90,6 +90,14 @@ extern "C" int runtime_elimination_spectator(char* name, size_t size, int* place
 extern "C" int runtime_online_team_color(int team, unsigned char rgb[3], char* name, size_t size);
 extern "C" int runtime_online_team_points(int team);   // the room's points so far, -1 none
 extern "C" void runtime_online_team_text(int which, int team, char* out, size_t size);   // 0 title, 1 hint
+// The background Ranked search (src/runtime_ranked_queue.c): RankedTab and RankedQueueBanner.
+extern "C" int runtime_ranked_queue_banner(int* state, int* mode, int* count, int* needed, int* seconds);
+extern "C" int runtime_ranked_queue_banner_text(char* title, size_t title_size, char* detail, size_t detail_size);
+extern "C" void runtime_ranked_queue_request(int what);   // 0/1 search Normal/Itemless, 2 cancel (game thread)
+extern "C" int runtime_net_is_online(void);
+extern "C" int runtime_public_match_active(void);
+extern "C" int runtime_replay_race_active(void);   // a race running (time trial, bots, online), not a replay
+
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
@@ -1076,6 +1084,41 @@ void ChatSection() {
         ImGui::PopID();
     }
     ImGui::Spacing();
+}
+
+
+// The menu's Ranked page: the background search (runtime_ranked_queue.c), the same as the Online menu's button.
+void RankedTab() {
+    MenuSection(BbSettings::MenuText("Background Ranked search", "Фоновый поиск рейтингового матча"));
+    int state = 0, mode = 0, count = 0, needed = 0, seconds = 0;
+    const bool on = runtime_ranked_queue_banner(&state, &mode, &count, &needed, &seconds);
+    if (on) {
+        if (state == 2) {
+            ImGui::TextWrapped("%s", BbSettings::MenuText("The match is ready: open Online > Ranked to join it.",
+                                                          "Матч готов: откройте Онлайн > Рейтинг, чтобы войти."));
+        } else {
+            const char* format = mode ? BbSettings::MenuText("Searching Ranked Itemless: %d/%d players (%d:%02d)",
+                                                             "Поиск рейтингового матча без предметов: %d/%d игроков (%d:%02d)")
+                                      : BbSettings::MenuText("Searching Ranked Normal: %d/%d players (%d:%02d)",
+                                                             "Поиск обычного рейтингового матча: %d/%d игроков (%d:%02d)");
+            ImGui::TextWrapped(format, count, needed > 0 ? needed : count, seconds / 60, seconds % 60);
+        }
+        if (ImGui::Button(BbSettings::MenuText("Cancel the search", "Отменить поиск"))) runtime_ranked_queue_request(2);
+    } else {
+        const bool can = runtime_net_is_online() && !runtime_public_match_active();
+        ImGui::BeginDisabled(!can);
+        if (ImGui::Button(BbSettings::MenuText("Search Ranked Normal", "Искать обычный рейтинговый матч"))) runtime_ranked_queue_request(0);
+        ImGui::SameLine();
+        if (ImGui::Button(BbSettings::MenuText("Search Ranked Itemless", "Искать рейтинговый матч без предметов"))) runtime_ranked_queue_request(1);
+        ImGui::EndDisabled();
+        if (!can) ImGui::TextDisabled("%s", BbSettings::MenuText("Online only, and not during public matchmaking.",
+                                                                  "Только онлайн и не во время публичного подбора."));
+    }
+    Hint(BbSettings::MenuText(
+        "Look for a Ranked match while you play time trial, private rooms or races with bots; public matchmaking "
+        "stays closed meanwhile. When enough players are waiting, the match is ready.",
+        "Ищите рейтинговый матч, пока играете в гонку на время, приватные комнаты или с ботами; публичный подбор "
+        "в это время закрыт. Когда наберётся достаточно игроков, матч готов."));
 }
 
 void RoomTab() {
@@ -2111,6 +2154,7 @@ void Menu() {
     g_show_report_tab = false;
     const bool friends_page = SideTab("\xE2\x98\xBA", BbSettings::MenuText("Friends", "Друзья"));       // carita
     const bool room_page = SideTab("\xE2\x9A\x91", BbSettings::MenuText("Room", "Комната"));            // bandera
+    const bool ranked_page = SideTab("\xE2\x98\x85", BbSettings::MenuText("Ranked", "Рейтинг"));          // estrella
     const bool voice_page = SideTab("\xE2\x99\xAA", BbSettings::MenuText("Voice", "Голос"));             // nota
     const bool replays_page = SideTab("\xE2\x96\xB6", BbSettings::MenuText("Replays", "Повторы"));      // play
     const bool report_page = SideTab("\xE2\x9A\xA0", report_label);                                     // aviso
@@ -2202,6 +2246,7 @@ void Menu() {
 
     if (friends_page) FriendsTab();
     if (room_page) RoomTab();
+    if (ranked_page) RankedTab();
     if (voice_page) VoiceTab();
     else if (BbVoice::Testing()) BbVoice::SetTest(false); // the test ends with the tab
     if (replays_page) ReplaysTab();
@@ -2821,6 +2866,46 @@ bool AnnouncementActive() {
 
 // The CTR title font (<BB_ART_DIR>/ctr-title.ttf, CCZoinks) for the members list by team; null without the file.
 ImFont* banner_title_font = nullptr;
+
+// The background Ranked search (src/runtime_ranked_queue.c): a slim bar at the bottom centre, always while it waits
+// (menus, races, the port's menu open: the user, 27/11, "que aparezca siempre... abajo centro"), "Waiting for players
+// 4/6", pulsing dots, and a green one when the match is ready. Above the game's button legend.
+void RankedQueueBanner() {
+    // The texts in the GAME's language (lang/*.json via runtime_text), not the port menu's (the user, 27/11: the game
+    // in English, the banner in Spanish).
+    char title[96], detail[128];
+    const int state = runtime_ranked_queue_banner_text(title, sizeof title, detail, sizeof detail);
+    if (!state) return;
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* title_font = banner_title_font ? banner_title_font : ImGui::GetFont();
+    ImFont* text_font = ImGui::GetFont();
+    const bool ready = state == 2;
+    if (!ready) {
+        const int dots = int(ImGui::GetTime() * 2.0) % 4;
+        const size_t used = std::strlen(detail);
+        std::snprintf(detail + used, sizeof detail - used, "%.*s", dots, "...");
+    }
+    const float title_size = 24.0f * s, text_size = 18.0f * s, pad = 12.0f * s;
+    const ImVec2 t = title_font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title);
+    const ImVec2 d = text_font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, detail);
+    const float width = std::max(t.x, d.x) + pad * 3.0f, height = t.y + d.y + pad * 1.3f;
+    const float cx = viewport->WorkPos.x + viewport->WorkSize.x * 0.5f;
+    // In a race, near the bottom edge, out of the way (the user, 27/11: "bajaría un poco más para no molestar"); in
+    // the menus above the main menu's news ticker (84-90% of the height) and the button legend under it.
+    const float bottom = runtime_replay_race_active() ? 0.975f : 0.82f;
+    const float top = viewport->WorkPos.y + viewport->WorkSize.y * bottom - height;
+    const ImVec2 a(cx - width * 0.5f, top), b(cx + width * 0.5f, top + height);
+    const float pulse = ready ? 0.75f + 0.25f * std::sin(float(ImGui::GetTime()) * 6.0f) : 1.0f;
+    const ImU32 panel = ready ? IM_COL32(20, 140, 60, int(235 * pulse)) : IM_COL32(18, 70, 150, 215);
+    dl->AddRectFilled(ImVec2(a.x + 3 * s, a.y + 4 * s), ImVec2(b.x + 3 * s, b.y + 4 * s), IM_COL32(0, 0, 0, 90), 10.0f * s);
+    dl->AddRectFilled(a, b, panel, 10.0f * s);
+    dl->AddRect(a, b, ready ? IM_COL32(150, 255, 170, 230) : IM_COL32(110, 180, 255, 200), 10.0f * s, 0, 2.0f * s);
+    dl->AddText(title_font, title_size, ImVec2(cx - t.x * 0.5f + 1.5f * s, a.y + pad * 0.5f + 1.5f * s), IM_COL32(0, 0, 0, 200), title);
+    dl->AddText(title_font, title_size, ImVec2(cx - t.x * 0.5f, a.y + pad * 0.5f), IM_COL32(255, 160, 30, 255), title);
+    dl->AddText(text_font, text_size, ImVec2(cx - d.x * 0.5f, a.y + pad * 0.5f + t.y + 2.0f * s), IM_COL32(255, 255, 255, 240), detail);
+}
 
 /// Elimination mode: "<name> ELIMINADO" / "<name> GANÓ" in the middle near the top, as the game's own result banners
 /// look: a blue panel, an orange title with a dark edge, a white line under it, an icon on the left.
@@ -3742,6 +3827,7 @@ bool Visible() {
                            !BbVoice::Speaking().empty() ||
                            runtime_online_team_lobby(nullptr, 0, nullptr) >= 0 || runtime_online_mode_select_screen() ||
                            runtime_elimination_banner(nullptr, 0, nullptr, 0, nullptr, nullptr) ||
+                           runtime_ranked_queue_banner(nullptr, nullptr, nullptr, nullptr, nullptr) ||
                            runtime_elimination_spectator(nullptr, 0, nullptr, nullptr, nullptr));
 }
 
@@ -3885,6 +3971,7 @@ static void BuildFrame(u32 width, u32 height, float ms, void (*backend_new_frame
     if (!menu_open) TeamLobbyList();
     if (!menu_open) RankedRulesNotice();
     if (!menu_open) EliminationBanner();
+    RankedQueueBanner();   // always while searching, the port's menu open too (the user, 27/11)
     if (!menu_open) SpectatorLegend();
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();

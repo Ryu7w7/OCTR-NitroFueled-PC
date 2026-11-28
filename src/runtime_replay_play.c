@@ -20,6 +20,7 @@ void runtime_stutter_frame(const char *where);
     runtime_stutter_note(name, runtime_stutter_clock_us() - t0_); } while (0)
 #include "runtime_replay_list.h"
 #include "runtime_net_ping.h"
+#include "runtime_clan_tags.h"
 #include "runtime.h"
 
 #include <math.h>
@@ -3151,11 +3152,14 @@ int runtime_voice_glyph(void) {
     return glyph;
 }
 
-/* name: the tag's text without the loudspeaker; adds it while that racer talks, takes it off after */
+/* name: the racer's nickname (the tag's text without the loudspeaker and without a clan tag in front,
+ * runtime_clan_tags.c); adds the loudspeaker while that racer talks, takes it off after, the clan tag kept */
 static void voice_glyph(void *marker, void *tag, const char *text, char *name, size_t size) {
     const size_t len = strlen(text), suffix = sizeof VOICE_GLYPH - 1;
     const int has = len > suffix && !strcmp(text + len - suffix, VOICE_GLYPH);
-    snprintf(name, size, "%.*s", (int)(has ? len - suffix : len), text);
+    char shown[64], account[17];
+    snprintf(shown, sizeof shown, "%.*s", (int)(has ? len - suffix : len), text);
+    snprintf(name, size, "%s", runtime_clan_identity(shown, account));
     if (!game.set_text || !runtime_voice_glyph()) return;
     const int talking = runtime_voice_speaking(name);
     if (talking == has) return;
@@ -3172,11 +3176,11 @@ static void voice_glyph(void *marker, void *tag, const char *text, char *name, s
             glyph_on[slot].keep = RR_AT(marker, 0x8a, uint8_t);
         }
         char with[96];
-        snprintf(with, sizeof with, "%s%s", name, VOICE_GLYPH);
+        snprintf(with, sizeof with, "%s%s", shown, VOICE_GLYPH);
         RR_AT(marker, 0x8a, uint8_t) = 0;
         game.set_text(tag, with);
     } else {
-        game.set_text(tag, name);
+        game.set_text(tag, shown);
         if (slot >= 0) {
             RR_AT(marker, 0x8a, uint8_t) = glyph_on[slot].keep;
             glyph_on[slot].marker = 0;

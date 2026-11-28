@@ -128,6 +128,33 @@ def isa_rewrite_wanted(missing, env):
 LOG_LIMIT = LogLimit()
 
 
+CONSOLE = sys.stdout   # the real console/pipe: sys.stdout becomes ScriptLines once the log is open
+
+
+class ScriptLines:
+    """run.py's own output (the scripts' print(), the aspect ratio's and widescreen's reasons) into the run log
+    too, through emit, a whole line at a time (LogLimit counts lines). Before 27/11 only the game's lines and
+    say() reached last_run.log: a 21:9 that fell back to 16:9 said why on the console only (issue #267)."""
+    def __init__(self):
+        self.pending = ''
+
+    def write(self, text):
+        self.pending += text
+        if '\n' in self.pending:
+            done, _, self.pending = self.pending.rpartition('\n')
+            emit(done + '\n')
+        return len(text)
+
+    def flush(self):
+        try:
+            CONSOLE.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(CONSOLE, name)
+
+
 def emit(text):
     if ((text.startswith('Guest write check:') and os.environ.get('BB_GUEST_WRITE_TRACE') != '1') or
         (text.startswith('Perf: frames ') and os.environ.get('BB_PERF_LOG') != '1') or
@@ -135,8 +162,8 @@ def emit(text):
         (text.startswith(('Graphics tab: show ', 'Graphics tab: hide ')) and os.environ.get('BB_GRAPHICS_TAB_TRACE') != '1')):
         return
     try:
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        CONSOLE.write(text)
+        CONSOLE.flush()
     except Exception:
         pass
     if LOG:
@@ -986,6 +1013,28 @@ def main():
         fail('Launch failed: ' + str(error))
 
 
+# MSYS2's FFmpeg and what it brought (x265, AV1, JPEG XL, SVG...), 92 DLLs, 129 MB: from 27/11 the game is built
+# without the PS4's video player (gpu/CMakeLists.txt SACREDFIRE_AVPLAYER; CTR's videos are Bink), and an update
+# copied over an older package leaves them in bin\. Removed once bin\sacredfire.exe no longer imports FFmpeg.
+FFMPEG_DLLS = """
+    avcodec-63.dll avformat-63.dll avutil-61.dll libaom.dll libbluray-4.dll libbrotlicommon.dll libbrotlidec.dll
+    libbrotlienc.dll libbz2-1.dll libcairo-2.dll libcrypto-3-x64.dll libdatrie-1.dll libdav1d-7.dll
+    libdeflate.dll libexpat-1.dll libffi-8.dll libfontconfig-1.dll libfreetype-6.dll libfribidi-0.dll
+    libgdk_pixbuf-2.0-0.dll libgio-2.0-0.dll libglib-2.0-0.dll libgme.dll libgmodule-2.0-0.dll libgmp-10.dll
+    libgnutls-30.dll libgobject-2.0-0.dll libgraphite2.dll libgsm.dll libharfbuzz-0.dll libhogweed-7.dll
+    libhwy.dll libidn2-0.dll libintl-8.dll libjbig-0.dll libjpeg-8.dll libjxl.dll libjxl_cms.dll
+    libjxl_threads.dll liblc3-1.dll liblcms2-2.dll liblerc.dll liblzma-5.dll libmodplug-1.dll libmp3lame-0.dll
+    libnettle-9.dll libogg-0.dll libomp.dll libopencore-amrnb-0.dll libopencore-amrwb-0.dll libopenjp2-7.dll
+    libp11-kit-0.dll libpango-1.0-0.dll libpangocairo-1.0-0.dll libpangoft2-1.0-0.dll libpangowin32-1.0-0.dll
+    libpcre2-8-0.dll libpixman-1-0.dll libpng16-16.dll librav1e.dll librsvg-2-2.dll librtmp-1.dll
+    libsharpyuv-0.dll libsoxr.dll libspeex-1.dll libsrt.dll libssh.dll libsvtav1enc-4.dll libtasn1-6.dll
+    libthai-0.dll libtheoradec-2.dll libtheoraenc-2.dll libtiff-6.dll libunistring-5.dll libunwind.dll libva.dll
+    libva_win32.dll libvorbis-0.dll libvorbisenc-2.dll libvpl-2.dll libvpx-1.dll libwebp-7.dll libwebpmux-3.dll
+    libx264-165.dll libx265-217.dll libxml2-16.dll libzstd.dll libzvbi-0.dll swresample-7.dll swscale-10.dll
+    xvidcore.dll zlib1.dll
+""".split()
+
+
 def remove_obsolete_files():
     """Files an older package left that a newer one no longer carries (an update copies the new
     package's files over the old ones and removes none): v0.8.5 builds Zydis into sacredfire.exe
@@ -1004,6 +1053,15 @@ def remove_obsolete_files():
         stale_folders.append(PORT / 'docs')
     if (PORT / 'art' / 'steamgrid').is_dir():
         stale_folders.append(PORT / 'steamgrid')
+    try:
+        exe = (PORT / 'bin' / 'sacredfire.exe').read_bytes()
+        if b'avcodec-' not in exe and b'avformat-' not in exe:
+            stale += [PORT / 'bin' / name for name in FFMPEG_DLLS]
+    except OSError:
+        pass
+    # The Steam shortcut's background: a 1.5 MB fondo.jpg since 27/11 (the launcher takes it first).
+    if (PORT / 'art' / 'steamgrid' / 'fondo.jpg').is_file():
+        stale.append(PORT / 'art' / 'steamgrid' / 'fondo.png')
     removed = 0
     for path in stale:
         try:
@@ -1103,6 +1161,9 @@ def launch(args, restarted=False):
             LOG = open(data / f'last_run_{os.getpid()}.log', 'w', encoding='utf-8', errors='replace')
         LOG_LIMIT.written = LOG.tell()
     say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")}{" (restart)" if restarted else ""}')
+    if not isinstance(sys.stdout, ScriptLines):
+        sys.stdout = ScriptLines()
+    aspect_ratio.MESSAGES = aspect_ratio.widescreen.MESSAGES = sys.stdout   # they kept the console
 
     # BB_GAME_DIR: the merged CTR dump (update 1.21 copied over the base game).
     game_dir_env = env.get('BB_GAME_DIR')
@@ -1214,6 +1275,14 @@ def launch(args, restarted=False):
         # always: public rooms draw from the same pool for everyone. The game reads it through an
         # archive patch; the archives stay as they are. When it cannot be built, the game's own.
         env.pop('BB_ARCHIVE_PATCHES', None)
+        # The port's new tracks are in it for Ranked rooms only (the game's map draw skips them elsewhere,
+        # src/runtime_online_mode.c vote_pick_map): Ranked needs the latest version, a public room may not.
+        try:
+            ranked_only = [] if os.environ.get('BB_TRACKS_ONLINE') == '1' else \
+                sorted({track_content.zone(m) for _folder, m in track_content.packages()})
+        except (OSError, ValueError, KeyError):
+            ranked_only = []
+        env['BB_RANKED_ONLY_TRACKS'] = ','.join(ranked_only)
         run_python('scripts/online_playlist.py', game, '--out', out)
         playlist_patch = out / 'online_playlist.bbpatch'
         base_patches = {}
@@ -1404,6 +1473,11 @@ def launch(args, restarted=False):
                     env[key] = previous
             renderer_changes.clear()
             previous = env.copy()
+            # NVIDIA DLSS (nvngx_dlss.dll, 59 MB) is not in the package since 27/11 (scripts/components.py): the
+            # first launch with DLSS chosen downloads it; without it the game runs without DLSS, as before.
+            if ini_value(config, 'temporal') == 'dlss' and os.name == 'nt':
+                import components
+                components.ensure('dlss', PORT, log=say)
             if ini_value(config, 'renderer') == 'd3d11':
                 env['BB_D3D11'] = '1'
                 shaders = out / 'd3d11-shaders' / 'hlsl'

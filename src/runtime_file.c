@@ -37,6 +37,7 @@ typedef struct stat HostStat;
 #define MAX_FILES 1024
 #define MAX_MOUNTS 16
 #include "runtime_mod_files.h"
+#include "runtime_content_crypt.h"
 
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 typedef struct {
@@ -84,7 +85,8 @@ typedef struct ArchivePatch {
     const struct ArchivePatch *nsane_view;
 } ArchivePatch;
 extern int runtime_private_room_active(void); /* runtime_services.c */
-typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; const ArchivePatch *patch; } File;
+/* crypt: the port's content files kept encrypted (runtime_content_crypt.c): read through it, the trailer hidden. */
+typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; const ArchivePatch *patch; ContentCrypt crypt; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -203,7 +205,7 @@ static int long_host_path(char *path,size_t size) {
  * "archives/t929_....pak=<host file>|...") are served before any mod's file of the same name. */
 typedef struct { char *guest, *host; } ContentFile;
 static ContentFile *content_files;
-static int content_file_count, content_files_missing;
+static int content_file_count, content_files_missing, content_files_encrypted;
 static pthread_once_t content_files_once=PTHREAD_ONCE_INIT;
 static void load_content_files(void) {
     const char *list=getenv("BB_CONTENT_FILES");
@@ -224,12 +226,30 @@ static void load_content_files(void) {
             printf("Content: %s is missing (%s)\n",item,eq+1);
             continue;
         }
+        int probe=open(eq+1,O_RDONLY|O_BINARY);
+        ContentCrypt crypt;
+        const int encrypted=probe>=0 ? runtime_content_crypt_probe(probe,(uint64_t)st.st_size,&crypt) : 0;
+        if (probe>=0) close(probe);
+        if (encrypted<0) {
+            ++content_files_missing;
+            printf("Content: %s is encrypted and this build cannot read it (no content key, or the file is damaged)\n",item);
+            continue;
+        }
+        if (encrypted>0) ++content_files_encrypted;
         ContentFile *f=&content_files[content_file_count];
         f->guest=strdup(item); f->host=strdup(eq+1);
         if (f->guest && f->host) ++content_file_count;
     }
     free(copy);
-    if (content_file_count) printf("Content: %d file(s) of the port's tracks, served before any mod's\n",content_file_count);
+    if (content_file_count) printf("Content: %d file(s) of the port's tracks, served before any mod's (%d encrypted)\n",
+                                   content_file_count,content_files_encrypted);
+}
+/* Whether a host path is one of the port's content files (only those can be encrypted). */
+static int content_host_path(const char *host) {
+    pthread_once(&content_files_once,load_content_files);
+    for (int i=0;i<content_file_count;++i)
+        if (!strcasecmp(host,content_files[i].host)) return 1;
+    return 0;
 }
 /* 1: out is the track's file; 0: not one of them; -(errno) */
 static int content_file(const char *guest,char *out,size_t size) {
@@ -870,6 +890,16 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     Listing *dir=NULL;
     if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path,guest);
 #endif
+    ContentCrypt crypt={0};
+    if (host>=0 && !dir && !(flags&3) && content_host_path(current)) {
+        const int encrypted=runtime_content_crypt_probe(host,(uint64_t)s.st_size,&crypt);
+        if (encrypted<0) {
+            close(host);
+            printf("Runtime: open(%s) -> encrypted, this build cannot read it\n",guest);
+            return -EACCES;
+        }
+        if (encrypted>0) s.st_size=crypt.size;   /* the game sees the file without its trailer */
+    }
     pthread_mutex_lock(&lock);
     int fd=-1;
     for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
@@ -878,7 +908,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (temp) unlink(temp);
         free(commit); free(temp); return -EMFILE;
     }
-    files[fd]=(File){.used=1,.host=host,.dir=dir,.commit=commit,.temp=temp};
+    files[fd]=(File){.used=1,.host=host,.dir=dir,.commit=commit,.temp=temp,.crypt=crypt};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     if (host>=0 && !dir && !(flags&3)) files[fd].patch=archive_patch_for(guest,(uint64_t)s.st_size);
     /* A full-screen Bink video (ultrawide: shown at 16:9 while one is open, runtime_cinematic.c).
@@ -963,16 +993,27 @@ static ssize_t read_retrying(int h,void *buffer,uint64_t size,int64_t offset,int
     }
     return n;
 }
-/* A read of a patched archive at offset: the archive's bytes, then the patch's ranges over them. */
-static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t size,int64_t offset) {
+/* A read at offset of an encrypted content file: its own bytes (not the trailer), decrypted. */
+static int64_t crypt_read(const ContentCrypt *c,int h,void *buffer,uint64_t size,int64_t offset) {
+    if (offset<0) return -EINVAL;
+    if ((uint64_t)offset>=c->size || !size) return 0;
+    if (size>c->size-(uint64_t)offset) size=c->size-(uint64_t)offset;
+    ssize_t n=read_retrying(h,buffer,size,offset,1);
+    if (n<0) return -errno;
+    runtime_content_crypt_apply(c,(uint64_t)offset,buffer,(size_t)n);
+    return n;
+}
+/* A read of a patched archive at offset: the archive's bytes (decrypted, an encrypted content file), then the
+ * patch's ranges over them. */
+static int64_t patched_read(const ArchivePatch *p,const ContentCrypt *c,int h,void *buffer,uint64_t size,int64_t offset) {
     if (offset<0) return -EINVAL;
     uint64_t off=(uint64_t)offset;
     if (off>=p->virtual_size || !size) return 0;
     uint64_t total=size<p->virtual_size-off ? size : p->virtual_size-off;
     uint64_t from_archive=off<p->size ? (total<p->size-off ? total : p->size-off) : 0;
     if (from_archive) {
-        ssize_t n=read_retrying(h,buffer,from_archive,offset,1);
-        if (n<0) return -errno;
+        int64_t n=c && c->on ? crypt_read(c,h,buffer,from_archive,offset) : (int64_t)read_retrying(h,buffer,from_archive,offset,1);
+        if (n<0) return c && c->on ? n : -errno;
         if ((uint64_t)n<from_archive) total=from_archive=(uint64_t)n;
     }
     if (total>from_archive) memset((char *)buffer+from_archive,0,total-from_archive);
@@ -1026,7 +1067,14 @@ static int64_t do_read_locked(int fd,int h,void *buffer,uint64_t size) {
     File *pf=get(fd);
     if (pf && pf->patch) {
         int64_t at=host_lseek(h,0,SEEK_CUR);
-        int64_t got=at<0 ? -errno : patched_read(active_archive_patch(pf->patch),h,buffer,size,at);
+        int64_t got=at<0 ? -errno : patched_read(active_archive_patch(pf->patch),&pf->crypt,h,buffer,size,at);
+        if (got>0) { host_lseek(h,at+got,SEEK_SET); runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); }
+        if (got>0) { __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
+        return got;
+    }
+    if (pf && pf->crypt.on) {
+        int64_t at=host_lseek(h,0,SEEK_CUR);
+        int64_t got=at<0 ? -errno : crypt_read(&pf->crypt,h,buffer,size,at);
         if (got>0) { host_lseek(h,at+got,SEEK_SET); runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); }
         if (got>0) { __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
         return got;
@@ -1044,7 +1092,12 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     touch_for_write(buffer,size);
     File *pf=get(fd);
     if (pf && pf->patch) {
-        int64_t got=patched_read(active_archive_patch(pf->patch),h,buffer,size,offset);
+        int64_t got=patched_read(active_archive_patch(pf->patch),&pf->crypt,h,buffer,size,offset);
+        if (got>0) { runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
+        return got;
+    }
+    if (pf && pf->crypt.on) {
+        int64_t got=crypt_read(&pf->crypt,h,buffer,size,offset);
         if (got>0) { runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
         return got;
     }
@@ -1110,7 +1163,8 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
     /* A patched archive ends where the game sees it end. */
     FD_IO_LOCK(f->host);
     int64_t r=f->patch && whence==2 ? host_lseek(f->host,(int64_t)f->patch->virtual_size+offset,SEEK_SET)
-                                    : host_lseek(f->host,offset,whence);
+            : f->crypt.on && whence==2 ? host_lseek(f->host,(int64_t)f->crypt.size+offset,SEEK_SET)
+                                       : host_lseek(f->host,offset,whence);
     const int seek_errno=errno;
     FD_IO_UNLOCK(f->host);
     return r<0 ? -seek_errno : r;
@@ -1135,6 +1189,7 @@ static int64_t do_fstat(int fd,GuestStat *out) {
     convert_stat(&s,out);
     File *pf=get(fd);
     if (pf && pf->patch) { out->size=(int64_t)pf->patch->virtual_size; out->blocks=(out->size+511)/512; }
+    else if (pf && pf->crypt.on) { out->size=(int64_t)pf->crypt.size; out->blocks=(out->size+511)/512; }
     return 0;
 }
 static int64_t do_stat(const char *guest,GuestStat *out) {
@@ -1147,6 +1202,12 @@ static int64_t do_stat(const char *guest,GuestStat *out) {
     if (r==-ENOENT && !save_path(guest) && fix_case(path)) r=host_stat(path,&s) ? -errno : 0;
     if (save_trace() && save_path(guest)) printf("Save trace: stat(%s) -> %d, %lld bytes\n",guest,r,r ? -1LL : (long long)s.st_size);
     if (r) return r;
+    if (S_ISREG(s.st_mode) && content_host_path(path)) {   /* an encrypted content file: its own size */
+        int h=open(path,O_RDONLY|O_BINARY);
+        ContentCrypt crypt;
+        if (h>=0 && runtime_content_crypt_probe(h,(uint64_t)s.st_size,&crypt)>0) s.st_size=crypt.size;
+        if (h>=0) close(h);
+    }
     convert_stat(&s,out);
     const ArchivePatch *patch=S_ISREG(s.st_mode) ? archive_patch_for(guest,(uint64_t)s.st_size) : NULL;
     if (patch) { out->size=(int64_t)patch->virtual_size; out->blocks=(out->size+511)/512; }

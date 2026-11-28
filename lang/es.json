@@ -146,5 +146,17 @@
   "%d hours": null,
   "1 hour": null,
   "%d minutes": null,
-  "1 minute": null
+  "1 minute": null,
+  "BACKGROUND SEARCH": "BÚSQUEDA EN 2.º PLANO",
+  "Background Ranked search cancelled.": "Búsqueda Clasificatoria en segundo plano cancelada.",
+  "Searching Ranked in the background... you will be told when the match is ready.": "Buscando Clasificatoria en segundo plano... te avisaremos cuando la partida esté lista.",
+  "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.": "Estás buscando Clasificatoria en segundo plano. Cancélala en el menú (Insert / L3+R3) > Clasificatoria para jugar emparejamiento público.",
+  "SEARCHING FOR A RANKED MATCH": "BUSCANDO PARTIDA CLASIFICATORIA",
+  "RANKED MATCH READY!": "¡PARTIDA CLASIFICATORIA LISTA!",
+  "Waiting for players": "Esperando jugadores",
+  "Open Online > Ranked": "Abre Online > Clasificatoria",
+  "Normal": "Normal",
+  "Itemless": "Sin objetos",
+  "Drift bar": null,
+  "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.": null
 }

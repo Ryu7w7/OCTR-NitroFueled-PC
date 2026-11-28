@@ -15,6 +15,11 @@ archive. The archive itself is never changed. Written to <out>/online_playlist.b
 when the archives change.
 
     online_playlist.py <game> --out <dir> [--weight 100]
+
+The port's new tracks (scripts/track_content.py) are in it too, at RANKED_FACTOR times the weight, but only
+Ranked rooms draw them (src/runtime_online_mode.c vote_pick_map, BB_RANKED_ONLY_TRACKS from run.py): Ranked
+needs the latest version, so every player there has them; a public room may have an older client (27/11, the
+user: Neo Bowser City in Ranked, "que salga seguido").
 """
 import argparse
 import json
@@ -29,7 +34,8 @@ import mod_file_paths
 import gcn_shaders as iga
 from igz_file import Igz
 
-FORMAT = 1
+FORMAT = 2
+RANKED_FACTOR = 3   # a Ranked-only track's weight: three times a normal track's
 ENTRY = 'temporary/octane/data/ps4/output/loosedata/onlinesystemdata.igz'
 ARCHIVES = ('update2.pak', 'update.pak', 'permanent.pak')  # newest first
 TRACK = re.compile(r'/maps/octane/(t\d{3}_[a-z0-9_]+)/\1_zoneinfo\.igz$')
@@ -47,8 +53,8 @@ def track_key(name):
 
 
 def content_tracks():
-    """The port's new tracks (scripts/track_content.py) kept out of public votes: a track goes in only
-    once every player has it (BB_TRACKS_ONLINE=1, set when the server requires the content)."""
+    """The port's new tracks (scripts/track_content.py): in the playlist for Ranked only (vote_pick_map), unless
+    BB_TRACKS_ONLINE=1 (every public room has them: then they are ordinary tracks)."""
     if os.environ.get('BB_TRACKS_ONLINE') == '1':
         return set()
     try:
@@ -59,15 +65,14 @@ def content_tracks():
 
 
 def game_tracks(archives):
-    """Race tracks of the game (folder names), from every archive's names; the port's new tracks
-    only when every player has them (content_tracks)."""
+    """Race tracks of the game (folder names), from every archive's names (the port's new tracks are added
+    by build, from content_tracks)."""
     found = set()
-    hold = content_tracks()
     for pak in mod_file_paths.archives(archives):
         try:
             for name, *_ in iga.pak_entries(pak):
                 m = TRACK.search(name.lower())
-                if m and m.group(1) not in hold:
+                if m:
                     found.add(m.group(1))
         except (OSError, struct.error, ValueError, UnicodeDecodeError):
             continue
@@ -109,8 +114,9 @@ def race_playlist(g):
     return best
 
 
-def rebuild(blob, tracks, weight):
-    """(new file, report) with the race playlist listing every track in tracks."""
+def rebuild(blob, tracks, weight, ranked_only=()):
+    """(new file, report) with the race playlist listing every track in tracks (ranked_only ones at
+    RANKED_FACTOR times the weight)."""
     g = Igz(blob)
     playlist = race_playlist(g)
     weighted, maplist = g.u64(playlist + PLAYLIST_WEIGHTED), g.u64(playlist + PLAYLIST_MAPLIST)
@@ -148,11 +154,12 @@ def rebuild(blob, tracks, weight):
         keep.append(e)
         added.append(key)
     for e in keep:
-        g.set_u64(e + MAP_WEIGHT, weight)
+        key = track_key(g.string_at(e + MAP_NAME))
+        g.set_u64(e + MAP_WEIGHT, weight * RANKED_FACTOR if key in ranked_only else weight)
     set_list(g, weighted, keep, 'ROFS', keep)
     set_list(g, maplist, keep, 'RSTT', [g.u64(e + MAP_NAME) for e in keep])
     names = [track_key(g.string_at(e + MAP_NAME)) for e in keep]
-    return g.build(), {'tracks': names, 'added': added, 'weight': weight}
+    return g.build(), {'tracks': names, 'added': added, 'weight': weight, 'ranked_only': sorted(ranked_only)}
 
 
 def build(game, out, weight):
@@ -166,7 +173,8 @@ def build(game, out, weight):
         target.unlink(missing_ok=True)
         return 0
     import hashlib
-    stamp = {'format': FORMAT, 'weight': weight, 'held': sorted(content_tracks()),
+    ranked_only = content_tracks()
+    stamp = {'format': FORMAT, 'weight': weight, 'ranked_only': sorted(ranked_only), 'factor': RANKED_FACTOR,
              'code': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
              'archives': [[str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns] for p in paks]}
     try:
@@ -186,13 +194,14 @@ def build(game, out, weight):
         _name, off, length, mode = entries[index]
         with open(pak, 'rb') as f:
             blob = iga.read_entry(f, off, length, mode)
-        new, report = rebuild(blob, game_tracks(archives), weight)
+        new, report = rebuild(blob, game_tracks(archives) | ranked_only, weight, ranked_only)
         Igz(new)  # it must read back
         out.mkdir(parents=True, exist_ok=True)
         archive_patch.write_entry_patch(target, pak, f'/app0/archives/{name}', index, new)
         stamp_file.write_text(json.dumps({'stamp': stamp, 'report': report}))
         print(f'Online playlist: {len(report["tracks"])} race tracks at the same weight'
-              + (f', added {", ".join(report["added"])}' if report['added'] else ''))
+              + (f', added {", ".join(report["added"])}' if report['added'] else '')
+              + (f'; Ranked only, {RANKED_FACTOR}x: {", ".join(sorted(ranked_only))}' if ranked_only else ''))
         return 0
     print('Online playlist: OnlineSystemData not found in the archives; left as the game has it')
     target.unlink(missing_ok=True)

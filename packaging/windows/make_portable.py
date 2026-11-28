@@ -96,7 +96,7 @@ DLSS_THIRD_PARTY = [
     '  source:  dlss_bridge\\ in this repository; from https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR',
     '  It links NVIDIA\'s DLSS SDK (NGX). sacredfire.exe contains no NVIDIA code: it loads the',
     '  bridge at run time when it is present.', '',
-    'nvngx_dlss.dll, in bin\\ (NVIDIA DLSS)',
+    'nvngx_dlss.dll (NVIDIA DLSS): downloaded into bin\\ the first time DLSS is used (scripts\\components.py)',
     '  license: NVIDIA RTX SDKs license (licenses\\NVIDIA-DLSS-SDK-LICENSE.txt), redistributed',
     '           unchanged as part of this application under its terms',
     '  home:    https://github.com/NVIDIA/DLSS',
@@ -126,8 +126,8 @@ def third_party(dlls, python=None, dlss=False):
                   f'  home:    {field("URL")}',
                   f'  source:  https://packages.msys2.org/packages/{package}',
                   f'  files:   {", ".join(packages[package]["dlls"])}', '']
-    lines += ['DirectX Shader Compiler (dxc.exe, dxcompiler.dll), in bin\\dxc\\ (the native Vulkan',
-              '  renderer compiles its shaders with it on your PC)',
+    lines += ['DirectX Shader Compiler (dxc.exe, dxcompiler.dll): downloaded into bin\\dxc\\ the first time the',
+              '  native Vulkan renderer compiles its shaders on your PC (scripts\\components.py)',
               '  license: University of Illinois/NCSA (LLVM) and MIT (bin\\dxc\\LICENSE-LLVM.txt,',
               '           bin\\dxc\\LICENCE-MIT.txt)',
               '  home:    https://github.com/microsoft/DirectXShaderCompiler', '',
@@ -226,6 +226,9 @@ def main():
     p.add_argument('--version', default='')
     p.add_argument('--dist', type=Path, default=ROOT / 'dist')
     p.add_argument('--dlss-sdk', type=Path, help='NVIDIA DLSS SDK folder: bundle DLSS')
+    # Since 27/11 NVIDIA DLSS's runtime and DXC are downloaded on first use (scripts/components.py, 83 MB fewer in
+    # every package); this puts them in the package as before (an offline copy).
+    p.add_argument('--bundle-components', action='store_true', help='also bundle nvngx_dlss.dll and DXC')
     # DXC (github.com/microsoft/DirectXShaderCompiler releases, dxc_*.zip unpacked): the native
     # renderer's shaders are compiled with it on the player's PC (scripts/native_shaders.py)
     p.add_argument('--dxc-dir', type=Path, default=ROOT.parent / 'OCTR-vulkan-lab-tools' / 'dxc',
@@ -273,6 +276,8 @@ def main():
                (ROOT / 'third_party' / 'ctrnf-replay-mode' / 'LICENSE').read_text(encoding='utf-8'))
     if dlss_files:
         for path in dlss_files:
+            if path.name == 'nvngx_dlss.dll' and not a.bundle_components:
+                continue   # scripts/components.py brings it
             shutil.copy2(path, folder / 'bin')
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
@@ -320,7 +325,7 @@ def main():
     if not (dxc_bin / 'dxc.exe').is_file():
         sys.exit(f'{dxc_bin / "dxc.exe"} not found: give --dxc-dir an unpacked DXC release')
     (folder / 'bin' / 'dxc').mkdir()
-    for f in ('dxc.exe', 'dxcompiler.dll'):
+    for f in ('dxc.exe', 'dxcompiler.dll') if a.bundle_components else ():   # else scripts/components.py
         shutil.copy2(dxc_bin / f, folder / 'bin' / 'dxc')
     for f in ('LICENSE-LLVM.txt', 'LICENCE-MIT.txt'):
         if (a.dxc_dir / f).is_file():

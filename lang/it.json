@@ -146,5 +146,17 @@
   "%d hours": "%d ore",
   "1 hour": "1 ora",
   "%d minutes": "%d minuti",
-  "1 minute": "1 minuto"
+  "1 minute": "1 minuto",
+  "BACKGROUND SEARCH": "RICERCA IN BACKGROUND",
+  "Background Ranked search cancelled.": "Ricerca Classificata in background annullata.",
+  "Searching Ranked in the background... you will be told when the match is ready.": "Ricerca Classificata in background... ti avviseremo quando la partita sarà pronta.",
+  "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.": "Stai cercando una Classificata in background. Annullala nel menu (Insert / L3+R3) > Classificata per giocare al matchmaking pubblico.",
+  "SEARCHING FOR A RANKED MATCH": "RICERCA PARTITA CLASSIFICATA",
+  "RANKED MATCH READY!": "PARTITA CLASSIFICATA PRONTA!",
+  "Waiting for players": "In attesa di giocatori",
+  "Open Online > Ranked": "Apri Online > Classificata",
+  "Normal": "Normale",
+  "Itemless": "Senza oggetti",
+  "Drift bar": "Barra della derapata",
+  "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.": "Sì: mostra la barra della derapata accanto al tuo kart (verde, giallo turbo, arancione perfetto). No: la nasconde."
 }

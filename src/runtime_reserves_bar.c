@@ -11,6 +11,9 @@
  * "Hud Power Charged" (the 8-place leaders list, HudOriginal.xml at VA 0x2334000) starts off the
  * same way: it reads _showObjective (+0x29, the pack's variable 11), turned off once with its own
  * marker, so a player who already had the bar's marker still gets it.
+ *
+ * "Barra de derrape" (the drift bar, in BarraReservas.xml with the reserves bar) starts off the same way: it reads
+ * _showPlayerTags (+0x2b, the pack's variable 13; no game code reads it), with its own marker.
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "runtime.h"
 
@@ -66,4 +69,5 @@ void runtime_reserves_bar_tick(void) {
     done = 1;
     start_off(options, 0x28, 0x2330000, "reserves_bar_default.txt", "Barra de reservas");
     start_off(options, 0x29, 0x2334000, "hud_power_charged_default.txt", "Hud Power Charged");
+    start_off(options, 0x2b, 0x2330000, "drift_bar_default.txt", "Barra de derrape");
 }

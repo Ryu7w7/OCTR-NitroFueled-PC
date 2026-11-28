@@ -146,5 +146,17 @@
   "%d hours": "%d hours",
   "1 hour": "1 hour",
   "%d minutes": "%d minutes",
-  "1 minute": "1 minute"
+  "1 minute": "1 minute",
+  "BACKGROUND SEARCH": "BACKGROUND SEARCH",
+  "Background Ranked search cancelled.": "Background Ranked search cancelled.",
+  "Searching Ranked in the background... you will be told when the match is ready.": "Searching Ranked in the background... you will be told when the match is ready.",
+  "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.": "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.",
+  "SEARCHING FOR A RANKED MATCH": "SEARCHING FOR A RANKED MATCH",
+  "RANKED MATCH READY!": "RANKED MATCH READY!",
+  "Waiting for players": "Waiting for players",
+  "Open Online > Ranked": "Open Online > Ranked",
+  "Normal": "Normal",
+  "Itemless": "Itemless",
+  "Drift bar": "Drift bar",
+  "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.": "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it."
 }

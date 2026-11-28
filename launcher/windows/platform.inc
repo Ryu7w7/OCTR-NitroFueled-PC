@@ -771,18 +771,26 @@ bool AddToSteam(std::string& out_msg) {
         }
 
         if (!assets_dir.empty()) {
-            const std::pair<const wchar_t*, const char*> mapping[] = {
-                {L"portada.png", "p.png"},
-                {L"fondo.png", "_hero.png"},
-                {L"logo.png", "_logo.png"},
-                {L"portada_ancha.png", ".png"}
+            // fondo.jpg since 27/11 (the 9 MB fondo.png became a 1.5 MB JPEG); an older package's fondo.png still
+            // works. Steam takes <id>_hero.png or .jpg: the other one goes, so only the copy made here is there.
+            struct Art { const wchar_t* src; const char* suffix; const char* other; };
+            const Art mapping[] = {
+                {L"portada.png", "p.png", nullptr},
+                {L"fondo.jpg", "_hero.jpg", "_hero.png"},
+                {L"fondo.png", "_hero.png", "_hero.jpg"},
+                {L"logo.png", "_logo.png", nullptr},
+                {L"portada_ancha.png", ".png", nullptr}
             };
-            for (const auto& [src_name, suffix] : mapping) {
-                fs::path src = assets_dir / src_name;
-                if (fs::is_regular_file(src, ec)) {
-                    fs::copy_file(src, grid_dir / TextPath(id32 + suffix), fs::copy_options::overwrite_existing, ec);
-                    fs::copy_file(src, grid_dir / TextPath(id64 + suffix), fs::copy_options::overwrite_existing, ec);
+            bool hero = false;
+            for (const auto& art : mapping) {
+                fs::path src = assets_dir / art.src;
+                const bool is_hero = std::string(art.suffix).rfind("_hero", 0) == 0;
+                if ((is_hero && hero) || !fs::is_regular_file(src, ec)) continue;
+                for (const auto& id : {id32, id64}) {
+                    fs::copy_file(src, grid_dir / TextPath(id + art.suffix), fs::copy_options::overwrite_existing, ec);
+                    if (art.other) fs::remove(grid_dir / TextPath(id + art.other), ec);
                 }
+                if (is_hero) hero = true;
             }
         }
 

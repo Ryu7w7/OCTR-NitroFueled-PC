@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "runtime_hall_of_fame.h"
 #include "runtime_name_colors.h"
+#include "runtime_clan_tags.h"
 #include "runtime_ai_catchup.h"
 #include "runtime_chat.h"
 #include "runtime_np_online.h"
@@ -2402,9 +2403,49 @@ static void ABI leader_event(unsigned char *self, void *event, void *owner) {
 
 static void colored_name(unsigned char *placeable, int allowed);
 static int name_colors_allowed(void);
+
+/* A player's clan tag in front of the shown name, "(MC) Ryu7w7" (runtime_clan_tags.c, the RyuNET site's clans):
+ * online only, and only for players (human: a bot named as a player gets no tag; 2: a lobby's member row, online
+ * by itself: in_network_game() is still 0 there while the search runs, test 27/11). The name with the voice's
+ * loudspeaker after it is left to the voice (runtime_replay_play.c voice_glyph keeps the tag). */
+int runtime_net_is_online(void);   /* runtime_net.c */
+static int racer_is_player(unsigned char *racer) {
+    return racer && handle_object((void **)(racer + 0x10)) != NULL;
+}
+static void clan_name(unsigned char *placeable, int human) {
+    const char *current = placeable ? pointer_at(placeable, 0x30) : NULL;
+    if (!human || !current || !*current || !runtime_net_is_online()) return;
+    if (human != 2 && (!in_network_game || !in_network_game())) return;
+    const size_t length = strlen(current);
+    if (length > 40 || (length > 4 && !strcmp(current + length - 4, " \xee\x80\x93"))) return;
+    char account[17], label[48];
+    const char *nick = runtime_clan_identity(current, account);
+    runtime_clan_label(nick, label, sizeof label);
+    if (strcmp(label, current)) {
+        set_text(placeable, label);
+        static int told;
+        if (!told && strcmp(label, nick)) { told = 1; printf("Clan tags: shown in game (%s)\n", label); }
+    }
+}
+
+typedef void (ABI *VscDisplayText)(unsigned char *, const char *);
+static VscDisplayText original_display_text;
+static void ABI menu_display_text(unsigned char *placeable, const char *text) {
+    const char *field = placeable ? pointer_at(placeable, 0x28) : NULL;
+    const char *me = field && !strcmp(field, "CurrentUser") ? runtime_np_get_online_name() : NULL;
+    if (me && text && !strcmp(text, me) && runtime_net_is_online()) {
+        char label[48];
+        runtime_clan_label(me, label, sizeof label);   /* the first time asks; the next menu shows it */
+        original_display_text(placeable, label);
+        return;
+    }
+    original_display_text(placeable, text);
+}
+
 static void ABI leader_update(unsigned char *self, unsigned char *owner, float dt) {
     original_leader_update(self, owner, dt);
     team_leader_border(self);
+    clan_name(pointer_at(self, 0x20), racer_is_player(handle_object((void **)(self + 0x88))));
     colored_name(pointer_at(self, 0x20), name_colors_allowed()); /* _playerTagText */
 }
 
@@ -3538,6 +3579,9 @@ int runtime_online_mode_lobby_open(void) {
 
 /* The online menu's RANKED Mode Select screen ("go to lobby", Game Mode, the ranked badge) is on screen: its Game Mode
  * selector updates every frame while it shows (the overlay's Ranked rules notice shows only there). */
+/* The mode chosen in the mode select (0 Normal, 1 Itemless, 2 Battle...): the background Ranked search's. */
+int runtime_online_mode_mode_select_index(void) { return selector_mode_index; }
+
 int runtime_online_mode_select_screen(void) {
     const uint64_t at = __atomic_load_n(&mode_select_updated_ms, __ATOMIC_RELAXED);
     return mode_select_active && at && monotonic_ms() - at < 300 && runtime_ranked_selected();   /* Ranked only */
@@ -5425,6 +5469,72 @@ static void ABI receive_map_choices(void *self, void *event) {
     original_map_choices(self, event);
 }
 
+/* ---- The map vote's draw: the port's new tracks in Ranked rooms only (27/11) ----
+ * The lobby host draws each map of the vote (image+0xebe740: the playlist's tracks this game has, into a list made
+ * for the draw, then image+0xebee30 picks one by weight; the list's count +0xc, its items +0x20, each a
+ * COnlinePlaylistMapData: its name, an igString, at +0x10, its _weight, an int, at +0x18). The port's new tracks
+ * are in the playlist at three times a track's weight (scripts/online_playlist.py; BB_RANKED_ONLY_TRACKS from
+ * run.py names them), but only a Ranked room draws them: Ranked needs the latest version, a public room may have
+ * an older client without them. This replaces the game's pick, which also could return an entry of weight 0 (its
+ * draw went to sum + 1, and the first entry the remainder reached was taken, whatever its weight). */
+static char ranked_only_tracks[512];
+static int ranked_only_loaded;
+static int ranked_only_track(const char *name) {
+    if (!ranked_only_loaded) {
+        const char *list = getenv("BB_RANKED_ONLY_TRACKS");
+        snprintf(ranked_only_tracks, sizeof ranked_only_tracks, "%s", list ? list : "");
+        ranked_only_loaded = 1;
+    }
+    if (!name || !ranked_only_tracks[0]) return 0;
+    for (const char *p = ranked_only_tracks; *p;) {
+        const char *end = strchr(p, ',');
+        const size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n) {
+            for (const char *s = name; (s = strchr(s, p[0])); ++s)
+                if (!strncasecmp(s, p, n)) return 1;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+static uint32_t ABI vote_pick_map(unsigned char *list) {
+    const int count = list ? *(int *)(list + 0xc) : 0;
+    unsigned char **items = count > 0 ? *(unsigned char ***)(list + 0x20) : NULL;
+    if (!items) return 0;
+    const int ranked = runtime_ranked_active();
+    int64_t total = 0;
+    int first = -1, last = -1, left_out = 0;
+    for (int i = 0; i < count; ++i) {
+        const char *name = items[i] ? *(const char **)(items[i] + 0x10) : NULL;
+        if (!ranked && ranked_only_track(name)) { ++left_out; continue; }
+        const int weight = items[i] ? *(int *)(items[i] + 0x18) : 0;
+        if (first < 0) first = i;
+        last = i;
+        if (weight > 0) total += weight;
+    }
+    if (first < 0) return 0;   /* only Ranked tracks here: the game's first (never with a whole playlist) */
+    static uint64_t state;
+    if (!state) state = runtime_stutter_clock_us() | 1;
+    state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+    int picked = last;
+    if (total > 0) {
+        int64_t r = (int64_t)(state % (uint64_t)total);
+        for (int i = 0; i < count; ++i) {
+            const char *name = items[i] ? *(const char **)(items[i] + 0x10) : NULL;
+            if (!ranked && ranked_only_track(name)) continue;
+            const int weight = items[i] ? *(int *)(items[i] + 0x18) : 0;
+            if (weight <= 0) continue;
+            if (r < weight) { picked = i; break; }
+            r -= weight;
+        }
+    }
+    const char *chosen = items[picked] ? *(const char **)(items[picked] + 0x10) : NULL;
+    printf("Map vote: drew %s (%d tracks%s; %s room)\n", chosen ? chosen : "?", count - left_out,
+           left_out ? ", the Ranked-only ones left out" : "", ranked ? "Ranked" : "public or private");
+    return (uint32_t)picked;
+}
+
 /* Ranked: the exact native map-selection moment. COctaneLobbyTimerComponent posts
  * CLobbyMapVoteFinishedMessage (sender image+0x120f740, called from image+0xeb7ee0), and the
  * lobby subscribes this handler (image+0xebcd40) to that message. Every client runs it once per
@@ -5569,7 +5679,8 @@ static int name_colors_off(void) {
 
 static void colored_name(unsigned char *placeable, int allowed) {
     if (!placeable || name_colors_off()) return;
-    const char *text = (const char *)pointer_at(placeable, 0x30);
+    char account[17];
+    const char *text = runtime_clan_identity((const char *)pointer_at(placeable, 0x30), account);
     float rgb[3];
     const int colored = allowed && text && runtime_name_color(text, rgb);
     ColoredName *entry = NULL, *free_entry = NULL;
@@ -5644,7 +5755,8 @@ static void online_name_badge(unsigned char *name, int human) {
         if (label && !strncmp(label,"OCTR_NAME_ICON_",15)) { badges=1;break; }
     }
     if (!badges) return;
-    const char *nick = pointer_at(name,0x30);
+    char account[17];
+    const char *nick = runtime_clan_identity(pointer_at(name,0x30), account);
     int mode = runtime_speed_race_active() != 0, tier = -1;
     const int online=in_network_game() && !battle_selected();
     human=online && human>0 && nick && *nick;
@@ -5773,7 +5885,8 @@ static int ranked_icon_logged;
 
 static void ranked_member_icons(unsigned char *self) {
     unsigned char *name = pointer_at(self, 0x10);
-    const char *nick = name ? pointer_at(name, 0x30) : NULL;
+    char account[17];
+    const char *nick = name ? runtime_clan_identity(pointer_at(name, 0x30), account) : NULL;
     if (!name) return;
     int mode = 0, selected_mode = -1;
     const uint64_t at = __atomic_load_n(&mode_select_updated_ms, __ATOMIC_RELAXED);
@@ -5873,6 +5986,7 @@ static void ABI member_event(unsigned char *self, void *event, void *owner) {
     /* Lobby Members rows only exist inside a room; in a private one this guest is in the host's
      * room, and leaving it must also leave the host's party (runtime_public_itemless.c). */
     if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
+    clan_name(pointer_at(self, 0x10), 2);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
 }
@@ -5881,12 +5995,14 @@ static void ABI member_update(unsigned char *self, unsigned char *owner, float d
     original_member_update(self, owner, dt);
     if (runtime_online_mode_in_private()) runtime_public_itemless_guest_room(1);
     team_lobby_row(self);
+    clan_name(pointer_at(self, 0x10), 2);
     colored_name(pointer_at(self, 0x10), name_colors_allowed());
     ranked_member_icons(self);
 }
 
 static void ABI marker_update(unsigned char *self, unsigned char *owner, float dt) {
     original_marker_update(self, owner, dt);
+    clan_name(pointer_at(self, 0x50), racer_is_player(handle_object((void **)(self + 0x70))));
     colored_name(pointer_at(self, 0x50), name_colors_allowed() && !self[0x88]); /* _playerTagPlaceable, _isBattle */
 }
 
@@ -5902,6 +6018,7 @@ static void ABI results_item_update(unsigned char *self, unsigned char *owner, f
     unsigned char *racer=handle_object((void **)(self+0x78));
     const struct RaceIdentity *saved=saved_race_identity(racer);
     if (saved && saved->report.dc) set_text(pointer_at(self,0xa8),saved->report.name);
+    clan_name(pointer_at(self,0xa8),saved || racer_is_player(racer));
     if (!team_ranking_project) online_name_badge(pointer_at(self,0xa8),saved || (racer && handle_object((void **)(racer+0x10))!=NULL));
 }
 
@@ -5909,6 +6026,7 @@ static void ABI team_slot_update(unsigned char *self, unsigned char *owner, floa
     if (runtime_private_party_update()) return;
     if (resume_private_map()) return; /* Loading may invalidate the old UI objects. */
     original_team_slot_update(self, owner, dt);
+    clan_name(pointer_at(self, 0x10), 2);
     colored_name(pointer_at(self, 0x10), name_colors_allowed()); /* _namePlaceable */
     refresh_lobby_members_visibility();
     if (!private_team_selector_allowed()) return;
@@ -6850,6 +6968,15 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     }
     jump_to(jump, team_ready_broadcast);
     if (!write_code(image + 0x248d10, jump, sizeof jump)) return 0;
+    /* The VSC display-text setter's vtable slot (0x268ef0, the same in the European game), only when it is the
+     * stock one: the signed-in name's clan tag (menu_display_text). */
+    if (pointer_at(image, 0x2807238) == image + 0x268ed0 && pointer_at(image, 0x2807170) == image + 0x268ef0) {
+        original_display_text = (VscDisplayText)(image + 0x268ef0);
+        const VscDisplayText writer = menu_display_text;
+        if (!write_code(image + 0x2807170, &writer, sizeof writer)) return 0;
+    } else {
+        puts("Clan tags: the signed-in name's setter is not the expected one; that name stays as it is");
+    }
     const BehaviorUpdate team_slot_replacement = team_slot_update;
     if (!write_code(image + 0x2544140, &team_slot_replacement, sizeof team_slot_replacement)) return 0;
     const EventHandler team_selector_replacement = team_selector_event;
@@ -6907,6 +7034,17 @@ int runtime_online_mode_start(unsigned char *image, size_t size) {
     if (!write_code(image + (0xeb7950 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, ranked_map_vote_finished);
     if (!write_code(image + (0xebcd40 - shift), jump, sizeof jump)) return 0;
+    {   /* the map vote's weighted pick (vote_pick_map): USA 0xebee30, EU 0x10 lower; the game's own if it differs */
+        static const unsigned char pick_prefix[] = {0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x49,0x89,0xfe,0x49,0x63,0x46,0x0c};
+        if (!memcmp(image + (0xebee30 - shift), pick_prefix, sizeof pick_prefix)) {
+            jump_to(jump, vote_pick_map);
+            if (write_code(image + (0xebee30 - shift), jump, sizeof jump))
+                printf("Map vote: Ranked-only tracks drawn in Ranked rooms only (%s)\n",
+                       getenv("BB_RANKED_ONLY_TRACKS") && *getenv("BB_RANKED_ONLY_TRACKS") ? getenv("BB_RANKED_ONLY_TRACKS") : "none");
+        } else {
+            puts("Map vote: the draw is not the expected code; the game's own (no Ranked-only tracks)");
+        }
+    }
     jump_to(jump, receive_map_choices);
     if (!write_code(image + (0xeba370 - shift), jump, sizeof jump)) return 0;
     jump_to(jump, team_selector_disable_node);

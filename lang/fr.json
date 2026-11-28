@@ -146,5 +146,17 @@
   "%d hours": "%d heures",
   "1 hour": "1 heure",
   "%d minutes": "%d minutes",
-  "1 minute": "1 minute"
+  "1 minute": "1 minute",
+  "BACKGROUND SEARCH": "RECHERCHE EN FOND",
+  "Background Ranked search cancelled.": "Recherche Classée en arrière-plan annulée.",
+  "Searching Ranked in the background... you will be told when the match is ready.": "Recherche Classée en arrière-plan... vous serez prévenu quand la partie sera prête.",
+  "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.": "Vous cherchez une partie Classée en arrière-plan. Annulez-la dans le menu (Insert / L3+R3) > Classé pour jouer en matchmaking public.",
+  "SEARCHING FOR A RANKED MATCH": "RECHERCHE D'UNE PARTIE CLASSÉE",
+  "RANKED MATCH READY!": "PARTIE CLASSÉE PRÊTE !",
+  "Waiting for players": "En attente de joueurs",
+  "Open Online > Ranked": "Ouvrez En ligne > Classé",
+  "Normal": "Normale",
+  "Itemless": "Sans objets",
+  "Drift bar": "Barre de dérapage",
+  "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.": "Oui : affiche la barre de dérapage à côté de ton kart (vert, jaune turbo, orange parfait). Non : la masque."
 }

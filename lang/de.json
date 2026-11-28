@@ -146,5 +146,17 @@
   "%d hours": "%d Stunden",
   "1 hour": "1 Stunde",
   "%d minutes": "%d Minuten",
-  "1 minute": "1 Minute"
+  "1 minute": "1 Minute",
+  "BACKGROUND SEARCH": "SUCHE IM HINTERGRUND",
+  "Background Ranked search cancelled.": "Ranglisten-Suche im Hintergrund abgebrochen.",
+  "Searching Ranked in the background... you will be told when the match is ready.": "Ranglisten-Suche im Hintergrund... du wirst benachrichtigt, sobald das Spiel bereit ist.",
+  "You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.": "Du suchst im Hintergrund nach einem Ranglisten-Spiel. Brich die Suche im Menü (Insert / L3+R3) > Rangliste ab, um öffentlich zu spielen.",
+  "SEARCHING FOR A RANKED MATCH": "SUCHE NACH RANGLISTEN-SPIEL",
+  "RANKED MATCH READY!": "RANGLISTEN-SPIEL BEREIT!",
+  "Waiting for players": "Warte auf Spieler",
+  "Open Online > Ranked": "Öffne Online > Rangliste",
+  "Normal": "Normal",
+  "Itemless": "Ohne Items",
+  "Drift bar": "Driftleiste",
+  "Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.": "Ja: zeigt die Driftleiste neben deinem Kart (grün, gelb Turbo, orange perfekt). Nein: blendet sie aus."
 }

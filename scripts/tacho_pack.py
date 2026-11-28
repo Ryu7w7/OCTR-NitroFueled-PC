@@ -40,19 +40,19 @@ FOLDER = Path(__file__).resolve().parent / 'tacho_pack'
 FORMAT = 3
 # The pack as shipped: the manifest (which holds every game file's SHA256) and its patches.
 EXPECTED = {
-    'manifest.json': '0def9a284e171fb1533fddb2115fb75edcb5a64a8f62d8ba1351170bd22bb58f',
-    'patches/BarraReservas.xml': '3259ce94fbc6c71a71f913e76fc33f7c4455ec63e0624e192b467415de71bafc',
+    'manifest.json': '027b40d3a05dd3cc211714d945fb3c56cee465a971dcc58fb2b665eb92122895',
+    'patches/BarraReservas.xml': '71e974a472ff60e6b51ae1a5302d789443566f1a091c9164f49fc6871be5dd65',
     'patches/HudOriginal.xml': '1b150e56c06b36619fcca5c49e16f07b5633ce45d96320ea891ecc966c0d621d',
     'patches/ItemsMejorados.xml': 'af2146c67bdde0ccbc27cdbbfc28fbab9d05d64e10d6c7348ef2048506329725',
     'patches/NtropyPosicion.xml': '2d698ba3dd71472f428e1e2df3a8fdc1f37b8049331331986d0828779c2e5115',
-    'patches/RaceLeaders_hud.xml': 'ad35f230077e60061518d79c6df0dfd24ff4e790d62e8a10d1620b0bfc03ef0f',
+    'patches/RaceLeaders_hud.xml': '7faa4a861790e7cca6382a7d6886f537ce15106caf5092538cf97b1cf95f97d2',
     'patches/SinItemsPortales.xml': '138ed816f5e64ac77b54835364c1eb1be4bee526e10d51dfb8516a2773336d69',
     # The European game's (CUSA14876 1.21) copies, made by tools/port_patch_eu.py from the ones above.
-    'patches_eu/BarraReservas.xml': '770c13fd92323b99b5f74b0e1ae8a60a21f7bb692bdfb33298fd1bf737098215',
+    'patches_eu/BarraReservas.xml': '2f32363652a9f79747a9c52b89da0fd6e1e5a59a86811ed46ae9ea92181590d3',
     'patches_eu/HudOriginal.xml': 'cc263509034bba16b049313b18f37eb99721bb510daabd13bfe9655058b78b13',
     'patches_eu/ItemsMejorados.xml': '85e5c69791ea9b4aecb89100559e55447b031a1ae61f0a2e6e2a1e7b7b536ca8',
     'patches_eu/NtropyPosicion.xml': '24d68d00ad821047cd0e9bddc2d6d90adac5570c9e16f53b846f34fb5ca20a6a',
-    'patches_eu/RaceLeaders_hud.xml': 'f1e3961658663fc2e432b1271c9cb725a7a37bb98f7efb51576ea3c415538ae9',
+    'patches_eu/RaceLeaders_hud.xml': 'a37fa8dbb879fd0e00f76c76ea15b552244193ae7a7f08f62f54919b66e6b852',
     'patches_eu/SinItemsPortales.xml': '10a6a07a0d04a5712801f8c9ab283227587de0cd342766575dc98e87ebc348e7',
 }
 # The European game's (CUSA14876 1.21) own copies of the files the pack changes where they are not the
@@ -118,6 +118,9 @@ OPTION_TEXTS = {
         'Yes: shows your boost reserves under the boost bar. No: hides it.',
     'Sí: lista de 8 con nombre, wumpas e ítem. No: solo los 4 primeros, sin extras.':
         'Yes: 8-place list with name, wumpas and item. No: only the top 4, no extras.',
+    'Barra de derrape': 'Drift bar',
+    'Sí: muestra la barra de derrape junto a tu kart (verde, amarillo turbo, naranja perfecto). No: la oculta.':
+        'Yes: shows the drift bar next to your kart (green, yellow boost, orange perfect). No: hides it.',
     'Sí': 'Yes',   # the options' own values (20/11: "Some of the Yes options come up in Spanish")
     'No': 'No',
 }

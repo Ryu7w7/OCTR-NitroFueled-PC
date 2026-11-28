@@ -1758,6 +1758,39 @@ std::string RankText(const std::string& server, const std::string& nick, bool it
     return text;
 }
 
+/// The player's clan tag for the presence ("MC"; "" in none or before the server answered): the RyuNET site's
+/// clans (the server's clans.go, /ryunet/clan-tags), asked again every two minutes.
+std::string ClanTagText(const std::string& server, const std::string& nick) {
+    static std::mutex mutex;
+    static std::string id, tag;
+    static uint64_t at = 0;
+    static bool in_flight = false;
+    const std::string key = server + "|" + nick;
+    std::scoped_lock lock{mutex};
+    if ((id != key || Ticks() - at >= 120000) && !in_flight) {
+        in_flight = true;
+        std::thread([server, nick, key] {
+            const std::string body = HttpGet(server, L"/ryunet/clan-tags?names=" + Widen(nick));
+            std::string found;
+            // "ok\n<nick>\t<TAG>\n" when the player is in a clan
+            const size_t tab = body.rfind('\t');
+            if (body.rfind("ok\n", 0) == 0 && tab != std::string::npos) {
+                found = body.substr(tab + 1);
+                while (!found.empty() && (found.back() == '\n' || found.back() == '\r')) found.pop_back();
+                if (found.size() < 2 || found.size() > 3 ||
+                    !std::all_of(found.begin(), found.end(), [](unsigned char c) { return std::isalnum(c); }))
+                    found.clear();
+            }
+            std::scoped_lock done{mutex};
+            id = key;
+            tag = found;
+            at = Ticks();
+            in_flight = false;
+        }).detach();
+    }
+    return id == key ? tag : std::string();
+}
+
 /// A level's own name in the launcher's language (track_names.txt from scripts/track_names.py: the
 /// game's zone infos), "" for menus and levels without one.
 std::string ZoneName(const std::string& level) {
@@ -1877,7 +1910,12 @@ void UpdateDiscord() {
     if (a.game.Flag("online", true)) {
         activity.details = described ? doing : T("Jugando online", "Playing online");
         const std::string nick = CurrentNick();
-        if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
+        if (!nick.empty()) {
+            // the clan's tag in front, as in the game: "Apodo: [MC] Ryu7w7"
+            const std::string server_name = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+            const std::string clan = !NickProblem(nick) && ValidServer(server_name) ? ClanTagText(server_name, nick) : "";
+            activity.state = std::string(T("Apodo: ", "Nickname: ")) + (clan.empty() ? "" : "[" + clan + "] ") + nick;
+        }
         if (described && !match.empty())
             activity.state += activity.state.empty() ? match : std::string(" · ") + match;
         // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
@@ -3195,6 +3233,16 @@ std::string GameTemporal() {
     return game.Flag("fsr1", true) ? "fsr1" : "off";
 }
 
+/// The port's DLSS bridge (bin\sacredfire_dlss.dll, in the package); NVIDIA's runtime comes on first use.
+bool DlssBridgePresent() {
+    std::error_code ec;
+#ifdef _WIN32
+    return fs::is_regular_file(g_app.root / "bin/sacredfire_dlss.dll", ec);
+#else
+    return false;
+#endif
+}
+
 /// The separately distributed NGX bridge and NVIDIA runtime must both be installed.
 bool DlssFilesPresent() {
     std::error_code ec;
@@ -3642,6 +3690,10 @@ void GraphicsSettings() {
         if (native && (temporal == "fsr3" || temporal == "fsr4")) {
             FormNote(T("FSR 3 y FSR 4 no funcionan con el motor nativo: se usa FSR 1.",
                        "FSR 3 and FSR 4 do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "dlss" && !DlssFilesPresent() && DlssBridgePresent()) {
+            // since 27/11 nvngx_dlss.dll is downloaded the first time DLSS is used (scripts/components.py)
+            FormNote(T("NVIDIA DLSS (59 MB) se descarga una sola vez al pulsar Jugar con DLSS elegido.",
+                       "NVIDIA DLSS (59 MB) is downloaded once, when you press Play with DLSS chosen."));
         } else if (temporal == "dlss" && !DlssFilesPresent()) {
             FormNote(T("DLSS necesita sacredfire_dlss.dll y nvngx_dlss.dll en la carpeta bin, "
                        "que no están en esta copia. Mientras falten, el juego no usa DLSS.",
@@ -8303,8 +8355,11 @@ void ToolsAboutPage() {
         const bool dlss = DlssFilesPresent();
         ImGui::TextColored(kGrey, "%s", dlss ? T("DLSS: archivos presentes (necesita una tarjeta NVIDIA RTX)",
                                                  "DLSS: files present (needs an NVIDIA RTX card)")
-                                             : T("DLSS: archivos no incluidos (se usa FSR 3)",
-                                                 "DLSS: files not included (FSR 3 is used)"));
+                                    : DlssBridgePresent()
+                                        ? T("DLSS: se descarga la primera vez que se usa (necesita una tarjeta NVIDIA RTX)",
+                                            "DLSS: downloaded the first time it is used (needs an NVIDIA RTX card)")
+                                        : T("DLSS: archivos no incluidos (se usa FSR 3)",
+                                            "DLSS: files not included (FSR 3 is used)"));
 
         ImGui::TextColored(kGrey, "%s", Fsr4FilesPresent()
                                             ? T("FSR 4: archivos presentes (necesita una gráfica con soporte INT8)",

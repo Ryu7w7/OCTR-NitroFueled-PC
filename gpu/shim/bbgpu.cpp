@@ -321,7 +321,9 @@ extern "C" void bbgpu_register_kernel(void) {
     Libraries::Kernel::StartKernelService();
     Core::Loader::SymbolsResolver resolver;
     Libraries::Kernel::RegisterEventQueue(&resolver);
-    Libraries::AvPlayer::RegisterLib(&resolver);
+#ifdef BB_AVPLAYER
+    Libraries::AvPlayer::RegisterLib(&resolver);   /* CTR does not import it (gpu/CMakeLists.txt SACREDFIRE_AVPLAYER) */
+#endif
 }
 
 extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {

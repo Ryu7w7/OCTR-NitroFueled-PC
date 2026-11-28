@@ -179,8 +179,18 @@ set(COMMON
     shadps4/common/path_util.cpp shadps4/common/rdtsc.cpp shadps4/common/spin_lock.cpp shadps4/common/recursive_lock.cpp
     shadps4/common/string_util.cpp shadps4/common/thread.cpp shadps4/common/signal_context.cpp
     shim/common/logging/log.cpp)
-file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+# The PS4's video player (libSceAvPlayer, FFmpeg): CTR imports neither it nor libSceVideodec (its videos are
+# Bink), and MSYS2's FFmpeg brought 92 DLLs (129 MB: x265, AV1, JPEG XL, SVG...) into every package (27/11).
+option(SACREDFIRE_AVPLAYER "Build the PS4 video player (needs FFmpeg)" OFF)
+if (SACREDFIRE_AVPLAYER)
+    file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
+    list(APPEND AVPLAYER shadps4/core/libraries/videodec/video_utils.cpp)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
+    set(BB_FFMPEG PkgConfig::FFMPEG)
+else()
+    set(AVPLAYER "")
+    set(BB_FFMPEG "")
+endif()
 # Voice chat (shim/bbport_voice.cpp): Opus, already shipped beside FFmpeg (libopus-0.dll).
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
@@ -198,8 +208,10 @@ endif()
 add_library(bbgpu ${BBGPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
-    shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
-    shadps4/core/libraries/videodec/video_utils.cpp)
+    shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER})
+if (SACREDFIRE_AVPLAYER)
+    target_compile_definitions(bbgpu PRIVATE BB_AVPLAYER=1)
+endif()
 add_dependencies(bbgpu host_shaders)
 # In-game settings menu: Dear ImGui (third_party/imgui, MIT) with its Vulkan backend, and an
 # embedded Cyrillic font (third_party/fonts).
@@ -235,7 +247,7 @@ if (NOT WIN32)
 endif()
 target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
-    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG PkgConfig::OPUS miniz::miniz Zydis::Zydis sirit)
+    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 ${BB_FFMPEG} PkgConfig::OPUS miniz::miniz Zydis::Zydis sirit)
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
@@ -272,6 +284,51 @@ if (WIN32)
             OUTPUT_VARIABLE SACREDFIRE_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
     endif()
     target_compile_definitions(sacredfire PRIVATE SACREDFIRE_RELEASE="${SACREDFIRE_RELEASE}")
+    # The key of the port's encrypted content (src/runtime_content_crypt.c): 64 hex digits in a file kept out of
+    # the repository (SACREDFIRE_CONTENT_KEY_FILE, else $OCTR_CONTENT_KEY_FILE, else octr-content.key beside the
+    # checkout). In the exe as two halves, the key XOR a mask made at each configure, and the mask. Without
+    # it the build runs as before and refuses the encrypted content files.
+    set(SACREDFIRE_CONTENT_KEY_FILE "" CACHE FILEPATH "Key of the port's encrypted content (kept out of git)")
+    set(BB_CONTENT_KEY_FILE "${SACREDFIRE_CONTENT_KEY_FILE}")
+    if (NOT BB_CONTENT_KEY_FILE AND DEFINED ENV{OCTR_CONTENT_KEY_FILE})
+        set(BB_CONTENT_KEY_FILE "$ENV{OCTR_CONTENT_KEY_FILE}")
+    endif()
+    if (NOT BB_CONTENT_KEY_FILE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../octr-content.key")
+        set(BB_CONTENT_KEY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../octr-content.key")
+    endif()
+    if (BB_CONTENT_KEY_FILE AND EXISTS "${BB_CONTENT_KEY_FILE}")
+        file(READ "${BB_CONTENT_KEY_FILE}" BB_CONTENT_KEY)
+        string(STRIP "${BB_CONTENT_KEY}" BB_CONTENT_KEY)
+        if (NOT BB_CONTENT_KEY MATCHES "^[0-9a-fA-F]+$")
+            message(FATAL_ERROR "The content key file holds no hex key")
+        endif()
+        string(LENGTH "${BB_CONTENT_KEY}" BB_CONTENT_KEY_LENGTH)
+        if (NOT BB_CONTENT_KEY_LENGTH EQUAL 64)
+            message(FATAL_ERROR "The content key must be 64 hex digits")
+        endif()
+        string(RANDOM LENGTH 64 ALPHABET 0123456789abcdef BB_CONTENT_MASK)
+        set(BB_KEY_A "")
+        set(BB_KEY_B "")
+        foreach (i RANGE 0 31)
+            math(EXPR at "${i} * 2")
+            string(SUBSTRING "${BB_CONTENT_KEY}" ${at} 2 k)
+            string(SUBSTRING "${BB_CONTENT_MASK}" ${at} 2 m)
+            math(EXPR a "0x${k} ^ 0x${m}" OUTPUT_FORMAT HEXADECIMAL)
+            string(APPEND BB_KEY_A "${a},")
+            string(APPEND BB_KEY_B "0x${m},")
+        endforeach()
+        file(WRITE "${CMAKE_BINARY_DIR}/content-key/content_key.h"
+            "/* generated by gpu/CMakeLists.txt: do not commit */\n"
+            "static const unsigned char content_key_a[32] = {${BB_KEY_A}};\n"
+            "static const unsigned char content_key_b[32] = {${BB_KEY_B}};\n")
+        target_include_directories(sacredfire PRIVATE "${CMAKE_BINARY_DIR}/content-key")
+        target_compile_definitions(sacredfire PRIVATE OCTR_CONTENT_KEY=1)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${BB_CONTENT_KEY_FILE}")
+        message(STATUS "Content key: from ${BB_CONTENT_KEY_FILE}")
+    else()
+        file(REMOVE "${CMAKE_BINARY_DIR}/content-key/content_key.h")
+        message(STATUS "Content key: none (encrypted content files will not open)")
+    endif()
     set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     # isa_emulate runs inside guest code: no XMM/YMM.
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")

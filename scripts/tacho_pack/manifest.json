@@ -1,100 +1,217 @@
 {
- "format": 1,
- "name": "Pack Tacho",
- "version": "1.2.8",
- "author": "Tacho",
- "description": "Paquete: Lista 8 puestos compacta + nombre + wumpas + item (Hud Power Charged) 0.53.0 (con No = HUD original) + Items mejorados 1.5.1 + Reloj de N. Tropy por posicion 0.3.0 + Sin items en los portales 0.19.0 + Barra de reservas 1.0.1. Minimapa un poco mas arriba (no tapa el velocimetro). Sin el logo Power Charged del menu principal (el menu es el del juego).",
- "operations": [
-  {
-   "kind": "archive_asset",
-   "archive": "update.pak",
-   "asset": "ui/Octane_race_Leaders.igz",
-   "index": 36,
-   "original_sha256": "18c3401278639ef239e0109fe8c5be6180e967d70c05bd93cd5bf4074a8c9906",
-   "patched_sha256": "13ba0c73edf93b2c4e865e5e4df6405986fbd9bfa0440aa55731b2c23923ad92",
-   "payload": "payloads/13ba0c73edf93b2c.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race.pak",
-   "asset": "ui/Octane_race_Leaders.igz",
-   "index": 6,
-   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
-   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
-   "payload": "payloads/bc2e431dcd2ff509.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race_flareday.pak",
-   "asset": "ui/Octane_race_Leaders.igz",
-   "index": 7,
-   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
-   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
-   "payload": "payloads/bc2e431dcd2ff509.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race_flarenight.pak",
-   "asset": "ui/Octane_race_Leaders.igz",
-   "index": 7,
-   "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
-   "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
-   "payload": "payloads/bc2e431dcd2ff509.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "update2.pak",
-   "asset": "ui/Octane_Racer_HUD.igz",
-   "index": 10067,
-   "original_sha256": "0018619b6ccf5b40015bd1b4caa24516028d487ce05b27a6ecc1b9c57b71be2f",
-   "patched_sha256": "716be7d86455c297b4dceff51e6a5e8db9c9d462bcd8b3a898285f727c4fc5a2",
-   "payload": "payloads/716be7d86455c297.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race.pak",
-   "asset": "ui/Octane_Minimap.igz",
-   "index": 283,
-   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
-   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
-   "payload": "payloads/617bebb344d18b24.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race_flareday.pak",
-   "asset": "ui/Octane_Minimap.igz",
-   "index": 287,
-   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
-   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
-   "payload": "payloads/617bebb344d18b24.igz"
-  },
-  {
-   "kind": "archive_asset",
-   "archive": "juicedomain_race_flarenight.pak",
-   "asset": "ui/Octane_Minimap.igz",
-   "index": 288,
-   "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
-   "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
-   "payload": "payloads/617bebb344d18b24.igz"
-  }
- ],
- "menu_operations": [
-  {
-   "kind": "archive_asset",
-   "archive": "update2.pak",
-   "asset": "ui/Octane_Options_Menu_Page.igz",
-   "index": 1582,
-   "original_sha256": "a3f73faeb9311f80c24436bfd604204125b4e429653e3927bfc5adc98cdbf4b0",
-   "patched_sha256": "db9174f804219cf3e609cc47ec3deb756358279c56fb9f97d348b40a66422a93",
-   "payload": "payloads/db9174f804219cf3.igz"
-  }
- ],
- "patches": [
-  "RaceLeaders_hud.xml",
-  "HudOriginal.xml",
-  "ItemsMejorados.xml",
-  "NtropyPosicion.xml",
-  "SinItemsPortales.xml",
-  "BarraReservas.xml"
- ]
+  "format": 1,
+  "name": "Pack Tacho",
+  "version": "1.2.8",
+  "author": "Tacho",
+  "description": "Paquete: Lista 8 puestos compacta + nombre + wumpas + item (Hud Power Charged) 0.53.0 (con No = HUD original) + Items mejorados 1.5.1 + Reloj de N. Tropy por posicion 0.3.0 + Sin items en los portales 0.19.0 + Barra de reservas 1.0.1. Minimapa un poco mas arriba (no tapa el velocimetro). Sin el logo Power Charged del menu principal (el menu es el del juego).",
+  "operations": [
+    {
+      "kind": "archive_asset",
+      "archive": "update.pak",
+      "asset": "ui/Octane_race_Leaders.igz",
+      "index": 36,
+      "original_sha256": "18c3401278639ef239e0109fe8c5be6180e967d70c05bd93cd5bf4074a8c9906",
+      "patched_sha256": "13ba0c73edf93b2c4e865e5e4df6405986fbd9bfa0440aa55731b2c23923ad92",
+      "payload": "payloads/13ba0c73edf93b2c.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_race_Leaders.igz",
+      "index": 6,
+      "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+      "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+      "payload": "payloads/bc2e431dcd2ff509.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_race_Leaders.igz",
+      "index": 7,
+      "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+      "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+      "payload": "payloads/bc2e431dcd2ff509.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_race_Leaders.igz",
+      "index": 7,
+      "original_sha256": "74727b5e5c016e06613bcb3bf33a3c65947ee105bb48bdd24efc123ce8323ec3",
+      "patched_sha256": "bc2e431dcd2ff5090c09fa876c450c421e752b8f36506d77779f3aae66e4ae9f",
+      "payload": "payloads/bc2e431dcd2ff509.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_Racer_HUD.igz",
+      "index": 10067,
+      "original_sha256": "0018619b6ccf5b40015bd1b4caa24516028d487ce05b27a6ecc1b9c57b71be2f",
+      "patched_sha256": "716be7d86455c297b4dceff51e6a5e8db9c9d462bcd8b3a898285f727c4fc5a2",
+      "payload": "payloads/716be7d86455c297.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/Octane_Minimap.igz",
+      "index": 283,
+      "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+      "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+      "payload": "payloads/617bebb344d18b24.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/Octane_Minimap.igz",
+      "index": 287,
+      "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+      "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+      "payload": "payloads/617bebb344d18b24.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/Octane_Minimap.igz",
+      "index": 288,
+      "original_sha256": "76a58fd19801137117a0f60c071c5961d8990601966c1fd53387440cc8c81e55",
+      "patched_sha256": "617bebb344d18b24e3dbaed797841c7364236a4db4dda9a204ad0bc0a46344d4",
+      "payload": "payloads/617bebb344d18b24.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_hub.pak",
+      "asset": "ui/GuiSharedAssets/Octane_BoostBar.igz",
+      "index": 4,
+      "original_sha256": "b99765481a6131d24b087391c66e6577facbe852a3c696ba347f8473ffca7f27",
+      "patched_sha256": "b9c29e89fd589b9c4df0e8587067aedac31eb03d349d06b28a64e662b4c15012",
+      "payload": "payloads/b9c29e89fd589b9c.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_hub.pak",
+      "asset": "ui/materialInstances/GuiSharedAssets/juice_Octane_BoostBar_materials.igz",
+      "index": 293,
+      "original_sha256": "8de58a03d3a59118ddd9b71a0be183be59fc208c0b6f06ed5da638aa612ea1ad",
+      "patched_sha256": "1a5fb233bc20b22f86dfaddf85e01ee9ff5d261e78109891685e5e7723941f50",
+      "payload": "payloads/1a5fb233bc20b22f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/GuiSharedAssets/Octane_BoostBar.igz",
+      "index": 3,
+      "original_sha256": "b99765481a6131d24b087391c66e6577facbe852a3c696ba347f8473ffca7f27",
+      "patched_sha256": "b9c29e89fd589b9c4df0e8587067aedac31eb03d349d06b28a64e662b4c15012",
+      "payload": "payloads/b9c29e89fd589b9c.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "ui/materialInstances/GuiSharedAssets/juice_Octane_BoostBar_materials.igz",
+      "index": 161,
+      "original_sha256": "8de58a03d3a59118ddd9b71a0be183be59fc208c0b6f06ed5da638aa612ea1ad",
+      "patched_sha256": "1a5fb233bc20b22f86dfaddf85e01ee9ff5d261e78109891685e5e7723941f50",
+      "payload": "payloads/1a5fb233bc20b22f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/GuiSharedAssets/Octane_BoostBar.igz",
+      "index": 4,
+      "original_sha256": "b99765481a6131d24b087391c66e6577facbe852a3c696ba347f8473ffca7f27",
+      "patched_sha256": "b9c29e89fd589b9c4df0e8587067aedac31eb03d349d06b28a64e662b4c15012",
+      "payload": "payloads/b9c29e89fd589b9c.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "ui/materialInstances/GuiSharedAssets/juice_Octane_BoostBar_materials.igz",
+      "index": 163,
+      "original_sha256": "8de58a03d3a59118ddd9b71a0be183be59fc208c0b6f06ed5da638aa612ea1ad",
+      "patched_sha256": "1a5fb233bc20b22f86dfaddf85e01ee9ff5d261e78109891685e5e7723941f50",
+      "payload": "payloads/1a5fb233bc20b22f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/GuiSharedAssets/Octane_BoostBar.igz",
+      "index": 4,
+      "original_sha256": "b99765481a6131d24b087391c66e6577facbe852a3c696ba347f8473ffca7f27",
+      "patched_sha256": "b9c29e89fd589b9c4df0e8587067aedac31eb03d349d06b28a64e662b4c15012",
+      "payload": "payloads/b9c29e89fd589b9c.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "ui/materialInstances/GuiSharedAssets/juice_Octane_BoostBar_materials.igz",
+      "index": 165,
+      "original_sha256": "8de58a03d3a59118ddd9b71a0be183be59fc208c0b6f06ed5da638aa612ea1ad",
+      "patched_sha256": "1a5fb233bc20b22f86dfaddf85e01ee9ff5d261e78109891685e5e7723941f50",
+      "payload": "payloads/1a5fb233bc20b22f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "update.pak",
+      "asset": "ui/GuiSharedAssets/Octane_BoostBar.igz",
+      "index": 27,
+      "original_sha256": "aface0ec8932c09640a14c361c16fecae47a6d6a7c04611a166bd37b723b679b",
+      "patched_sha256": "ab098b918cb764239fd037ff1062b96fcd81b7dd688c34be63ad0b02d3c2d2ed",
+      "payload": "payloads/ab098b918cb76423.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_hub.pak",
+      "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Boost!octane_ui_hud_boost_bg`tga,001.igz",
+      "index": 774,
+      "original_sha256": "6a9e546b3465811024cfe61ba30ba55760be766f36055f4543f0dab13ef27458",
+      "patched_sha256": "1e1ce6cb83b8ba4f926d87dca24104ce668b59f46527905863696c374bc4f8a6",
+      "payload": "payloads/1e1ce6cb83b8ba4f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race.pak",
+      "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Boost!octane_ui_hud_boost_bg`tga,001.igz",
+      "index": 419,
+      "original_sha256": "6a9e546b3465811024cfe61ba30ba55760be766f36055f4543f0dab13ef27458",
+      "patched_sha256": "1e1ce6cb83b8ba4f926d87dca24104ce668b59f46527905863696c374bc4f8a6",
+      "payload": "payloads/1e1ce6cb83b8ba4f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flareday.pak",
+      "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Boost!octane_ui_hud_boost_bg`tga,001.igz",
+      "index": 425,
+      "original_sha256": "6a9e546b3465811024cfe61ba30ba55760be766f36055f4543f0dab13ef27458",
+      "patched_sha256": "1e1ce6cb83b8ba4f926d87dca24104ce668b59f46527905863696c374bc4f8a6",
+      "payload": "payloads/1e1ce6cb83b8ba4f.igz"
+    },
+    {
+      "kind": "archive_asset",
+      "archive": "juicedomain_race_flarenight.pak",
+      "asset": "textures/GuiStandard_diffuse,textures@!ui!Octane!Boost!octane_ui_hud_boost_bg`tga,001.igz",
+      "index": 426,
+      "original_sha256": "6a9e546b3465811024cfe61ba30ba55760be766f36055f4543f0dab13ef27458",
+      "patched_sha256": "1e1ce6cb83b8ba4f926d87dca24104ce668b59f46527905863696c374bc4f8a6",
+      "payload": "payloads/1e1ce6cb83b8ba4f.igz"
+    }
+  ],
+  "menu_operations": [
+    {
+      "kind": "archive_asset",
+      "archive": "update2.pak",
+      "asset": "ui/Octane_Options_Menu_Page.igz",
+      "index": 1582,
+      "original_sha256": "a3f73faeb9311f80c24436bfd604204125b4e429653e3927bfc5adc98cdbf4b0",
+      "patched_sha256": "7dada7bc360e413d0ac668834c85a25f4895d8af38808bcf7cb532d2fac4a7ec",
+      "payload": "payloads/7dada7bc360e413d.igz"
+    }
+  ],
+  "patches": [
+    "RaceLeaders_hud.xml",
+    "HudOriginal.xml",
+    "ItemsMejorados.xml",
+    "NtropyPosicion.xml",
+    "SinItemsPortales.xml",
+    "BarraReservas.xml"
+  ]
 }

@@ -726,7 +726,9 @@ def prepare(game, out, config, env, base):
             try:
                 index = next((i for i in range(len(archive.names))
                               if archive.logical(i).lower() == zone_info_path(m)), None)
-                current = archive.read(index) if index is not None else None
+                # an encrypted level archive (tools/content_crypt.py): its data is not readable here; the
+                # zone info is replaced by the patch anyway
+                current = archive.read(index) if index is not None and not archive_patch.encrypted(path) else None
                 carried = {archive.logical(i).lower() for i in range(len(archive.names))}
             finally:
                 archive.f.close()

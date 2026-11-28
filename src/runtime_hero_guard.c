@@ -159,10 +159,12 @@ int runtime_host_readable(const void *p, size_t n) {
  * en el online": the stutter log found it there). The regions found readable are kept, per thread, until the
  * guest's mappings change (runtime_memory_changes, counted before each unmap, map and protection change), when
  * a name's memory can go. */
+#ifdef _WIN32   /* the cache is for VirtualQuery; elsewhere host_readable is cheap */
 extern volatile unsigned runtime_memory_changes;   /* runtime_memory.c */
 static _Thread_local unsigned names_seen_changes;
 static _Thread_local const char *names_lo[16], *names_hi[16];
 static _Thread_local int names_next;
+#endif
 static int name_readable(const char *p) {
     if (!p) return 0;
 #ifdef _WIN32

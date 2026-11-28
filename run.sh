@@ -167,6 +167,30 @@ if [[ -z ${BB_GRAPHICS_TAB_ARCHIVE:-} ]] && compgen -G "${BB_CONTENT_DIR:-conten
     echo "El juego no pudo añadir sus pistas (graphics_tab.py). No arranca sin ellas." >&2
     exit 1
 fi
+# As run.py: the tracks' own files served before any mod's of the same name (runtime_file.c; 26/11, a character
+# mod's update3.pak hid Neo Bowser City), and the tracks drawn in Ranked rooms only (runtime_online_mode.c
+# vote_pick_map; BB_TRACKS_ONLINE=1 everywhere).
+unset BB_CONTENT_FILES BB_CONTENT_REQUIRED
+while IFS= read -r line; do
+    case $line in
+        BB_*=*) export "$line" ;;
+    esac
+done < <(startup_python -c '
+import os, sys
+sys.path.insert(0, "scripts")
+import track_content
+files = [(r.as_posix(), str(s)) for r, s in track_content.level_archives()]
+files = [f"{r}={s}" for r, s in files if "|" not in r + s]
+if files:
+    print("BB_CONTENT_FILES=" + "|".join(files))
+    print("BB_CONTENT_REQUIRED=1")
+try:
+    ranked = [] if os.environ.get("BB_TRACKS_ONLINE") == "1" else \
+        sorted({track_content.zone(m) for _folder, m in track_content.packages()})
+except (OSError, ValueError, KeyError):
+    ranked = []
+print("BB_RANKED_ONLY_TRACKS=" + ",".join(ranked))
+' || true)
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game
@@ -202,8 +226,10 @@ while IFS= read -r patch; do
     if [[ -n $patch ]]; then base_patches+=(--base "$patch"); fi
 done < <(startup_python scripts/button_prompts.py "$game" --out "$out" --settings "$BB_CONFIG" "${base_patches[@]}")
 # ...and the voice chat's loudspeaker character in them: the nickname over a talking racer shows it.
-unset BB_VOICE_GLYPH
+unset BB_VOICE_GLYPH BB_CLAN_BRACKETS
 if grep -q '"speaker": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_VOICE_GLYPH=1; fi
+# ...and "[" "]" for the clans' tags (with_brackets): "[MC] Ryu7w7", else "(MC) Ryu7w7".
+if grep -q '"brackets": true' "$out/button_prompts/stamp.json" 2>/dev/null; then export BB_CLAN_BRACKETS=1; fi
 # Then, as run.py (scripts/startup_extras.py): the seasonal title screen, the nickname bottom left
 # of the menus online, the CTR TV logo and Pack Tacho's files (its executable patches need them:
 # without them a race crashed while loading), each keeping the patches before it.

@@ -67,6 +67,19 @@ static const char *ranked_device(void) {
 
 static pthread_mutex_t mode_lock = PTHREAD_MUTEX_INITIALIZER;
 static int installed, selected, ranked_selected, searching, allow_party;
+/* The Online menu's background search (OCTR_RANKED_QUEUE_BUTTON, runtime_ranked_queue.c): its mode select's Go
+ * puts the player in the server's Ranked queue instead of searching. */
+static int background_choice;
+void runtime_ranked_queue_join(int mode);
+void runtime_ranked_queue_leave(const char *why);
+int runtime_ranked_queue_state(void);
+void runtime_ranked_queue_tick(void);
+int runtime_online_mode_mode_select_index(void);   /* runtime_online_mode.c: 0 Normal, 1 Itemless */
+int runtime_net_is_online(void);
+/* The overlay menu's Ranked page (bbport_overlay.cpp RankedTab, its own thread): 0/1 search Normal/Itemless in the
+ * background, 2 cancel; taken on the game's thread (runtime_public_itemless_poll_ranked_request). */
+static int queue_request = -1;
+void runtime_ranked_queue_request(int what) { __atomic_store_n(&queue_request, what, __ATOMIC_SEQ_CST); }
 /* Whether the party is in a Ranked search. Survives reset_locked (which follows a leave) so a
  * guest that takes over as host re-searches Ranked, not Casual (2026-11-19). */
 static int joined_ranked;
@@ -1108,7 +1121,9 @@ static int ABI remove_race_player(void *manager,void *player) {
 /* ---- The host handoff's behaviour, from RyuNET (26/11: the server's handoff.go, its admin panel's "Relevo de
  * host" card): GET /ryunet/handoff once online and every minute, so it changes without a new build. Until an
  * answer (or with an older server), these defaults: the behaviour of test3 + the guest sync fix.
- *   enabled     hold the race connection when the host is lost (the handoff at all); 0 the game's own
+ *   enabled     hold the race connection when the host is lost (the handoff at all); 0 the game's own (the
+ *               default since 27/11, the user: off for the release while it is in development; the server
+ *               can turn it on)
  *   bind_keep   while binding, leave racing players' karts to their owners (0: the game takes them)
  *   guest_sync  a guest's first sync to the new host: 0 everything, 1 not its stale copy of the new host's
  *               kart (given to it), 2 also not the other karts it does not drive, 3 those given to it too
@@ -1126,7 +1141,7 @@ static int ABI remove_race_player(void *manager,void *player) {
  *   diag_every_ms  one snapshot every so often in that span (and one every 15 s of a matchmaking race before) */
 static struct {
     int enabled, bind_keep, guest_sync, host_sync, sync_ms, reclaim, watch_ms, give_up_ms, diag_ms, diag_every_ms;
-} HO = {1, 1, 3, 1, 15000, 1, 20000, 0, 30000, 1000};
+} HO = {0, 1, 3, 1, 15000, 1, 20000, 0, 30000, 1000};   /* enabled 0 for v0.9.5 (27/11: still in development) */
 int runtime_net_is_online(void);   /* runtime_net.c */
 int runtime_net_peer_stats(char *out, size_t cap);   /* runtime_net.c */
 int runtime_host_readable(const void *p, size_t n);  /* runtime_hero_guard.c */
@@ -2699,6 +2714,13 @@ static void *bot_join_worker(void *unused) {
     return NULL;
 }
 
+static void ranked_request_apply(int mode, uint64_t room, uint64_t now, const char *from);
+/* The background queue's "go" (runtime_ranked_queue.c): the Online menu opens on Ranked, and the next Ranked
+ * search of that mode goes to the room, as with the Discord Join. */
+void runtime_public_itemless_ranked_go(int mode, uint64_t room) {
+    ranked_request_apply(mode, room, check_clock(), "the background search");
+}
+
 static void ranked_request_apply(int mode, uint64_t room, uint64_t now, const char *from) {
     __atomic_store_n(&ranked_request_mode, mode, __ATOMIC_SEQ_CST);
     __atomic_store_n(&ranked_request_pending, 1, __ATOMIC_SEQ_CST);
@@ -2713,6 +2735,16 @@ static void ranked_request_apply(int mode, uint64_t room, uint64_t now, const ch
 void runtime_public_itemless_poll_ranked_request(void) {
     static uint64_t next_check;
     const uint64_t now = check_clock();
+    runtime_ranked_queue_tick();
+    const int queue_want = __atomic_exchange_n(&queue_request, -1, __ATOMIC_SEQ_CST);
+    if (queue_want == 2 && runtime_ranked_queue_state()) {
+        runtime_ranked_queue_leave("cancelled from the menu");
+        notice("Background Ranked search cancelled.");
+    } else if ((queue_want == 0 || queue_want == 1) && !runtime_ranked_queue_state() && runtime_net_is_online() &&
+               !runtime_public_match_active() && ranked_entry_allowed() && ranked_account_allowed()) {
+        runtime_ranked_queue_join(queue_want);
+        notice("Searching Ranked in the background... you will be told when the match is ready.");
+    }
     if (__atomic_exchange_n(&bot_join_ready, 0, __ATOMIC_SEQ_CST)) {
         const int mode = __atomic_load_n(&bot_join_mode, __ATOMIC_SEQ_CST);
         if (mode == 0 || mode == 1)
@@ -2884,7 +2916,8 @@ static void native_return_focus(void *node, int ancestors) {
                 slots[j] = (void **)((char *)items[i] + offset);
             }
             void *target = online_return_button ? return_button_in(node,
-                online_return_button == 1 ? "OCTR_RANKED_BUTTON" : "OCTR_HALL_OF_FAME_BUTTON", 0) :
+                online_return_button == 1 ? "OCTR_RANKED_BUTTON" : online_return_button == 3 ? "OCTR_RANKED_QUEUE_BUTTON" :
+                "OCTR_HALL_OF_FAME_BUTTON", 0) :
                 resolve_private_target(slots[0]);
             if (!target) {
                 printf("Online focus: selection=%d target absent under root=%p\n", online_return_button, node);
@@ -2910,6 +2943,7 @@ static void native_return_focus(void *node, int ancestors) {
 void runtime_public_itemless_new_session(void) {
     runtime_public_itemless_reset();
     selected = ranked_selected = 0;
+    background_choice = 0;
     clear_private_pending();
     runtime_public_itemless_party_ready();
 }
@@ -2942,12 +2976,13 @@ static void ABI placeable_event(void *self, void *event) {
     const char *tag = self ? *(const char **)((char *)self + 0x28) : NULL;
     int ranked_button = tag && !strcmp(tag, "OCTR_RANKED_BUTTON");
     int hall_of_fame_button = tag && !strcmp(tag, "OCTR_HALL_OF_FAME_BUTTON");
+    int queue_button = tag && !strcmp(tag, "OCTR_RANKED_QUEUE_BUTTON");
     int signal = 0;
     if (self && event) {
         const char *type = meta_name(event);
         const int gain = type && (!strcmp(type, "igGuiEventProjectGainFocus") ||
                                   !strcmp(type, "igGuiEventPlaceableGainFocus"));
-        if (gain && (ranked_button || hall_of_fame_button)) runtime_online_mode_selector_left();
+        if (gain && (ranked_button || hall_of_fame_button || queue_button)) runtime_online_mode_selector_left();
         if (gain) native_return_focus(self, 0);
         /* The Discord announcement's Join (ryunet_ranked.txt): once, where the focus was put on Ranked. */
         if (gain && ranked_button && __atomic_exchange_n(&ranked_request_notice, 0, __ATOMIC_SEQ_CST)) {
@@ -2979,6 +3014,31 @@ static void ABI placeable_event(void *self, void *event) {
         /* Confirm (8) is the input filter in both native button graphs. */
         const int confirm = type && !strcmp(type, "igGuiEventFocusInputPressed") && signal == 8;
         if (confirm && ranked_button && !ranked_entry_allowed()) return;
+        /* The background search: pressed again while it runs, it stops; else on to the mode select. */
+        if (confirm && queue_button) {
+            if (runtime_ranked_queue_state()) {
+                runtime_ranked_queue_leave("cancelled from the Online menu");
+                notice("Background Ranked search cancelled.");
+                return;
+            }
+            if (!ranked_entry_allowed()) return;
+        }
+        /* While it runs: no public matchmaking (a Ranked search now replaces it). */
+        if (confirm && runtime_ranked_queue_state() && !queue_button && !hall_of_fame_button) {
+            void *blist = *(void **)((char *)self + 0xe8);
+            const int bcount = blist ? *(int *)((char *)blist + 0xc) : 0;
+            void **bitems = blist ? *(void ***)((char *)blist + 0x20) : NULL;
+            for (int i = 0; bitems && i < bcount; ++i) {
+                const char *name = vsc_graph_name(bitems[i]);
+                if (!name || strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton")) continue;
+                /* Ranked itself: the background search stays until its search starts (runtime_ranked_queue_tick), so a
+                 * player who goes back without searching keeps it (27/11). */
+                if (!ranked_button) {
+                    notice("You are searching Ranked in the background. Cancel it in the menu (Insert / L3+R3) > Ranked to play public matchmaking.");
+                    return;
+                }
+            }
+        }
         if (type && (((!strcmp(type, "igGuiEventFocusInputPressed") ||
                       !strcmp(type, "igGuiEventFocusInputRepeated")) && signal != 10) ||
                      (!strcmp(type, "igGuiEventProjectInputPressed") && signal == 10 &&
@@ -2996,7 +3056,7 @@ static void ABI placeable_event(void *self, void *event) {
             void **items = list ? *(void ***)((char *)list + 0x20) : NULL;
             for (int i = 0; items && i < count; ++i) {
                 const char *name = vsc_graph_name(items[i]);
-                if (gain && !ranked_button && !hall_of_fame_button && name &&
+                if (gain && !ranked_button && !hall_of_fame_button && !queue_button && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton"))
                     runtime_online_mode_selector_left();
                 if (confirm && name && (!strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton") ||
@@ -3005,9 +3065,10 @@ static void ABI placeable_event(void *self, void *event) {
                     runtime_room_mode_hosting();
                 }
                 if (confirm && name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_MatchmakingButton")) {
-                    ranked_selected = ranked_button;
-                    joined_ranked = ranked_button; /* a fresh user choice wins over a stale snapshot */
-                    online_return_button = hall_of_fame_button ? 2 : ranked_button;
+                    ranked_selected = ranked_button || queue_button;
+                    joined_ranked = ranked_selected; /* a fresh user choice wins over a stale snapshot */
+                    background_choice = queue_button;
+                    online_return_button = hall_of_fame_button ? 2 : queue_button ? 3 : ranked_button;
                     native_return_focus(self, 1);
                 }
                 if (name && !strcmp(name, "Scripts.Graph.Octane_Lobby_Main_PrivateMatchButton")) {
@@ -3018,6 +3079,15 @@ static void ABI placeable_event(void *self, void *event) {
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
                     arm_private_room();
                     __atomic_store_n(&private_lobby_open,1,__ATOMIC_SEQ_CST);
+                }
+                if (confirm && ranked_selected && background_choice && !private_room && name &&
+                    !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
+                    /* the background search's mode: into the queue, no search; Back returns to the menu */
+                    if (!ranked_entry_allowed() || !ranked_account_allowed()) return;
+                    const int mode = runtime_online_mode_mode_select_index() == 1;
+                    runtime_ranked_queue_join(mode);
+                    notice("Searching Ranked in the background... you will be told when the match is ready.");
+                    return;
                 }
                 if (confirm && ranked_selected && !private_room && name &&
                     !strcmp(name, "Scripts.Graph.Octane_Lobby_ModeSelect_GoToLobbyButton")) {
@@ -3057,11 +3127,11 @@ static void ABI placeable_event(void *self, void *event) {
     /* The label override touches the shared comp instance through the nav's resolved text
      * reference: safe while the scene is live (focus and input events), but the LoseFocus
      * events also fire while the project is tearing down and the comp may already be gone. */
-    if ((ranked_button || hall_of_fame_button) && event) {
+    if ((ranked_button || hall_of_fame_button || queue_button) && event) {
         const char *event_type = meta_name(event);
         if (!event_type || (strcmp(event_type, "igGuiEventPlaceableLoseFocus") &&
                             strcmp(event_type, "igGuiEventProjectLoseFocus"))) {
-            menu_label(self, ranked_button ? "RANKED" : "HALL OF FAME");
+            menu_label(self, ranked_button ? "RANKED" : queue_button ? runtime_text("BACKGROUND SEARCH") : "HALL OF FAME");
             if (getenv("BB_GUI_DUMP")) gui_dump(self);
         }
     }
@@ -3635,7 +3705,7 @@ static void ABI updated(void *self, uint64_t room, uint64_t version, const char 
             if (changed) race_handoff_departed_pid=race_lobby_host_pid;
             native_update(self, room, version, host, hn, confirmation_doc, bn);
             if (new_host) race_lobby_host_pid=new_host;
-            if (changed && native_join_match_host && race_join_state_call && !race_join_room) {
+            if (changed && handoff_setting(&HO.enabled) && native_join_match_host && race_join_state_call && !race_join_room) {
                 void *candidate=match_session_manager && *match_session_manager ? *match_session_manager : NULL;
                 void *session=candidate ? ptr(candidate,0x28) : NULL;
                 race_join_old_connection=session ? ptr(session,0x10) : NULL;

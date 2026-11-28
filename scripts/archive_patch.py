@@ -18,9 +18,27 @@ SECTOR = 0x800
 MAX_ARCHIVE_OVERLAYS = 128  # src/runtime_file.c: MAX_ARCHIVE_PATCHES
 
 
+def plain_size(path):
+    """An archive's own size: an encrypted content file (tools/content_crypt.py) without its 48-byte trailer,
+    the size the game sees (src/runtime_file.c) and a patch is made for."""
+    size = Path(path).stat().st_size
+    if size >= 48:
+        with open(path, 'rb') as f:
+            f.seek(size - 48)
+            tail = f.read(48)
+        if tail[:8] == b'OCTRENC1':
+            return struct.unpack_from('<Q', tail, 40)[0]
+    return size
+
+
+def encrypted(path):
+    """Whether a file is one of the port's encrypted content files (its entries' data cannot be read here)."""
+    return plain_size(path) != Path(path).stat().st_size
+
+
 def write(target, archive, guest, ranges):
     archive = resolve(archive)
-    size = Path(archive).stat().st_size
+    size = plain_size(archive)
     path = guest.encode('utf-8')
     out = bytearray(MAGIC + struct.pack('<QI', size, len(path)) + path + struct.pack('<I', len(ranges)))
     for offset, data in sorted(ranges):
@@ -66,7 +84,7 @@ def write_entries_patch(target, archive, guest, entries, base=None, override=())
     payload are dropped): the caller already read base's current bytes for those into its own
     payload, so this is a deliberate second replacement, not an accidental collision."""
     archive = resolve(archive)
-    size = Path(archive).stat().st_size
+    size = plain_size(archive)
     ranges, end = [], size
     if base is not None:
         base_size, base_guest, ranges = read(base)
@@ -116,7 +134,7 @@ def write_grown_patch(target, archive, guest, entries, added):
     after the end, uncompressed), and the names after the end. Entries keep their data but not
     their index numbers, so it is the only patch for its archive (no base)."""
     archive = resolve(archive)
-    size = Path(archive).stat().st_size
+    size = plain_size(archive)
     with open(archive, 'rb') as f:
         blob = f.read()
     u32 = lambda o: struct.unpack_from('<I', blob, o)[0]

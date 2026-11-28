@@ -140,6 +140,14 @@ def build(port, game, folder, say, python=None, progress=None):
     port, folder = Path(port), Path(folder)
     dxc = find_dxc(port)
     if not dxc:
+        # Not in the package since 27/11 (scripts/components.py): downloaded once, before the first build.
+        try:
+            import components
+            components.ensure('dxc', port, log=say)
+        except ImportError:
+            pass
+        dxc = find_dxc(port)
+    if not dxc:
         say('Native Vulkan: DXC (the shader compiler) is missing from bin/dxc')
         return False
     work = folder.with_name(folder.name + '.building')

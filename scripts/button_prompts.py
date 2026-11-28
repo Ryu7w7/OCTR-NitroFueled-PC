@@ -335,6 +335,185 @@ def with_speaker(blob, glyph):
     return bytes(out)
 
 
+# ---- "[" and "]" for the clans' tags (27/11: "[MC] Ryu7w7"; the fonts have neither: they drew as boxes) ----
+# Each font's letters are cells of its "font" image (igCharMetrics: u16 character at +12; floats at +24: advance,
+# 0, 0, width, height, two of the letter's own, u0, v0, u1, v1). "[" is made from the font's own letter so it keeps
+# its look and outline: from "L" (its rows above the middle mirrored: a foot on top too) in GeekSpeak, from "E"
+# without its middle arm in the title font; "]" is "[" mirrored. They take the cells of "$" and "*", which no
+# text of the game uses (its .lng tables checked, 27/11), and the list of letters is sorted again.
+BRACKET_DONORS = ('$', '*')          # their cells become "[" and "]"
+BRACKET_BASE = {'fonts/geekspeak.igz': 'L', 'fonts/geekspeak_outline.igz': 'L', 'fonts/zoinks_outline.igz': 'E'}
+CM_FLOATS = 24
+EMPTY = b'\0\0\0\0'
+
+
+def _font_image(blob):
+    """(width, height, file offset, byte length) of the font's letters image ("font", tiled)."""
+    sections, fixups = _sections_and_fixups(blob)
+    types = _strings(*fixups['TMET'])
+    strings = _strings(*fixups['TSTR'])
+    file_offset = lambda encoded: sections[1 + (encoded >> 27)][0] + (encoded & 0x7FFFFFF)
+    for obj in _offsets(*fixups['RVTB']):
+        at = file_offset(obj)
+        kind, = struct.unpack_from('<Q', blob, at)
+        if kind >= len(types) or types[kind] != 'igImage2':
+            continue
+        name, = struct.unpack_from('<Q', blob, at + 16)
+        if name < len(strings) and strings[name] == 'font':
+            width, height = struct.unpack_from('<HH', blob, at + IMG_W)
+            _size, data = struct.unpack_from('<QQ', blob, at + IMG_DATA)
+            return width, height, file_offset(data), (width + 7) // 8 * 8 * ((height + 7) // 8 * 8) * 4
+    return None
+
+
+def _letters(blob):
+    """(file offset of the pointer array, {character: (slot offset, metrics offset)}) of the font's letters (its
+    biggest igCharMetricsList)."""
+    objects, _strings_list, file_offset = _objects(blob)
+    best = (None, {})
+    for at, kind in objects:
+        if kind != 'igCharMetricsList':
+            continue
+        count, = struct.unpack_from('<I', blob, at + 12)
+        data, = struct.unpack_from('<Q', blob, at + 32)
+        array = file_offset(data)
+        found = {}
+        for i in range(count):
+            encoded, = struct.unpack_from('<Q', blob, array + i * 8)
+            metrics = file_offset(encoded)
+            found[chr(struct.unpack_from('<H', blob, metrics + CM_CHAR)[0])] = (array + i * 8, metrics)
+        if len(found) > len(best[1]):
+            best = (array, found)
+    return best
+
+
+def _cell(blob, metrics, width, height):
+    f = struct.unpack_from('<11f', blob, metrics + CM_FLOATS)
+    x0, y0 = round(f[7] * width), round(f[8] * height)
+    return x0, y0, round(f[3]), round(f[4])   # x, y, width, height (pixels)
+
+
+def _ink(px):
+    return px[3] > 8
+
+
+def _bracket_from_l(L):
+    """[ from L: the rows above its ink's middle are its rows mirrored about it (so the foot is on top too)."""
+    rows = [y for y in range(len(L)) if any(_ink(px) for px in L[y])]
+    top, bottom = rows[0], rows[-1]
+    mid = (top + bottom) / 2
+    return [list(L[y]) if y > mid or y < top else list(L[top + bottom - y]) for y in range(len(L))]
+
+
+def _bracket_from_e(E):
+    """[ from E: from the stem-only band above its middle arm to the one below it, the rows become that stem row,
+    moved along the letter's slant (no piece of the arm or its outline left)."""
+    h, w = len(E), len(E[0])
+
+    def first_run(y):
+        xs = [x for x in range(w) if _ink(E[y][x])]
+        if not xs:
+            return None
+        x = xs[0]
+        while x + 1 < w and _ink(E[y][x + 1]):
+            x += 1
+        return xs[0], x - xs[0] + 1
+    runs = [first_run(y) for y in range(h)]
+    rows = [y for y in range(h) if runs[y]]
+    top, bottom = rows[0], rows[-1]
+    inner = [y for y in rows if top + 4 < y < bottom - 4]
+    if not inner:
+        return None
+    stem = min(runs[y][1] for y in inner)
+    bands, band = [], []
+    for y in (y for y in inner if runs[y][1] <= stem * 1.3):
+        if band and y != band[-1] + 1:
+            bands.append(band)
+            band = []
+        band.append(y)
+    if band:
+        bands.append(band)
+    bands = [b for b in bands if b[0] < top + (bottom - top) * 0.7][:2]   # not the bottom arm's narrow tip
+    if len(bands) < 2:
+        return None
+    a, b = bands[0][len(bands[0]) // 2], bands[1][len(bands[1]) // 2]
+    left_a, left_b = runs[a][0], runs[b][0]
+    stem_row = [E[a][x] if left_a <= x < left_a + runs[a][1] else EMPTY for x in range(w)]
+    out = [list(row) for row in E]
+    for y in range(bands[0][0], bands[1][-1] + 1):
+        shift = round((left_b - left_a) * (y - a) / (b - a))
+        out[y] = [stem_row[x - shift] if 0 <= x - shift < w else EMPTY for x in range(w)]
+    return out
+
+
+def _narrower(glyph, width, foot=0.6):
+    """The bracket with its feet shortened (to foot of their length, and to at most width columns): columns
+    taken out between the stem and the feet's ends."""
+    h, w = len(glyph), len(glyph[0])
+    rows = [y for y in range(h) if any(_ink(px) for px in glyph[y])]
+    top, bottom = rows[0], rows[-1]
+    middle = range(top + (bottom - top) * 2 // 5, top + (bottom - top) * 3 // 5 + 1)
+    stem_end = max(x for x in range(w) if any(glyph[y][x][3] > 128 for y in middle))
+    last = max(x for x in range(w) if any(_ink(glyph[y][x]) for y in rows))
+    span = last - stem_end
+    cut = max(int(span * (1 - foot)), w - width)
+    if cut <= 0:
+        return glyph
+    start = stem_end + max(2, span // 3)
+    cut = min(cut, max(0, last - 3 - start))
+    keep = [x for x in range(w) if not (start <= x < start + cut)]
+    return [[row[x] for x in keep] for row in glyph]
+
+
+def with_brackets(blob, entry):
+    """The font with "[" and "]" (in the cells of BRACKET_DONORS), or None when it is not a font this knows how
+    to give them (another letter set, no donors, or brackets already there)."""
+    base = BRACKET_BASE.get(entry.lower())
+    image = _font_image(blob)
+    array, letters = _letters(blob)
+    _alt_array, alternates = _alternate_list(blob)
+    if not base or not image or array is None or base not in letters or any(d not in letters for d in BRACKET_DONORS):
+        return None
+    if '[' in letters or ']' in letters or any(char in (0x5B, 0x5D) for _, _, char in alternates):
+        return None
+    width, height, at, length = image
+    original = blob[at:at + length]
+    linear = bytearray(untile(original, width, height))
+    bx, by, bw, bh = _cell(blob, letters[base][1], width, height)
+    glyph = [[bytes(linear[((by + y) * width + bx + x) * 4:((by + y) * width + bx + x) * 4 + 4]) for x in range(bw)]
+             for y in range(bh)]
+    left = _bracket_from_l(glyph) if base == 'L' else _bracket_from_e(glyph)
+    if left is None:
+        return None
+    out = bytearray(blob)
+    base_floats = struct.unpack_from('<11f', blob, letters[base][1] + CM_FLOATS)
+    for donor, char, shape in ((BRACKET_DONORS[0], 0x5B, None), (BRACKET_DONORS[1], 0x5D, 'mirror')):
+        metrics = letters[donor][1]
+        dx, dy, dw, dh = _cell(blob, metrics, width, height)
+        g = _narrower(left, dw)
+        if shape == 'mirror':
+            g = [list(reversed(row)) for row in g]
+        gw = len(g[0])
+        if gw > dw or dh != bh:
+            return None
+        for y in range(dh):
+            for x in range(dw):
+                px = g[y][x] if x < gw else EMPTY
+                linear[((dy + y) * width + dx + x) * 4:((dy + y) * width + dx + x) * 4 + 4] = px
+        f = list(struct.unpack_from('<11f', blob, metrics + CM_FLOATS))
+        f[0] = f[3] = float(gw)                      # advance, width
+        f[5], f[6] = base_floats[5], base_floats[6]  # as the letter it is made from
+        f[9] = (dx + gw) / width                     # u1
+        struct.pack_into('<11f', out, metrics + CM_FLOATS, *f)
+        struct.pack_into('<H', out, metrics + CM_CHAR, char)
+    out[at:at + length] = tile(bytes(linear), width, height, original)
+    # the letters' pointers sorted by character again (the game looks a character up by halving)
+    slots = sorted(letters.values())
+    pointers = sorted(((struct.unpack_from('<H', out, metrics + CM_CHAR)[0], blob[slot:slot + 8]) for slot, metrics in slots))
+    out[array:array + 8 * len(pointers)] = b''.join(p for _, p in pointers)
+    return bytes(out)
+
+
 def _controls_check(igz):
     """(the controller type check node, its XB1 output's reference, the nodes leading to the
     check) in the Options page's script; None when it is not the script expected.
@@ -423,6 +602,7 @@ def prepare(game, out, config, env, base):
     import json
     style = chosen_style(config, env)
     env.pop('BB_VOICE_GLYPH', None)
+    env.pop('BB_CLAN_BRACKETS', None)
     art_path = ART / f'{style}.png' if style != 'playstation' else None
     folder = Path(out) / 'button_prompts'
     from mod_file_paths import resolve
@@ -440,6 +620,8 @@ def prepare(game, out, config, env, base):
         if made['stamp'] == stamp and all(Path(p).is_file() for p in made['patches'].values()):
             if made.get('speaker'):
                 env['BB_VOICE_GLYPH'] = '1'
+            if made.get('brackets'):
+                env['BB_CLAN_BRACKETS'] = '1'
             return {g: Path(p) for g, p in made['patches'].items()}
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -449,7 +631,7 @@ def prepare(game, out, config, env, base):
     art = read_png(art_path) if art_path else None
     glyph = read_png(SPEAKER_ART)
     folder.mkdir(parents=True, exist_ok=True)
-    patches, speakers, diagrams = {}, 0, 0
+    patches, speakers, diagrams, bracketed = {}, 0, 0, set()
     for path in archives:
         archive = Archive(path)
         entries = {}
@@ -466,19 +648,31 @@ def prepare(game, out, config, env, base):
                 styled = restyled_font(blob, art) if art else blob
                 spoken = with_speaker(styled, glyph)
                 speakers += spoken is not None
-                if spoken is not None or art:
-                    entries[f['index']] = spoken if spoken is not None else styled
+                font = spoken if spoken is not None else styled
+                try:
+                    braced = with_brackets(font, entry) if path.name == 'update.pak' else None
+                except (ValueError, struct.error, IndexError):
+                    braced = None
+                if braced is not None:
+                    bracketed.add(entry)
+                    font = braced
+                if spoken is not None or art or braced is not None:
+                    entries[f['index']] = font
         if not entries:
             continue
         guest = f'/app0/archives/{path.name}'
         target = folder / (path.stem + '.bbpatch')
         archive_patch.write_entries_patch(target, path, guest, entries, base.get(guest))
         patches[guest] = target
+    # The 1.21 game reads update.pak's fonts: brackets in all three, or the tags keep their parentheses.
+    brackets = len(bracketed) == len(FONTS)
     stamp_file.write_text(json.dumps({'stamp': stamp, 'patches': {g: str(p) for g, p in patches.items()},
-                                      'speaker': speakers > 0}), encoding='utf-8')
+                                      'speaker': speakers > 0, 'brackets': brackets}), encoding='utf-8')
     if speakers:
         env['BB_VOICE_GLYPH'] = '1'
-    say(f'{style} buttons, the loudspeaker in {speakers} fonts, ' +
+    if brackets:
+        env['BB_CLAN_BRACKETS'] = '1'
+    say(f'{style} buttons, the loudspeaker in {speakers} fonts, clan brackets in {len(bracketed)}, ' +
         (f'the Xbox controls diagram in {diagrams} scripts, ' if style == 'xbox' else '') + f'{len(patches)} archives')
     return patches
 
